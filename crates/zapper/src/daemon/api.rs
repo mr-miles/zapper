@@ -854,6 +854,9 @@ async fn answer(State(d): D, Path(id): Path<String>, body: String) -> R<Json<Val
 }
 
 #[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 mod guard_tests {
     use super::{host_ok, origin_ok};
 

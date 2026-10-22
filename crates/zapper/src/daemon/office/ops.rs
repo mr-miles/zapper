@@ -900,3 +900,6 @@ fn check_attachments(run: &FirmRun, me: &str, list: &[String]) -> Result<()> {
 fn board() -> &'static str {
     BOARD
 }
+
+#[cfg(test)]
+mod tests;

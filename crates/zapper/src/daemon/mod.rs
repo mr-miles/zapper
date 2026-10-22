@@ -24,6 +24,8 @@ mod proxy;
 pub mod record;
 pub mod session;
 mod spec;
+#[cfg(test)]
+pub mod testing;
 pub mod tls;
 mod ui;
 pub mod vm;
@@ -600,6 +602,9 @@ pub fn redact(mut c: Config) -> Config {
     }
     c
 }
+
+#[cfg(test)]
+mod daemon_tests;
 
 #[cfg(test)]
 mod tests {

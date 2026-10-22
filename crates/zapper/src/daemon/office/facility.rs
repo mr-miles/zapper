@@ -1051,6 +1051,9 @@ pub async fn break_cluster(run: &FirmRun, mode: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+mod git_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn git_requests_name_their_repository() {
