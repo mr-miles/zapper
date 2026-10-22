@@ -3,7 +3,7 @@
 #
 #   tests/e2e.sh [path/to/zapper]
 #
-# Needs KVM, network access, a built `ubuntu-24.04` image (`make image`) and
+# Needs KVM, network access, a built `ubuntu-26.04` image (`make image`) and
 # gcc for the attack probe. Runs its own daemon on a private config and socket
 # under a temporary directory, so it does not touch a running daemon. Every
 # session it starts is removed. Set ZAPPER_E2E_KEEP=1 to keep the directory.
@@ -41,7 +41,7 @@ policy:
   defaults: { net: deny, exec: allow }
 profiles:
   default:
-    engine: { image: ubuntu-24.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
+    engine: { image: ubuntu-26.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
     agent: { kind: generic, command: [bash, -l], user: user, workdir: /work, env: { TOKEN: "{{secret:test}}", KEY: "{{secret:key}}" } }
     mounts: [{ host: "{workdir}", guest: /work, mode: rw }]
     policy:

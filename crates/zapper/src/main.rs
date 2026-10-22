@@ -246,7 +246,7 @@ enum ProfileCmd {
 
 #[derive(Subcommand)]
 enum ImageCmd {
-    /// Build an image from an OCI image: `zapper image build ubuntu-24.04 --from docker.io/library/ubuntu:24.04`
+    /// Build an image from an OCI image: `zapper image build ubuntu-26.04 --from docker.io/library/ubuntu:26.04`
     Build {
         name: String,
         #[arg(long)]

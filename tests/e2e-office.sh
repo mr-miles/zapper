@@ -5,7 +5,7 @@
 #
 #   tests/e2e-office.sh [path/to/zapper]
 #
-# Needs what tests/e2e.sh needs (KVM, the ubuntu-24.04 image, network). Runs
+# Needs what tests/e2e.sh needs (KVM, the ubuntu-26.04 image, network). Runs
 # its own daemon under a temporary directory. ZAPPER_E2E_KEEP=1 keeps it.
 set -u
 
@@ -295,7 +295,7 @@ policy:
   defaults: { net: deny, exec: allow }
 profiles:
   worker:
-    engine: { image: ubuntu-24.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
+    engine: { image: ubuntu-26.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
     agent: { kind: claude-code, command: [bash], user: agent, workdir: /work }
     mounts: [{ host: "{workdir}", guest: /work, mode: rw, extra: 256MiB }]
     policy:
@@ -312,7 +312,7 @@ profiles:
     engine: { image: k3s, kernel: vmlinux-6.1-k8s, vcpus: 4, memory_mib: 4096, disk: 12GiB }
     agent: { kind: generic, command: [bash], user: user, workdir: / }
   plain:
-    engine: { image: ubuntu-24.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
+    engine: { image: ubuntu-26.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
     agent: { kind: generic, command: [bash], user: user, workdir: /work }
 firms:
   acme:

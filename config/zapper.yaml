@@ -116,7 +116,7 @@ profiles:
   base:
     description: Ubuntu shell; network only as rules allow
     engine:
-      image: ubuntu-24.04
+      image: ubuntu-26.04
       kernel: vmlinux-6.1
       vcpus: 2
       memory_mib: 2048

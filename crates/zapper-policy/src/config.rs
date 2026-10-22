@@ -462,7 +462,7 @@ pub enum NetworkMode {
 impl Default for Engine {
     fn default() -> Self {
         Self {
-            image: "ubuntu-24.04".into(),
+            image: "ubuntu-26.04".into(),
             kernel: "vmlinux-6.1".into(),
             vcpus: 2,
             memory_mib: 2048,
