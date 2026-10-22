@@ -1,4 +1,4 @@
-//! The credentials subsystem: who may use the firm's resources (the git
+//! The credentials subsystem: who may use the firm's resources (each git
 //! repository, the cluster, the shared drive's spaces) and how far, as
 //! grants the policy owners decide. A worker asks with a reason; the
 //! security officer decides, escalating to the CEO, and the CEO to the
@@ -54,19 +54,44 @@ impl Level {
 
 /// A resource's key: `git`, `cluster` or `drive:<space>`.
 pub fn resource(run: &FirmRun, r: &str) -> Result<String> {
+    resource_in(&run.config, r)
+}
+
+/// A resource's canonical name in `firm`: `git:<repo>`, `cluster` or
+/// `drive:<space>`. Plain `git` names the repository of a firm that has one.
+pub fn resource_in(firm: &zapper_policy::Firm, r: &str) -> Result<String> {
     let r = r.trim();
+    let repos = firm.git_repos();
     match r {
-        "git" if run.config.git.is_some() => Ok(r.into()),
-        "cluster" if !run.config.facilities.is_empty() => Ok(r.into()),
-        "git" | "cluster" => bail!("this firm has no {r}"),
-        _ => match r.strip_prefix("drive:") {
-            Some(space) if run.config.credentials.spaces.iter().any(|s| s == space) => Ok(r.into()),
-            Some(space) => bail!(
-                "no drive space {space:?} (spaces: {})",
-                run.config.credentials.spaces.join(", ")
-            ),
-            None => bail!("resource {r:?}: git, cluster, or drive:<space>"),
+        "git" => match repos.as_slice() {
+            [] => bail!("this firm has no git"),
+            [one] => Ok(format!("git:{one}")),
+            _ => bail!("name the repository: git:<name> ({})", repos.join(", ")),
         },
+        "cluster" if !firm.facilities.is_empty() => Ok(r.into()),
+        "cluster" => bail!("this firm has no cluster"),
+        _ => {
+            if let Some(repo) = r.strip_prefix("git:") {
+                if repos.iter().any(|x| x == repo) {
+                    return Ok(r.into());
+                }
+                if repos.is_empty() {
+                    bail!("this firm has no git");
+                }
+                bail!(
+                    "no repository {repo:?} (repositories: {})",
+                    repos.join(", ")
+                );
+            }
+            match r.strip_prefix("drive:") {
+                Some(space) if firm.credentials.spaces.iter().any(|s| s == space) => Ok(r.into()),
+                Some(space) => bail!(
+                    "no drive space {space:?} (spaces: {})",
+                    firm.credentials.spaces.join(", ")
+                ),
+                None => bail!("resource {r:?}: git:<repo>, cluster, or drive:<space>"),
+            }
+        }
     }
 }
 
@@ -173,9 +198,7 @@ pub fn can_write_space(run: &FirmRun, who: &str, space: &str) -> bool {
 
 fn every_resource(run: &FirmRun) -> Vec<String> {
     let mut v = Vec::new();
-    if run.config.git.is_some() {
-        v.push("git".to_string());
-    }
+    v.extend(run.config.git_repos().iter().map(|r| format!("git:{r}")));
     if !run.config.facilities.is_empty() {
         v.push("cluster".to_string());
     }
@@ -275,9 +298,9 @@ fn take(
 
 /// Makes the platform match the grant: the cluster's RBAC and the worker's
 /// kubeconfig, and the network rules for git and the cluster. git and the
-/// drive are checked on every request, so they need nothing here.
+/// drive are checked on every request, so they need nothing more here.
 fn enforce(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, resource: &str) {
-    if resource == "git" || resource == "cluster" {
+    if resource.starts_with("git:") || resource == "cluster" {
         super::facility::network_follows_grant(run, worker, resource, level(run, worker, resource));
     }
     if resource == "cluster" {
@@ -302,9 +325,14 @@ fn enforce(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, resource: &str) {
 
 /// Puts a worker's grants in place again: their VM came up after them.
 pub fn reapply(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str) {
-    for r in ["git", "cluster"] {
-        if level(run, worker, r) > Level::None {
-            enforce(d, run, worker, r);
+    let repos = run
+        .config
+        .git_repos()
+        .into_iter()
+        .map(|r| format!("git:{r}"));
+    for r in repos.chain(["cluster".to_string()]) {
+        if level(run, worker, &r) > Level::None {
+            enforce(d, run, worker, &r);
         }
     }
 }
@@ -927,7 +955,7 @@ pub fn mine(run: &FirmRun, worker: &str) -> Value {
     json!({
         "grants": grants, "requests": requests,
         "resources": every_resource(run),
-        "levels": { "git": "read (fetch), write (push branches), admin (also main and tags)", "cluster": "read (view dev), write (deploy to dev), admin (also prod)", "drive:<space>": "read (list, fetch), write (also publish)" },
+        "levels": { "git:<repo>": "read (fetch), write (push branches), admin (also main and tags)", "cluster": "read (view dev), write (deploy to dev), admin (also prod)", "drive:<space>": "read (list, fetch), write (also publish)" },
     })
 }
 
@@ -951,5 +979,32 @@ mod tests {
         assert_eq!(Level::parse("write").unwrap(), Level::Write);
         assert!(Level::parse("root").is_err());
         assert_eq!(serde_json::to_value(Level::Admin).unwrap(), "admin");
+    }
+
+    fn firm(git: &str) -> zapper_policy::Firm {
+        let yaml = format!(
+            "profiles:\n  w: {{ agent: {{ kind: claude-code }} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, skills: {{ work: ceo }} }} }}\n    workers: [{{ name: ceo, role: ceo }}]\n{git}"
+        );
+        zapper_policy::Config::from_yaml(&yaml).unwrap().firms["acme"].clone()
+    }
+
+    #[test]
+    fn git_resources_are_per_repository() {
+        use super::resource_in;
+        let none = firm("");
+        assert!(resource_in(&none, "git").is_err());
+        assert!(resource_in(&none, "git:product").is_err());
+
+        // One repository: plain `git` is it.
+        let one = firm("    git: {}\n");
+        assert_eq!(resource_in(&one, "git").unwrap(), "git:product");
+        assert_eq!(resource_in(&one, "git:product").unwrap(), "git:product");
+
+        let three = firm("    git: { repos: [product, product2, product3] }\n");
+        assert_eq!(resource_in(&three, "git:product2").unwrap(), "git:product2");
+        let e = resource_in(&three, "git").unwrap_err().to_string();
+        assert!(e.contains("product, product2, product3"), "{e}");
+        assert!(resource_in(&three, "git:other").is_err());
+        assert!(resource_in(&three, "drive:general").is_ok());
     }
 }

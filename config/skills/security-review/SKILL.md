@@ -47,7 +47,7 @@ Every hire waits for your check: `background_checks()` lists them with the role 
 
 Budget size and style aren't your business. Decide promptly: the hire and the hirer wait.
 
-**Grant with the clearance** at most what the brief names, so the hire starts working instead of asking: e.g. `grants: [{resource: "git", level: "write"}, {resource: "cluster", level: "write"}, {resource: "drive:general", level: "write"}]`, with the firm's default expiry. Admin on git and the cluster is the CEO's; an officer hire gets none (they own policy once cleared).
+**Grant with the clearance** at most what the brief names, so the hire starts working instead of asking: e.g. `grants: [{resource: "git:product", level: "write"}, {resource: "cluster", level: "write"}, {resource: "drive:general", level: "write"}]`, one git grant per repository the brief names, with the firm's default expiry. Admin on git and the cluster is the CEO's; an officer hire gets none (they own policy once cleared).
 
 ## Watching traffic
 

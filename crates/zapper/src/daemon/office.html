@@ -2827,7 +2827,8 @@ function renderAccess(M) {
   const box = $('sec-access');
   if (!box) return;
   const people = [...M.workers.values()].filter((w) => w.inChart);
-  const resources = [...new Set(['git', 'cluster', ...[...M.grants.values()].flatMap((m) => [...m.keys()]), ...[...M.credReqs.values()].map((q) => q.resource)])]
+  const repos = arr(S.info && S.info.run && S.info.run.repos).map((r) => 'git:' + str(r));
+  const resources = [...new Set([...(repos.length ? repos : ['git']), 'cluster', ...[...M.grants.values()].flatMap((m) => [...m.keys()]), ...[...M.credReqs.values()].map((q) => q.resource)])]
     .sort((a, b) => (a.startsWith('drive:') ? 1 : 0) - (b.startsWith('drive:') ? 1 : 0) || a.localeCompare(b));
   const waiting = credWaiting(M);
   const open = [...M.credReqs.values()].filter((q) => q.state === 'pending' || q.state === 'escalated');
@@ -3262,17 +3263,32 @@ function csvTable(text, sep) {
 // The run's repository: branches, the selected branch's files and commits,
 // a file's text and a commit's diff. Everything is text from workers.
 
-const GIT = { branch: 'main', path: '', file: null, commit: null, branches: [], tree: null, log: [], readme: null, view: null, run: null, at: 0, busy: false, err: null };
+const GIT = { repo: null, repos: [], branch: 'main', path: '', file: null, commit: null, branches: [], tree: null, log: [], readme: null, view: null, run: null, at: 0, busy: false, err: null };
 
 function mountGit() {
   $('tab-git').replaceChildren(el('div', { class: 'git-empty hidden', id: 'git-empty' }), el('div', { class: 'split', id: 'git-split' },
     el('div', {},
-      el('div', { class: 'bar' }, el('select', { id: 'git-branch', onchange: (e) => gitOpen({ branch: e.target.value, path: '', file: null, commit: null }) })),
+      el('div', { class: 'bar' }, el('select', { id: 'git-repo', class: 'hidden', onchange: (e) => gitRepo(e.target.value) }), el('select', { id: 'git-branch', onchange: (e) => gitOpen({ branch: e.target.value, path: '', file: null, commit: null }) })),
       el('h2', { class: 'sec' }, 'Commits'), el('div', { class: 'card commits', id: 'git-log' }, el('span', { class: 'muted' }, 'Loading…'))),
     el('div', {}, el('div', { class: 'git-crumbs', id: 'git-crumbs' }), el('div', { id: 'git-main' }))));
   GIT.run = null;
 }
-async function gitFetch(path) { return api(runPath() + '/git' + path); }
+// The selected repository rides on every request; `null` asks for none.
+async function gitFetch(path, repo) {
+  const r = repo === undefined ? GIT.repo : repo;
+  return api(runPath() + '/git' + path + (r ? (path.includes('?') ? '&' : '?') + 'repo=' + enc(r) : ''));
+}
+// Another of the run's repositories: its main, from the top.
+function gitRepo(name) {
+  Object.assign(GIT, { repo: name, branch: 'main', path: '', file: null, commit: null, view: null });
+  loadGitTab(true);
+}
+// The repository picker, when the run has more than one.
+function gitRepoSelect(sel) {
+  sel.classList.toggle('hidden', GIT.repos.length < 2);
+  sel.replaceChildren(...GIT.repos.map((r) => opt(r, r + '.git', r === GIT.repo)));
+  return sel;
+}
 // Loads branches and the branch's log and tree; the view (file or commit)
 // separately.
 async function loadGitTab(force) {
@@ -3283,6 +3299,8 @@ async function loadGitTab(force) {
   GIT.busy = true;
   const run = S.run;
   try {
+    GIT.repos = arr(await gitFetch('/repos', null)).map(str);
+    if (!GIT.repos.includes(GIT.repo)) GIT.repo = GIT.repos[0] || null;
     GIT.branches = arr(await gitFetch('/branches'));
     if (GIT.branches.length && !GIT.branches.some((b) => b.name === GIT.branch)) GIT.branch = GIT.branches[0].name;
     if (GIT.branches.length) {
@@ -3319,6 +3337,7 @@ function gitReadme(tree) {
 function renderGit() {
   const sel = $('git-branch');
   if (!sel) return;
+  if ($('git-repo')) gitRepoSelect($('git-repo'));
   if (GIT.err) { gitShowEmpty(null); $('git-main').replaceChildren(el('div', { class: 'empty card' }, 'No repository: ' + GIT.err)); return; }
   // Nothing pushed yet: one calm page instead of empty panes.
   if (!GIT.branches.length) { gitShowEmpty(gitEmptyView()); return; }
@@ -3410,8 +3429,9 @@ function gitOffView() {
 }
 function gitEmptyView() {
   const domain = str(S.info && S.info.run && S.info.run.domain) || (S.firm + '.internal');
-  const url = 'https://git.' + domain + '/product.git';
-  const local = '~/.local/state/zapper/firms/' + S.firm + '/runs/' + S.run + '/git/product.git';
+  const name = GIT.repo || 'product';
+  const url = 'https://git.' + domain + '/' + name + '.git';
+  const local = '~/.local/state/zapper/firms/' + S.firm + '/runs/' + S.run + '/git/' + name + '.git';
   // A branch drawing: main, a side branch, and a merge, in the firm's colours.
   const art = sv('svg', { class: 'git-art', viewBox: '0 0 160 90', 'aria-hidden': 'true' },
     sv('path', { d: 'M14 64 H146', class: 'gl main' }),
@@ -3424,9 +3444,10 @@ function gitEmptyView() {
     el('h2', { class: 'serif' }, 'Nothing pushed yet'),
     el('p', { class: 'muted' }, S.mode === 'replay' ? 'This run\'s repository has no commits.' : 'The firm\'s repository is empty. Engineers and designers push to it as they build; branches, files and commits appear here as they do.'),
     el('div', { class: 'git-empty-rows' },
+      ...(GIT.repos.length > 1 ? [el('div', { class: 'muted small' }, 'Repository'), gitRepoSelect(el('select', { onchange: (e) => gitRepo(e.target.value) })), el('span')] : []),
       el('div', { class: 'muted small' }, 'Workers push to'), el('code', {}, url), copy(url),
       el('div', { class: 'muted small' }, 'Clone it here'), el('code', {}, 'git clone ' + local), copy('git clone ' + local)));
-  v.dataset.v = 'empty:' + S.run;
+  v.dataset.v = 'empty:' + S.run + ':' + name + ':' + GIT.repos.join(',');
   return v;
 }
 function gitFileView(f) {
@@ -4610,14 +4631,17 @@ function renderFooter() {
   foot.dataset.sig = sig;
   foot.replaceChildren(...els, a);
 }
-// The commits on main: polled while live, read once for a replay.
+// The commits on main, across the run's repositories: polled while live,
+// read once for a replay.
 async function footCommits() {
   const run = S.run;
   if (FOOT.busy || (FOOT.logRun === run && (S.mode === 'replay' || Date.now() - FOOT.logAt < 15000))) return;
   FOOT.busy = true; FOOT.logAt = Date.now();
   let log = [];
   try {
-    if (arr(await gitFetch('/branches')).some((x) => x.name === 'main')) log = arr(await gitFetch('/log?ref=main&limit=1000'));
+    for (const repo of arr(await gitFetch('/repos', null)).map(str)) {
+      if (arr(await gitFetch('/branches', repo)).some((x) => x.name === 'main')) log = log.concat(arr(await gitFetch('/log?ref=main&limit=1000', repo)));
+    }
   } catch (e) { /* no repository */ }
   FOOT.busy = false;
   if (run !== S.run) return;

@@ -53,6 +53,7 @@ pub fn read_routes() -> Router<Arc<Daemon>> {
             get(drive_file),
         )
         .route("/firms/{f}/runs/{run}/git", get(git_log))
+        .route("/firms/{f}/runs/{run}/git/repos", get(git_repos))
         .route("/firms/{f}/runs/{run}/git/branches", get(git_branches))
         .route("/firms/{f}/runs/{run}/git/log", get(git_ref_log))
         .route("/firms/{f}/runs/{run}/git/tree", get(git_tree))
@@ -349,6 +350,9 @@ async fn git_log(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<
 
 #[derive(Deserialize)]
 struct GitQuery {
+    /// The repository; the run's first if unset.
+    #[serde(default)]
+    repo: Option<String>,
     #[serde(rename = "ref", default = "main_ref")]
     r: String,
     #[serde(default)]
@@ -361,9 +365,19 @@ fn main_ref() -> String {
     "main".into()
 }
 
-async fn git_branches(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+async fn git_repos(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+    Ok(Json(json!(super::git::repos(&super::run_dir(
+        &d, &f, &run
+    )?))))
+}
+
+async fn git_branches(
+    State(d): D,
+    Path((f, run)): Path<(String, String)>,
+    Query(q): Query<GitQuery>,
+) -> R<Json<Value>> {
     Ok(Json(
-        super::git::branches(&super::run_dir(&d, &f, &run)?).await?,
+        super::git::branches(&super::run_dir(&d, &f, &run)?, q.repo.as_deref()).await?,
     ))
 }
 
@@ -373,7 +387,13 @@ async fn git_ref_log(
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::log(&super::run_dir(&d, &f, &run)?, &q.r, q.limit.unwrap_or(200)).await?,
+        super::git::log(
+            &super::run_dir(&d, &f, &run)?,
+            q.repo.as_deref(),
+            &q.r,
+            q.limit.unwrap_or(200),
+        )
+        .await?,
     ))
 }
 
@@ -383,7 +403,13 @@ async fn git_tree(
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::tree(&super::run_dir(&d, &f, &run)?, &q.r, &q.path).await?,
+        super::git::tree(
+            &super::run_dir(&d, &f, &run)?,
+            q.repo.as_deref(),
+            &q.r,
+            &q.path,
+        )
+        .await?,
     ))
 }
 
@@ -393,16 +419,23 @@ async fn git_blob(
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::blob(&super::run_dir(&d, &f, &run)?, &q.r, &q.path).await?,
+        super::git::blob(
+            &super::run_dir(&d, &f, &run)?,
+            q.repo.as_deref(),
+            &q.r,
+            &q.path,
+        )
+        .await?,
     ))
 }
 
 async fn git_commit(
     State(d): D,
     Path((f, run, id)): Path<(String, String, String)>,
+    Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::commit(&super::run_dir(&d, &f, &run)?, &id).await?,
+        super::git::commit(&super::run_dir(&d, &f, &run)?, q.repo.as_deref(), &id).await?,
     ))
 }
 

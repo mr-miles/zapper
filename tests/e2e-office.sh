@@ -385,7 +385,7 @@ firms:
       - { name: ceo, role: boss }
       - { name: pat, role: dev, reports_to: ceo }
   lab:
-    git: {}
+    git: { repos: [product, tools] }
     product_port: 127.0.0.1:$PORT
     dashboard_port: 127.0.0.1:$((PORT + 1))
     facilities: { cluster: { kind: k3s, profile: k3s } }
@@ -1032,15 +1032,17 @@ echo "apps=$(curl -s -m 5 http://apps.lab.internal/)"' 2>&1)
     expect "without a grant, git is unreachable" "$out" "git=000"
     expect "without a grant, the API is unreachable" "$out" "api=000"
     expect "the product is open to everyone" "$out" "apps=hello from the cluster"
-    "$Z" firm credentials lab grant ken git read > /dev/null
+    "$Z" firm credentials lab grant ken git:product read > /dev/null
     out=$("$Z" exec "$ken" -- sh -c 'cd /tmp && git clone -q https://git.lab.internal/product.git p 2>&1 && echo cloned; cd p && git switch -qc ken/x && echo x > x && git add x && git commit -qm x && git push -q origin ken/x 2>&1; echo push=$?' 2>&1)
     expect "git read: clone" "$out" "cloned"
-    expect "git read: no push" "$out" "you can read this repository, not push to it"
-    "$Z" firm credentials lab grant ken git write > /dev/null
+    expect "git read: no push" "$out" "you can read product, not push to it"
+    "$Z" firm credentials lab grant ken git:product write > /dev/null
     out=$("$Z" exec "$ken" -- sh -c 'cd /tmp/p && git push -q origin ken/x 2>&1; echo branch=$?; git switch -q main && echo y > y && git add y && git commit -qm y && git push -q origin main 2>&1; echo main=$?; git push -q origin HEAD:refs/heads/main/x 2>&1; echo under=$?' 2>&1)
     expect "git write: push a branch" "$out" "branch=0"
     expect "git write: not main" "$out" "refs/heads/main needs admin"
     expect "git write: nor a branch under main/" "$out" "refs/heads/main/x needs admin"
+    out=$("$Z" exec "$ken" -- sh -c 'cd /tmp && git clone -q https://git.lab.internal/tools.git t 2>&1; echo tools=$?' 2>&1)
+    expect "a git grant is per repository" "$out" "you have no access to tools"
     "$Z" firm credentials lab grant ken cluster read > /dev/null
     for i in $(seq 30); do "$Z" exec "$ken" -- sh -c 'test -s ~/.kube/config' 2>/dev/null && break; sleep 2; done
     out=$("$Z" exec "$ken" -- sh -c "$ca

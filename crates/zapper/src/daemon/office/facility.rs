@@ -198,6 +198,15 @@ fn plain(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
+/// The repository a git request is for: `/<name>.git/...`.
+fn repo_of(path: &str) -> Option<&str> {
+    path.strip_prefix('/')?
+        .split('/')
+        .next()?
+        .strip_suffix(".git")
+        .filter(|n| zapper_policy::valid_worker_name(n))
+}
+
 fn basic_auth(h: &hyper::HeaderMap) -> Option<(String, String)> {
     use base64::Engine as _;
     let v = h
@@ -246,23 +255,36 @@ async fn git_request(
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
-    // The worker's grant, read on every request: a change or revocation
-    // applies to the next fetch or push.
-    let level = super::access::level(run, member, "git");
+    if path.split('/').any(|c| c == "..") {
+        return plain(StatusCode::BAD_REQUEST, "bad path");
+    }
+    let repos = run.config.git_repos();
+    let Some(repo) = repo_of(&path).filter(|r| repos.iter().any(|x| x == r)) else {
+        let urls: Vec<String> = repos
+            .iter()
+            .map(|r| format!("https://git.{}/{r}.git", run.domain))
+            .collect();
+        return plain(
+            StatusCode::NOT_FOUND,
+            &format!("no such repository; the firm's: {}", urls.join(", ")),
+        );
+    };
+    // The worker's grant on this repository, read on every request: a
+    // change or revocation applies to the next fetch or push.
+    let level = super::access::level(run, member, &format!("git:{repo}"));
     if level == super::access::Level::None {
         return plain(
             StatusCode::FORBIDDEN,
-            "you have no access to this repository; ask for it with credentials_request",
+            &format!(
+                "you have no access to {repo}; ask for it with credentials_request (git:{repo})"
+            ),
         );
     }
     if push && level < super::access::Level::Write {
         return plain(
             StatusCode::FORBIDDEN,
-            "you can read this repository, not push to it; ask for write with credentials_request",
+            &format!("you can read {repo}, not push to it; ask for write with credentials_request (git:{repo})"),
         );
-    }
-    if path.split('/').any(|c| c == "..") {
-        return plain(StatusCode::BAD_REQUEST, "bad path");
     }
     let method = req.method().to_string();
     let headers = req.headers().clone();
@@ -390,15 +412,18 @@ pub fn network_follows_grant(
     let Some(s) = run.rt(worker).and_then(|w| w.session()) else {
         return;
     };
-    let id = format!("credentials-{resource}");
+    // One rule per grant (`git:api` → `credentials-git-api`): a revoked
+    // repository leaves the others' rules, and so the host, in place.
+    let id = format!("credentials-{}", resource.replace(':', "-"));
     let mut p = s.policy.write().unwrap();
     p.remove(&id);
     if level == super::access::Level::None {
         return;
     }
-    let (host, port) = match resource {
-        "git" => (format!("git.{}", run.domain), 443),
-        _ => (format!("{CLUSTER}.{}", run.domain), API_PORT as u16),
+    let (host, port) = if resource.starts_with("git:") {
+        (format!("git.{}", run.domain), 443)
+    } else {
+        (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
     };
     p.insert(
         zapper_policy::AnyRule::Net(zapper_policy::NetRule {
@@ -525,38 +550,44 @@ pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
 }
 
 pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
-    if run.config.git.is_some() {
-        let repo = run.dir.join("git").join("product.git");
-        std::fs::create_dir_all(&repo)?;
-        let ok = tokio::process::Command::new("git")
-            .args(["init", "--quiet", "--bare", "-b", "main"])
-            .arg(&repo)
-            .status()
-            .await
-            .context("git init (is git installed?)")?;
-        if !ok.success() {
-            bail!("git init failed");
+    let repos = run.config.git_repos();
+    if !repos.is_empty() {
+        for name in &repos {
+            let repo = run.dir.join("git").join(format!("{name}.git"));
+            std::fs::create_dir_all(&repo)?;
+            let ok = tokio::process::Command::new("git")
+                .args(["init", "--quiet", "--bare", "-b", "main"])
+                .arg(&repo)
+                .status()
+                .await
+                .context("git init (is git installed?)")?;
+            if !ok.success() {
+                bail!("git init {name} failed");
+            }
+            let _ = tokio::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&repo)
+                .args(["config", "http.receivepack", "true"])
+                .status()
+                .await;
+            // Below admin, pushes may not touch `main` or tags. The hook is
+            // the daemon's: the repository lives on the host, out of
+            // workers' reach.
+            let hook = repo.join("hooks").join("pre-receive");
+            std::fs::create_dir_all(repo.join("hooks"))?;
+            std::fs::write(&hook, PRE_RECEIVE)?;
+            std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
         }
-        let _ = tokio::process::Command::new("git")
-            .arg("--git-dir")
-            .arg(&repo)
-            .args(["config", "http.receivepack", "true"])
-            .status()
-            .await;
-        // Below admin, pushes may not touch `main` or tags. The hook is the
-        // daemon's: the repository lives on the host, out of workers' reach.
-        let hook = repo.join("hooks").join("pre-receive");
-        std::fs::create_dir_all(repo.join("hooks"))?;
-        std::fs::write(&hook, PRE_RECEIVE)?;
-        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
         // A password per worker is who they are, not what they may do: their
         // grant decides that.
         let mut pw = run.facility.git_passwords.lock().unwrap();
         for w in run.rts() {
             pw.insert(w.name.clone(), random_id(24));
         }
-        run.journal
-            .append("facility", json!({ "name": "git", "state": "ready" }));
+        run.journal.append(
+            "facility",
+            json!({ "name": "git", "state": "ready", "repos": repos }),
+        );
     }
     let Some((name, f)) = run.config.facilities.iter().next() else {
         return Ok(());
@@ -895,43 +926,52 @@ pub async fn stop(d: &Arc<Daemon>, run: &Arc<FirmRun>) {
     }
 }
 
-/// The commits of a run's repository, newest first.
+/// The commits of a run's repositories, newest first, each with its
+/// repository.
 pub async fn git_log(run_dir: &Path) -> Value {
-    let repo = run_dir.join("git").join("product.git");
-    if !repo.is_dir() {
-        return json!([]);
-    }
-    let out = tokio::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(&repo)
-        .args([
-            "log",
-            "--all",
-            "--date=unix",
-            "--max-count=500",
-            "--pretty=format:%H%x1f%an%x1f%ad%x1f%s%x1f%D",
-        ])
-        .output()
-        .await;
-    let Ok(out) = out else { return json!([]) };
-    let commits: Vec<Value> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
+    let mut commits: Vec<Value> = Vec::new();
+    for name in super::git::repos(run_dir) {
+        let repo = run_dir.join("git").join(format!("{name}.git"));
+        let out = tokio::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&repo)
+            .args([
+                "log",
+                "--all",
+                "--date=unix",
+                "--max-count=500",
+                "--pretty=format:%H%x1f%an%x1f%ad%x1f%s%x1f%D",
+            ])
+            .output()
+            .await;
+        let Ok(out) = out else { continue };
+        commits.extend(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| {
             let f: Vec<&str> = l.split('\x1f').collect();
-            (f.len() >= 4).then(|| json!({ "commit": f[0], "author": f[1], "ts": f[2].parse::<f64>().unwrap_or(0.0), "subject": f[3], "refs": f.get(4).unwrap_or(&"") }))
-        })
-        .collect();
+            (f.len() >= 4).then(|| json!({ "repo": name, "commit": f[0], "author": f[1], "ts": f[2].parse::<f64>().unwrap_or(0.0), "subject": f[3], "refs": f.get(4).unwrap_or(&"") }))
+        }));
+    }
+    commits.sort_by(|a, b| {
+        b["ts"]
+            .as_f64()
+            .partial_cmp(&a["ts"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    commits.truncate(500);
     json!(commits)
 }
 
 pub fn services_for(run: &FirmRun, _role: &str) -> Services {
     let d = &run.domain;
     // Shown to everyone: access to each comes with a grant.
-    let git = run.config.git.is_some();
     let kube = !run.config.facilities.is_empty();
     let cluster = run.facility.cluster.lock().unwrap().is_some();
     Services {
-        git: git.then(|| format!("https://git.{d}/product.git")),
+        git: run
+            .config
+            .git_repos()
+            .iter()
+            .map(|r| format!("https://git.{d}/{r}.git"))
+            .collect(),
         kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
         product: cluster.then(|| format!("http://apps.{d}")),
     }
@@ -1012,6 +1052,17 @@ pub async fn break_cluster(run: &FirmRun, mode: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_requests_name_their_repository() {
+        use super::repo_of;
+        assert_eq!(repo_of("/product.git/info/refs"), Some("product"));
+        assert_eq!(repo_of("/product2.git/git-receive-pack"), Some("product2"));
+        assert_eq!(repo_of("/product/info/refs"), None, "the .git suffix");
+        assert_eq!(repo_of("/Prod.git/info/refs"), None);
+        assert_eq!(repo_of("/.git/info/refs"), None);
+        assert_eq!(repo_of(""), None);
+    }
+
     #[test]
     fn landing_escapes_text() {
         let m = super::landing_manifest("A <b>&</b>", "it's \"new\"");

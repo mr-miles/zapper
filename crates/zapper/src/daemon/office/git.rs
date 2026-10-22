@@ -10,12 +10,38 @@ use serde_json::{json, Value};
 /// Largest file or diff returned.
 const MAX_BYTES: usize = 1 << 20;
 
-fn repo(run_dir: &Path) -> Result<std::path::PathBuf> {
-    let r = run_dir.join("git").join("product.git");
-    if !r.is_dir() {
-        bail!("this run has no git repository");
-    }
-    Ok(r)
+/// A run's repositories, as on disk (a past run's config may differ):
+/// `product` first, then by name.
+pub fn repos(run_dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(run_dir.join("git"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".git")
+                .map(str::to_string)
+        })
+        .filter(|n| zapper_policy::valid_worker_name(n))
+        .collect();
+    v.sort_by_key(|n| (n != zapper_policy::DEFAULT_REPO, n.clone()));
+    v
+}
+
+/// A repository of the run: `name`, or its first.
+fn repo(run_dir: &Path, name: Option<&str>) -> Result<std::path::PathBuf> {
+    let all = repos(run_dir);
+    let name = match name {
+        Some(n) if all.iter().any(|x| x == n) => n.to_string(),
+        Some(n) => bail!("this run has no repository {n:?}"),
+        None => all
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("this run has no git repository"))?,
+    };
+    Ok(run_dir.join("git").join(format!("{name}.git")))
 }
 
 /// A branch name or a commit id, safe to pass to git.
@@ -69,8 +95,8 @@ async fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 /// Branches, `main` first, with their last commit.
-pub async fn branches(run_dir: &Path) -> Result<Value> {
-    let r = repo(run_dir)?;
+pub async fn branches(run_dir: &Path, name: Option<&str>) -> Result<Value> {
+    let r = repo(run_dir, name)?;
     let out = git(&r, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%1f%(objectname)%1f%(authorname)%1f%(committerdate:unix)%1f%(subject)", "refs/heads/"]).await?;
     let mut list: Vec<Value> = String::from_utf8_lossy(&out)
         .lines()
@@ -85,9 +111,9 @@ pub async fn branches(run_dir: &Path) -> Result<Value> {
 
 /// Commits reachable from a ref, newest first, each with its subject and
 /// the first line of its description.
-pub async fn log(run_dir: &Path, r: &str, limit: usize) -> Result<Value> {
+pub async fn log(run_dir: &Path, name: Option<&str>, r: &str, limit: usize) -> Result<Value> {
     check_ref(r)?;
-    let rp = repo(run_dir)?;
+    let rp = repo(run_dir, name)?;
     let n = format!("--max-count={}", limit.clamp(1, 1000));
     let out = git(
         &rp,
@@ -126,10 +152,10 @@ fn is_trailer(line: &str) -> bool {
 }
 
 /// The entries of a directory at a ref.
-pub async fn tree(run_dir: &Path, r: &str, path: &str) -> Result<Value> {
+pub async fn tree(run_dir: &Path, name: Option<&str>, r: &str, path: &str) -> Result<Value> {
     check_ref(r)?;
     check_path(path)?;
-    let rp = repo(run_dir)?;
+    let rp = repo(run_dir, name)?;
     let spec = if path.is_empty() {
         r.to_string()
     } else {
@@ -156,13 +182,13 @@ pub async fn tree(run_dir: &Path, r: &str, path: &str) -> Result<Value> {
 }
 
 /// A file at a ref, as text when it is UTF-8.
-pub async fn blob(run_dir: &Path, r: &str, path: &str) -> Result<Value> {
+pub async fn blob(run_dir: &Path, name: Option<&str>, r: &str, path: &str) -> Result<Value> {
     check_ref(r)?;
     check_path(path)?;
     if path.is_empty() {
         bail!("give a file path");
     }
-    let rp = repo(run_dir)?;
+    let rp = repo(run_dir, name)?;
     let spec = format!("{r}:{path}");
     let size: usize = String::from_utf8_lossy(&git(&rp, &["cat-file", "-s", &spec]).await?)
         .trim()
@@ -181,11 +207,11 @@ pub async fn blob(run_dir: &Path, r: &str, path: &str) -> Result<Value> {
 }
 
 /// A commit: its message, files changed and diff.
-pub async fn commit(run_dir: &Path, id: &str) -> Result<Value> {
+pub async fn commit(run_dir: &Path, name: Option<&str>, id: &str) -> Result<Value> {
     if id.len() < 7 || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("{id:?} is not a commit id");
     }
-    let rp = repo(run_dir)?;
+    let rp = repo(run_dir, name)?;
     let head = git(
         &rp,
         &[
