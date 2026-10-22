@@ -16,18 +16,16 @@ fn only_a_stopped_session_is_forgotten() {
     let running = t.core.test_session(new_session(&t, "web"), true).unwrap();
     let starting = t.core.test_session(new_session(&t, "web"), false).unwrap();
     for s in [&running, &starting] {
-        t.core.forget_session(&s.id);
-        assert!(
-            t.core.session(&s.id).is_ok(),
-            "still listed: nothing else would manage its VM"
-        );
+        let e = t.core.forget_session(&s.id).err().unwrap().to_string();
+        assert!(e.contains("still running"), "{e}");
+        assert!(t.core.session(&s.id).is_ok(), "still listed");
     }
     running
         .status
         .send_replace(Status::Stopped("stopped by test".into()));
-    t.core.forget_session(&running.id);
+    t.core.forget_session(&running.id).unwrap();
     assert!(t.core.session(&running.id).is_err());
     starting.status.send_replace(Status::Failed("no VM".into()));
-    t.core.forget_session(&starting.id);
+    t.core.forget_session(&starting.id).unwrap();
     assert!(t.core.sessions().is_empty());
 }

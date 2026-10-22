@@ -105,9 +105,20 @@ impl Core {
         session::stop(&self.d, s, reason).await
     }
 
-    /// Takes a stopped session off the list.
-    pub fn forget_session(&self, id: &str) {
-        self.d.sessions.write().unwrap().remove(id);
+    /// Takes a stopped session off the list; a session still starting or
+    /// running stays, as nothing would manage its VM.
+    pub fn forget_session(&self, id: &str) -> Result<()> {
+        let mut sessions = self.d.sessions.write().unwrap();
+        if let Some(s) = sessions.get(id) {
+            if matches!(
+                *s.status.borrow(),
+                session::Status::Starting | session::Status::Running
+            ) {
+                return Err(anyhow!("session {id} is still running; stop it first"));
+            }
+        }
+        sessions.remove(id);
+        Ok(())
     }
 
     /// A session registered as `new` describes, without a VM: for tests of

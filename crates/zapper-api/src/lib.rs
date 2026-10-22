@@ -615,7 +615,7 @@ async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo
 async fn delete_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
     let s = d.session(&id)?;
     d.stop_session(&s, "removed by operator").await;
-    d.forget_session(&id);
+    d.forget_session(&id)?;
     Ok(Json(json!({ "removed": id, "audit": s.audit_path() })))
 }
 
