@@ -83,4 +83,4 @@ zapper audit tusn49 | jq -r 'select(.type=="net" and .action=="deny") | .host' |
 ## References
 
 - `man 5 acct`; asciicast v2: https://docs.asciinema.org/manual/asciicast/v2/
-- Sources: `crates/zapper/src/daemon/{mod,session,nic}.rs`, `crates/zapper-agent/src/acct.rs`
+- Sources: `crates/zapper-core/src/daemon/{mod,session,nic}.rs`, `crates/zapper-agent/src/acct.rs`

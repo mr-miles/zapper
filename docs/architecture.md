@@ -132,4 +132,4 @@ See [configuration](configuration.md) and [policy](policy.md).
 ## References
 
 - Firecracker vsock: https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md
-- Sources: `crates/zapper/src/daemon/`, `crates/zapper/src/vmm.rs`, `crates/zapper/src/netns.rs`, `crates/zapper-agent/src/`, `crates/zapper-policy/src/proto.rs`
+- Sources: `crates/zapper-core/src/daemon/`, `crates/zapper-core/src/vmm.rs`, `crates/zapper-core/src/netns.rs`, `crates/zapper-agent/src/`, `crates/zapper-policy/src/proto.rs`

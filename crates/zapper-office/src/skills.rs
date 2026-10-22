@@ -12,7 +12,7 @@ use super::FirmRun;
 
 macro_rules! defaults {
     ($($name:literal),* $(,)?) => {
-        &[$(($name, include_str!(concat!("../../../../../config/skills/", $name, "/SKILL.md")))),*]
+        &[$(($name, include_str!(concat!("../../../config/skills/", $name, "/SKILL.md")))),*]
     };
 }
 

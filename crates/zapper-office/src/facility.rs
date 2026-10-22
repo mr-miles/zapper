@@ -23,9 +23,9 @@ use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::{drive, FirmRun};
-use crate::util::random_id;
-use crate::Core;
-use crate::{NewSession, ServiceHandler, ServiceIo, ServiceSpec, ServiceTarget, Session};
+use zapper_core::util::random_id;
+use zapper_core::Core;
+use zapper_core::{NewSession, ServiceHandler, ServiceIo, ServiceSpec, ServiceTarget, Session};
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -683,7 +683,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         {
             eprintln!(
                 "{}",
-                crate::util::exposed_warning(&format!(
+                zapper_core::util::exposed_warning(&format!(
                     "firm {}'s Kubernetes dashboard (dashboard_port) listens on {addr}",
                     run.firm
                 ))

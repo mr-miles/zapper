@@ -1221,9 +1221,6 @@ async fn forward_plain(
 }
 
 #[cfg(test)]
-pub(crate) mod service_tests;
-
-#[cfg(test)]
 mod approval_tests;
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ struct Daemon {
 async fn daemon(t: TestCore) -> Daemon {
     let socket = t.dir.join("api.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let app = zapper_api::api(t.core.clone());
+    let app = zapper_api::api(t.core.clone(), &zapper_api::Mount::default());
     tokio::spawn(async move { axum::serve(listener, app).await });
     Daemon { t, socket }
 }
@@ -232,7 +232,35 @@ async fn serve_listens_on_its_socket() {
     assert!(text.contains("global-deny"), "{text}");
     let text = ok(run(&t.startup(), Some(&socket), &["ps"]).await);
     assert_eq!(text.lines().count(), 1, "the header only: {text}");
+    // With the office, its routes are mounted.
+    #[cfg(feature = "office")]
+    ok(run(&t.startup(), Some(&socket), &["firm", "ls"]).await);
     serve.start_kill().unwrap();
+}
+
+/// Without the office, `zapper serve` refuses a config with firms.
+#[cfg(not(feature = "office"))]
+#[tokio::test]
+async fn serve_without_the_office_refuses_firms() {
+    let t = TestCore::new("");
+    std::fs::write(
+        t.startup(),
+        std::fs::read_to_string(t.startup()).unwrap()
+            + "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+    )
+    .unwrap();
+    let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("--config")
+        .arg(t.startup())
+        .arg("serve")
+        .env("ZAPPER_SOCKET", t.dir.join("api.sock"))
+        .env("HOME", &t.dir)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let e = err(&o);
+    assert!(e.contains("built without the office"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

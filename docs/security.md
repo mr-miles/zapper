@@ -139,4 +139,4 @@ Network-specific limitations are on the [network](network.md#limitations) page.
 
 - Firecracker design and threat model: https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md
 - seccomp user notification and its TOCTOU caveat: `man 2 seccomp_unotify`
-- Sources: `crates/zapper/src/vmm.rs`, `crates/zapper/src/netns.rs`, `crates/zapper/src/daemon/{proxy,dns,nic,addr,session,tls}.rs`, `crates/zapper/src/daemon/office/`, `crates/zapper-agent/src/{shell,sys,init,office,forward}.rs`
+- Sources: `crates/zapper-core/src/vmm.rs`, `crates/zapper-core/src/netns.rs`, `crates/zapper-core/src/daemon/{proxy,dns,nic,addr,session,tls}.rs`, `crates/zapper-office/src/`, `crates/zapper-agent/src/{shell,sys,init,office,forward}.rs`

@@ -107,4 +107,4 @@ After the upgrade, both directions carry frames: a 1-byte type, a 4-byte big-end
 
 ## References
 
-- Sources: `crates/zapper/src/daemon/api.rs`, `crates/zapper/src/client.rs`, `crates/zapper-policy/src/proto.rs`
+- Sources: `crates/zapper-api/src/lib.rs`, `crates/zapper/src/client.rs`, `crates/zapper-policy/src/proto.rs`

@@ -31,63 +31,7 @@ async fn ask(t: &TestCore, s: &Arc<Session>, name: &str) -> Result<Ipv4Addr, u8>
     Ok(Ipv4Addr::new(a[0], a[1], a[2], a[3]))
 }
 
-#[cfg(feature = "office")]
-const NXDOMAIN: u8 = 3;
 const REFUSED: u8 = 5;
-
-#[cfg(feature = "office")]
-const FIRM: &str = "
-profiles:
-  w:
-    agent: { kind: claude-code }
-    policy:
-      net:
-        - { action: allow, host: '*.acme.internal' }
-        - { action: allow, host: acme.internal }
-firms:
-  acme:
-    roles:
-      ceo: { profile: w, skills: { work: ceo } }
-    workers:
-      - { name: ceo, role: ceo }
-    git: { repos: [api] }
-";
-
-#[cfg(feature = "office")]
-#[tokio::test]
-async fn a_firms_names_are_answered_for_its_sessions_never_by_the_host() {
-    let t = TestCore::new(FIRM);
-    let run = crate::daemon::office::test_run(&t.core, "acme");
-    let ceo = run
-        .rt("ceo")
-        .unwrap()
-        .session
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap();
-    let d = run.domain.clone();
-    assert_eq!(d, "acme.internal");
-
-    // The host has no such names: an address means the daemon answered.
-    let git = ask(&t, &ceo, &format!("git.{d}")).await.unwrap();
-    assert_eq!(git.octets()[..2], [198, 18], "{git}");
-    assert_eq!(ask(&t, &ceo, &format!("nope.{d}")).await, Err(NXDOMAIN));
-    assert_eq!(ask(&t, &ceo, &d).await, Err(NXDOMAIN));
-    // Until the cluster boots, its name isn't served either.
-    assert_eq!(ask(&t, &ceo, &format!("cluster.{d}")).await, Err(NXDOMAIN));
-
-    // A session of no firm, with the same rules: the host is asked, and
-    // knows nothing of the firm's names.
-    let plain = t
-        .core
-        .test_session(
-            NewSession::plain("w".into(), t.workdir(), Default::default()),
-            true,
-        )
-        .unwrap();
-    assert!(ask(&t, &plain, &format!("git.{d}")).await.is_err());
-}
 
 #[tokio::test]
 async fn a_name_no_rule_allows_is_refused() {

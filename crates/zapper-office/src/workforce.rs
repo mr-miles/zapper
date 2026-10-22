@@ -15,7 +15,7 @@ use zapper_policy::{valid_worker_name, Firm, Worker, BOARD};
 
 use super::mail::{Draft, Expects, Kind};
 use super::{now, FirmRun, WorkerRt, WorkerState};
-use crate::Core;
+use zapper_core::Core;
 
 /// Longest budget plan or reason, in bytes.
 const MAX_PLAN: usize = 20_000;
@@ -1122,7 +1122,7 @@ pub(super) fn join(
             .git_passwords
             .lock()
             .unwrap()
-            .insert(name.clone(), crate::util::random_id(24));
+            .insert(name.clone(), zapper_core::util::random_id(24));
     }
     Ok((name, firm, rt))
 }

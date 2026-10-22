@@ -77,8 +77,17 @@ fn read_routes() -> Router<Core> {
         .route("/services", get(list_services))
 }
 
-/// The API, with the office's routes when there is an office.
-pub fn api(core: Core) -> Router {
+/// What a client of the core (the office) adds to the API and the UI: its
+/// routes, under `/v1` and `/api` behind the same guard as the rest, and its
+/// page, the UI's front page instead of the sessions page.
+#[derive(Clone, Default)]
+pub struct Mount {
+    pub routes: Router,
+    pub page: Option<&'static str>,
+}
+
+/// The API, with what is mounted on it.
+pub fn api(core: Core, mount: &Mount) -> Router {
     let write = Router::new()
         .route("/config", axum::routing::put(put_config))
         .route("/config/save", post(save))
@@ -103,16 +112,17 @@ pub fn api(core: Core) -> Router {
         read_routes()
             .merge(write)
             .with_state(core.clone())
-            .merge(core.office_routes()),
+            .merge(mount.routes.clone()),
     )
 }
 
 /// The UI: the read routes, plus answering approvals. `remote`: it listens
 /// on an address other than loopback (`daemon.ui`), for a remote host.
-pub fn ui(core: Core, port: u16, remote: bool) -> Router {
+pub fn ui(core: Core, port: u16, remote: bool, mount: &Mount) -> Router {
+    let page = mount.page;
     Router::new()
-        .route("/", get(ui::index))
-        .route("/sessions", get(ui::sessions))
+        .route("/", get(move || ui::index(page)))
+        .route("/sessions", get(move || ui::sessions(page.is_some())))
         .route("/favicon.ico", get(ui::favicon))
         .route("/terminal", get(ui::terminal))
         .route("/assets/xterm.js", get(ui::xterm_js))
@@ -124,7 +134,7 @@ pub fn ui(core: Core, port: u16, remote: bool) -> Router {
                 .route("/approvals/{id}", post(answer))
                 .route("/sessions/{id}/prompt", post(prompt))
                 .with_state(core.clone())
-                .merge(core.office_routes()),
+                .merge(mount.routes.clone()),
         )
         .layer(middleware::from_fn_with_state(
             (core, port, remote),

@@ -131,4 +131,4 @@ A rule gets its id when it's added, such as `net-4`, or `s-net-1` for a session 
 
 ## References
 
-- Sources: `crates/zapper-policy/src/{config,eval,template}.rs`, `crates/zapper/src/daemon/{proxy,dns}.rs`
+- Sources: `crates/zapper-policy/src/{config,eval,template}.rs`, `crates/zapper-core/src/daemon/{proxy,dns}.rs`

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::util::now;
+use zapper_core::util::now;
 
 /// Longest line kept; longer ones are cut and marked.
 pub const MAX_LINE: usize = 256 * 1024;
@@ -20,7 +20,7 @@ pub const MAX_LINE: usize = 256 * 1024;
 pub struct Journal {
     /// Where it is read from.
     path: PathBuf,
-    file: Mutex<crate::record::Writer>,
+    file: Mutex<zapper_core::record::Writer>,
     offset: AtomicU64,
     seq: AtomicU64,
 }
@@ -34,9 +34,9 @@ pub struct At {
 
 impl Journal {
     pub fn create(path: &Path) -> Result<Journal> {
-        let file = crate::record::Writer::open(path)
+        let file = zapper_core::record::Writer::open(path)
             .with_context(|| format!("creating {}", path.display()))?;
-        let path = crate::record::view(path);
+        let path = zapper_core::record::view(path);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         // An existing journal continues its sequence.
         let last = std::fs::read(&path).ok().and_then(|b| {
@@ -116,8 +116,10 @@ mod tests {
 
     #[test]
     fn append_and_read_back() {
-        let dir =
-            std::env::temp_dir().join(format!("zapper-journal-{}", crate::util::random_id(6)));
+        let dir = std::env::temp_dir().join(format!(
+            "zapper-journal-{}",
+            zapper_core::util::random_id(6)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("j.jsonl")).unwrap();
         let a = j.append("mail", json!({ "subject": "hi" }));

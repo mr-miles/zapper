@@ -35,11 +35,22 @@ use tokio::sync::{Notify, Semaphore};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Firm, Policy, BOARD};
 
-use crate::util::{now, random_id};
-use crate::Core;
-use crate::{NewSession, Session, Status};
+use zapper_core::util::{now, random_id};
+use zapper_core::Core;
+
+/// The office's state in the core: its registry of runs.
+pub trait OfficeOf {
+    fn office(&self) -> Arc<Office>;
+}
+
+impl OfficeOf for Core {
+    fn office(&self) -> Arc<Office> {
+        self.client()
+    }
+}
 use journal::Journal;
 use mail::{Draft, Kind, PostOffice};
+use zapper_core::{NewSession, Session, Status};
 
 /// Every firm's current or last run.
 #[derive(Default)]
@@ -255,12 +266,14 @@ pub fn is_run_id(s: &str) -> bool {
         && b[8] == b'-'
         && b[15] == b'-'
         && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
-        && b[16..].iter().all(|c| super::ID_CHARS.contains(c))
+        && b[16..]
+            .iter()
+            .all(|c| zapper_core::util::ID_CHARS.contains(c))
 }
 
 /// A run's sessions, by their labels: what the run registers services, its
 /// zone and its decider for.
-pub(super) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
+pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
     [("firm", &run.firm), ("run", &run.id)]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -546,7 +559,7 @@ fn chart(
 }
 
 /// One worker of the chart, as the UI draws it.
-pub(super) fn worker_json(
+pub(crate) fn worker_json(
     firm: &Firm,
     models: &BTreeMap<String, Option<String>>,
     agents: &Agents,
@@ -592,7 +605,7 @@ pub fn effective_model(role: &zapper_policy::Role, config: &Config) -> Option<St
 }
 
 /// Memory still available on the host, in MiB.
-pub(super) fn mem_available_mib() -> Option<u64> {
+pub(crate) fn mem_available_mib() -> Option<u64> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
     info.lines()
         .find_map(|l| {
@@ -947,15 +960,17 @@ fn create_run(
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
-    super::write_private(
+    zapper_core::util::write_private(
         &dir.join("run.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
     )?;
     // The whole config the run started with, for replay: profiles, rules,
     // firms. Inline secret values are hidden, as in `zapper config startup`.
-    super::write_private(
+    zapper_core::util::write_private(
         &dir.join(RUN_CONFIG),
-        super::redact(config.clone()).to_yaml().as_bytes(),
+        zapper_core::util::redact(config.clone())
+            .to_yaml()
+            .as_bytes(),
     )?;
     run.journal.append("run", json!({ "state": "starting", "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "chart": chart(name, &firm, &models, &agents), "budget": firm.budget }));
     workforce::seed(&run);
@@ -1148,7 +1163,7 @@ async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     }
 }
 
-pub(super) async fn boot_worker(
+pub(crate) async fn boot_worker(
     d: &Core,
     run: &Arc<FirmRun>,
     config: &Config,
@@ -1247,9 +1262,9 @@ pub(super) async fn boot_worker(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn crate::harness::Driver> {
+) -> Result<&'static dyn zapper_core::harness::Driver> {
     let kind = &profile.agent.kind;
-    crate::harness::get(kind)
+    zapper_core::harness::get(kind)
         .and_then(|h| h.driver())
         .ok_or_else(|| anyhow!("profile {}: agent kind {kind} can't run an office worker (those that can: claude-code, pi)", profile.name))
 }
@@ -1345,6 +1360,17 @@ pub fn board_send(run: &FirmRun, v: &Value) -> Result<mail::Sent> {
 
 /// Ends the journals of runs a previous daemon left running: they can't be
 /// resumed, and a replay should say how they ended.
+/// The office's API routes (firms, mail, security, the drive), for the API
+/// and the UI to serve.
+pub fn routes(d: &Core) -> axum::Router {
+    http::read_routes()
+        .merge(http::board_routes())
+        .with_state(d.clone())
+}
+
+/// The office's page: the UI's front page.
+pub const PAGE: &str = include_str!("office.html");
+
 /// The office in a starting daemon: runs a previous daemon left running are
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
@@ -1365,7 +1391,7 @@ pub fn start(d: &Core) {
 /// the operator removes through the officers' records.
 struct Keeper(Arc<Office>);
 
-impl crate::RuleKeeper for Keeper {
+impl zapper_core::RuleKeeper for Keeper {
     fn layers(&self) -> Vec<(zapper_policy::Scope, Policy)> {
         let mut layers = Vec::new();
         for run in self.0.runs.read().unwrap().values() {
@@ -1398,7 +1424,7 @@ pub fn close_orphans(state: &std::path::Path) {
         };
         for run in runs.flatten() {
             let path = run.path().join("journal.jsonl");
-            let Ok(text) = std::fs::read(super::record::view(&path)) else {
+            let Ok(text) = std::fs::read(zapper_core::record::view(&path)) else {
                 continue;
             };
             let tail = &text[text.len().saturating_sub(64 * 1024)..];
@@ -1433,7 +1459,7 @@ pub fn list_runs(d: &Core, firm: &str) -> Vec<Value> {
                 return None;
             }
             let info: Value = std::fs::read(e.path().join("run.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-            let journal = super::record::view(&e.path().join("journal.jsonl"));
+            let journal = zapper_core::record::view(&e.path().join("journal.jsonl"));
             let size = std::fs::metadata(&journal).map(|m| m.len()).unwrap_or(0);
             let sum = run_summary(&journal);
             let note = std::fs::read_to_string(e.path().join(RUN_NOTE)).ok();
@@ -1478,7 +1504,7 @@ pub fn set_note(d: &Core, firm: &str, run: &str, note: &str) -> Result<()> {
         }
     }
     let tmp = dir.join(format!("{RUN_NOTE}.tmp"));
-    super::write_private(&tmp, note.as_bytes())?;
+    zapper_core::util::write_private(&tmp, note.as_bytes())?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -1639,6 +1665,20 @@ pub fn prune(d: &Core, firm: &str, run: &str) -> Result<()> {
     Ok(())
 }
 
+/// A core without VMs with the office started on it, for tests.
+#[cfg(test)]
+pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
+    let t = zapper_core::testing::TestCore::new(yaml);
+    start(&t.core);
+    t
+}
+
+#[cfg(test)]
+mod approval_tests;
+
+#[cfg(test)]
+mod names_tests;
+
 #[cfg(test)]
 mod run_tests;
 
@@ -1647,16 +1687,18 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::OfficeOf;
+
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {
-        let t = crate::testing::TestCore::new("profiles:\n  w: {}\n");
-        let mut new = crate::NewSession::plain("w".into(), t.workdir(), Default::default());
+        let t = super::test_core("profiles:\n  w: {}\n");
+        let mut new = zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default());
         new.labels = super::labels("acme", "r1", "pat", true);
         let worker = t.core.test_session(new, true).unwrap();
         let plain = t
             .core
             .test_session(
-                crate::NewSession::plain("w".into(), t.workdir(), Default::default()),
+                zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default()),
                 true,
             )
             .unwrap();
@@ -1800,7 +1842,8 @@ mod tests {
 
     #[test]
     fn run_summaries() {
-        let dir = std::env::temp_dir().join(format!("zapper-runsum-{}", crate::util::random_id(6)));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-runsum-{}", zapper_core::util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = dir.join("journal.jsonl");
         std::fs::write(&j, concat!(

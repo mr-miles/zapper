@@ -141,4 +141,4 @@ make test-e2e                 # the NIC, root and vsock groups in docs/testing.m
 
 ## References
 
-- Sources: `crates/zapper/src/netns.rs`, `crates/zapper/src/daemon/{nic,dns,proxy,addr}.rs`, `crates/zapper-agent/src/forward.rs`
+- Sources: `crates/zapper-core/src/netns.rs`, `crates/zapper-core/src/daemon/{nic,dns,proxy,addr}.rs`, `crates/zapper-agent/src/forward.rs`

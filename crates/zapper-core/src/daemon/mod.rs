@@ -7,23 +7,15 @@
 
 pub mod addr;
 pub mod api_error;
-mod dns;
-pub mod driver;
-// Workers' conversations and the record's checks are the office's.
 pub mod clients;
 pub mod deciders;
+mod dns;
+pub mod driver;
 pub mod gateway;
-#[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
 pub mod httplog;
-mod nic;
-#[cfg(feature = "office")]
-pub mod office;
-#[cfg(not(feature = "office"))]
-#[path = "office_off.rs"]
-pub mod office;
-mod proxy;
-#[cfg_attr(not(feature = "office"), allow(dead_code))]
+pub(crate) mod nic;
+pub(crate) mod proxy;
 pub mod record;
 pub mod services;
 pub mod session;
@@ -289,16 +281,6 @@ pub fn exposed_warning(what: &str) -> String {
          can't reach it: the host's own addresses are closed to them.\n\
          ################################################################\n"
     )
-}
-
-/// A config with firms needs a zapper built with the office.
-pub fn office_config(c: &Config) -> Result<()> {
-    if !cfg!(feature = "office") && !c.firms.is_empty() {
-        anyhow::bail!(
-            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
-        );
-    }
-    Ok(())
 }
 
 impl Daemon {
@@ -642,14 +624,6 @@ pub fn redact(mut c: Config) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn firms_need_the_office() {
-        let mut c = Config::default();
-        assert!(office_config(&c).is_ok());
-        c.firms.insert("acme".into(), Default::default());
-        assert_eq!(office_config(&c).is_ok(), cfg!(feature = "office"));
-    }
 
     #[test]
     fn redacted_config_hides_inline_secret_values() {

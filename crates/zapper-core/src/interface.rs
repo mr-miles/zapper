@@ -1,13 +1,12 @@
 //! `Core`: what the daemon offers its clients (the REST API and UI server,
-//! the binary, and in time the office), and nothing of its internals.
+//! the binary, and the office), and nothing of its internals.
 //! Clients hold a `Core` and call it; the daemon's state stays behind it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
-use axum::Router;
+use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
@@ -44,30 +43,17 @@ pub enum RuleRemoval {
 }
 
 impl Core {
-    /// The office's registry of firm runs, while the office lives in the
-    /// core.
-    #[cfg(feature = "office")]
-    pub(crate) fn office(&self) -> Arc<daemon::office::Office> {
-        self.client()
-    }
-
     /// The daemon, for tests of its parts that take it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn daemon(&self) -> &Arc<Daemon> {
         &self.d
     }
 
     /// Loads the startup config and starts the daemon's state.
     pub fn start(startup_path: PathBuf) -> Result<Core> {
-        let core = Core {
+        Ok(Core {
             d: Daemon::new(startup_path)?,
-        };
-        core.add_config_check(daemon::office_config);
-        #[cfg(feature = "office")]
-        daemon::office::start(&core);
-        core.check_config()
-            .with_context(|| format!("loading {}", core.d.startup_path.display()))?;
-        Ok(core)
+        })
     }
 
     /// The state of type `T` a client keeps in the core, made on first use:
@@ -465,7 +451,7 @@ impl Core {
         daemon::record::status()
     }
 
-    // The UI, the state directory and the office.
+    // The UI and the state directory.
 
     /// The token the UI's first request carries.
     pub fn ui_token(&self) -> &str {
@@ -474,22 +460,6 @@ impl Core {
 
     pub fn state_dir(&self) -> &Path {
         &self.d.paths.state
-    }
-
-    /// The office's API routes (firms, mail, security, the drive), for the
-    /// API and the UI to serve; none without the office.
-    pub fn office_routes(&self) -> Router {
-        daemon::office::http::read_routes()
-            .merge(daemon::office::http::board_routes())
-            .with_state(self.clone())
-    }
-
-    /// The office's page, the UI's front page when there is an office.
-    pub fn office_page(&self) -> Option<&'static str> {
-        #[cfg(feature = "office")]
-        return Some(include_str!("daemon/office.html"));
-        #[cfg(not(feature = "office"))]
-        None
     }
 
     /// Runs the clients' shutdown hooks (the office stops its firms), then

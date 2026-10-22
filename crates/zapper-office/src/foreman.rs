@@ -16,10 +16,10 @@ use zapper_policy::proto::ShellRequest;
 
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use crate::driver::{self, Observer, Out, Proc};
-use crate::harness::{self, Driver, Outcome};
-use crate::Core;
-use crate::Session;
+use zapper_core::driver::{self, Observer, Out, Proc};
+use zapper_core::harness::{self, Driver, Outcome};
+use zapper_core::Core;
+use zapper_core::Session;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;
@@ -148,7 +148,7 @@ fn blocked(
         return Some((st, detail, 5));
     }
     // No turns while the record can't be written: work isn't done unrecorded.
-    if !crate::record::healthy() {
+    if !zapper_core::record::healthy() {
         return Some((
             WorkerState::Error,
             Some("the record can't be written (is zapper-keeper running?)".into()),

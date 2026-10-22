@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::daemon::proxy::service_tests::{dial, echoing_vm, guest_tls, net_event};
+use crate::testing::{dial, echoing_vm, guest_tls, net_event};
 
 use super::{check_name, Handler, Io, Route, Spec, Target};
 use crate::testing::TestCore;

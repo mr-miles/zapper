@@ -5,11 +5,11 @@
 //! becomes an access request; an officer (or the board) decides it, and the
 //! worker is told by mail.
 
-use crate::{Core, Decider, Referral, Session};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
+use zapper_core::{Core, Decider, Referral, Session};
 
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;

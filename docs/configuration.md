@@ -102,7 +102,7 @@ For `claude-code`, zapper also sets `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DIS
 
 ### Agent harnesses
 
-The agent keys above are neutral: each harness (`crates/zapper/src/daemon/harness.rs`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to run office workers, `Driver`, which starts a `Conversation`: the command line, a handshake if the protocol has one, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure, a reply to write back), and handing over a message while the agent works if it can.
+The agent keys above are neutral: each harness (`crates/zapper-core/src/daemon/harness.rs`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to run office workers, `Driver`, which starts a `Conversation`: the command line, a handshake if the protocol has one, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure, a reply to write back), and handing over a message while the agent works if it can.
 
 `claude-code` and `pi` are implemented; opencode isn't yet. [HARNESS.md](../HARNESS.md) describes the interfaces in full and how each implements them; in short:
 
@@ -188,4 +188,4 @@ zapper profile show office-engineer   # the profile and its resolved form
 
 ## References
 
-- Sources: `crates/zapper-policy/src/config.rs`, `crates/zapper/src/daemon/{mod,spec}.rs`
+- Sources: `crates/zapper-policy/src/config.rs`, `crates/zapper-core/src/daemon/{mod,spec}.rs`

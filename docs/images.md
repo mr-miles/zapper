@@ -51,4 +51,4 @@ zapper run -p default -- cat /etc/os-release   # boots the image
 
 - Firecracker CI kernels: https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md
 - k3s air-gap install: https://docs.k3s.io/installation/airgap
-- Sources: `crates/zapper/src/image.rs`, `crates/zapper/src/daemon/vm.rs`, `scripts/fetch-deps.sh`, `scripts/build-kernel.sh`, `config/kernel/`
+- Sources: `crates/zapper/src/image.rs`, `crates/zapper-core/src/daemon/vm.rs`, `scripts/fetch-deps.sh`, `scripts/build-kernel.sh`, `config/kernel/`

@@ -10,7 +10,7 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::testing::TestCore;
+use zapper_core::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -34,7 +34,7 @@ async fn call(t: &TestCore, method: Method, uri: &str, body: &str) -> (StatusCod
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let r = t.core.office_routes().oneshot(req).await.unwrap();
+    let r = crate::routes(&t.core).oneshot(req).await.unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await
@@ -85,7 +85,7 @@ fn two_runs(t: &TestCore) {
 
 #[tokio::test]
 async fn past_runs_newest_first_with_what_their_journal_says() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     two_runs(&t);
     let (status, runs) = get(&t, "/firms/acme/runs").await;
     assert_eq!(status, StatusCode::OK);
@@ -115,7 +115,7 @@ async fn past_runs_newest_first_with_what_their_journal_says() {
 
 #[tokio::test]
 async fn notes_on_runs_and_deleting_runs() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     two_runs(&t);
     let note = |run: &str| format!("/firms/acme/runs/{run}/note");
 
@@ -170,7 +170,7 @@ async fn notes_on_runs_and_deleting_runs() {
 
 #[tokio::test]
 async fn deleting_the_running_run_is_refused() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let run = super::test_run(&t.core, "acme");
     let (status, v) = call(
         &t,
@@ -186,7 +186,7 @@ async fn deleting_the_running_run_is_refused() {
 
 #[tokio::test]
 async fn journals_transcripts_and_a_runs_config() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     two_runs(&t);
     let old = run_dir(&t, OLD);
     std::fs::create_dir_all(old.join("transcripts")).unwrap();
@@ -307,7 +307,7 @@ fn repos(t: &TestCore) -> String {
 
 #[tokio::test]
 async fn the_git_browser_reads_a_runs_repositories() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let base = repos(&t);
 
     let (_, r) = get(&t, &format!("{base}/repos")).await;
@@ -383,7 +383,7 @@ async fn the_git_browser_reads_a_runs_repositories() {
 
 #[tokio::test]
 async fn the_git_browser_refuses_what_isnt_a_ref_path_or_repository() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let base = repos(&t);
     let bad = [
         "log?ref=--output=/tmp/x",
@@ -429,7 +429,7 @@ async fn the_git_browser_refuses_what_isnt_a_ref_path_or_repository() {
 
 #[tokio::test]
 async fn the_runs_git_log_is_every_repository_newest_first() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let base = repos(&t);
     let (_, all) = get(&t, &base).await;
     let seen: Vec<(&str, &str)> = all

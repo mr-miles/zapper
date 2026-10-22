@@ -3,7 +3,7 @@
 # Office prompts
 
 > [!NOTE]
-> First versions. The daemon renders them (`crates/zapper/src/daemon/office/prompts.rs`, `mail.rs`, `security.rs`); keep this page in step. `{{name}}` is filled from the firm, the mail and the worker's desk. Everything quoted from mail is untrusted text, framed but not filtered ([workers manipulating workers](office.md#workers-manipulating-workers)).
+> First versions. The daemon renders them (`crates/zapper-office/src/prompts.rs`, `mail.rs`, `security.rs`); keep this page in step. `{{name}}` is filled from the firm, the mail and the worker's desk. Everything quoted from mail is untrusted text, framed but not filtered ([workers manipulating workers](office.md#workers-manipulating-workers)).
 
 ## Principles
 

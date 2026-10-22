@@ -85,20 +85,25 @@ Architecture: [docs/architecture.md](docs/architecture.md). Network: [docs/netwo
 
 ```
 crates/zapper-policy/    config model, layered rule evaluation, host↔guest protocol (no I/O)
-crates/zapper/           CLI, daemon, proxy, Firecracker launcher, REST API, web UI
-  src/daemon/office/       firms: post office, foreman (headless Claude), shared drive, security officers, facilities
-  src/daemon/office.html   the office UI (org chart, messages, security, drive, statistics, replay)
+crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gateway, approvals, the driver, the record; its interface `Core`, the only way in for the crates below
+  src/interface.rs         `Core`: sessions, config, rules, approvals and deciders, services, MCP servers, events, what clients register
   src/vmm.rs               `zapper __vmm`: runs Firecracker confined in its own namespaces and root
   src/netns.rs             the guest's network in the VMM's namespace, and traffic capture
   src/daemon/harness.rs    agent harnesses: Claude Code and pi behind `Harness`/`Driver`/`Conversation`; HARNESS.md for both, and opencode
   src/daemon/session.rs    session lifecycle, guest control channel, exec decisions, recordings
   src/daemon/proxy.rs      egress proxy: tunnels, TLS inspection, secret injection
+  src/daemon/services.rs   names the daemon connects itself (a firm's git and cluster), zones
+  src/daemon/gateway.rs    the MCP gateway: servers registered in the daemon, over each VM's MCP port
   src/daemon/addr.rs       which destination addresses are reachable at all
   src/daemon/dns.rs        the guest's resolver: synthetic addresses for allowed names
   src/daemon/httplog.rs    per-session request log for the UI's network view
   src/daemon/vm.rs         disks, initramfs, the Firecracker process
-  src/daemon/ui.html       the web UI: state, terminal viewer, answering approvals (textContent only)
-  src/daemon/assets/       xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
+crates/zapper-api/       the REST API (the CLI's, on a unix socket) and the web UI, over `Core`; mounts what it is given (the office's routes and page)
+  src/ui.html              the web UI: state, terminal viewer, answering approvals (textContent only)
+  src/assets/              xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
+crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities
+  src/office.html          the office UI (org chart, messages, security, drive, statistics, replay)
+crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI) and the fake Claude and pi

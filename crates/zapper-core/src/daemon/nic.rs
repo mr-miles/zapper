@@ -77,7 +77,7 @@ fn rcode_name(rcode: u8) -> &'static str {
 }
 
 /// Answers one DNS query from the guest; `None` if it's too short to answer.
-async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
+pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
     let event =
         |name: &str, qtype: u16, rcode: u8, answer: Option<Ipv4Addr>, reason: Option<&str>| {
             d.emit(

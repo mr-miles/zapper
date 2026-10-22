@@ -17,9 +17,6 @@ pub use daemon::api_error::ApiError;
 pub use daemon::driver;
 /// Agent harnesses: how each agent is set up, and talked to headless.
 pub use daemon::harness;
-/// The office's workers' skills, for `zapper init` and `zapper check`.
-#[cfg(feature = "office")]
-pub use daemon::office::skills;
 /// The record: append-only files kept by the daemon, or by
 /// `zapper-keeper` as a separate user.
 pub use daemon::record;

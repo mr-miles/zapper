@@ -8,8 +8,8 @@ use tokio::io::AsyncReadExt;
 use zapper_policy::NetRequest;
 
 use super::{Decider, Referral};
-use crate::daemon::proxy::service_tests::{dial, net_event};
 use crate::testing::TestCore;
+use crate::testing::{dial, net_event};
 use crate::{NewSession, Session};
 
 /// Refers every `ask` to "the bot" as request `b-N`, or refuses them all.

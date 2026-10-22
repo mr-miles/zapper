@@ -18,8 +18,9 @@ use serde_json::{json, Value};
 use zapper_policy::{AnyRule, BOARD};
 
 use super::{drive, security};
-use crate::ApiError;
-use crate::Core;
+use crate::OfficeOf;
+use zapper_core::ApiError;
+use zapper_core::Core;
 
 type D = State<Core>;
 type R<T> = Result<T, ApiError>;
@@ -199,9 +200,9 @@ fn start_terms(firm: &zapper_policy::Firm, config: &zapper_policy::Config) -> Va
 /// Checks a run's record against the keeper's chains and signatures.
 async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     let dir = super::run_dir(&d, &f, &run)?;
-    let rel = crate::record::rel(&dir).ok_or_else(|| bad("not in the record"))?;
+    let rel = zapper_core::record::rel(&dir).ok_or_else(|| bad("not in the record"))?;
     Ok(Json(
-        tokio::task::spawn_blocking(move || crate::record::verify_dir(&rel))
+        tokio::task::spawn_blocking(move || zapper_core::record::verify_dir(&rel))
             .await
             .map_err(|e| bad(e.to_string()))??,
     ))
@@ -295,7 +296,7 @@ async fn journal(
     Query(q): Query<Follow>,
 ) -> R<Response> {
     let dir = super::run_dir(&d, &f, &run)?;
-    lines(crate::record::view(&dir.join("journal.jsonl")), q).await
+    lines(zapper_core::record::view(&dir.join("journal.jsonl")), q).await
 }
 
 async fn transcript(
@@ -308,7 +309,7 @@ async fn transcript(
         return Err(bad(format!("{worker:?} is not a worker name")));
     }
     lines(
-        crate::record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
+        zapper_core::record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
         q,
     )
     .await

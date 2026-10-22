@@ -172,12 +172,6 @@ fn approvals_start_empty_and_unknown_ones_are_errors() {
     assert!(status.is_object(), "{status}");
 }
 
-#[test]
-fn the_office_page_is_there_with_the_office() {
-    let t = TestCore::new("");
-    assert_eq!(t.core.office_page().is_some(), cfg!(feature = "office"));
-}
-
 #[tokio::test]
 async fn shutdown_with_nothing_running() {
     let t = TestCore::new("");

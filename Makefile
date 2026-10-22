@@ -27,16 +27,19 @@ IMAGE   ?= ubuntu-26.04
 ZAPPER  := $(TARGET)/zapper
 KERNEL  ?= k8s
 # OFFICE=0 builds zapper without The Office (cargo --no-default-features),
-# and without zapper-inspect, which reads firms' runs.
+# and without zapper-inspect, which reads firms' runs; lint and tests leave
+# out the office's crates too.
 OFFICE  ?= 1
 ifeq ($(OFFICE),0)
 FEATURES := --no-default-features
 HOST     := -p zapper -p zapper-keeper
 BINS     := zapper zapper-agent
+EXCLUDE  := --exclude zapper-office --exclude zapper-inspect
 else
 FEATURES :=
 HOST     := -p zapper -p zapper-keeper -p zapper-inspect
 BINS     := zapper zapper-agent zapper-inspect
+EXCLUDE  :=
 endif
 
 # Image recipes: name → base and build steps.
@@ -106,11 +109,11 @@ check: build
 	$(ZAPPER) check
 
 test:
-	cargo test --workspace $(FEATURES)
+	cargo test --workspace $(EXCLUDE) $(FEATURES)
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --release $(FEATURES) -- -D warnings
+	cargo clippy --workspace $(EXCLUDE) --all-targets --release $(FEATURES) -- -D warnings
 
 fmt:
 	cargo fmt --all

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use zapper_policy::{parse_duration, BOARD};
 
 use super::{now, FirmRun};
-use crate::Core;
+use zapper_core::Core;
 
 /// How far a grant reaches. For git: read is fetch, write is push to
 /// branches, admin is also `main` and tags. For the cluster: read and write

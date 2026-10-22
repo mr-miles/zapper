@@ -13,8 +13,9 @@ use zapper_policy::{AnyRule, Policy, BOARD};
 use super::access::{self, Level};
 use super::facility;
 use super::{labels, run_of, test_run, FirmRun};
-use crate::testing::TestCore;
-use crate::{NewSession, Session};
+use crate::OfficeOf;
+use zapper_core::testing::TestCore;
+use zapper_core::{NewSession, Session};
 
 const FIRM: &str = "
 profiles:
@@ -31,7 +32,7 @@ firms:
 ";
 
 fn run() -> (TestCore, Arc<FirmRun>) {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let run = test_run(&t.core, "acme");
     (t, run)
 }
@@ -219,12 +220,12 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
 
 /// Where `host:port` goes for `s`, in words.
 fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
-    use crate::daemon::services::{Route, Target};
-    match t.core.daemon().services.route(s, host, port) {
-        Some(Route::Service(Target::Handler { tls: true, .. })) => "git server".into(),
-        Some(Route::Service(Target::Session { id, port })) => format!("session {id}:{port}"),
-        Some(Route::Service(_)) => "other".into(),
-        Some(Route::Unserved) => "unserved".into(),
+    use zapper_core::ServiceTarget as Target;
+    match zapper_core::testing::route(&t.core, s, host, port) {
+        Some(Some(Target::Handler { tls: true, .. })) => "git server".into(),
+        Some(Some(Target::Session { id, port })) => format!("session {id}:{port}"),
+        Some(Some(_)) => "other".into(),
+        Some(None) => "unserved".into(),
         None => "host".into(),
     }
 }
@@ -241,10 +242,18 @@ fn the_firms_names_are_its_own() {
     assert_eq!(route(&t, &pat, &format!("x.{d}"), 443), "unserved");
     assert_eq!(route(&t, &pat, "example.com", 443), "host");
 
-    let services = &t.core.daemon().services;
-    assert_eq!(services.resolves(&pat, &format!("git.{d}")), Some(true));
-    assert_eq!(services.resolves(&pat, &format!("nope.{d}")), Some(false));
-    assert_eq!(services.resolves(&pat, "example.com"), None);
+    assert_eq!(
+        zapper_core::testing::resolves(&t.core, &pat, &format!("git.{d}")),
+        Some(true)
+    );
+    assert_eq!(
+        zapper_core::testing::resolves(&t.core, &pat, &format!("nope.{d}")),
+        Some(false)
+    );
+    assert_eq!(
+        zapper_core::testing::resolves(&t.core, &pat, "example.com"),
+        None
+    );
 
     // Not a session of the run: the names are nothing to it.
     let plain = t
@@ -291,8 +300,8 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
 /// line itself). The answer as `{"ok": ...}` or `{"error": "..."}`.
 async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
-    let (d, vm) = (t.core.daemon().clone(), s.clone());
-    tokio::spawn(async move { crate::daemon::gateway::connection(&d, &vm, host).await });
+    let (d, vm) = (t.core.clone(), s.clone());
+    tokio::spawn(async move { zapper_core::testing::mcp(&d, &vm, host).await });
     let line = match serde_json::from_str::<Value>(request) {
         Ok(v) if v.get("op").is_some() => json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -425,8 +434,8 @@ async fn once_the_firm_stops_its_tools_are_gone() {
 async fn the_office_server_introduces_itself() {
     let (t, run) = run();
     let (host, guest) = UnixStream::pair().unwrap();
-    let (d, s) = (t.core.daemon().clone(), session_of(&run, "pat"));
-    tokio::spawn(async move { crate::daemon::gateway::connection(&d, &s, host).await });
+    let (d, s) = (t.core.clone(), session_of(&run, "pat"));
+    tokio::spawn(async move { zapper_core::testing::mcp(&d, &s, host).await });
     let (r, mut w) = tokio::io::split(guest);
     w.write_all(
         b"office\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
@@ -450,8 +459,10 @@ async fn the_office_server_introduces_itself() {
 // and the daemon stopping.
 
 /// A daemon started again on `t`'s config and state, as after a restart.
-fn restart(t: &TestCore) -> crate::Core {
-    crate::Core::start(t.startup()).unwrap()
+fn restart(t: &TestCore) -> zapper_core::Core {
+    let d = zapper_core::Core::start(t.startup()).unwrap();
+    crate::start(&d);
+    d
 }
 
 /// The run's journal, one JSON value a line.
@@ -514,7 +525,7 @@ fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
 
     assert!(matches!(
         t.core.remove_rule(&rule).unwrap(),
-        crate::RuleRemoval::Revoked
+        zapper_core::RuleRemoval::Revoked
     ));
     assert!(security::standing(&run).is_empty());
     assert!(!in_layers(&t));
@@ -571,13 +582,19 @@ fn firms_need_the_driver() {
 
 #[test]
 fn a_startup_config_with_a_broken_firm_doesnt_load() {
-    let t = TestCore::new("profiles:\n  w: {}\n");
+    let t = crate::test_core("profiles:\n  w: {}\n");
     std::fs::write(
         t.startup(),
         std::fs::read_to_string(t.startup()).unwrap()
             + "firms:\n  acme:\n    roles: { ceo: { profile: nosuch, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
     )
     .unwrap();
-    let e = crate::Core::start(t.startup()).err().unwrap();
+    let e = match zapper_core::Core::start(t.startup()) {
+        Ok(d) => {
+            crate::start(&d);
+            d.check_config().unwrap_err()
+        }
+        Err(e) => e,
+    };
     assert!(format!("{e:#}").contains("firm acme:"), "{e:#}");
 }
