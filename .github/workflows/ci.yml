@@ -1,0 +1,72 @@
+# Lint, unit tests and the release build, as `make lint`, `make test` and
+# `make build` run them. The end-to-end tests need KVM, images and network,
+# and stay local (`make test-e2e`).
+name: ci
+
+on:
+  pull_request:
+  push:
+    # overlay is this fork's main line; main mirrors upstream.
+    branches: [main, overlay]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned, so a new Rust release can't fail the lint on its own; bump it
+  # with the code that its new lints ask for.
+  RUST_VERSION: 1.99.1
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt,clippy
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - run: make lint
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - run: make test
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+      - run: make build
+      # It runs as PID 1 in any image, so it must not need a dynamic loader.
+      - name: The guest agent is static
+        run: "! readelf -l target/release/zapper-agent | grep -q INTERP"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapper-${{ github.sha }}
+          path: |
+            target/release/zapper
+            target/release/zapper-agent
+            target/release/zapper-inspect
+            target/release/zapper-keeper
+          if-no-files-found: error
+          retention-days: 7

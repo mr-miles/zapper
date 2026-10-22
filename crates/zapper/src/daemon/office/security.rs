@@ -1200,7 +1200,7 @@ fn digest_text(run: &FirmRun) -> Option<String> {
     if total == 0 {
         return None;
     }
-    uploads.sort_by(|a, b| b.0.cmp(&a.0));
+    uploads.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut s = format!("Traffic digest {} – {}: {total} requests, {allowed} allowed, {} denied.\n\nNew hosts this period:\n", prompts::when(from), prompts::when(to), total - allowed);
     if new_hosts.is_empty() {
         s.push_str("  none\n");

@@ -1148,7 +1148,7 @@ async fn check(config_path: &Path) -> Result<i32> {
         "make build",
     );
     let images = PathBuf::from(expand_home(&d.images));
-    for (name, _) in config.profiles.iter() {
+    for name in config.profiles.keys() {
         if let Ok(p) = config.resolve(name) {
             let img = images.join(format!("{}.ext4", p.engine.image));
             report(
