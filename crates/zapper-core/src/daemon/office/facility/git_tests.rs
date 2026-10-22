@@ -1,6 +1,6 @@
-//! The git server's checks, over HTTP as a worker's git makes its requests:
-//! who asks (their password, for the worker the connection came from) and
-//! their grant on the repository.
+//! The git server over HTTP, as a worker's git makes its requests: its
+//! checks (`authorize`, tested on its own in `run_tests`) refuse, and what
+//! they let through reaches git.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -12,8 +12,22 @@ use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 
 use super::super::access::{self, Level};
-use super::super::run_tests::run;
-use super::super::FirmRun;
+use super::super::{test_run, FirmRun};
+use crate::testing::TestCore;
+
+const FIRM: &str = "
+profiles:
+  w: { agent: { kind: claude-code } }
+firms:
+  acme:
+    roles:
+      ceo: { profile: w, skills: { work: ceo } }
+      eng: { profile: w, skills: { work: software-engineer } }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: pat, role: eng, reports_to: ceo }
+    git: { repos: [api, web] }
+";
 
 /// The git server's answer to `member` asking for `path`, with `auth` as
 /// their Basic credentials: its status and text.
@@ -63,7 +77,8 @@ fn allowed((status, text): &(u16, String)) -> bool {
 
 #[tokio::test]
 async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
-    let (t, run) = run();
+    let t = TestCore::new(FIRM);
+    let run = test_run(&t.core, "acme");
     // The repositories as the firm's git server keeps them.
     for r in ["api", "web"] {
         let bare = run.dir.join("git").join(format!("{r}.git"));

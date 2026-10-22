@@ -40,7 +40,7 @@ pub async fn serve(d: Core, s: Arc<Session>, listener: UnixListener) {
     }
 }
 
-async fn handle(d: Core, s: Arc<Session>, stream: UnixStream) -> Result<()> {
+pub(super) async fn handle(d: Core, s: Arc<Session>, stream: UnixStream) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = Vec::new();
@@ -901,6 +901,3 @@ fn check_attachments(run: &FirmRun, me: &str, list: &[String]) -> Result<()> {
 fn board() -> &'static str {
     BOARD
 }
-
-#[cfg(test)]
-mod tests;

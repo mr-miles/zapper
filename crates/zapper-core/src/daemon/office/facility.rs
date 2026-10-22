@@ -221,16 +221,20 @@ fn basic_auth(h: &hyper::HeaderMap) -> Option<(String, String)> {
 
 /// One request to the firm's git server: checks the worker's password and
 /// rights, then runs `git http-backend`.
-async fn git_request(
-    run: &Arc<FirmRun>,
+/// Whether `member` may make this git request, and their grant's level:
+/// their password, the repository the path names, and their grant on it.
+pub(super) fn authorize(
+    run: &FirmRun,
     member: &str,
-    req: Request<hyper::body::Incoming>,
-) -> Response<Full<Bytes>> {
-    let Some((user, pass)) = basic_auth(req.headers()) else {
+    headers: &hyper::HeaderMap,
+    path: &str,
+    query: &str,
+) -> Result<super::access::Level, Box<Response<Full<Bytes>>>> {
+    let Some((user, pass)) = basic_auth(headers) else {
         let mut r = plain(StatusCode::UNAUTHORIZED, "credentials required");
         r.headers_mut()
             .insert("www-authenticate", "Basic realm=\"git\"".parse().unwrap());
-        return r;
+        return Err(Box::new(r));
     };
     let ok = user == member
         && run
@@ -247,42 +251,55 @@ async fn git_request(
         );
         r.headers_mut()
             .insert("www-authenticate", "Basic realm=\"git\"".parse().unwrap());
-        return r;
+        return Err(Box::new(r));
     }
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
     if path.split('/').any(|c| c == "..") {
-        return plain(StatusCode::BAD_REQUEST, "bad path");
+        return Err(Box::new(plain(StatusCode::BAD_REQUEST, "bad path")));
     }
     let repos = run.config.git_repos();
-    let Some(repo) = repo_of(&path).filter(|r| repos.iter().any(|x| x == r)) else {
+    let Some(repo) = repo_of(path).filter(|r| repos.iter().any(|x| x == r)) else {
         let urls: Vec<String> = repos
             .iter()
             .map(|r| format!("https://git.{}/{r}.git", run.domain))
             .collect();
-        return plain(
+        return Err(Box::new(plain(
             StatusCode::NOT_FOUND,
             &format!("no such repository; the firm's: {}", urls.join(", ")),
-        );
+        )));
     };
     // The worker's grant on this repository, read on every request: a
     // change or revocation applies to the next fetch or push.
     let level = super::access::level(run, member, &format!("git:{repo}"));
     if level == super::access::Level::None {
-        return plain(
+        return Err(Box::new(plain(
             StatusCode::FORBIDDEN,
             &format!(
                 "you have no access to {repo}; ask for it with credentials_request (git:{repo})"
             ),
-        );
+        )));
     }
     if push && level < super::access::Level::Write {
-        return plain(
+        return Err(Box::new(plain(
             StatusCode::FORBIDDEN,
             &format!("you can read {repo}, not push to it; ask for write with credentials_request (git:{repo})"),
-        );
+        )));
     }
+    Ok(level)
+}
+
+async fn git_request(
+    run: &Arc<FirmRun>,
+    member: &str,
+    req: Request<hyper::body::Incoming>,
+) -> Response<Full<Bytes>> {
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
+    let level = match authorize(run, member, req.headers(), &path, &query) {
+        Ok(level) => level,
+        Err(refused) => return *refused,
+    };
     let method = req.method().to_string();
     let headers = req.headers().clone();
     let body = match http_body_util::Limited::new(req.into_body(), MAX_GIT_BODY)

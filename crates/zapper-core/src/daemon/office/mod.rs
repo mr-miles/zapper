@@ -859,152 +859,24 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
     })
 }
 
-/// A run of `name` without VMs, for tests: built as `up_with` builds it
-/// (the middle of `up_with`, as it is), running, each founder on a session
-/// registered with their labels and role layer, and their grants applied.
-#[cfg(test)]
-pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
-    (|| -> Result<Arc<FirmRun>> {
-        let config = d.config();
-        let firm = config.firms[name].clone();
-        let Started {
-            firm,
-            company,
-            prompts,
-            articles,
-            scenario,
-        } = with_options(name, firm, &config, &StartOptions::default())?;
-        let id = run_id();
-        let dir = firm_dir(d, name).join("runs").join(&id);
-        for sub in ["transcripts", "drive", "skills", "empty"] {
-            std::fs::create_dir_all(dir.join(sub))?;
-        }
-        let journal = Journal::create(&dir.join("journal.jsonl"))?;
-        let domain = firm.domain(name);
-        let roles = firm
-            .roles
-            .keys()
-            .map(|r| (r.clone(), Arc::new(RwLock::new(Policy::default()))))
-            .collect();
-        let workers = firm
-            .workers
-            .iter()
-            .map(|w| (w.name.clone(), Arc::new(WorkerRt::new(&firm, w))))
-            .collect();
-        let started = now();
-        let models = role_models(&firm, &config);
-        let agents = profile_agents(&config);
-        let live = Arc::new(RwLock::new(firm.clone()));
-        let (boots, boot_rx) = tokio::sync::mpsc::unbounded_channel();
-        let run = Arc::new(FirmRun {
-            boots,
-            firm: name.to_string(),
-            id: id.clone(),
-            dir: dir.clone(),
-            post: Mutex::new(PostOffice::new(&firm, live.clone())),
-            chart: live,
-            ledger: Mutex::new(workforce::Ledger::new(&firm)),
-            models: models.clone(),
-            agents: agents.clone(),
-            company: company.clone(),
-            prompts: prompts.clone(),
-            articles: articles.clone(),
-            scenario: scenario.as_ref().map(|(n, sc)| scenario::Play::new(n, sc)),
-            close_waiter: Mutex::new(None),
-            departed: Mutex::new(BTreeMap::new()),
-            drive: Mutex::new(drive::Drive::new(&firm)?),
-            security: Mutex::new(security::Security::default()),
-            contracts: Mutex::new(contracts::Contracts::default()),
-            access: Mutex::new(access::Access::default()),
-            roles,
-            turns: Arc::new(Semaphore::new(firm.budget.max_concurrent as usize)),
-            usage: Mutex::new(Usage {
-                day: utc_day(started),
-                ..Default::default()
-            }),
-            facility: facility::Facilities::default(),
-            config: firm.clone(),
-            domain: domain.clone(),
-            started,
-            state: Mutex::new(RunState::Starting),
-            journal,
-            workers: RwLock::new(workers),
-            stopping: Notify::new(),
-        });
-        let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
-        super::write_private(
-            &dir.join("run.json"),
-            serde_json::to_string_pretty(&info)?.as_bytes(),
-        )?;
-        // The whole config the run started with, for replay: profiles, rules,
-        // firms. Inline secret values are hidden, as in `zapper config startup`.
-        super::write_private(
-            &dir.join(RUN_CONFIG),
-            super::redact(config.clone()).to_yaml().as_bytes(),
-        )?;
-        run.journal.append("run", json!({ "state": "starting", "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "chart": chart(name, &firm, &models, &agents), "budget": firm.budget }));
-        workforce::seed(&run);
-        // The policy owners (the CEO, any founding officers) hold admin on
-        // everything; everyone else starts with nothing.
-        for o in access::owners(&run) {
-            access::owner_access(d, &run, &o, BOARD);
-        }
-        d.office()
-            .runs
-            .write()
-            .unwrap()
-            .insert(name.to_string(), run.clone());
-        *run.state.lock().unwrap() = RunState::Running;
-        for w in run.rts() {
-            let profile = run
-                .chart()
-                .worker(&w.name)
-                .and_then(|x| x.profile.clone())
-                .unwrap_or_else(|| run.config.roles[&w.role].profile.clone());
-            let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
-            new.labels = labels(&run.firm, &run.id, &w.name, true);
-            new.shared_layers = vec![(
-                zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
-                run.roles[&w.role].clone(),
-            )];
-            *w.session.lock().unwrap() = Some(d.test_session(new, true)?);
-            access::reapply(d, &run, &w.name);
-        }
-        drop(boot_rx);
-        Ok(run)
-    })()
-    .unwrap()
-}
-
-pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
-    let task = opts.task.as_deref().and_then(task_parts);
-    if let Some((_, body)) = &task {
-        if body.len() > mail::MAX_BODY {
-            bail!("the task is too long: at most {} bytes", mail::MAX_BODY);
-        }
-    }
-    if let Ok(r) = d.office().run(name) {
-        if !r.ended() {
-            bail!("firm {name} is already running (run {})", r.id);
-        }
-    }
-    let config = d.config();
-    let firm = config
-        .firms
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow!("no firm {name}"))?;
+/// Builds a firm's run: its directory, journal, post office, ledger, drive
+/// and grants, in the registry as starting. `up_with` then boots it.
+fn create_run(
+    d: &Core,
+    name: &str,
+    config: &Config,
+    started: Started,
+) -> Result<(
+    Arc<FirmRun>,
+    tokio::sync::mpsc::UnboundedReceiver<Arc<WorkerRt>>,
+)> {
     let Started {
         firm,
         company,
         prompts,
         articles,
         scenario,
-    } = with_options(name, firm, &config, opts)?;
-    check_resources(d, &config, &firm)?;
-    for r in firm.roles.values() {
-        harness_driver(&config.resolve(&r.profile)?)?;
-    }
+    } = started;
     let id = run_id();
     let dir = firm_dir(d, name).join("runs").join(&id);
     for sub in ["transcripts", "drive", "skills", "empty"] {
@@ -1023,8 +895,8 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         .map(|w| (w.name.clone(), Arc::new(WorkerRt::new(&firm, w))))
         .collect();
     let started = now();
-    let models = role_models(&firm, &config);
-    let agents = profile_agents(&config);
+    let models = role_models(&firm, config);
+    let agents = profile_agents(config);
     let live = Arc::new(RwLock::new(firm.clone()));
     let (boots, boot_rx) = tokio::sync::mpsc::unbounded_channel();
     let run = Arc::new(FirmRun {
@@ -1085,6 +957,78 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         .write()
         .unwrap()
         .insert(name.to_string(), run.clone());
+    Ok((run, boot_rx))
+}
+
+/// A run of `name` without VMs, for tests: built as `up_with` builds it,
+/// running, each founder on a session registered with their labels and
+/// role layer, and their grants applied.
+#[cfg(test)]
+pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
+    let config = d.config();
+    let firm = config.firms[name].clone();
+    let started = with_options(name, firm, &config, &StartOptions::default()).unwrap();
+    let (run, _boots) = create_run(d, name, &config, started).unwrap();
+    *run.state.lock().unwrap() = RunState::Running;
+    for w in run.rts() {
+        let profile = run
+            .chart()
+            .worker(&w.name)
+            .and_then(|x| x.profile.clone())
+            .unwrap_or_else(|| run.config.roles[&w.role].profile.clone());
+        let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
+        new.labels = labels(&run.firm, &run.id, &w.name, true);
+        new.shared_layers = vec![(
+            zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
+            run.roles[&w.role].clone(),
+        )];
+        *w.session.lock().unwrap() = Some(d.test_session(new, true).unwrap());
+        access::reapply(d, &run, &w.name);
+    }
+    run
+}
+
+pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
+    let task = opts.task.as_deref().and_then(task_parts);
+    if let Some((_, body)) = &task {
+        if body.len() > mail::MAX_BODY {
+            bail!("the task is too long: at most {} bytes", mail::MAX_BODY);
+        }
+    }
+    if let Ok(r) = d.office().run(name) {
+        if !r.ended() {
+            bail!("firm {name} is already running (run {})", r.id);
+        }
+    }
+    let config = d.config();
+    let firm = config
+        .firms
+        .get(name)
+        .cloned()
+        .ok_or_else(|| anyhow!("no firm {name}"))?;
+    let Started {
+        firm,
+        company,
+        prompts,
+        articles,
+        scenario,
+    } = with_options(name, firm, &config, opts)?;
+    check_resources(d, &config, &firm)?;
+    for r in firm.roles.values() {
+        harness_driver(&config.resolve(&r.profile)?)?;
+    }
+    let (run, boot_rx) = create_run(
+        d,
+        name,
+        &config,
+        Started {
+            firm,
+            company,
+            prompts,
+            articles,
+            scenario,
+        },
+    )?;
 
     if let Err(e) = boot(d, &run, &config).await {
         let msg = format!("{e:#}");
@@ -1636,7 +1580,7 @@ pub fn prune(d: &Core, firm: &str, run: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(crate) mod run_tests;
+mod run_tests;
 
 #[cfg(test)]
 mod http_tests;

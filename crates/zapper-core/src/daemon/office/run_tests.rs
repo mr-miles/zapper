@@ -1,17 +1,20 @@
 //! A firm's run without VMs (`test_run`): finding a session's run, grants
-//! and their network rules per repository, and the firm's service names.
-//! The git server's checks are in `facility`'s tests, the office port's in
-//! `ops`'.
+//! and their network rules per repository, the git server's checks, the
+//! firm's service names, and the office port's requests.
 
 use std::sync::Arc;
 
+use base64::Engine as _;
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use zapper_policy::{AnyRule, Policy, BOARD};
 
 use super::access::{self, Level};
 use super::facility::{self, Internal};
 use super::{labels, run_of, test_run, FirmRun};
-use crate::daemon::session::{NewSession, Session};
 use crate::testing::TestCore;
+use crate::{NewSession, Session};
 
 const FIRM: &str = "
 profiles:
@@ -27,13 +30,13 @@ firms:
     git: { repos: [api, web] }
 ";
 
-pub(crate) fn run() -> (TestCore, Arc<FirmRun>) {
+fn run() -> (TestCore, Arc<FirmRun>) {
     let t = TestCore::new(FIRM);
     let run = test_run(&t.core, "acme");
     (t, run)
 }
 
-pub(crate) fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
+fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
         .session
@@ -119,6 +122,101 @@ fn a_git_grant_is_per_repository_with_its_own_network_rule() {
     assert!(e.contains("name the repository"), "{e}");
 }
 
+/// The git server's answer to `member` asking for `path`, with `auth` as
+/// their Basic credentials: their level, or the refusal's status and text.
+fn git(
+    run: &FirmRun,
+    member: &str,
+    auth: Option<&str>,
+    path: &str,
+) -> Result<Level, (u16, String)> {
+    let mut headers = hyper::HeaderMap::new();
+    if let Some(a) = auth {
+        let v = base64::engine::general_purpose::STANDARD.encode(a);
+        headers.insert(
+            hyper::header::AUTHORIZATION,
+            format!("Basic {v}").parse().unwrap(),
+        );
+    }
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    facility::authorize(run, member, &headers, path, query).map_err(|r| {
+        let r = *r;
+        let status = r.status().as_u16();
+        let body =
+            futures_util::FutureExt::now_or_never(http_body_util::BodyExt::collect(r.into_body()))
+                .unwrap()
+                .unwrap()
+                .to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    })
+}
+
+#[test]
+fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
+    let (t, run) = run();
+    run.facility
+        .git_passwords
+        .lock()
+        .unwrap()
+        .insert("pat".into(), "pw".into());
+    let refs = "/api.git/info/refs?service=git-upload-pack";
+    let push = "/api.git/git-receive-pack";
+
+    // Who: the password, for the worker the connection came from.
+    assert_eq!(git(&run, "pat", None, refs).unwrap_err().0, 401);
+    assert_eq!(
+        git(&run, "pat", Some("pat:wrong"), refs).unwrap_err().0,
+        401
+    );
+    assert_eq!(git(&run, "pat", Some("ceo:pw"), refs).unwrap_err().0, 401);
+
+    // What: a grant on this repository.
+    let (status, text) = git(&run, "pat", Some("pat:pw"), refs).unwrap_err();
+    assert_eq!(status, 403);
+    assert!(text.contains("no access to api"), "{text}");
+
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Read, None, "test").unwrap();
+    assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
+    let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
+    assert_eq!(status, 403);
+    assert!(text.contains("you can read api"), "{text}");
+    assert_eq!(
+        git(
+            &run,
+            "pat",
+            Some("pat:pw"),
+            "/api.git/info/refs?service=git-receive-pack"
+        )
+        .unwrap_err()
+        .0,
+        403,
+        "asking to push is a push"
+    );
+
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
+
+    // Other repositories: their own grant; unknown ones aren't there.
+    assert_eq!(
+        git(&run, "pat", Some("pat:pw"), "/web.git/info/refs")
+            .unwrap_err()
+            .0,
+        403
+    );
+    let (status, text) = git(&run, "pat", Some("pat:pw"), "/other.git/info/refs").unwrap_err();
+    assert_eq!(status, 404);
+    assert!(
+        text.contains("api.git") && text.contains("web.git"),
+        "{text}"
+    );
+    assert_eq!(
+        git(&run, "pat", Some("pat:pw"), "/api.git/../web.git/HEAD")
+            .unwrap_err()
+            .0,
+        400
+    );
+}
+
 #[test]
 fn the_firms_names_are_its_own() {
     let (_t, run) = run();
@@ -148,4 +246,49 @@ fn the_firms_names_are_its_own() {
         Some(false)
     );
     assert_eq!(facility::serves_name(&run, "example.com"), None);
+}
+
+/// One request over the office port, as `s`'s VM would make it.
+async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
+    let (host, mut guest) = UnixStream::pair().unwrap();
+    let serve = tokio::spawn(super::ops::handle(t.core.clone(), s.clone(), host));
+    guest
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut guest)
+        .read_line(&mut line)
+        .await
+        .unwrap();
+    serve.await.unwrap().unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+#[tokio::test]
+async fn the_office_port_answers_for_the_vm_it_serves() {
+    let (t, run) = run();
+    let pat = session_of(&run, "pat");
+    let dir = office(&t, &pat, r#"{"op":"directory"}"#).await;
+    let workers = dir["ok"]["workers"].as_array().unwrap();
+    assert!(workers.iter().any(|w| w["name"] == "pat"), "{dir}");
+
+    // Who asks is the VM's member label, not anything in the request.
+    let desk = office(&t, &pat, r#"{"op":"desk"}"#).await;
+    assert!(desk["ok"].is_object(), "{desk}");
+
+    let unknown = office(&t, &pat, r#"{"op":"no_such_op"}"#).await;
+    assert!(unknown["error"].is_string(), "{unknown}");
+    let bad = office(&t, &pat, "not json").await;
+    assert!(
+        bad["error"].as_str().unwrap().starts_with("bad request"),
+        "{bad}"
+    );
+
+    // A VM of an earlier run: its firm isn't running for it.
+    let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
+    old.labels = labels("acme", "an-earlier-run", "pat", true);
+    let old = t.core.test_session(old, true).unwrap();
+    let r = office(&t, &old, r#"{"op":"directory"}"#).await;
+    assert_eq!(r["error"], "the firm isn't running");
 }
