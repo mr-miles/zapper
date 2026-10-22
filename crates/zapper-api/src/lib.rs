@@ -465,7 +465,7 @@ struct Prompt {
 /// Gives a driven session's agent a task: queued for its next turn.
 async fn prompt(State(d): D, Path(id): Path<String>, body: String) -> R<(StatusCode, Json<Value>)> {
     let p: Prompt = parse_body(&body)?;
-    if !d.config().daemon.driver {
+    if !d.with_config(|c| c.daemon.driver) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "the driver is disabled (daemon.driver: false)".into(),

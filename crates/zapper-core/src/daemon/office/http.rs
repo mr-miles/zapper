@@ -213,7 +213,7 @@ async fn run_config(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Js
 }
 
 async fn runs(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    if !d.config().firms.contains_key(&f) && !super::firm_dir(&d, &f).is_dir() {
+    if !d.with_config(|c| c.firms.contains_key(&f)) && !super::firm_dir(&d, &f).is_dir() {
         return Err(anyhow::anyhow!("no firm {f}").into());
     }
     Ok(Json(json!(super::list_runs(&d, &f))))

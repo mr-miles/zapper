@@ -366,19 +366,15 @@ async fn prompts_are_bounded_and_end_with_the_session() {
 
 const DRIVEN: &str = "profiles:\n  bot:\n    agent: { kind: claude-code, driven: true }\n";
 
-fn driven(
-    t: &crate::daemon::testing::TestDaemon,
-    overlay: Option<Value>,
-) -> Arc<crate::daemon::session::Session> {
-    let mut new =
-        crate::daemon::session::NewSession::plain("bot".into(), t.workdir(), Default::default());
+fn driven(t: &crate::testing::TestCore, overlay: Option<Value>) -> Arc<crate::Session> {
+    let mut new = crate::NewSession::plain("bot".into(), t.workdir(), Default::default());
     new.agent_overlay = overlay;
-    t.test_session(new, true).unwrap()
+    t.core.test_session(new, true).unwrap()
 }
 
 /// Answers terminal requests on the session's socket as its agent does,
 /// with the scripted Claude behind each.
-fn guest(s: &crate::daemon::session::Session, seen: Arc<Seen>) {
+fn guest(s: &crate::Session, seen: Arc<Seen>) {
     use tokio::io::AsyncReadExt;
     let path = crate::daemon::vm::vsock_path(&s.dir);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -408,11 +404,9 @@ fn guest(s: &crate::daemon::session::Session, seen: Arc<Seen>) {
     });
 }
 
-fn driver_events(
-    t: &crate::daemon::testing::TestDaemon,
-    s: &crate::daemon::session::Session,
-) -> Vec<Value> {
-    t.d.recent_events(Some(&s.id))
+fn driver_events(t: &crate::testing::TestCore, s: &crate::Session) -> Vec<Value> {
+    t.core
+        .recent_events(Some(&s.id))
         .iter()
         .map(|e| serde_json::to_value(e).unwrap())
         .filter(|e| e["type"] == "driver")
@@ -421,11 +415,11 @@ fn driver_events(
 
 #[tokio::test]
 async fn a_driven_session_runs_its_agent_over_a_terminal_channel() {
-    let t = crate::daemon::testing::TestDaemon::new(DRIVEN);
+    let t = crate::testing::TestCore::new(DRIVEN);
     let s = driven(&t, None);
     let seen = Arc::new(Seen::default());
     guest(&s, seen.clone());
-    super::drive(&t.d, &s);
+    super::drive(t.core.daemon(), &s);
     let driver = s.driver.clone().unwrap();
     driver.prompt("hello").unwrap();
     until("the turn's end", || driver.info()["turns"] == 1).await;
@@ -461,10 +455,10 @@ async fn a_driven_session_runs_its_agent_over_a_terminal_channel() {
 
 #[tokio::test]
 async fn a_driver_that_cant_start_the_agent_says_why() {
-    let t = crate::daemon::testing::TestDaemon::new(DRIVEN);
+    let t = crate::testing::TestCore::new(DRIVEN);
     // No guest listening: the terminal channel can't open.
     let s = driven(&t, None);
-    super::drive(&t.d, &s);
+    super::drive(t.core.daemon(), &s);
     let driver = s.driver.clone().unwrap();
     driver.prompt("hello").unwrap();
     until("the error", || driver.status() == Status::Error).await;
@@ -478,17 +472,17 @@ async fn a_driver_that_cant_start_the_agent_says_why() {
 
 #[tokio::test]
 async fn a_kind_without_a_driver_is_an_error_at_once() {
-    let t = crate::daemon::testing::TestDaemon::new(DRIVEN);
+    let t = crate::testing::TestCore::new(DRIVEN);
     let s = driven(&t, Some(json!({ "kind": "generic" })));
     let driver = s.driver.clone().expect("driven by its profile");
-    super::drive(&t.d, &s);
+    super::drive(t.core.daemon(), &s);
     assert_eq!(driver.status(), Status::Error);
     assert_eq!(driver.info()["error"], "agent kind generic can't be driven");
     assert!(driver_events(&t, &s).is_empty(), "no loop runs");
 
     // Sessions without a driver: nothing to start.
-    let t = crate::daemon::testing::TestDaemon::new("profiles:\n  bot: {}\n");
+    let t = crate::testing::TestCore::new("profiles:\n  bot: {}\n");
     let s = driven(&t, None);
-    super::drive(&t.d, &s);
+    super::drive(t.core.daemon(), &s);
     assert!(s.driver.is_none());
 }

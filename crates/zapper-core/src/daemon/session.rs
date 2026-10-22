@@ -288,7 +288,9 @@ impl NewSession {
 }
 
 /// Creates a session and boots its VM; returns once the guest is ready.
-pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>> {
+/// Creates a session without booting it: its profile resolved, its
+/// directory and audit log, its rules; listed, as starting.
+pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Session>> {
     let (mut resolved, max) = {
         let c = daemon.config.read().unwrap();
         (c.resolve(&new.profile)?, c.daemon.max_sessions)
@@ -371,6 +373,13 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
             detail: Some(format!("profile {}", new.profile)),
         },
     );
+    Ok(session)
+}
+
+pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>> {
+    let session = register(&daemon, &new)?;
+    let (id, dir) = (session.id.clone(), session.dir.clone());
+    let ttl = session.resolved.engine.ttl_secs;
 
     let started = Instant::now();
     if let Err(e) = boot(&daemon, &session).await {
@@ -986,101 +995,4 @@ impl Recorder {
             let _ = f.line(line.to_string().as_bytes());
         }
     }
-}
-
-/// A session as `create` registers it, without booting a VM: for tests of
-/// what sits above sessions. `mark_running` marks it running. The first half of
-/// `create`, as it is.
-#[cfg(any(test, feature = "test-util"))]
-pub fn test_session(
-    daemon: &Arc<Daemon>,
-    new: &NewSession,
-    mark_running: bool,
-) -> Result<Arc<Session>> {
-    let (mut resolved, max) = {
-        let c = daemon.config.read().unwrap();
-        (c.resolve(&new.profile)?, c.daemon.max_sessions)
-    };
-    if let Some(overlay) = &new.agent_overlay {
-        let mut agent = serde_json::to_value(&resolved.agent)?;
-        zapper_policy::merge(&mut agent, overlay);
-        resolved.agent = serde_json::from_value(agent).context("agent overlay")?;
-    }
-    resolved.mounts.extend(new.mounts.iter().cloned());
-    // The agent's skills and configuration directories, where its harness
-    // reads them.
-    if let Some(h) = super::harness::get(&resolved.agent.kind) {
-        let home = format!("/home/{}", resolved.agent.user);
-        let extra = h.mounts(&resolved.agent, &home);
-        resolved.mounts.extend(extra);
-    }
-    let running = daemon
-        .sessions
-        .read()
-        .unwrap()
-        .values()
-        .filter(|s| matches!(*s.status.borrow(), Status::Starting | Status::Running))
-        .count();
-    if running >= max {
-        bail!("{running} sessions running; daemon.max_sessions is {max}");
-    }
-    let id = super::random_id(6);
-    let dir = daemon.paths.state.join("sessions").join(&id);
-    std::fs::create_dir_all(&dir)?;
-    let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
-    // A firm's workers are driven by the office's foreman.
-    let driven = resolved.agent.driven
-        && !new.labels.contains_key("firm")
-        && daemon.config.read().unwrap().daemon.driver;
-    let created = now();
-    let ttl = resolved.engine.ttl_secs;
-    let session = Arc::new(Session {
-        id: id.clone(),
-        profile: new.profile.clone(),
-        created,
-        expires: (ttl > 0).then_some(created + ttl as f64),
-        workdir: new.workdir.clone(),
-        policy: RwLock::new(Policy::default()),
-        status: watch::channel(Status::Starting).0,
-        ca: tls::SessionCa::new(&id)?,
-        dir: dir.clone(),
-        resolved,
-        counters: Counters::default(),
-        usage: Mutex::new(None),
-        dns: Mutex::new(Default::default()),
-        dns_rate: Mutex::new(Default::default()),
-        dns_lookups: Arc::new(Semaphore::new(8)),
-        terminals: Mutex::new(Default::default()),
-        requests: Default::default(),
-        guest: Mutex::new(None),
-        vm: tokio::sync::Mutex::new(None),
-        audit: Mutex::new(Some(audit)),
-        next_shell: AtomicU64::new(1),
-        conns: Arc::new(Semaphore::new(256)),
-        exec_checks: Arc::new(Semaphore::new(64)),
-        labels: new.labels.clone(),
-        shared_layers: new.shared_layers.clone(),
-        driver: driven.then(super::driver::Driver::new),
-        extra_files: new.files.clone(),
-        forwards: new.forwards.clone(),
-    });
-    for rule in new.policy.rules() {
-        session.add_rule(rule, None);
-    }
-    daemon
-        .sessions
-        .write()
-        .unwrap()
-        .insert(id.clone(), session.clone());
-    daemon.emit(
-        Some(&session),
-        EventBody::Session {
-            state: "starting".into(),
-            detail: Some(format!("profile {}", new.profile)),
-        },
-    );
-    if mark_running {
-        session.status.send_replace(Status::Running);
-    }
-    Ok(session)
 }

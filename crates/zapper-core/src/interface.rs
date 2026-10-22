@@ -49,6 +49,12 @@ impl Core {
         &self.d.office
     }
 
+    /// The daemon, for tests of its parts that take it.
+    #[cfg(test)]
+    pub(crate) fn daemon(&self) -> &Arc<Daemon> {
+        &self.d
+    }
+
     pub fn start(startup_path: PathBuf) -> Result<Core> {
         Ok(Core {
             d: Daemon::new(startup_path)?,
@@ -60,6 +66,11 @@ impl Core {
     /// The running config.
     pub fn config(&self) -> Config {
         self.d.config.read().unwrap().clone()
+    }
+
+    /// Reads the running config without copying it.
+    pub fn with_config<T>(&self, f: impl FnOnce(&Config) -> T) -> T {
+        f(&self.d.config.read().unwrap())
     }
 
     /// The running config with inline secret values hidden.
@@ -148,7 +159,11 @@ impl Core {
     /// what sits above sessions. `running` marks it running.
     #[cfg(any(test, feature = "test-util"))]
     pub fn test_session(&self, new: NewSession, running: bool) -> Result<Arc<Session>> {
-        session::test_session(&self.d, &new, running)
+        let s = session::register(&self.d, &new)?;
+        if running {
+            s.status.send_replace(session::Status::Running);
+        }
+        Ok(s)
     }
 
     /// A session's info, saying so when the driver is off.
