@@ -1,9 +1,9 @@
-//! REST API on the daemon's unix socket, and the web UI over TCP.
+//! REST API on the daemon's unix socket, and the web UI over TCP, over
+//! zapper's core (`zapper_core::Core`).
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
@@ -18,36 +18,18 @@ use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
+use zapper_core::{
+    ApiError, Core, NewSession, Remember, RuleRemoval, SessionInfo, TermChunk, TerminalInfo,
+};
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{
     evaluate_exec, evaluate_net, needs_inspection, AnyRule, Config, ExecRequest, Kind, NetRequest,
     Policy, Profile, Scope,
 };
 
-use super::session::{self, NewSession};
-use super::{spec, Daemon, EventBody, Remember};
+mod ui;
 
-type D = State<Arc<Daemon>>;
-
-pub struct ApiError(pub StatusCode, pub String);
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
-    }
-}
-
-impl From<anyhow::Error> for ApiError {
-    fn from(e: anyhow::Error) -> Self {
-        let msg = format!("{e:#}");
-        let code = if msg.starts_with("no ") {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        ApiError(code, msg)
-    }
-}
+type D = State<Core>;
 
 type R<T> = Result<T, ApiError>;
 
@@ -73,7 +55,7 @@ fn parse_body<T: serde::de::DeserializeOwned>(body: &str) -> R<T> {
 }
 
 /// Routes shared by the API and the UI: reads only.
-fn read_routes() -> Router<Arc<Daemon>> {
+fn read_routes() -> Router<Core> {
     Router::new()
         .route("/status", get(status))
         .route("/config", get(get_config))
@@ -91,10 +73,10 @@ fn read_routes() -> Router<Arc<Daemon>> {
         .route("/events", get(events))
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
-        .merge(super::office::http::read_routes())
 }
 
-pub fn api(daemon: Arc<Daemon>) -> Router {
+/// The API, with the office's routes when there is an office.
+pub fn api(core: Core) -> Router {
     let write = Router::new()
         .route("/config", axum::routing::put(put_config))
         .route("/config/save", post(save))
@@ -111,35 +93,39 @@ pub fn api(daemon: Arc<Daemon>) -> Router {
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
         .route("/evaluate", post(evaluate))
-        .route("/approvals/{id}", post(answer))
-        .merge(super::office::http::board_routes());
-    Router::new()
-        .nest("/v1", read_routes().merge(write))
-        .with_state(daemon)
+        .route("/approvals/{id}", post(answer));
+    Router::new().nest(
+        "/v1",
+        read_routes()
+            .merge(write)
+            .with_state(core.clone())
+            .merge(core.office_routes()),
+    )
 }
 
 /// The UI: the read routes, plus answering approvals. `remote`: it listens
 /// on an address other than loopback (`daemon.ui`), for a remote host.
-pub fn ui(daemon: Arc<Daemon>, port: u16, remote: bool) -> Router {
+pub fn ui(core: Core, port: u16, remote: bool) -> Router {
     Router::new()
-        .route("/", get(super::ui::index))
-        .route("/sessions", get(super::ui::sessions))
-        .route("/favicon.ico", get(super::ui::favicon))
-        .route("/terminal", get(super::ui::terminal))
-        .route("/assets/xterm.js", get(super::ui::xterm_js))
-        .route("/assets/xterm.css", get(super::ui::xterm_css))
+        .route("/", get(ui::index))
+        .route("/sessions", get(ui::sessions))
+        .route("/favicon.ico", get(ui::favicon))
+        .route("/terminal", get(ui::terminal))
+        .route("/assets/xterm.js", get(ui::xterm_js))
+        .route("/assets/xterm.css", get(ui::xterm_css))
+        .with_state(core.clone())
         .nest(
             "/api",
             read_routes()
                 .route("/approvals/{id}", post(answer))
                 .route("/sessions/{id}/prompt", post(prompt))
-                .merge(super::office::http::board_routes()),
+                .with_state(core.clone())
+                .merge(core.office_routes()),
         )
         .layer(middleware::from_fn_with_state(
-            (daemon.clone(), port, remote),
+            (core, port, remote),
             ui_guard,
         ))
-        .with_state(daemon)
 }
 
 /// The names a loopback UI answers to.
@@ -187,7 +173,7 @@ fn origin_ok(origin: &str, host: &str, port: u16, remote: bool) -> bool {
 /// CORS preflight that is never granted, and an Origin naming the UI itself
 /// (`origin_ok`).
 async fn ui_guard(
-    State((d, port, remote)): State<(Arc<Daemon>, u16, bool)>,
+    State((d, port, remote)): State<(Core, u16, bool)>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -202,10 +188,10 @@ async fn ui_guard(
     }
     let query: HashMap<String, String> =
         req.uri().query().map(url_decode_pairs).unwrap_or_default();
-    if query.get("token") == Some(&d.ui_token) {
+    if query.get("token").map(String::as_str) == Some(d.ui_token()) {
         let cookie = format!(
             "zapper_token={}; HttpOnly; SameSite=Strict; Path=/",
-            d.ui_token
+            d.ui_token()
         );
         let mut resp = Redirect::to(req.uri().path()).into_response();
         resp.headers_mut()
@@ -218,7 +204,7 @@ async fn ui_guard(
         .iter()
         .filter_map(|c| c.to_str().ok())
         .flat_map(|c| c.split(';'))
-        .any(|c| c.trim() == format!("zapper_token={}", d.ui_token));
+        .any(|c| c.trim() == format!("zapper_token={}", d.ui_token()));
     if !cookie_ok {
         return (
             StatusCode::UNAUTHORIZED,
@@ -290,11 +276,11 @@ fn percent_decode(s: &str) -> String {
 }
 
 async fn status(State(d): D) -> Json<Value> {
-    let sessions = d.sessions.read().unwrap();
-    let running = sessions.values().filter(|s| s.is_running()).count();
+    let sessions = d.sessions();
+    let running = sessions.iter().filter(|s| s.is_running()).count();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "startup": d.startup_path,
+        "startup": d.startup_path(),
         "unsaved_changes": !d.diff().trim().is_empty(),
         "sessions": sessions.len(),
         "running": running,
@@ -322,12 +308,12 @@ async fn put_config(State(d): D, body: String) -> R<Json<Value>> {
 
 async fn save(State(d): D) -> R<Json<Value>> {
     d.save()?;
-    Ok(Json(json!({ "saved": d.startup_path })))
+    Ok(Json(json!({ "saved": d.startup_path() })))
 }
 
 async fn reload(State(d): D) -> R<Json<Value>> {
     d.reload()?;
-    Ok(Json(json!({ "reloaded": d.startup_path })))
+    Ok(Json(json!({ "reloaded": d.startup_path() })))
 }
 
 #[derive(Deserialize)]
@@ -344,25 +330,7 @@ fn rule_json(scope: &Scope, r: &AnyRule) -> Value {
 async fn list_rules(State(d): D, Query(q): Query<ScopeQuery>) -> R<Json<Vec<Value>>> {
     let filter: Option<Scope> = q.scope.as_deref().map(str::parse).transpose()?;
     let mut out = Vec::new();
-    let c = d.config.read().unwrap();
-    let mut layers: Vec<(Scope, Policy)> = vec![(Scope::Global, c.policy.clone())];
-    layers.extend(
-        c.profiles
-            .iter()
-            .map(|(n, p)| (Scope::Profile(n.clone()), p.policy.clone())),
-    );
-    for (id, s) in d.sessions.read().unwrap().iter() {
-        layers.push((Scope::Session(id.clone()), s.policy.read().unwrap().clone()));
-    }
-    for run in d.office.runs.read().unwrap().values() {
-        for (role, p) in &run.roles {
-            layers.push((
-                Scope::Role(format!("{}/{role}", run.firm)),
-                p.read().unwrap().clone(),
-            ));
-        }
-    }
-    for (scope, policy) in layers {
+    for (scope, policy) in d.rule_layers() {
         if filter.as_ref().is_some_and(|f| *f != scope) {
             continue;
         }
@@ -394,13 +362,7 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
             ));
         }
         let s = d.session(id)?;
-        let rule = s.add_rule(rule, position);
-        d.emit(
-            Some(&s),
-            EventBody::Config {
-                change: format!("rule {} added to {scope}", rule.id().unwrap_or("?")),
-            },
-        );
+        let rule = d.add_session_rule(&s, rule, position);
         return Ok(Json(rule_json(&scope, &rule)));
     }
     let added = d.change(&format!("rule added to {scope}"), |c| {
@@ -423,39 +385,14 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
 }
 
 async fn delete_rule(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
-    // An officer's standing approval: revoked, so the firm's records agree.
-    let runs: Vec<_> = d.office.runs.read().unwrap().values().cloned().collect();
-    for run in runs {
-        if run.security.lock().unwrap().standing.contains_key(&id) {
-            super::office::security::revoke(
-                &run,
-                zapper_policy::BOARD,
-                &id,
-                "removed by the operator",
-            )?;
-            return Ok(Json(json!({ "id": id, "revoked": true })));
-        }
-    }
-    if id.starts_with("s-") {
-        for s in d.sessions.read().unwrap().values() {
-            if let Some(r) = s.policy.write().unwrap().remove(&id) {
-                return Ok(Json(rule_json(&Scope::Session(s.id.clone()), &r)));
-            }
-        }
-        return Err(ApiError(StatusCode::NOT_FOUND, format!("no rule {id}")));
-    }
-    let (scope, rule) = d.change(&format!("rule {id} removed"), |c| {
-        let scope = c
-            .find_rule(&id)
-            .ok_or_else(|| anyhow::anyhow!("no rule {id}"))?;
-        let rule = c.policy_mut(&scope).unwrap().remove(&id).unwrap();
-        Ok((scope, rule))
-    })?;
-    Ok(Json(rule_json(&scope, &rule)))
+    Ok(Json(match d.remove_rule(&id)? {
+        RuleRemoval::Revoked => json!({ "id": id, "revoked": true }),
+        RuleRemoval::Removed(scope, rule) => rule_json(&scope, &rule),
+    }))
 }
 
 async fn list_profiles(State(d): D) -> Json<Value> {
-    let c = d.config.read().unwrap();
+    let c = d.config();
     let out: Vec<Value> = c
         .profiles
         .iter()
@@ -479,7 +416,7 @@ async fn get_profile(
     Path(name): Path<String>,
     Query(f): Query<Format>,
 ) -> R<Response> {
-    let c = d.config.read().unwrap();
+    let c = d.config();
     let p = c
         .profiles
         .get(&name)
@@ -511,29 +448,13 @@ async fn delete_profile(State(d): D, Path(name): Path<String>) -> R<Json<Value>>
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn list_sessions(State(d): D) -> Json<Vec<session::SessionInfo>> {
-    Json(
-        d.sessions
-            .read()
-            .unwrap()
-            .values()
-            .map(|s| info(&d, s))
-            .collect(),
-    )
+async fn list_sessions(State(d): D) -> Json<Vec<SessionInfo>> {
+    Json(d.sessions().iter().map(|s| d.session_info(s)).collect())
 }
 
-async fn get_session(State(d): D, Path(id): Path<String>) -> R<Json<session::SessionInfo>> {
+async fn get_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo>> {
     let s = d.session(&id)?;
-    Ok(Json(info(&d, &s)))
-}
-
-/// A session's info, saying so when the driver is off.
-fn info(d: &Daemon, s: &session::Session) -> session::SessionInfo {
-    let mut i = s.info();
-    if !d.config.read().unwrap().daemon.driver {
-        i.driver = json!("disabled");
-    }
-    i
+    Ok(Json(d.session_info(&s)))
 }
 
 #[derive(Deserialize)]
@@ -544,7 +465,7 @@ struct Prompt {
 /// Gives a driven session's agent a task: queued for its next turn.
 async fn prompt(State(d): D, Path(id): Path<String>, body: String) -> R<(StatusCode, Json<Value>)> {
     let p: Prompt = parse_body(&body)?;
-    if !d.config.read().unwrap().daemon.driver {
+    if !d.config().daemon.driver {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "the driver is disabled (daemon.driver: false)".into(),
@@ -577,9 +498,9 @@ async fn prompt(State(d): D, Path(id): Path<String>, body: String) -> R<(StatusC
 }
 
 /// Who keeps the record, and whether it is being written.
-async fn record_status() -> Json<Value> {
+async fn record_status(State(d): D) -> Json<Value> {
     Json(
-        tokio::task::spawn_blocking(super::record::status)
+        tokio::task::spawn_blocking(move || d.record_status())
             .await
             .unwrap_or_default(),
     )
@@ -587,19 +508,7 @@ async fn record_status() -> Json<Value> {
 
 /// The session's audit log; for a session that has ended, from its directory.
 async fn get_audit(State(d): D, Path(id): Path<String>) -> R<Response> {
-    let path = match d.session(&id) {
-        Ok(s) => s.audit_path(),
-        Err(_) => {
-            // The id goes into a path: accept only the form session ids have.
-            if !super::is_session_id(&id) {
-                return Err(ApiError(
-                    StatusCode::BAD_REQUEST,
-                    format!("{id:?} is not a session id"),
-                ));
-            }
-            super::record::view(&d.paths.state.join("sessions").join(&id).join("audit.jsonl"))
-        }
-    };
+    let path = d.audit_path(&id)?;
     let text = tokio::fs::read_to_string(&path).await.map_err(|_| {
         ApiError(
             StatusCode::NOT_FOUND,
@@ -628,10 +537,7 @@ async fn get_request(State(d): D, Path((id, n)): Path<(String, u64)>) -> R<Json<
     Ok(Json(r))
 }
 
-async fn list_terminals(
-    State(d): D,
-    Path(id): Path<String>,
-) -> R<Json<Vec<session::TerminalInfo>>> {
+async fn list_terminals(State(d): D, Path(id): Path<String>) -> R<Json<Vec<TerminalInfo>>> {
     let s = d.session(&id)?;
     let terms = s
         .terminals
@@ -663,11 +569,11 @@ async fn terminal_stream(
     let live = BroadcastStream::new(rx).filter_map(|r| async move { r.ok() });
     let stream = stream::iter(snapshot).chain(live).map(|chunk| {
         let data = match chunk {
-            session::TermChunk::Output(bytes) => {
+            TermChunk::Output(bytes) => {
                 json!({ "o": base64::engine::general_purpose::STANDARD.encode(bytes) })
             }
-            session::TermChunk::Resize(rows, cols) => json!({ "r": [rows, cols] }),
-            session::TermChunk::End(code) => json!({ "end": code }),
+            TermChunk::Resize(rows, cols) => json!({ "r": [rows, cols] }),
+            TermChunk::End(code) => json!({ "end": code }),
         };
         Ok(SseEvent::default().data(data.to_string()))
     });
@@ -682,7 +588,7 @@ struct CreateSession {
     rules: Vec<AnyRule>,
 }
 
-async fn create_session(State(d): D, body: String) -> R<Json<session::SessionInfo>> {
+async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     let req: CreateSession = parse_body(&body)?;
     if !req.workdir.is_absolute() {
         return Err(ApiError(
@@ -694,24 +600,22 @@ async fn create_session(State(d): D, body: String) -> R<Json<session::SessionInf
     for r in req.rules {
         policy.insert(r, None);
     }
-    let s = session::create(
-        d.clone(),
-        NewSession::plain(req.profile, req.workdir, policy),
-    )
-    .await?;
-    Ok(Json(info(&d, &s)))
+    let s = d
+        .create_session(NewSession::plain(req.profile, req.workdir, policy))
+        .await?;
+    Ok(Json(d.session_info(&s)))
 }
 
-async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<session::SessionInfo>> {
+async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo>> {
     let s = d.session(&id)?;
-    session::stop(&d, &s, "stopped by operator").await;
-    Ok(Json(info(&d, &s)))
+    d.stop_session(&s, "stopped by operator").await;
+    Ok(Json(d.session_info(&s)))
 }
 
 async fn delete_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
     let s = d.session(&id)?;
-    session::stop(&d, &s, "removed by operator").await;
-    d.sessions.write().unwrap().remove(&id);
+    d.stop_session(&s, "removed by operator").await;
+    d.forget_session(&id);
     Ok(Json(json!({ "removed": id, "audit": s.audit_path() })))
 }
 
@@ -760,7 +664,8 @@ async fn attach(
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
         if let Ok(up) = on_upgrade.await {
-            session::pump_shell(d, s, TokioIo::new(up), guest, shell_id, argv, tty).await;
+            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty)
+                .await;
         }
     });
     Ok(Response::builder()
@@ -782,17 +687,8 @@ struct Evaluate {
 /// Dry run: what would happen to this request.
 async fn evaluate(State(d): D, body: String) -> R<Json<Value>> {
     let e: Evaluate = parse_body(&body)?;
-    let c = d.config.read().unwrap();
-    let layers = match (&e.session, &e.profile) {
-        (Some(id), _) => d.session(id)?.layers(&c),
-        (None, Some(p)) => {
-            let mut l = c.resolve(p)?.layers;
-            l.push((Scope::Global, c.policy.clone()));
-            l
-        }
-        (None, None) => vec![(Scope::Global, c.policy.clone())],
-    };
-    let layers = spec::layers_of(&layers);
+    let layers = d.layers_for(e.session.as_deref(), e.profile.as_deref())?;
+    let layers: Vec<(Scope, &Policy)> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     if let Some(n) = e.net {
         let inspected = needs_inspection(&layers, &n.host, n.port);
         let (decision, effects) = evaluate_net(&layers, &n);
@@ -823,7 +719,7 @@ async fn events(
         vec![]
     };
     let session = q.session.clone();
-    let live = BroadcastStream::new(d.events.subscribe()).filter_map(move |e| {
+    let live = BroadcastStream::new(d.subscribe()).filter_map(move |e| {
         let session = session.clone();
         async move {
             let e = e.ok()?;

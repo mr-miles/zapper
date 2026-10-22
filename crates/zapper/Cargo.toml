@@ -13,6 +13,7 @@ office = ["zapper-core/office"]
 
 [dependencies]
 zapper-core = { path = "../zapper-core", default-features = false }
+zapper-api = { path = "../zapper-api" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }
 anyhow.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "zapper-api"
+description = "zapper's REST API (the CLI's, on a unix socket) and web UI, over zapper-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zapper-core = { path = "../zapper-core", default-features = false }
+zapper-policy = { path = "../zapper-policy" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+futures-util = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[dev-dependencies]
+zapper-core = { path = "../zapper-core", default-features = false, features = ["test-util"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

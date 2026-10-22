@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# `Core::test_session`, for other crates' tests.
+test-util = []
 default = ["office"]
 # The Office: firms of workers, their mail, drive, security officers and
 # cluster. Without it (`--no-default-features`), zapper runs sessions only.

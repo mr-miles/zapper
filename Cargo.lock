@@ -1604,6 +1604,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "zapper-api",
  "zapper-core",
  "zapper-keeper",
  "zapper-policy",
@@ -1620,6 +1621,27 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "ureq",
+ "zapper-policy",
+]
+
+[[package]]
+name = "zapper-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "zapper-core",
  "zapper-policy",
 ]
 

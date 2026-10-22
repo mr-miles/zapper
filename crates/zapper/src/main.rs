@@ -1044,7 +1044,7 @@ fn event_line(e: &Value) -> String {
 }
 
 async fn serve(config_path: PathBuf) -> Result<()> {
-    let d = daemon::Daemon::new(config_path)?;
+    let d = zapper_core::Core::start(config_path)?;
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1063,7 +1063,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
-    let ui_addr = d.config.read().unwrap().daemon.ui.clone();
+    let ui_addr = d.config().daemon.ui;
     if !ui_addr.is_empty() {
         let addr: std::net::SocketAddr = ui_addr
             .parse()
@@ -1081,8 +1081,8 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         } else {
             bound.to_string()
         };
-        let url = format!("http://{shown}/?token={}", d.ui_token);
-        daemon::write_private(&d.paths.state.join("ui-url"), format!("{url}\n").as_bytes())?;
+        let url = format!("http://{shown}/?token={}", d.ui_token());
+        daemon::write_private(&d.state_dir().join("ui-url"), format!("{url}\n").as_bytes())?;
         if remote {
             eprintln!(
                 "{}",
@@ -1090,7 +1090,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
             );
         }
         eprintln!("zapper: UI at {url}");
-        let app = daemon::api::ui(d.clone(), port, remote);
+        let app = zapper_api::ui(d.clone(), port, remote);
         tokio::spawn(async move {
             if let Err(e) = axum::serve(tcp, app).await {
                 tracing::error!("UI: {e}");
@@ -1098,7 +1098,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         });
     }
     eprintln!("zapper: API on {}", socket.display());
-    let app = daemon::api::api(d.clone());
+    let app = zapper_api::api(d.clone());
     let shutdown = {
         let d = d.clone();
         async move {
@@ -1109,14 +1109,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
                 _ = term.recv() => {}
             }
             eprintln!("zapper: stopping sessions");
-            let runs: Vec<_> = d.office.runs.read().unwrap().values().cloned().collect();
-            for r in runs {
-                daemon::office::down(&d, &r, "daemon shutdown").await;
-            }
-            let sessions: Vec<_> = d.sessions.read().unwrap().values().cloned().collect();
-            for s in sessions {
-                daemon::session::stop(&d, &s, "daemon shutdown").await;
-            }
+            d.shutdown().await;
         }
     };
     axum::serve(listener, app)

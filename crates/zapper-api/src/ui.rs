@@ -1,41 +1,34 @@
 //! The web UI: the office page and the sessions page, over the read routes,
 //! answering approvals, and the board's writes.
 
+use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use zapper_core::Core;
 
-/// The office: firms, mail, security, the shared drive, statistics.
-#[cfg(feature = "office")]
-pub async fn index() -> impl IntoResponse {
+/// The office: firms, mail, security, the shared drive, statistics. Without
+/// the office, the front page is the sessions page.
+pub async fn index(State(core): State<Core>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("office.html"),
+        core.office_page().unwrap_or_else(|| sessions_page(false)),
     )
-}
-
-/// Without the office, the front page is the sessions page.
-#[cfg(not(feature = "office"))]
-pub async fn index() -> impl IntoResponse {
-    sessions().await
 }
 
 /// Sessions, network, terminals and approvals.
-pub async fn sessions() -> impl IntoResponse {
+pub async fn sessions(State(core): State<Core>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        sessions_page(),
+        sessions_page(core.office_page().is_some()),
     )
-}
-
-#[cfg(feature = "office")]
-fn sessions_page() -> &'static str {
-    include_str!("ui.html")
 }
 
 /// Without the office, the page is flagged `office-disabled`, which hides
 /// its way back to the office.
-#[cfg(not(feature = "office"))]
-fn sessions_page() -> &'static str {
+fn sessions_page(office: bool) -> &'static str {
+    if office {
+        return include_str!("ui.html");
+    }
     static PAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         include_str!("ui.html").replacen(
             r#"<html lang="en">"#,
@@ -83,11 +76,11 @@ pub async fn xterm_css() -> impl IntoResponse {
     )
 }
 
-#[cfg(all(test, not(feature = "office")))]
+#[cfg(test)]
 mod tests {
     #[test]
     fn without_the_office_the_sessions_page_is_flagged() {
-        let page = super::sessions_page();
+        let page = super::sessions_page(false);
         assert!(page.contains(r#"<html lang="en" class="office-disabled">"#));
         assert!(page.contains("html.office-disabled footer.foot { display:none; }"));
     }

@@ -971,7 +971,7 @@ impl Recorder {
 /// A session as `create` registers it, without booting a VM: for tests of
 /// what sits above sessions. `mark_running` marks it running. The first half of
 /// `create`, as it is.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub fn test_session(
     daemon: &Arc<Daemon>,
     new: &NewSession,

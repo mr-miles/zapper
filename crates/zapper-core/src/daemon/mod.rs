@@ -6,7 +6,7 @@
 //! startup file, and `GET /v1/config/diff` shows what save would change.
 
 pub mod addr;
-pub mod api;
+pub mod api_error;
 mod dns;
 pub mod driver;
 // Workers' conversations and the record's checks are the office's.
@@ -27,7 +27,6 @@ mod spec;
 #[cfg(test)]
 pub mod testing;
 pub mod tls;
-mod ui;
 pub mod vm;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

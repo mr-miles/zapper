@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zapper-policy", "crates/zapper-core", "crates/zapper", "crates/zapper-agent", "crates/zapper-keeper", "crates/zapper-inspect"]
+members = ["crates/zapper-policy", "crates/zapper-core", "crates/zapper-api", "crates/zapper", "crates/zapper-agent", "crates/zapper-keeper", "crates/zapper-inspect"]
 
 [workspace.package]
 version = "0.1.0"
