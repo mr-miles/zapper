@@ -1205,10 +1205,15 @@ async fn check(config_path: &Path) -> Result<i32> {
                 &format!("make image IMAGE={} (see README: Images)", p.engine.image),
             );
             let k = kernels.join(&p.engine.kernel);
+            // `make deps` fetches vmlinux-6.1; `make kernel` builds the others.
+            let fix = match p.engine.kernel.strip_prefix("vmlinux-6.1-") {
+                Some(n) => format!("make kernel KERNEL={n}"),
+                None => "make deps".into(),
+            };
             report(
                 k.is_file(),
                 &format!("profile {name}: kernel {}", p.engine.kernel),
-                "make deps",
+                &fix,
             );
         }
     }

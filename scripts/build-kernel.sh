@@ -6,14 +6,24 @@
 #
 #   scripts/build-kernel.sh k8s      # → ~/.local/share/zapper/kernels/vmlinux-6.1-k8s
 #
-# Builds in a container (podman, or $ZAPPER_OCI), so the host needs no
-# toolchain. The source is checked against kernel.org's checksum.
+# Builds in a container (podman, else docker, or $ZAPPER_OCI), so the host
+# needs no toolchain. The source is checked against kernel.org's checksum.
 set -eu
 
 NAME=${1:-k8s}
 VERSION=6.1.155
 SHA256=c29387aeee085fbcbd91236224b9df805063bac43615e75cea2c6b29604a5c73
-OCI=${ZAPPER_OCI:-podman}
+if [ -n "${ZAPPER_OCI:-}" ]; then
+    OCI=$ZAPPER_OCI
+elif command -v podman >/dev/null 2>&1; then
+    OCI=podman
+else
+    OCI=docker
+fi
+# docker's containers write as root: the kernel is given back to you. (Under
+# rootless podman, the container's root is you already.)
+OWNER=
+[ "$(basename "$OCI")" = docker ] && OWNER=$(id -u):$(id -g)
 DATA=${ZAPPER_DATA:-$HOME/.local/share/zapper}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 FRAGMENT=$HERE/config/kernel/$NAME.config
@@ -37,7 +47,7 @@ echo "$SHA256  $TARBALL" | sha256sum -c --quiet || { echo "checksum mismatch for
 echo "building vmlinux-6.1-$NAME in a container"
 "$OCI" run --rm \
     -v "$CACHE:/cache:ro" -v "$FRAGMENT:/fragment.config:ro" -v "$BASE:/base.config:ro" -v "$OUT:/out" \
-    -e VERSION="$VERSION" -e NAME="$NAME" \
+    -e VERSION="$VERSION" -e NAME="$NAME" -e OWNER="$OWNER" \
     docker.io/library/ubuntu:24.04 sh -euc '
         apt-get update -qq >/dev/null
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev xz-utils cpio python3 >/dev/null
@@ -53,6 +63,7 @@ echo "building vmlinux-6.1-$NAME in a container"
         make -j"$(nproc)" vmlinux >/tmp/build.log 2>&1 || { tail -40 /tmp/build.log; exit 1; }
         cp vmlinux /out/vmlinux-6.1-$NAME.tmp
         cp .config /out/vmlinux-6.1-$NAME.config
+        [ -z "$OWNER" ] || chown "$OWNER" /out/vmlinux-6.1-$NAME.tmp /out/vmlinux-6.1-$NAME.config
         mv /out/vmlinux-6.1-$NAME.tmp /out/vmlinux-6.1-$NAME
     '
 echo "kernel vmlinux-6.1-$NAME: installed in $OUT"
