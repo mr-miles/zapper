@@ -74,6 +74,8 @@ pub struct Session {
     exec_checks: Arc<Semaphore>,
     /// The firm the session works for, if any.
     pub firm: Option<FirmLink>,
+    /// The driver, for a driven agent (`agent.driven`) outside a firm.
+    pub driver: Option<Arc<super::driver::Driver>>,
     extra_files: Vec<GuestFile>,
     forwards: Vec<Forward>,
 }
@@ -102,6 +104,10 @@ pub struct SessionInfo {
     pub firm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
+    /// The driver's state for a driven session; `"disabled"` with the
+    /// driver off (`daemon.driver: false`).
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub driver: serde_json::Value,
 }
 
 impl Session {
@@ -131,6 +137,7 @@ impl Session {
             rules: self.policy.read().unwrap().rules().len(),
             firm: self.firm.as_ref().map(|f| f.firm.clone()),
             member: self.firm.as_ref().map(|f| f.member.clone()),
+            driver: self.driver.as_ref().map(|d| d.info()).unwrap_or_default(),
         }
     }
 
@@ -294,6 +301,9 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
     let dir = daemon.paths.state.join("sessions").join(&id);
     std::fs::create_dir_all(&dir)?;
     let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
+    // A firm's workers are driven by the office's foreman.
+    let driven =
+        resolved.agent.driven && new.firm.is_none() && daemon.config.read().unwrap().daemon.driver;
     let created = now();
     let ttl = resolved.engine.ttl_secs;
     let session = Arc::new(Session {
@@ -321,6 +331,7 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
         conns: Arc::new(Semaphore::new(256)),
         exec_checks: Arc::new(Semaphore::new(64)),
         firm: new.firm.clone(),
+        driver: driven.then(super::driver::Driver::new),
         extra_files: new.files.clone(),
         forwards: new.forwards.clone(),
     });
@@ -372,6 +383,7 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
                     detail: Some(format!("ready in {ms} ms")),
                 },
             );
+            super::driver::drive(&daemon, &session);
         }
         (_, state) => {
             let msg = match state {
@@ -695,6 +707,9 @@ pub async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &str) {
 }
 
 async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&str>) {
+    if let Some(driver) = &session.driver {
+        driver.stop();
+    }
     if let Some(mut child) = session.vm.lock().await.take() {
         if tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await

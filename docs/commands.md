@@ -78,6 +78,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper exec ID [--system] -- CMD…` | Run a command without a terminal, returning its exit code; `--system` runs it as root without exec supervision, for the operator's own maintenance (e.g. a firm's cluster VM) |
 | `zapper cp ID:/path DIR` | Copy a guest directory out |
 | `zapper ps` | Sessions with state, image and allow/deny counters |
+| `zapper tell ID TEXT…` | Give a driven session's agent a task (`agent.driven`); it waits for the agent's next turn. `zapper events --session ID` follows it |
 | `zapper stop ID` / `zapper rm ID` | Stop a session and keep it listed / stop it and remove it from the list; audit logs stay on disk |
 | `zapper audit ID` | The session's audit log (JSON lines) |
 | `zapper events [-s ID] [--history]` | Follow events, one line each, or raw with `--json` |

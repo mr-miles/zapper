@@ -21,8 +21,18 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `shell` | `id`, `state` (`open`, `closed`), `argv`, `exit_code` | Terminals |
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
+| `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
 
 The host writes `net`, `dns` and `exec` events from its own decisions, so the guest can't alter them. `exit` events come from the guest kernel, and are as reliable as the guest ([security](security.md#what-is-enforced-where)).
+
+## The driver
+
+A session whose profile sets `agent.driven: true` runs its agent headless (`claude -p` with stream-json in and out, or `pi --mode rpc`) instead of waiting for a terminal, and gets its tasks from `zapper tell`, the API (`POST /v1/sessions/{id}/prompt`) or the prompt box on the UI's session page. It is the office's foreman without the firm: one conversation per session, kept between turns.
+
+- Tasks that arrive while the agent works wait, and go together as its next turn; pi takes them at once.
+- A turn the provider rate-limits, or that fails before the agent could work, keeps its tasks and is tried again a minute later. A turn without an end in 30 minutes drops the process; three in a row rest the driver. An agent that exits takes its turn's tasks back and the next process resumes the conversation; more than five exits in ten minutes rest it for two minutes.
+- The session's info has `driver`: `status` (`idle`, `starting`, `working`, `backoff`, `error`, `stopped`), `activity`, `error`, `queued`, `turns`, `tokens` and `conversation`; or `"disabled"` with `daemon.driver: false`. The UI shows it with the session's details.
+- A firm's workers are driven by the office's foreman, not by this driver, and take work by mail: the prompt route refuses them.
 
 ## Files
 
@@ -31,6 +41,7 @@ Each session directory, `state/sessions/<id>/`, holds:
 | File | Content |
 |---|---|
 | `audit.jsonl` | The session's events, one JSON object per line |
+| `driver.jsonl` | A driven session's transcript: every line the agent wrote (Claude Code's stream-json, pi's events), and `{zapper: stderr|raw|truncated}` for the rest |
 | `shell-<n>.cast` | asciicast v2 recording of terminal *n*, with output (`o`), input (`i`) and resizes (`r`); replay it with `asciinema play shell-1.cast` |
 | `console.log` | Serial console and Firecracker messages, up to 1 MiB |
 | `metrics.json` | Firecracker metrics: vCPU exits, block, network and vsock counters (in `vm/` while the session runs) |

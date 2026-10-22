@@ -46,6 +46,7 @@ firms:      name → org chart, budgets, officers, the firm's services  (office.
 | `ui` | `127.0.0.1:7878` | Address of the UI (state and approvals); empty turns the UI off. Loopback by default; another address serves it to the network, for a remote host ([a remote host](#a-remote-host)) |
 | `ask_timeout_secs` | `60` | How long an `ask` waits before it denies |
 | `max_sessions` | `16` | Sessions starting or running at the same time |
+| `driver` | `true` | The driver: agents run headless and given tasks (`agent.driven`), and The Office's workers. `false`: zapper only sandboxes and monitors; it starts no agent on its own and gives none any input. A config with a driven profile or a firm is then refused, and turning it off in the running config is refused while driven sessions run |
 | `private_networks` | `[]` | CIDRs of private networks sessions may reach ([network](network.md#address-checks)) |
 | `keeper` | unset | `{socket, dir}`: the record kept by `zapper-keeper` as a separate user, append-only ([security: the record](security.md#the-record)); `scripts/install-keeper.sh` prints the values. Read at start: changing it needs a restart |
 
@@ -73,6 +74,7 @@ profiles:
 |---|---|---|
 | `kind` | `claude-code` | The agent harness: `claude-code` sets Claude Code up and `pi` sets pi up from the keys below (both can run office workers); `generic` writes only `env` and `files`. See [agent harnesses](#agent-harnesses) |
 | `command` | `[claude]` | What `zapper run` and `zapper attach` start |
+| `driven` | `false` | Run the agent headless, with tasks given by `zapper tell`, the API or the UI's prompt box instead of a terminal ([instrumentation: the driver](instrumentation.md#the-driver)). `claude-code` and `pi` only, and needs `daemon.driver` |
 | `user` | `agent` | The user the command runs as, created with uid 1000 |
 | `root` | `false` | Run as root; this gives up the in-guest guardrails ([security](security.md#what-is-enforced-where)) |
 | `workdir` | `/work` | Working directory |

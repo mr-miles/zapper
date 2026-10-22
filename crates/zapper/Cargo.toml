@@ -42,3 +42,6 @@ flate2 = "1"
 brotli = "8"
 libc = "0.2"
 ring = "0.17"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

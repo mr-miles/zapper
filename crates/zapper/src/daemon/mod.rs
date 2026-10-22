@@ -8,6 +8,7 @@
 pub mod addr;
 pub mod api;
 mod dns;
+pub mod driver;
 // Workers' conversations and the record's checks are the office's.
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
@@ -136,6 +137,12 @@ pub enum EventBody {
     },
     Config {
         change: String,
+    },
+    /// What a driven session's agent did: `started`, `turn_start`,
+    /// `activity`, `steered`, `turn_end`, `exited`, `error`.
+    Driver {
+        event: String,
+        detail: serde_json::Value,
     },
 }
 
@@ -365,6 +372,22 @@ impl Daemon {
         let out = f(&mut next)?;
         next.normalize();
         next.validate()?;
+        if !next.daemon.driver {
+            let driven: Vec<String> = self
+                .sessions
+                .read()
+                .unwrap()
+                .values()
+                .filter(|s| s.driver.is_some() && s.is_running())
+                .map(|s| s.id.clone())
+                .collect();
+            if !driven.is_empty() {
+                anyhow::bail!(
+                    "daemon.driver: driven sessions are running ({}); stop them first",
+                    driven.join(", ")
+                );
+            }
+        }
         office_config(&next)?;
         if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
