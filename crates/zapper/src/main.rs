@@ -246,7 +246,7 @@ enum ProfileCmd {
 
 #[derive(Subcommand)]
 enum ImageCmd {
-    /// Build an image from an OCI image: `zapper image build ubuntu-24.04 --from docker.io/library/ubuntu:24.04`
+    /// Build an image from an OCI image: `zapper image build ubuntu-26.04 --from docker.io/library/ubuntu:26.04`
     Build {
         name: String,
         #[arg(long)]
@@ -1205,10 +1205,15 @@ async fn check(config_path: &Path) -> Result<i32> {
                 &format!("make image IMAGE={} (see README: Images)", p.engine.image),
             );
             let k = kernels.join(&p.engine.kernel);
+            // `make deps` fetches vmlinux-6.1; `make kernel` builds the others.
+            let fix = match p.engine.kernel.strip_prefix("vmlinux-6.1-") {
+                Some(n) => format!("make kernel KERNEL={n}"),
+                None => "make deps".into(),
+            };
             report(
                 k.is_file(),
                 &format!("profile {name}: kernel {}", p.engine.kernel),
-                "make deps",
+                &fix,
             );
         }
     }
@@ -1264,7 +1269,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             "sudo apt install iproute2 nftables, or use network: vsock",
         );
     }
-    let oci = std::env::var("ZAPPER_OCI").unwrap_or_else(|_| "podman".into());
+    let oci = image::engine();
     let oci_ok = std::process::Command::new(&oci)
         .arg("--version")
         .output()
@@ -1272,7 +1277,7 @@ async fn check(config_path: &Path) -> Result<i32> {
     report(
         oci_ok,
         &format!("{oci} (to build images)"),
-        "sudo apt install podman",
+        "sudo apt install podman, or install docker",
     );
     let mkfs = std::process::Command::new("mkfs.ext4")
         .arg("-V")
@@ -1324,32 +1329,29 @@ async fn check(config_path: &Path) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
-    #[cfg(feature = "office")]
     fn example_config_is_valid() {
         let c = zapper_policy::Config::from_yaml(super::EXAMPLE).unwrap();
-        let acme = &c.firms["acme"];
-        assert!(acme.roles["security-officer"].officer);
-        assert!(acme.roles["ceo"]
-            .hires
-            .contains(&"security-officer".to_string()));
-        // Access comes with grants: the spaces and their expiry, no roles.
-        assert_eq!(acme.roles["cto"].profile, "office-engineer");
-        assert_eq!(acme.credentials.expiry, "24h");
-        assert!(acme.credentials.spaces.contains(&"general".to_string()));
-        assert!(acme.roles["ceo"].hires.contains(&"cto".to_string()));
-        // The simulations, validated with the firm.
-        let names: Vec<&str> = acme.scenarios.keys().map(String::as_str).collect();
+        assert!(c.firms.is_empty());
+        let names: Vec<&str> = c.profiles.keys().map(String::as_str).collect();
+        assert_eq!(names, ["base", "claude", "default", "k3s"]);
+        assert_eq!(c.resolve("base").unwrap().engine.image, "ubuntu-26.04");
+    }
+
+    /// `zapper run -p k3s`: k3s started at boot, a root shell with kubectl.
+    #[test]
+    fn k3s_profile() {
+        let c = zapper_policy::Config::from_yaml(super::EXAMPLE).unwrap();
+        let p = c.resolve("k3s").unwrap();
         assert_eq!(
-            names,
-            [
-                "key-engineer-quits",
-                "mid-project-pivot",
-                "production-incident",
-                "red-team"
-            ]
+            (p.engine.image.as_str(), p.engine.kernel.as_str()),
+            ("k3s", "vmlinux-6.1-k8s")
         );
-        assert!(acme.scenarios["red-team"].hires[0].board_line);
+        assert!(p.agent.root);
+        assert_eq!(p.agent.env["KUBECONFIG"], "/etc/rancher/k3s/k3s.yaml");
+        assert!(p.setup.iter().any(|s| s.contains("nohup k3s server")));
+        assert!(p.mounts.iter().any(|m| m.guest == "/work"));
     }
 
     /// `zapper run -p claude`, the README's quickstart: Claude Code on a
