@@ -35,7 +35,7 @@ firms:
     description: A small product company
     board: { name: Board }                 # the operator; mail to `board` lands in the UI
     budget: { daily_turns: 400, max_concurrent: 3, seed: 1000000, security_share: 0.2 }   # a run budget: see the workforce
-    git: {}                                # an empty repository per run at https://git.acme.internal/product.git
+    git: {}                                # an empty repository per run at https://git.acme.internal/product.git; repos: [a, b] for several
     product_port: 0.0.0.0:8080             # browsers on the LAN → the cluster's ingress; 127.0.0.1:8080 for this machine only
     facilities:
       cluster: { kind: k3s, profile: office-k3s }   # image k3s, kernel vmlinux-6.1-k8s
@@ -247,7 +247,7 @@ An `assignment` from someone without authority over the receiver is rejected wit
 | `desk()` | My open assignments, threads waiting on others, pending access requests |
 | `directory()` | The org chart: names, titles, roles, who reports to whom, who is busy |
 | `request_access(host, port?, methods?, path?, reason)` | Ask the security officers ahead of time, with a reason (outside hosts; the firm's own services are grants) |
-| `credentials_request(resource, level, spaces?, reason)`, `credentials()` | Ask for a grant on git, the cluster or drive spaces; see your grants and requests |
+| `credentials_request(resource, level, repo?, spaces?, reason)`, `credentials()` | Ask for a grant on a git repository, the cluster or drive spaces; see your grants and requests |
 | `credentials_decide`, `credentials_escalate`, `credentials_revoke`, `credentials_list` | The CEO and security officers: decide, hand up, revoke, list |
 
 **Mail during a turn.** Mail that arrives while a worker is in a turn waits for its next wake, except at the turn's end: each worker's Claude Code has a `Stop` hook (`office stop-hook`) that asks the daemon, as Claude is about to stop, whether mail came in meanwhile. If so, the stop is blocked and the mail is handed over, shown as a wake would show it, so Claude can handle it before finishing (a cancellation, a change of scope); it counts as delivered and doesn't wake the worker again. A turn is extended at most three times; if the hook fails, Claude stops as usual. The journal records it as `turn … extended`.
@@ -410,7 +410,7 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 | Resource | read | write | admin | Enforced by |
 |---|---|---|---|---|
-| `git` | clone and fetch | push branches | also `main`, branches under `main/`, and tags | the daemon's git handler (the grant on every request) and a `pre-receive` hook in the repository, which only the daemon writes |
+| `git:<repo>`, one per repository (`git` names the repository of a firm that has one) | clone and fetch | push branches | also `main`, branches under `main/`, and tags | the daemon's git handler (the grant on every request) and a `pre-receive` hook in the repository, which only the daemon writes |
 | `cluster` | view `dev` | deploy to `dev` | also `prod` | Kubernetes RBAC: a service account per worker in `zapper-workers`, RoleBindings to `view`, `edit` and `admin`, and a token in the worker's `~/.kube/config` |
 | `drive:<space>` | list and fetch | also publish | — | the daemon's drive operations |
 
@@ -435,7 +435,7 @@ Facilities are reached by name under the firm's `domain`, through the same proxy
 
 | Name | Port | What | Who reaches it |
 |---|---|---|---|
-| `git.acme.internal` | 443 | The firm's git repository, served by the daemon | workers with a git grant |
+| `git.acme.internal` | 443 | The firm's git repositories, served by the daemon | workers with a grant on one of them (the server checks the repository's own) |
 | `cluster.acme.internal` | 6443 | The Kubernetes API | workers with a cluster grant |
 | `apps.acme.internal`, `*.apps.acme.internal` | 80, 443 | The cluster's ingress load balancer: the product | everyone |
 
@@ -460,7 +460,7 @@ How the product is built and deployed (images built in the VMs, a registry in th
 
 ### The git repository
 
-A bare repository in the run directory, `runs/<id>/git/product.git`, empty at the start of each run. The daemon serves it over HTTPS at `git.acme.internal` by running `git http-backend` for each request, with the session's CA (which each VM already trusts, for inspected connections). It is part of the run's record: replay shows the commit history as it was, and `git clone` from the run directory works after the run.
+A bare repository per name in `git.repos` (`product` if unset, with `git: {}`) in the run directory, `runs/<id>/git/<name>.git`, each empty at the start of each run, at `https://git.acme.internal/<name>.git`. Access is granted per repository (`git:<name>`), so a worker can hold one and not another. The daemon serves it over HTTPS at `git.acme.internal` by running `git http-backend` for each request, with the session's CA (which each VM already trusts, for inspected connections). It is part of the run's record: replay shows the commit history as it was, and `git clone` from the run directory works after the run.
 
 ### Ports on the host
 
@@ -582,7 +582,7 @@ Artifacts by kind, author and thread. An artifact shows its version history, new
 
 ### Git
 
-The run's repository, read-only: a branch picker (`main` first), the branch's commits (the subject, author and age, with the first line of the description under them), its files as a tree with breadcrumbs and the directory's README rendered under it, a file's text (Markdown rendered, code as text, up to 1 MiB), and a commit's message, files changed and diff. In replay, commits after the timeline's position are hidden. With the firm off there is no current repository, and the tab offers to open the last run. The repository itself is `state/firms/<firm>/runs/<run>/git/product.git` under `~/.local/state/zapper`, a bare repository you can clone.
+The run's repositories, read-only: a repository picker when there is more than one, a branch picker (`main` first), the branch's commits (the subject, author and age, with the first line of the description under them), its files as a tree with breadcrumbs and the directory's README rendered under it, a file's text (Markdown rendered, code as text, up to 1 MiB), and a commit's message, files changed and diff. In replay, commits after the timeline's position are hidden. With the firm off there is no current repository, and the tab offers to open the last run. Each repository is `state/firms/<firm>/runs/<run>/git/<name>.git` under `~/.local/state/zapper`, a bare repository you can clone.
 
 ### Statistics
 
@@ -643,7 +643,7 @@ state/firms/<firm>/runs/<run-id>/
   transcripts/<worker>.jsonl   each worker's agent events (Claude Code's stream-json, or pi's)
   drive/<sha256>       shared drive files
   skills/<role>/       the skills each role's workers had, mounted read-only
-  git/product.git      the firm's repository
+  git/<name>.git       the firm's repositories (product.git by default)
 ```
 
 - Each worker's session keeps its own audit log and terminal recordings in `state/sessions/<id>/`, as any zapper session does; `run.json` links them.

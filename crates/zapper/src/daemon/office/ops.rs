@@ -260,8 +260,8 @@ pub fn tools(p: Powers) -> Vec<Value> {
     v.extend([
         tool(
             "credentials_request",
-            "Ask for access to one of the firm's resources, with a reason: git (read: fetch; write: push branches; admin: also main and tags), cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
-            json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
+            "Ask for access to one of the firm's resources, with a reason: a git repository (read: fetch; write: push branches; admin: also main and tags; each repository is its own grant), the cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
+            json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "repo": s("For git: the repository's name, e.g. product (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
             &["resource", "level", "reason"],
         ),
         tool("credentials", "Your grants (with expiry), your requests, and the resources and spaces there are.", json!({}), &[]),
@@ -291,7 +291,7 @@ pub fn tools(p: Powers) -> Vec<Value> {
                 "background_check",
                 "Clear a new hire to start, or object (with the reason): an objection cancels the hire and returns its budget to the hirer. Clearing can grant the access the brief names (not admin on git or the cluster, which is the CEO's).",
                 json!({ "screening": s("c-2"), "clear": { "type": "boolean" }, "note": s("One line; the hirer and the board read it. Required to object"),
-                    "grants": { "type": "array", "description": "With clear: access the brief names, granted at once", "items": { "type": "object", "properties": { "resource": s("git, cluster or drive:<space>"), "level": { "type": "string", "enum": ["read", "write", "admin"] }, "expires_in": s("e.g. 8h; default the firm's") }, "required": ["resource", "level"] } } }),
+                    "grants": { "type": "array", "description": "With clear: access the brief names, granted at once", "items": { "type": "object", "properties": { "resource": s("git:<repo> (or git, when there is one), cluster or drive:<space>"), "level": { "type": "string", "enum": ["read", "write", "admin"] }, "expires_in": s("e.g. 8h; default the firm's") }, "required": ["resource", "level"] } } }),
                 &["screening", "clear"],
             ),
             tool("access_revoke", "Remove a standing approval.", json!({ "rule": s("Rule id"), "reason": s("Why") }), &["rule", "reason"]),
@@ -526,6 +526,8 @@ pub async fn dispatch(
                     bail!("for drive, name the spaces");
                 }
                 sp.into_iter().map(|x| format!("drive:{x}")).collect()
+            } else if let (true, Some(repo)) = (resource == "git", opt_str(args, "repo")) {
+                vec![format!("git:{repo}")]
             } else {
                 vec![resource]
             };

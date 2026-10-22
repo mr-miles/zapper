@@ -58,7 +58,8 @@ fn expects_name(e: Expects) -> &'static str {
 
 /// Services a worker can reach, for its preamble.
 pub struct Services {
-    pub git: Option<String>,
+    /// The firm's repositories' URLs.
+    pub git: Vec<String>,
     pub kube: Option<String>,
     pub product: Option<String>,
 }
@@ -121,8 +122,13 @@ pub const CHARTER: &[Article] = &[
 pub fn onboard(run: &super::FirmRun, worker: &str) {
     let spaces = run.config.credentials.spaces.join(", ");
     let mut resources = Vec::new();
-    if run.config.git.is_some() {
-        resources.push("git (the repository)".to_string());
+    match run.config.git_repos().as_slice() {
+        [] => {}
+        [one] => resources.push(format!("git:{one} (the repository)")),
+        all => resources.push(format!(
+            "git:<name> for each repository ({})",
+            all.join(", ")
+        )),
     }
     if !run.config.facilities.is_empty() {
         resources.push("cluster (namespaces dev and prod)".to_string());
@@ -283,10 +289,13 @@ reports more or takes it back; release() lets someone go.\n",
         }
     }
     let mut lines = Vec::new();
-    if let Some(g) = &services.git {
-        lines.push(format!(
-            "Git: {g} (with a grant: ask with credentials_request)"
-        ));
+    match services.git.as_slice() {
+        [] => {}
+        [g] => lines.push(format!("Git: {g} (with a grant: ask with credentials_request)")),
+        all => lines.push(format!(
+            "Git repositories: {} (each with its own grant, git:<name>: ask with credentials_request)",
+            all.join(", ")
+        )),
     }
     if let Some(k) = &services.kube {
         lines.push(format!("Kubernetes: {k}, namespaces dev and prod (with a grant, kubectl is configured for you)"));

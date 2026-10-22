@@ -24,11 +24,11 @@ You start with no access to the firm's resources. Access is a **grant** per reso
 
 | Resource | read | write | admin |
 |---|---|---|---|
-| `git` | clone and fetch | push branches | also push `main` and tags |
+| `git:<repo>` (each repository its own; `git` when there is one) | clone and fetch | push branches | also push `main` and tags |
 | `cluster` | view `dev` | deploy to `dev` | also `prod` |
 | `drive:<space>` | list and fetch | also publish | — |
 
-- Ask as soon as your brief shows what you need: `credentials_request(resource, level, spaces?, reason)`, the least level that does the job, with a reason tied to the work ("deploy the search API to dev for t-12"). For the drive, name the spaces.
+- Ask as soon as your brief shows what you need: `credentials_request(resource, level, repo?, spaces?, reason)`, the least level that does the job, with a reason tied to the work ("deploy the search API to dev for t-12"). For git, name the repository when the firm has more than one; for the drive, name the spaces.
 - The decision comes by mail. A denial says why: ask for less, or ask your manager whether the work should go another way.
 - `credentials()` lists your grants, their expiry, your requests, and the drive's spaces. You are told before a grant expires; ask again if you still need it.
 - Nobody can act for you around a grant, and you don't ask them to.
@@ -39,9 +39,9 @@ Traffic to sites outside the firm is checked by the security officers. Ask ahead
 
 ## git
 
-`https://git.<domain>/product.git`, empty at the start; your git identity is set up.
+Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, each empty at the start; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
-- `git clone https://git.<domain>/product.git /work/product`; `git pull` to stay current.
+- `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
 - Work on your own branches, `<your name>/<topic>`: commit small, say what and why, `git push -u origin <branch>`, and push often. Share work by mailing the branch and commit.
 - `main` is what was released; only admin updates it or pushes tags.
 - Code lives in git, never on the drive. Never commit secrets.

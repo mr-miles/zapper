@@ -489,7 +489,7 @@ impl FirmRun {
         let u = self.usage.lock().unwrap();
         json!({
             "firm": self.firm, "company": self.company, "run": self.id, "state": *self.state.lock().unwrap(), "started": self.started,
-            "domain": self.domain, "workers": workers, "chart": chart, "funds": ledger,
+            "domain": self.domain, "repos": self.config.git_repos(), "workers": workers, "chart": chart, "funds": ledger,
             "usage": { "day": u.day, "turns": u.turns, "tokens": u.tokens, "worker_turns": u.worker_turns },
             "budget": self.config.budget,
             "board_unread": self.post.lock().unwrap().unread(BOARD).len(),
@@ -526,7 +526,7 @@ fn chart(
         .iter()
         .map(|w| worker_json(firm, models, agents, w))
         .collect();
-    json!({ "firm": name, "description": firm.description, "board": firm.board.name, "domain": firm.domain(name), "workers": workers })
+    json!({ "firm": name, "description": firm.description, "board": firm.board.name, "domain": firm.domain(name), "repos": firm.git_repos(), "workers": workers })
 }
 
 /// One worker of the chart, as the UI draws it.

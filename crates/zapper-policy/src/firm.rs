@@ -32,7 +32,8 @@ pub struct Firm {
     pub roles: BTreeMap<String, Role>,
     pub workers: Vec<Worker>,
     pub security: Security,
-    /// An empty git repository per run at `https://git.<domain>/product.git`.
+    /// Git repositories per run, each empty at the start, at
+    /// `https://git.<domain>/<name>.git`; `{}` is one, `product`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<GitService>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -558,7 +559,15 @@ impl Default for Digest {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct GitService {}
+pub struct GitService {
+    /// The repositories' names; `[product]` if unset. Access is granted per
+    /// repository (`git:<name>`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+}
+
+/// The repository a firm with `git: {}` has.
+pub const DEFAULT_REPO: &str = "product";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -676,6 +685,15 @@ pub fn valid_worker_name(name: &str) -> bool {
 }
 
 impl Firm {
+    /// The firm's git repositories, in config order; none without `git`.
+    pub fn git_repos(&self) -> Vec<String> {
+        match &self.git {
+            None => vec![],
+            Some(g) if g.repos.is_empty() => vec![DEFAULT_REPO.to_string()],
+            Some(g) => g.repos.clone(),
+        }
+    }
+
     pub fn domain(&self, firm: &str) -> String {
         if self.domain.is_empty() {
             format!("{firm}.internal")
@@ -924,6 +942,12 @@ impl Firm {
         if self.credentials.spaces.is_empty() {
             err("credentials.spaces: at least one space for the shared drive".into());
         }
+        let mut repos = BTreeSet::new();
+        for r in self.git.iter().flat_map(|g| &g.repos) {
+            if !valid_worker_name(r) || !repos.insert(r.as_str()) {
+                err(format!("git.repos: {r:?} must be a unique name of lowercase letters, digits and dashes"));
+            }
+        }
         if self.product_port.is_some() && self.facilities.is_empty() {
             err("product_port needs a cluster facility".into());
         }
@@ -1012,6 +1036,19 @@ firms:
 
     fn firm(yaml: &str) -> Result<Config> {
         Config::from_yaml(yaml)
+    }
+
+    #[test]
+    fn git_repos() {
+        let c = firm(BASE).unwrap();
+        assert!(c.firms["acme"].git_repos().is_empty(), "no git, no repos");
+        let c = firm(&format!("{BASE}    git: {{}}\n")).unwrap();
+        assert_eq!(c.firms["acme"].git_repos(), ["product"]);
+        let c = firm(&format!("{BASE}    git: {{ repos: [api, web] }}\n")).unwrap();
+        assert_eq!(c.firms["acme"].git_repos(), ["api", "web"]);
+        let e = firm(&format!("{BASE}    git: {{ repos: [api, api] }}\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("git.repos"), "{e:#}");
+        assert!(firm(&format!("{BASE}    git: {{ repos: [Api] }}\n")).is_err());
     }
 
     #[test]

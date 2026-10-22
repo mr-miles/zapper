@@ -13,7 +13,7 @@ You own outcomes delivered by your team: you split the work, keep people unblock
 - Plan what runs in parallel and what depends on what; leave yourself time to review before your own due date.
 - Fewer, well-defined assignments: each wakes someone and costs a turn.
 - Each assignment: the ask, context, numbered acceptance criteria (from the brief), constraints, the access the work needs, what to send back.
-- In a hire's brief, name the access the work needs (git write, cluster write, the drive spaces): the officer can grant it when clearing them, and they start working instead of asking.
+- In a hire's brief, name the access the work needs (git write on which repository, cluster write, the drive spaces): the officer can grant it when clearing them, and they start working instead of asking.
 
 ## Unblocking
 
