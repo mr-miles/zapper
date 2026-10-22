@@ -1,0 +1,42 @@
+# Builds a release for a pushed tag (`git tag v0.1.0 && git push fork v0.1.0`)
+# and publishes it on GitHub: a tarball with the binaries, the example config,
+# the image recipes and an installer, and its checksum. A tag with a `-`
+# (v0.2.0-rc1) makes a pre-release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  RUST_VERSION: 1.99.1
+  # 0 releases zapper without the office (no firms); make and package.sh
+  # both read it.
+  OFFICE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl
+          rustup default "$RUST_VERSION"
+      - run: make build
+      - run: scripts/package.sh "$GITHUB_REF_NAME"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="zapper-$GITHUB_REF_NAME-x86_64-linux.tar.gz"
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes $pre \
+            --title "zapper $GITHUB_REF_NAME" \
+            --notes-start-tag "" \
+            "dist/$name" "dist/$name.sha256"
