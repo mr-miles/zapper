@@ -1219,6 +1219,9 @@ async fn forward_plain(
 pub(crate) mod service_tests;
 
 #[cfg(test)]
+mod approval_tests;
+
+#[cfg(test)]
 mod tests {
     use super::split_authority;
 
