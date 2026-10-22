@@ -94,6 +94,9 @@ pub struct SessionInfo {
     pub network: zapper_policy::NetworkMode,
     pub user: String,
     pub root: bool,
+    pub sudo: bool,
+    /// Whether execs are checked against exec rules and recorded.
+    pub exec_supervised: bool,
     pub workdir: String,
     pub counters: serde_json::Value,
     pub usage: Option<zapper_policy::proto::GuestEvent>,
@@ -121,6 +124,8 @@ impl Session {
             network: self.resolved.engine.network,
             user: self.resolved.agent.user.clone(),
             root: self.resolved.agent.root,
+            sudo: self.resolved.agent.sudo,
+            exec_supervised: self.resolved.agent.supervise_exec(),
             workdir: self.workdir.display().to_string(),
             counters: serde_json::json!({
                 "net_allowed": get(&c.net_allowed), "net_denied": get(&c.net_denied),

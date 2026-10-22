@@ -140,6 +140,7 @@ const api = (p) => fetch('/api' + p).then(r => { if (!r.ok) throw new Error(r.st
 const time = (t) => new Date(t * 1000).toLocaleTimeString();
 const ago = (t) => { const s = Math.round(Date.now() / 1000 - t); return s < 90 ? s + 's' : s < 5400 ? Math.round(s / 60) + 'm' : Math.round(s / 3600) + 'h'; };
 const pill = (cls, text) => el('span', { class: 'pill ' + cls }, text ?? cls);
+const userPill = (s) => s.root ? pill('ask', 'root') : s.sudo ? el('span', { class: 'pill ask', title: 'passwordless sudo; no exec supervision' }, s.user + ' + sudo') : s.user;
 const sessionLink = (id) => id ? el('span', { class: 'link', title: 'open session ' + id, on: () => show('session', id) }, id) : '';
 
 const tabs = ['sessions', 'events', 'approvals', 'rules', 'config'];
@@ -193,8 +194,8 @@ async function renderSessions() {
       el('td', {}, ago(s.created) + ' ago', el('div', { class: 'dim' }, left)),
       el('td', { class: 'mono' }, s.image, el('div', { class: 'dim' }, s.vcpus + ' vCPU · ' + s.memory_mib + ' MiB')),
       el('td', {}, el('span', { class: 'allow' }, c.net_allowed), ' / ', el('span', { class: 'deny' }, c.net_denied)),
-      el('td', {}, el('span', { class: 'allow' }, c.exec_allowed), ' / ', el('span', { class: 'deny' }, c.exec_denied)),
-      el('td', {}, c.exits), el('td', {}, s.root ? pill('ask', 'root') : s.user));
+      el('td', {}, s.exec_supervised ? [el('span', { class: 'allow' }, c.exec_allowed), ' / ', el('span', { class: 'deny' }, c.exec_denied)] : el('span', { class: 'dim', title: 'exec supervision is off (agent.sudo)' }, 'off')),
+      el('td', {}, c.exits), el('td', {}, userPill(s)));
     return tr;
   });
   $('sessions').replaceChildren(el('table', {}, el('thead', {}, el('tr', {}, ['id', 'profile', 'state', 'age', 'vm', 'net ✓/✗', 'exec ✓/✗', 'exits', 'user'].map(h => el('th', {}, h)))), el('tbody', {}, rows)));
@@ -224,12 +225,13 @@ async function renderSession(id) {
   $('session-info').replaceChildren(el('div', {}, el('h2', {}, 'details'), el('ul', { class: 'kv' },
     item('profile', s.profile),
     item('vm', s.image, el('span', { class: 'dim' }, ' · ' + s.vcpus + ' vCPU · ' + s.memory_mib + ' MiB')),
-    item('user', s.root ? pill('ask', 'root') : s.user),
+    item('user', userPill(s)),
     item('workdir', el('span', { class: 'mono' }, s.workdir)),
     item('up', ago(s.created), el('span', { class: 'dim' }, ' · since ' + new Date(s.created * 1000).toLocaleTimeString())),
     item('expires', s.expires ? new Date(s.expires * 1000).toLocaleString() : 'never'),
     item('network', el('span', { class: 'allow' }, c.net_allowed + ' allowed'), ' · ', el('span', { class: 'deny' }, c.net_denied + ' denied')),
-    item('programs', el('span', { class: 'allow' }, c.exec_allowed + ' allowed'), ' · ', el('span', { class: 'deny' }, c.exec_denied + ' denied')),
+    s.exec_supervised ? item('programs', el('span', { class: 'allow' }, c.exec_allowed + ' allowed'), ' · ', el('span', { class: 'deny' }, c.exec_denied + ' denied'))
+      : item('programs', el('span', { class: 'dim' }, 'not supervised')),
     item('process exits', c.exits),
     item('session rules', s.rules))));
   showTerminal(id, terms);
@@ -238,7 +240,7 @@ async function renderSession(id) {
     el('h2', {}, 'exec (latest first)'),
     execs.length ? el('table', {}, el('thead', {}, el('tr', {}, ['time', 'action', 'pid', 'command', 'cwd', 'rule', 'wait'].map(h => el('th', {}, h)))),
       el('tbody', {}, execs.map(e => el('tr', {}, el('td', {}, time(e.ts)), el('td', {}, pill(e.action)), el('td', { class: 'mono' }, e.pid),
-        el('td', { class: 'mono' }, el('div', { class: 'clamp', title: 'click to show it all', on: (ev) => ev.currentTarget.classList.toggle('open') }, e.argv.join(' '))), el('td', { class: 'mono dim' }, e.cwd || ''), el('td', { class: 'mono' }, e.rule || 'default'), el('td', {}, e.wait_ms.toFixed(1) + ' ms'))))) : el('div', { class: 'empty' }, 'no execs'),
+        el('td', { class: 'mono' }, el('div', { class: 'clamp', title: 'click to show it all', on: (ev) => ev.currentTarget.classList.toggle('open') }, e.argv.join(' '))), el('td', { class: 'mono dim' }, e.cwd || ''), el('td', { class: 'mono' }, e.rule || 'default'), el('td', {}, e.wait_ms.toFixed(1) + ' ms'))))) : el('div', { class: 'empty' }, s.exec_supervised ? 'no execs' : 'exec supervision is off (agent.sudo): execs are not checked or recorded'),
     el('h2', {}, 'process exits (latest first)'),
     exits.length ? el('table', {}, el('thead', {}, el('tr', {}, ['time', 'pid', 'command', 'exit', 'elapsed', 'cpu user/sys', 'avg mem', 'io'].map(h => el('th', {}, h)))),
       el('tbody', {}, exits.map(({ ts, event: x }) => el('tr', {}, el('td', {}, time(ts)), el('td', { class: 'mono' }, x.pid), el('td', { class: 'mono' }, x.comm),

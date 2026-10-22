@@ -3,7 +3,7 @@
 #   make deps              Firecracker and a guest kernel into ~/.local/share/zapper
 #   make build             zapper, zapper-inspect and the static guest agent (release)
 #   make install           zapper, zapper-agent and zapper-inspect into ~/.local/bin
-#   make image             the base image (IMAGE=ubuntu-24.04, see IMAGES below)
+#   make image             the base image (IMAGE=ubuntu-26.04, see IMAGES below)
 #   make image IMAGE=office  office workers: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
 #   make image IMAGE=k3s     the cluster facility (pinned k3s, air-gap images)
 #   make kernel KERNEL=k8s   a guest kernel with Kubernetes support
@@ -23,7 +23,7 @@ MUSL    := x86_64-unknown-linux-musl
 TARGET  := target/release
 AGENT   := target/$(MUSL)/release/zapper-agent
 PREFIX  ?= $(HOME)/.local
-IMAGE   ?= ubuntu-24.04
+IMAGE   ?= ubuntu-26.04
 ZAPPER  := $(TARGET)/zapper
 KERNEL  ?= k8s
 # OFFICE=0 builds zapper without The Office (cargo --no-default-features),
@@ -40,9 +40,9 @@ BINS     := zapper zapper-agent zapper-inspect
 endif
 
 # Image recipes: name → base and build steps.
-BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps && rm -rf /var/lib/apt/lists/*
-IMAGE_FROM_ubuntu-24.04 := docker.io/library/ubuntu:24.04
-IMAGE_RUN_ubuntu-24.04  := --run "$(BASE_PKGS)"
+BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps sudo && rm -rf /var/lib/apt/lists/*
+IMAGE_FROM_ubuntu-26.04 := docker.io/library/ubuntu:26.04
+IMAGE_RUN_ubuntu-26.04  := --run "$(BASE_PKGS)"
 # Office workers: Claude Code at a pinned version (auto-update is off in
 # sessions), with the tools engineers deploy with. Bump the versions here and
 # rebuild to update.
@@ -57,8 +57,8 @@ NODE_VERSION := v22.23.3
 NODE_SHA256 := df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
 KUBECTL_VERSION := v1.36.5
 KUBECTL_SHA256 := 33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
-IMAGE_FROM_office := docker.io/library/ubuntu:24.04
-IMAGE_RUN_office  := --run "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*" \
+IMAGE_FROM_office := docker.io/library/ubuntu:26.04
+IMAGE_RUN_office  := --run "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps sudo ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*" \
 	--run "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/$(NODE_VERSION)/node-$(NODE_VERSION)-linux-x64.tar.xz && echo '$(NODE_SHA256)  /tmp/node.tar.xz' | sha256sum -c && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE && rm /tmp/node.tar.xz && node --version" \
 	--run "curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/linux/amd64/kubectl && echo '$(KUBECTL_SHA256)  /usr/local/bin/kubectl' | sha256sum -c && chmod 755 /usr/local/bin/kubectl" \
 	--run "curl -fsSL https://claude.ai/install.sh | bash -s $(CLAUDE_VERSION) && cp -L /root/.local/bin/claude /usr/local/bin/claude && rm -rf /root/.local /root/.claude* && claude --version" \
@@ -75,7 +75,7 @@ K3S_URL := https://github.com/k3s-io/k3s/releases/download/$(K3S_VERSION)
 # directory so k3s imports it at start.
 HEADLAMP_IMAGE := ghcr.io/headlamp-k8s/headlamp:v0.46.0
 HEADLAMP_DIGEST := sha256:8a0ef97527544baa2b35825940ddf4db6e2d09c30cd5aa31fd269ff604cc8b75
-IMAGE_FROM_k3s := docker.io/library/ubuntu:24.04
+IMAGE_FROM_k3s := docker.io/library/ubuntu:26.04
 IMAGE_RUN_k3s  := --run "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl iptables conntrack ipset zstd procps && rm -rf /var/lib/apt/lists/*" \
 	--run "curl -fsSL -o /usr/local/bin/k3s $(K3S_URL)/k3s && echo '$(K3S_SHA256)  /usr/local/bin/k3s' | sha256sum -c && chmod 755 /usr/local/bin/k3s && ln -sf k3s /usr/local/bin/kubectl" \
 	--run "mkdir -p /var/lib/rancher/k3s/agent/images && curl -fsSL -o /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst $(K3S_URL)/k3s-airgap-images-amd64.tar.zst && echo '$(K3S_IMAGES_SHA256)  /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst' | sha256sum -c" \

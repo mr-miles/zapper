@@ -462,7 +462,7 @@ pub enum NetworkMode {
 impl Default for Engine {
     fn default() -> Self {
         Self {
-            image: "ubuntu-24.04".into(),
+            image: "ubuntu-26.04".into(),
             kernel: "vmlinux-6.1".into(),
             vcpus: 2,
             memory_mib: 2048,
@@ -494,6 +494,12 @@ pub struct AgentSpec {
     /// controls (exec policy, `fs` rules, instrumentation); host-side
     /// controls (network, secrets, disks, limits) still hold.
     pub root: bool,
+    /// Run as `user` with passwordless `sudo`, and none of the in-guest
+    /// controls: no `no_new_privs`, no exec supervision (so exec rules don't
+    /// apply). The workload can become root, like with `root`; host-side
+    /// controls (network, secrets, disks, limits) still hold. The image
+    /// needs `sudo`.
+    pub sudo: bool,
     /// Working directory of the command.
     pub workdir: String,
     /// Environment; values may use `{{secret:NAME}}`.
@@ -531,6 +537,14 @@ pub struct AgentSpec {
     pub files: BTreeMap<String, String>,
 }
 
+impl AgentSpec {
+    /// Whether the guest checks and records the workload's execs. Not with
+    /// `sudo`: the filter needs `no_new_privs`, which would break sudo.
+    pub fn supervise_exec(&self) -> bool {
+        !self.sudo
+    }
+}
+
 impl Default for AgentSpec {
     fn default() -> Self {
         Self {
@@ -538,6 +552,7 @@ impl Default for AgentSpec {
             command: vec!["claude".into()],
             user: "agent".into(),
             root: false,
+            sudo: false,
             workdir: "/work".into(),
             env: BTreeMap::new(),
             model: None,
@@ -832,8 +847,12 @@ impl Config {
             }
         }
         for name in self.profiles.keys() {
-            if let Err(e) = self.resolve(name) {
-                errors.push(format!("profile {name}: {e:#}"));
+            match self.resolve(name) {
+                Err(e) => errors.push(format!("profile {name}: {e:#}")),
+                Ok(r) if r.agent.root && r.agent.sudo => errors.push(format!(
+                    "profile {name}: agent.root and agent.sudo are alternatives: root runs as root, sudo as the user with sudo"
+                )),
+                Ok(_) => {}
             }
         }
         for (name, firm) in &self.firms {

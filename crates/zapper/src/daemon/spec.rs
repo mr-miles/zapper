@@ -120,6 +120,7 @@ pub fn build(
         hostname: format!("zapper-{session}"),
         user: agent.user.clone(),
         root: agent.root,
+        sudo: agent.sudo,
         home,
         workdir: agent.workdir.clone(),
         env,
@@ -128,7 +129,7 @@ pub fn build(
         fs,
         setup: profile.setup.clone(),
         ca_pem: ca_pem.into(),
-        supervise_exec: true,
+        supervise_exec: agent.supervise_exec(),
         forwards,
     })
 }
@@ -174,5 +175,30 @@ mod tests {
                 .unwrap()
                 .user_owned
         );
+    }
+
+    #[test]
+    fn sudo_drops_exec_supervision() {
+        let build = |agent: &str| {
+            let config = Config::from_yaml(&format!(
+                "profiles:\n  c:\n    agent: {{ kind: generic, {agent} }}\n"
+            ))
+            .unwrap();
+            let profile = config.resolve("c").unwrap();
+            build(&config, &profile, "s", "", vec![], vec![], vec![]).unwrap()
+        };
+        let plain = build("user: agent");
+        assert!(plain.supervise_exec && !plain.sudo);
+        let sudo = build("sudo: true");
+        assert!(!sudo.supervise_exec && sudo.sudo && !sudo.root);
+    }
+
+    #[test]
+    fn sudo_and_root_conflict() {
+        let err = Config::from_yaml(
+            "profiles:\n  c:\n    agent: { kind: generic, root: true, sudo: true }\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("alternatives"), "{err:#}");
     }
 }

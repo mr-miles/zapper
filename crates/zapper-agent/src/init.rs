@@ -127,6 +127,9 @@ fn setup(control: &Control, spec: &GuestSpec) -> Result<()> {
         )?;
     }
     ensure_user(&spec.user, &spec.home).context("creating user")?;
+    if spec.sudo {
+        ensure_sudo(&spec.user).context("agent.sudo")?;
+    }
 
     for d in &spec.disks {
         let flags =
@@ -270,6 +273,38 @@ fn ensure_user(user: &str, home: &str) -> Result<()> {
     }
     sys::chown(Path::new(home), UID, UID);
     fs::set_permissions(home, fs::Permissions::from_mode(0o750))?;
+    Ok(())
+}
+
+/// Lets `user` run anything as root without a password (`agent.sudo`).
+fn ensure_sudo(user: &str) -> Result<()> {
+    if !["/usr/bin/sudo", "/usr/local/bin/sudo", "/bin/sudo"]
+        .iter()
+        .any(|p| Path::new(p).exists())
+    {
+        bail!("the image has no sudo; install it (apt-get install sudo)");
+    }
+    fs::create_dir_all("/etc/sudoers.d")?;
+    // sudo reads the drop-in only when sudoers includes the directory.
+    let main = fs::read_to_string("/etc/sudoers").unwrap_or_default();
+    if !main.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("#includedir /etc/sudoers.d") || l.starts_with("@includedir /etc/sudoers.d")
+    }) {
+        let mut main = main;
+        main.push_str("\n@includedir /etc/sudoers.d\n");
+        fs::write("/etc/sudoers", main)?;
+        fs::set_permissions("/etc/sudoers", fs::Permissions::from_mode(0o440))?;
+    }
+    let drop_in = "/etc/sudoers.d/zapper";
+    fs::write(
+        drop_in,
+        // Nothing but this rule: sudo-rs, which Ubuntu 26.04 can use instead
+        // of sudo, rejects settings such as `requiretty`.
+        format!("{user} ALL=(ALL:ALL) NOPASSWD: ALL\n"),
+    )?;
+    fs::set_permissions(drop_in, fs::Permissions::from_mode(0o440))?;
+    sys::chown(Path::new(drop_in), 0, 0);
     Ok(())
 }
 

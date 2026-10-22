@@ -41,7 +41,7 @@ Each office worker runs in a zapper session, and zapper assumes that whatever ru
 | `fs` rules (`hidden`, `ro`) | Guest agent (bind mounts at boot) | No |
 | Process exit accounting | Guest kernel (`acct`) | No |
 
-The guest-side controls hold while the workload is unprivileged. A profile with `agent.root: true` gives them up, and the UI marks its sessions. A guest kernel exploit also defeats them. The host-side controls hold in both cases.
+The guest-side controls hold while the workload is unprivileged. A profile with `agent.root: true` or `agent.sudo: true` (the user keeps passwordless `sudo`, without `no_new_privs` and exec supervision) gives them up, and the UI marks its sessions. A guest kernel exploit also defeats them. The host-side controls hold in both cases.
 
 ## The record
 
@@ -103,7 +103,7 @@ From there, the VMM sees none of the daemon user's other files: the config, secr
 
 ## Usage
 
-- Run workers, and anything else you don't trust, with `root: false`, the default.
+- Run workers, and anything else you don't trust, with `root: false` and `sudo: false`, the defaults. Use `sudo: true` for agents you trust to administer their own VM: the VM and the host-side controls are the boundary, not the guest.
 - Use `proxy` secrets for bearer tokens and API keys: the workload can use them but can't read them. Use `guest` secrets for credentials the client has to hold, such as S3 signing keys, client certificates and kubeconfigs, and issue them scoped and short-lived.
 - Bind each `proxy` secret to the hosts that need it. A destination that echoes request headers back, such as an echo service, returns the value to the guest; `tests/e2e.sh` shows this with a test secret.
 - Use a `final: true` deny in the global layer for destinations that must stay unreachable from every profile.
