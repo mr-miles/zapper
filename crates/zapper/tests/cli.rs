@@ -235,6 +235,98 @@ async fn serve_listens_on_its_socket() {
     serve.start_kill().unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn services_added_listed_and_removed() {
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let id = session(&d, "web");
+    let text = ok(zapper(
+        &d,
+        &[
+            "service",
+            "add",
+            "db.internal:5432",
+            "--to-session",
+            &format!("{id}:5432"),
+            "--for",
+            "team=a",
+        ],
+    )
+    .await);
+    assert_eq!(
+        text,
+        format!("service 1: db.internal:5432 to session {id} port 5432; sessions also need a net rule for it\n")
+    );
+    // Another client's, which the operator can't remove.
+    let firms =
+        d.t.core
+            .add_service(zapper_core::ServiceSpec {
+                name: "git.acme.internal".into(),
+                port: 443,
+                sessions: Default::default(),
+                target: zapper_core::ServiceTarget::Addr("10.0.0.6:443".parse().unwrap()),
+                owner: "firm acme".into(),
+            })
+            .unwrap();
+    let text = ok(zapper(&d, &["service", "ls"]).await);
+    let rows: Vec<&str> = text.lines().collect();
+    assert!(rows[0].starts_with("ID"), "{text}");
+    assert!(
+        rows[1].contains("db.internal") && rows[1].contains("team=a"),
+        "{text}"
+    );
+    assert!(
+        rows[2].contains("all") && rows[2].contains("firm acme"),
+        "{text}"
+    );
+
+    let e = failed(zapper(&d, &["service", "rm", &firms.to_string()]).await);
+    assert!(e.contains("is firm acme's"), "{e}");
+    let text = ok(zapper(&d, &["service", "rm", "1"]).await);
+    assert_eq!(text, "removed service 1 (db.internal:5432)\n");
+    let e = failed(zapper(&d, &["service", "add", "x.internal", "--to", "10.0.0.5:80"]).await);
+    assert!(e.contains("name:port"), "{e}");
+    let o = zapper(&d, &["service", "add", "x.internal:80"]).await;
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "--to or --to-session: {}",
+        err(&o)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_labels_are_checked_before_anything_starts() {
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let dir = d.t.workdir();
+    let dir = dir.to_str().unwrap();
+    let e = failed(
+        zapper(
+            &d,
+            &[
+                "run",
+                "-p",
+                "web",
+                "-C",
+                dir,
+                "-l",
+                "firm=acme",
+                "--",
+                "true",
+            ],
+        )
+        .await,
+    );
+    assert!(e.contains("label firm is the office's"), "{e}");
+    let e = failed(
+        zapper(
+            &d,
+            &["run", "-p", "web", "-C", dir, "-l", "team", "--", "true"],
+        )
+        .await,
+    );
+    assert!(e.contains("key=value"), "{e}");
+}
+
 // `init` and `check`: no daemon needed.
 
 #[tokio::test]

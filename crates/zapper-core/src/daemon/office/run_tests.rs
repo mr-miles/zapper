@@ -1,6 +1,6 @@
 //! A firm's run without VMs (`test_run`): finding a session's run, grants
 //! and their network rules per repository, the git server's checks, the
-//! firm's service names, and the office port's requests.
+//! firm's services and zone, and the office port's requests.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use zapper_policy::{AnyRule, Policy, BOARD};
 
 use super::access::{self, Level};
-use super::facility::{self, Internal};
+use super::facility;
 use super::{labels, run_of, test_run, FirmRun};
 use crate::testing::TestCore;
 use crate::{NewSession, Session};
@@ -217,35 +217,73 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     );
 }
 
+/// Where `host:port` goes for `s`, in words.
+fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
+    use crate::daemon::services::{Route, Target};
+    match t.core.daemon().services.route(s, host, port) {
+        Some(Route::Service(Target::Handler { tls: true, .. })) => "git server".into(),
+        Some(Route::Service(Target::Session { id, port })) => format!("session {id}:{port}"),
+        Some(Route::Service(_)) => "other".into(),
+        Some(Route::Unserved) => "unserved".into(),
+        None => "host".into(),
+    }
+}
+
 #[test]
 fn the_firms_names_are_its_own() {
-    let (_t, run) = run();
+    let (t, run) = run();
     let d = run.domain.clone();
-    assert!(matches!(
-        facility::route(&run, &format!("git.{d}"), 443),
-        Some(Ok(Internal::Git))
-    ));
-    assert!(matches!(
-        facility::route(&run, &format!("git.{d}"), 80),
-        Some(Err(_))
-    ));
-    // No cluster in this firm: its names exist in the domain, unserved.
-    assert!(matches!(
-        facility::route(&run, &format!("cluster.{d}"), 6443),
-        Some(Err(_))
-    ));
-    assert!(matches!(
-        facility::route(&run, &format!("x.{d}"), 443),
-        Some(Err(_))
-    ));
-    assert!(facility::route(&run, "example.com", 443).is_none());
+    let pat = session_of(&run, "pat");
+    assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "git server");
+    assert_eq!(route(&t, &pat, &format!("git.{d}"), 80), "unserved");
+    // No cluster yet: its names are in the domain, unserved.
+    assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 6443), "unserved");
+    assert_eq!(route(&t, &pat, &format!("x.{d}"), 443), "unserved");
+    assert_eq!(route(&t, &pat, "example.com", 443), "host");
 
-    assert_eq!(facility::serves_name(&run, &format!("git.{d}")), Some(true));
+    let services = &t.core.daemon().services;
+    assert_eq!(services.resolves(&pat, &format!("git.{d}")), Some(true));
+    assert_eq!(services.resolves(&pat, &format!("nope.{d}")), Some(false));
+    assert_eq!(services.resolves(&pat, "example.com"), None);
+
+    // Not a session of the run: the names are nothing to it.
+    let plain = t
+        .core
+        .test_session(
+            NewSession::plain("w".into(), t.workdir(), Policy::default()),
+            true,
+        )
+        .unwrap();
+    assert_eq!(route(&t, &plain, &format!("git.{d}"), 443), "host");
+}
+
+#[tokio::test]
+async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
+    let (t, run) = run();
+    let d = run.domain.clone();
+    let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
+    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, false);
+    let cluster = t.core.test_session(new, true).unwrap();
+    facility::test_cluster(&t.core, &run, &cluster);
+    let pat = session_of(&run, "pat");
+    let c = &cluster.id;
     assert_eq!(
-        facility::serves_name(&run, &format!("nope.{d}")),
-        Some(false)
+        route(&t, &pat, &format!("cluster.{d}"), 6443),
+        format!("session {c}:6443")
     );
-    assert_eq!(facility::serves_name(&run, "example.com"), None);
+    assert_eq!(
+        route(&t, &pat, &format!("apps.{d}"), 80),
+        format!("session {c}:80")
+    );
+    assert_eq!(
+        route(&t, &pat, &format!("shop.apps.{d}"), 443),
+        format!("session {c}:443")
+    );
+    assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 443), "unserved");
+
+    facility::stop(&t.core, &run).await;
+    assert!(t.core.services().is_empty(), "{:?}", t.core.services());
+    assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "host");
 }
 
 /// One request over the office port, as `s`'s VM would make it.

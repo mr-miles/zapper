@@ -22,6 +22,7 @@ pub mod office;
 mod proxy;
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod record;
+pub mod services;
 pub mod session;
 mod spec;
 pub mod tls;
@@ -137,6 +138,12 @@ pub enum EventBody {
     Config {
         change: String,
     },
+    /// A service or zone added or removed (`services`).
+    Service {
+        change: String,
+        #[serde(flatten)]
+        service: services::Info,
+    },
     /// What a driven session's agent did: `started`, `turn_start`,
     /// `activity`, `steered`, `turn_end`, `exited`, `error`.
     Driver {
@@ -195,6 +202,7 @@ pub struct Daemon {
     approvals: Mutex<HashMap<String, Pending>>,
     pub ui_token: String,
     pub office: office::Office,
+    pub services: services::Services,
 }
 
 pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
@@ -340,6 +348,7 @@ impl Daemon {
             approvals: Mutex::new(HashMap::new()),
             ui_token: random_id(24),
             office: office::Office::default(),
+            services: services::Services::default(),
         }))
     }
 

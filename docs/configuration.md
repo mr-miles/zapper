@@ -66,6 +66,8 @@ profiles:
 
 `engine.network` is `nic` (the default) or `vsock`; [network](network.md) describes both.
 
+`engine.ports` lists guest TCP ports the host may connect to over vsock, such as `[6443]` for a test cluster's API, so a [service](network.md#services) can send other sessions there (`zapper service add k3s.internal:6443 --to-session ID:6443`). Nothing reaches them otherwise.
+
 `mounts` are copied in at boot. `{workdir}` is the directory `zapper run` was started in, or the one given with `-C`. A `rw` disk gets `extra` free space, 1 GiB by default. Changes stay in the session's disk until you copy them out with `zapper cp ID:/work ./out`.
 
 ### agent

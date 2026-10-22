@@ -55,7 +55,22 @@ Names are looked up on the host's resolver, so a query for a name the rules cove
 
 When the guest connects to one of these synthetic addresses, the daemon knows which name it stands for and decides on that name and the port. This works for any TCP protocol, such as HTTPS, SSH, git or a database. A connection to any other address is decided on the address itself.
 
-A firm's own service names (`git.`, `cluster.` and `apps.` under its domain) resolve the same way, but are never looked up on the host: the daemon routes connections to them to the firm's facilities itself ([office](office.md#names-and-who-reaches-what)).
+### Services
+
+A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule; rules with methods, paths or secrets don't apply to a service, since its traffic isn't inspected. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+
+A zone is a domain whose names resolve only to services, for the sessions it is for: a name in it that nothing serves doesn't exist (`NXDOMAIN`), and nothing about it is looked up on the host. A firm's domain is one: the office registers the zone and its services (`git.`, `cluster.` and `apps.` under the domain) for the run's sessions ([office](office.md#names-and-who-reaches-what)).
+
+The operator adds services with `zapper service add` (or `POST /v1/services`), for example a test cluster's API in one session for others to use:
+
+```
+zapper run -p k3s --keep --label team=a                 # session ID, its API on vsock port 6443
+zapper service add k3s.internal:6443 --to-session ID:6443 --for team=a
+zapper rule add profile:default '{kind: net, action: allow, host: k3s.internal, ports: [6443]}'
+zapper service ls ; zapper service rm 1
+```
+
+Adding and removing a service are `service` events.
 
 For an allowed connection, the daemon:
 

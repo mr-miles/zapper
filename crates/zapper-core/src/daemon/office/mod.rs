@@ -952,6 +952,7 @@ fn create_run(
     for o in access::owners(&run) {
         access::owner_access(d, &run, &o, BOARD);
     }
+    facility::register(d, &run)?;
     d.office()
         .runs
         .write()

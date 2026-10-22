@@ -58,6 +58,10 @@ enum Cmd {
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
+        /// A label for the session, `key=value`, which services pick
+        /// sessions by (repeatable).
+        #[arg(short, long = "label")]
+        labels: Vec<String>,
         /// Command instead of the profile's.
         #[arg(last = true)]
         command: Vec<String>,
@@ -178,6 +182,51 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RecordCmd,
     },
+    /// Services: names sessions use that the daemon connects itself.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// List services and zones.
+    Ls,
+    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`
+    Add {
+        /// The name and port sessions use; `*.` in front for any name
+        /// under it.
+        name: String,
+        /// An address on the host's network, `ip:port`.
+        #[arg(
+            long,
+            conflicts_with = "to_session",
+            required_unless_present = "to_session"
+        )]
+        to: Option<String>,
+        /// A port of a session's VM, `ID:port`.
+        #[arg(long)]
+        to_session: Option<String>,
+        /// Only for sessions with this label, `key=value` (repeatable);
+        /// every session without.
+        #[arg(long = "for")]
+        sessions: Vec<String>,
+    },
+    /// Remove a service added with `add`.
+    Rm { id: u64 },
+}
+
+/// `key=value` pairs, as JSON.
+fn label_pairs(pairs: &[String]) -> Result<Value> {
+    let mut m = serde_json::Map::new();
+    for p in pairs {
+        let (k, v) = p
+            .split_once('=')
+            .with_context(|| format!("{p:?}: key=value"))?;
+        m.insert(k.to_string(), json!(v));
+    }
+    Ok(Value::Object(m))
 }
 
 #[derive(Subcommand)]
@@ -435,6 +484,7 @@ async fn run(cli: Cli) -> Result<i32> {
             profile,
             keep,
             workdir,
+            labels,
             command,
         } => {
             let workdir = match workdir {
@@ -442,7 +492,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 None => std::env::current_dir()?,
             };
             eprintln!("zapper: starting a {profile} session…");
-            let body = serde_json::to_string(&json!({ "profile": profile, "workdir": workdir }))?;
+            let body = serde_json::to_string(
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)? }),
+            )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
             eprintln!("zapper: session {id} is ready");
@@ -781,6 +833,7 @@ async fn run(cli: Cli) -> Result<i32> {
         },
         #[cfg(feature = "office")]
         Cmd::Firm { cmd } => return firm_cli::firm(&c, cmd, cli.json).await,
+        Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
                 RecordCmd::Status => ("/v1/record".to_string(), false),
@@ -877,6 +930,85 @@ async fn attach(c: &Client, id: &str, command: &[String], system: bool) -> Resul
     };
     let io = c.attach(id, size, command, system).await?;
     term::run(io, tty).await
+}
+
+async fn service(c: &Client, cmd: ServiceCmd, json_out: bool) -> Result<()> {
+    match cmd {
+        ServiceCmd::Ls => {
+            let v = c.json(Method::GET, "/v1/services", None).await?;
+            if json_out {
+                print_json(&v);
+                return Ok(());
+            }
+            let rows = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    let sessions = x["sessions"]
+                        .as_object()
+                        .map(|m| {
+                            m.iter()
+                                .map(|(k, v)| format!("{k}={}", s(v)))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "all".into());
+                    vec![
+                        s(&x["id"]),
+                        s(&x["kind"]),
+                        s(&x["name"]),
+                        s(&x["port"]),
+                        sessions,
+                        s(&x["to"]),
+                        s(&x["owner"]),
+                    ]
+                })
+                .collect();
+            table(
+                &["id", "kind", "name", "port", "sessions", "to", "owner"],
+                rows,
+            );
+        }
+        ServiceCmd::Add {
+            name,
+            to,
+            to_session,
+            sessions,
+        } => {
+            let (name, port) = name
+                .rsplit_once(':')
+                .context("name:port, e.g. db.internal:5432")?;
+            let port: u16 = port.parse().context("the port")?;
+            let to = match (to, to_session) {
+                (Some(addr), _) => json!({ "addr": addr }),
+                (None, Some(t)) => {
+                    let (id, port) = t.rsplit_once(':').context("--to-session ID:port")?;
+                    json!({ "session": id, "port": port.parse::<u32>().context("the port")? })
+                }
+                (None, None) => bail!("give --to or --to-session"),
+            };
+            let body = json!({ "name": name, "port": port, "sessions": label_pairs(&sessions)?, "to": to });
+            let v = c
+                .json(Method::POST, "/v1/services", Some(body.to_string()))
+                .await?;
+            println!(
+                "service {}: {}:{} to {}; sessions also need a net rule for it",
+                s(&v["id"]),
+                s(&v["name"]),
+                s(&v["port"]),
+                s(&v["to"])
+            );
+        }
+        ServiceCmd::Rm { id } => {
+            let v = c
+                .json(Method::DELETE, &format!("/v1/services/{id}"), None)
+                .await?;
+            println!("removed service {id} ({}:{})", s(&v["name"]), s(&v["port"]));
+        }
+    }
+    Ok(())
 }
 
 async fn answer(c: &Client, id: &str, allow: bool, remember: Option<String>) -> Result<()> {

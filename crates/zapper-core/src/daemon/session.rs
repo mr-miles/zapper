@@ -155,6 +155,28 @@ impl Session {
         vm::vsock_path(&self.dir)
     }
 
+    /// Opens a host-initiated connection to a port of the session's VM,
+    /// over vsock.
+    pub async fn connect_port(&self, port: u32) -> Result<UnixStream> {
+        let mut stream = UnixStream::connect(self.vsock_path()).await?;
+        stream
+            .write_all(format!("CONNECT {port}\n").as_bytes())
+            .await?;
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        while line.len() < 64 {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            line.push(byte[0]);
+        }
+        if !line.starts_with(b"OK ") {
+            bail!("the VM refused port {port}");
+        }
+        Ok(stream)
+    }
+
     /// One of the session's labels.
     pub fn label(&self, key: &str) -> Option<&str> {
         self.labels.get(key).map(String::as_str)
@@ -288,6 +310,22 @@ impl NewSession {
 }
 
 /// Creates a session and boots its VM; returns once the guest is ready.
+/// The guest ports the host connects to over vsock: those the session was
+/// created with, then the profile's `engine.ports` not among them.
+fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
+    let mut v = given.to_vec();
+    for p in &engine.ports {
+        if !v.iter().any(|f| f.vsock_port == *p as u32) {
+            v.push(Forward {
+                vsock_port: *p as u32,
+                tcp_port: *p,
+                nic: engine.network == zapper_policy::NetworkMode::Nic,
+            });
+        }
+    }
+    v
+}
+
 /// Creates a session without booting it: its profile resolved, its
 /// directory and audit log, its rules; listed, as starting.
 pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Session>> {
@@ -476,7 +514,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
             &session.ca.pem,
             guest_disks,
             session.extra_files.clone(),
-            session.forwards.clone(),
+            forwards(&session.resolved.engine, &session.forwards),
         )?
     };
 
@@ -994,5 +1032,37 @@ impl Recorder {
             let line = serde_json::json!([t, kind, String::from_utf8_lossy(data)]);
             let _ = f.line(line.to_string().as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use zapper_policy::proto::Forward;
+    use zapper_policy::{Engine, NetworkMode};
+
+    #[test]
+    fn a_profiles_ports_join_the_sessions_forwards_once() {
+        let given = [Forward {
+            vsock_port: 6443,
+            tcp_port: 6443,
+            nic: true,
+        }];
+        let engine = Engine {
+            ports: vec![6443, 8080],
+            ..Engine::default()
+        };
+        let f = super::forwards(&engine, &given);
+        let ports: Vec<(u32, u16, bool)> = f
+            .iter()
+            .map(|f| (f.vsock_port, f.tcp_port, f.nic))
+            .collect();
+        assert_eq!(ports, [(6443, 6443, true), (8080, 8080, true)]);
+        // Without a NIC, to the guest's loopback.
+        let vsock = Engine {
+            ports: vec![8080],
+            network: NetworkMode::Vsock,
+            ..Engine::default()
+        };
+        assert!(!super::forwards(&vsock, &[])[0].nic);
     }
 }

@@ -462,6 +462,92 @@ async fn rules_added_to_a_session_are_its_own_and_an_event() {
     assert_eq!(gone.json()["scope"], format!("session:{s}"));
 }
 
+#[tokio::test]
+async fn new_sessions_labels_are_checked() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone());
+    let body = |labels: &str| {
+        format!(
+            r#"{{"profile":"web","workdir":"{}","labels":{labels}}}"#,
+            t.workdir().display()
+        )
+    };
+    let r = post(&app, "/v1/sessions", &body(r#"{"firm":"acme"}"#)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("label firm is the office's"), "{}", r.body);
+    let r = post(&app, "/v1/sessions", &body(r#"{"a b":"c"}"#)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("label a b=c"), "{}", r.body);
+    // Good labels pass; with no VM to boot, the session fails later.
+    let r = post(&app, "/v1/sessions", &body(r#"{"team":"a.1"}"#)).await;
+    assert!(!r.body.contains("label"), "{}", r.body);
+}
+
+#[tokio::test]
+async fn services_added_listed_and_removed() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone());
+    assert_eq!(get(&app, "/v1/services").await.json(), json!([]));
+    let id = session(&t, "web", &[], true);
+    let add = |body: String| {
+        let app = app.clone();
+        async move { post(&app, "/v1/services", &body).await }
+    };
+    let r = add(format!(
+        r#"{{"name":"db.internal","port":5432,"sessions":{{"team":"a"}},"to":{{"session":"{id}","port":5432}}}}"#
+    ))
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let svc = r.json();
+    assert_eq!(svc["to"], format!("session {id} port 5432"));
+    assert_eq!(svc["owner"], "operator");
+    let r = add(r#"{"name":"lan.internal","port":80,"to":{"addr":"10.0.0.5:80"}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(
+        get(&app, "/v1/services")
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let r =
+        add(r#"{"name":"x.internal","port":1,"to":{"session":"nosuch","port":1}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    let r = add(r#"{"name":"not a name","port":1,"to":{"addr":"10.0.0.5:80"}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    let r = add(r#"{"name":"x.internal","port":1,"to":{"nowhere":1}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    // Another client's service is theirs to remove.
+    let firms = t
+        .core
+        .add_service(zapper_core::ServiceSpec {
+            name: "git.acme.internal".into(),
+            port: 443,
+            sessions: Default::default(),
+            target: zapper_core::ServiceTarget::Addr("10.0.0.6:443".parse().unwrap()),
+            owner: "firm acme".into(),
+        })
+        .unwrap();
+    let del = |id: String| {
+        let app = app.clone();
+        async move { send(&app, Method::DELETE, &format!("/v1/services/{id}"), &[], "").await }
+    };
+    let r = del(firms.to_string()).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert!(r.body.contains("is firm acme's"), "{}", r.body);
+    let r = del(svc["id"].to_string()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["name"], "db.internal");
+    assert_eq!(
+        del(svc["id"].to_string()).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
 // The UI.
 
 /// The UI's cookie, from the token in the URL `zapper serve` prints.
