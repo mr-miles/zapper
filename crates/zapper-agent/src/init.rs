@@ -210,9 +210,12 @@ fn install_self() -> Result<()> {
     fs::copy("/proc/self/exe", to)?;
     fs::set_permissions(to, fs::Permissions::from_mode(0o755))?;
     sys::chown(to, 0, 0);
-    let link = Path::new("/usr/local/bin/office");
-    let _ = fs::remove_file(link);
-    std::os::unix::fs::symlink("zapper-agent", link)?;
+    #[cfg(feature = "office")]
+    {
+        let link = Path::new("/usr/local/bin/office");
+        let _ = fs::remove_file(link);
+        std::os::unix::fs::symlink("zapper-agent", link)?;
+    }
     Ok(())
 }
 

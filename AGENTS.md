@@ -39,7 +39,7 @@ make image                      # ubuntu-24.04: the base profiles, and a plain s
 make image IMAGE=office         # Claude Code and pi: `zapper run -p claude`, and The Office's workers
 ```
 
-Run zapper from the repository's root: it uses `config/zapper.yaml`, tracked in the repository, whose paths are relative to it or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the config to `~/.config/zapper/zapper.yaml`.
+Run zapper from the repository's root: it uses `config/zapper.yaml`, tracked in the repository, whose paths are relative to it or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the config to `~/.config/zapper/zapper.yaml` and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
 
 Run image builds in the background with a log (`make image > /tmp/zapper-image.log 2>&1`) and give the user `tail -f /tmp/zapper-image.log`.
 

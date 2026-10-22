@@ -8,11 +8,18 @@
 pub mod addr;
 pub mod api;
 mod dns;
+// Workers' conversations and the record's checks are the office's.
+#[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
 pub mod httplog;
 mod nic;
+#[cfg(feature = "office")]
+pub mod office;
+#[cfg(not(feature = "office"))]
+#[path = "office_off.rs"]
 pub mod office;
 mod proxy;
+#[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod record;
 pub mod session;
 mod spec;
@@ -240,12 +247,23 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 use std::os::unix::fs::OpenOptionsExt;
 
+/// A config with firms needs a zapper built with the office.
+pub fn office_config(c: &Config) -> Result<()> {
+    if !cfg!(feature = "office") && !c.firms.is_empty() {
+        anyhow::bail!(
+            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
+        );
+    }
+    Ok(())
+}
+
 impl Daemon {
     pub fn new(startup_path: PathBuf) -> Result<Arc<Self>> {
         let config = if startup_path.exists() {
             let text = std::fs::read_to_string(&startup_path)
                 .with_context(|| format!("reading {}", startup_path.display()))?;
             Config::from_yaml(&text)
+                .and_then(|c| office_config(&c).map(|_| c))
                 .with_context(|| format!("loading {}", startup_path.display()))?
         } else {
             tracing::warn!(
@@ -347,6 +365,7 @@ impl Daemon {
         let out = f(&mut next)?;
         next.normalize();
         next.validate()?;
+        office_config(&next)?;
         if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
@@ -562,6 +581,14 @@ pub fn redact(mut c: Config) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firms_need_the_office() {
+        let mut c = Config::default();
+        assert!(office_config(&c).is_ok());
+        c.firms.insert("acme".into(), Default::default());
+        assert_eq!(office_config(&c).is_ok(), cfg!(feature = "office"));
+    }
 
     #[test]
     fn redacted_config_hides_inline_secret_values() {

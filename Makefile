@@ -12,6 +12,7 @@
 #   make lint              rustfmt and clippy (warnings are errors), as the pre-commit hook runs them
 #   make fmt               format the code with rustfmt
 #   make hooks             use the repository's git hooks (.githooks: pre-commit runs make lint)
+#   OFFICE=0               with any of the above: zapper without The Office (no firms)
 #   make test-e2e          boots real VMs: policy, secrets, exec, attacks (needs KVM, network)
 #   make clean
 #
@@ -25,6 +26,18 @@ PREFIX  ?= $(HOME)/.local
 IMAGE   ?= ubuntu-24.04
 ZAPPER  := $(TARGET)/zapper
 KERNEL  ?= k8s
+# OFFICE=0 builds zapper without The Office (cargo --no-default-features),
+# and without zapper-inspect, which reads firms' runs.
+OFFICE  ?= 1
+ifeq ($(OFFICE),0)
+FEATURES := --no-default-features
+HOST     := -p zapper -p zapper-keeper
+BINS     := zapper zapper-agent
+else
+FEATURES :=
+HOST     := -p zapper -p zapper-keeper -p zapper-inspect
+BINS     := zapper zapper-agent zapper-inspect
+endif
 
 # Image recipes: name → base and build steps.
 BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps && rm -rf /var/lib/apt/lists/*
@@ -74,13 +87,13 @@ deps:
 	scripts/fetch-deps.sh
 
 build:
-	cargo build --release -p zapper-agent --target $(MUSL)
-	cargo build --release -p zapper -p zapper-keeper -p zapper-inspect
+	cargo build --release $(FEATURES) -p zapper-agent --target $(MUSL)
+	cargo build --release $(FEATURES) $(HOST)
 	cp $(AGENT) $(TARGET)/zapper-agent
 
 install: build
 	install -d $(PREFIX)/bin
-	install -m 0755 $(TARGET)/zapper $(TARGET)/zapper-agent $(TARGET)/zapper-inspect $(PREFIX)/bin/
+	install -m 0755 $(addprefix $(TARGET)/,$(BINS)) $(PREFIX)/bin/
 
 image: build
 	@test -n "$(IMAGE_FROM_$(IMAGE))" || { echo "no recipe for IMAGE=$(IMAGE); see IMAGE_FROM_* in the Makefile, or run zapper image build"; exit 1; }
@@ -93,11 +106,11 @@ check: build
 	$(ZAPPER) check
 
 test:
-	cargo test --workspace
+	cargo test --workspace $(FEATURES)
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --release -- -D warnings
+	cargo clippy --workspace --all-targets --release $(FEATURES) -- -D warnings
 
 fmt:
 	cargo fmt --all

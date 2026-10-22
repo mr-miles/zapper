@@ -24,7 +24,7 @@ make deps         # downloads Firecracker and a guest kernel
 make install      # builds zapper, zapper-agent and zapper-inspect into ~/.local/bin
 ```
 
-zapper is the daemon and CLI the office runs on. Run it from the repository's root: it uses `config/zapper.yaml` there, and paths in it are relative to that file or under your home. Outside a checkout, `zapper init` copies it to `~/.config/zapper/zapper.yaml`. The config defines the firm `acme` and the profiles its workers run with; a profile is a recipe for a VM: which image, which command, which rules.
+zapper is the daemon and CLI the office runs on. Run it from the repository's root: it uses `config/zapper.yaml` there, and paths in it are relative to that file or under your home. Outside a checkout, `zapper init` copies it to `~/.config/zapper/zapper.yaml`, with the workers' skills in `~/.config/zapper/skills`. The config defines the firm `acme` and the profiles its workers run with; a profile is a recipe for a VM: which image, which command, which rules.
 
 ## 3. Images and the cluster's kernel
 

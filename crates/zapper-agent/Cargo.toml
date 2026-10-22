@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["office"]
+# Firm workers' `office` command and MCP server, and the fake Claude and pi
+# the office's tests use.
+office = []
+
 [dependencies]
 zapper-policy = { path = "../zapper-policy" }
 anyhow.workspace = true

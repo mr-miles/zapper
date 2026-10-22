@@ -404,6 +404,8 @@ firms:
 EOF
 echo "rules: []" > "$T/fake/none.yaml"
 chmod 600 "$T/zapper.yaml"
+# The workers' skills, next to the config: firms read them from there only.
+"$Z" init > "$T/init.log" || { cat "$T/init.log"; echo "zapper init failed"; exit 1; }
 
 K=$(dirname "$Z")/zapper-keeper
 "$K" serve --socket "$T/keeper.sock" --dir "$T/record" --key "$T/keeper.key" --writer-uid "$(id -u)" --group "$(id -g)" --ui 127.0.0.1:0 > "$T/keeper.log" 2>&1 &

@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["office"]
+# The Office: firms of workers, their mail, drive, security officers and
+# cluster. Without it (`--no-default-features`), zapper runs sessions only.
+office = []
+
 [dependencies]
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }

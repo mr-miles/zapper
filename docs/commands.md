@@ -37,7 +37,7 @@ Setting up and running the daemon:
 
 | Command | Purpose |
 |---|---|
-| `zapper init` | Outside a checkout: write the repository's config to `~/.config/zapper/zapper.yaml`, if it doesn't exist yet |
+| `zapper init` | Outside a checkout: write the repository's config to `~/.config/zapper/zapper.yaml` if it doesn't exist yet, and the default skills of The Office's workers to `~/.config/zapper/skills` (those already there stay; a zapper built without the office writes none) |
 | `zapper check` | Report missing prerequisites, each with the command that fixes it |
 | `zapper serve` | Run the daemon; prints the UI URL |
 

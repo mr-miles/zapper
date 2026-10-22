@@ -79,7 +79,7 @@ firms:
 | `security` | `officers`, `digest_every: {minutes, requests}`, `answer_within`, `officer_first` (default true: a firm whose CEO can hire a security officer hires or contracts nobody else before one) |
 | `git`, `facilities`, `credentials`, `product_port`, `dashboard_port`, `landing` | The firm's services ([below](#facilities-the-cluster-git-and-the-product)) |
 | `scenarios.<name>` | A preset the board picks when starting a run: `description`, `note` (a few words next to its name in Kickoff, like `unavailable on Claude`; only text), `articles` (added to the board's own), `hires` and `script` ([scenarios](#scenarios)) |
-| `skills_dir` | A directory of `<name>/SKILL.md` used instead of the built-in skills of the same name |
+| `skills_dir` | The directory of the workers' skills, `<name>/SKILL.md` each, relative to the config; `skills` if unset. `zapper init` writes the default skills there ([skills](#skills)) |
 
 The office adds to each worker's profile at boot: the preamble (in `~/.claude/CLAUDE.md`, or `~/.pi/agent/AGENTS.md` for pi), the skills, the `office` MCP server, the model, and credentials for the firm's services. The profile still decides the image, the VM's size, the network rules and the secrets.
 
@@ -496,7 +496,7 @@ So the CEO has the shared skills, `manager`, `security-review` and `ceo`; the CT
 | `security-review` | officers, the CEO while holding security | Network requests and TLS, credential requests, background checks, watching traffic, escalation |
 | work skill | each role | The role's core function: `ceo`, `cto`, `product-manager`, `software-engineer`, `designer`, `researcher`, `analyst` |
 
-Skills live in [config/skills/](../config/skills/). They are built into the binary, and the acme firm reads them live through `skills_dir: skills` (relative to the config), so an edit applies at the next `zapper firm up`. A skill missing from `skills_dir` falls back to the built-in one. Keep the frontmatter (`name`, `description`): Claude Code uses the description to decide when to read a skill.
+A firm reads its skills from its `skills_dir`, `skills` next to the config unless set, at each `zapper firm up`, so an edit applies at the next one. In a checkout that is [config/skills/](../config/skills/); elsewhere, `zapper init` writes the default skills (built into zapper from config/skills/) to `~/.config/zapper/skills`, keeping any already there. There are no built-in fallbacks: a firm whose directory lacks a skill it needs doesn't start, and `zapper check` lists what is missing. Keep the frontmatter (`name`, `description`): Claude Code uses the description to decide when to read a skill.
 
 ## Web UI
 

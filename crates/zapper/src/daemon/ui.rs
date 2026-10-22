@@ -5,6 +5,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 
 /// The office: firms, mail, security, the shared drive, statistics.
+#[cfg(feature = "office")]
 pub async fn index() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -12,12 +13,37 @@ pub async fn index() -> impl IntoResponse {
     )
 }
 
+/// Without the office, the front page is the sessions page.
+#[cfg(not(feature = "office"))]
+pub async fn index() -> impl IntoResponse {
+    sessions().await
+}
+
 /// Sessions, network, terminals and approvals.
 pub async fn sessions() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("ui.html"),
+        sessions_page(),
     )
+}
+
+#[cfg(feature = "office")]
+fn sessions_page() -> &'static str {
+    include_str!("ui.html")
+}
+
+/// Without the office, the page is flagged `office-disabled`, which hides
+/// its way back to the office.
+#[cfg(not(feature = "office"))]
+fn sessions_page() -> &'static str {
+    static PAGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        include_str!("ui.html").replacen(
+            r#"<html lang="en">"#,
+            r#"<html lang="en" class="office-disabled">"#,
+            1,
+        )
+    });
+    &PAGE
 }
 
 /// xterm.js 6.0.0 (MIT), bundled; see `assets/README`.
@@ -55,4 +81,14 @@ pub async fn xterm_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("assets/xterm.css"),
     )
+}
+
+#[cfg(all(test, not(feature = "office")))]
+mod tests {
+    #[test]
+    fn without_the_office_the_sessions_page_is_flagged() {
+        let page = super::sessions_page();
+        assert!(page.contains(r#"<html lang="en" class="office-disabled">"#));
+        assert!(page.contains("html.office-disabled footer.foot { display:none; }"));
+    }
 }

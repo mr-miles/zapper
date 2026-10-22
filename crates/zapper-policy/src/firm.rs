@@ -47,8 +47,9 @@ pub struct Firm {
     /// The credentials subsystem: how long grants last, and the shared
     /// drive's spaces. Access itself is granted during a run, never by role.
     pub credentials: Credentials,
-    /// Directory of skills (`<name>/SKILL.md`) used instead of the built-in
-    /// ones of the same name.
+    /// Directory of the workers' skills (`<name>/SKILL.md`), relative to the
+    /// config file; `skills` if unset. `zapper init` writes the defaults
+    /// there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills_dir: Option<String>,
     /// Names for hires whose hirer doesn't pick one, in order.

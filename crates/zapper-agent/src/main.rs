@@ -9,9 +9,11 @@
 
 mod acct;
 mod control;
+#[cfg(feature = "office")]
 mod fake;
 mod forward;
 mod init;
+#[cfg(feature = "office")]
 mod office;
 mod shell;
 mod sys;
@@ -28,6 +30,7 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().collect();
     // Installed in guests as `office` too.
+    #[cfg(feature = "office")]
     if args
         .first()
         .is_some_and(|a| a.rsplit('/').next() == Some("office"))
@@ -36,7 +39,9 @@ fn main() {
     }
     match args.get(1).map(String::as_str) {
         Some("--version") => println!("zapper-agent {}", env!("CARGO_PKG_VERSION")),
+        #[cfg(feature = "office")]
         Some("office") => std::process::exit(office::cli(&args[2..])),
+        #[cfg(feature = "office")]
         Some(f @ ("fake-claude" | "fake-pi")) => std::process::exit(fake::run(
             args.get(2).map(String::as_str).unwrap_or("/dev/null"),
             if f == "fake-pi" {
