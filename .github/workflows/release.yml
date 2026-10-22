@@ -13,9 +13,9 @@ permissions:
 
 env:
   RUST_VERSION: 1.99.1
-  # 0 releases zapper without the office (no firms); make and package.sh
-  # both read it.
-  OFFICE: 1
+  # This fork releases zapper without the office (no firms); 1 puts it back.
+  # make and package.sh both read it.
+  OFFICE: 0
   CARGO_TERM_COLOR: always
 
 jobs:
