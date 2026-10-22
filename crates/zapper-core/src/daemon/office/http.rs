@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use zapper_policy::{AnyRule, BOARD};
 
 use super::{drive, security};
-use crate::daemon::api_error::ApiError;
+use crate::ApiError;
 use crate::Core;
 
 type D = State<Core>;

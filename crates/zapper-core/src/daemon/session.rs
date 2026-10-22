@@ -149,6 +149,12 @@ impl Session {
         }
     }
 
+    /// The socket of the session's VM's vsock, for connecting to a port in
+    /// the guest (`CONNECT <port>`).
+    pub fn vsock_path(&self) -> PathBuf {
+        vm::vsock_path(&self.dir)
+    }
+
     /// One of the session's labels.
     pub fn label(&self, key: &str) -> Option<&str> {
         self.labels.get(key).map(String::as_str)

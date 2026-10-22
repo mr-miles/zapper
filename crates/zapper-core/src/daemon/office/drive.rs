@@ -14,7 +14,8 @@ use zapper_policy::proto::{Frame, ShellRequest};
 use zapper_policy::{parse_size, Firm, BOARD};
 
 use super::{now, FirmRun};
-use crate::daemon::session::{read_frame, Session};
+use crate::util::read_frame;
+use crate::Session;
 
 /// No `code`: code lives in the firm's git repository, shared as a branch.
 const KINDS: [&str; 5] = ["document", "report", "dataset", "deck", "board-pack"];

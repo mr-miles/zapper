@@ -24,6 +24,6 @@ pub use daemon::office::skills;
 /// `zapper-keeper` as a separate user.
 pub use daemon::record;
 pub use interface::{
-    Core, Event, NewSession, Pending, Remember, RuleRemoval, Session, SessionInfo, TermChunk,
-    TerminalInfo,
+    Core, Event, NewSession, Pending, Remember, RuleRemoval, Session, SessionInfo, Status,
+    TermChunk, TerminalInfo,
 };

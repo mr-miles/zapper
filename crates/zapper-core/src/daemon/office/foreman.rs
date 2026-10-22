@@ -16,10 +16,10 @@ use zapper_policy::proto::ShellRequest;
 
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use crate::daemon::session::Session;
 use crate::driver::{self, Observer, Out, Proc};
 use crate::harness::{self, Driver, Outcome};
 use crate::Core;
+use crate::Session;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;

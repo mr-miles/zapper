@@ -23,10 +23,9 @@ use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::{drive, FirmRun};
-use crate::daemon::session::{NewSession, Session};
-use crate::daemon::vm;
 use crate::util::random_id;
 use crate::Core;
+use crate::{NewSession, Session};
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -122,7 +121,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// Opens a host-initiated vsock connection to a port of a session's VM.
 pub async fn vsock_connect(s: &Session, port: u32) -> Result<UnixStream> {
-    let mut stream = UnixStream::connect(vm::vsock_path(&s.dir)).await?;
+    let mut stream = UnixStream::connect(s.vsock_path()).await?;
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;

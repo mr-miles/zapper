@@ -35,9 +35,9 @@ use tokio::sync::{Notify, Semaphore};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Firm, Policy, BOARD};
 
-use super::session::{self, NewSession, Session};
 use crate::util::{now, random_id};
 use crate::Core;
+use crate::{NewSession, Session, Status};
 use journal::Journal;
 use mail::{Draft, Kind, PostOffice};
 
@@ -611,12 +611,7 @@ fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
     let running = d
         .sessions()
         .iter()
-        .filter(|s| {
-            !matches!(
-                *s.status.borrow(),
-                session::Status::Stopped(_) | session::Status::Failed(_)
-            )
-        })
+        .filter(|s| !matches!(*s.status.borrow(), Status::Stopped(_) | Status::Failed(_)))
         .count();
     if running + count > config.daemon.max_sessions {
         bail!(

@@ -17,8 +17,8 @@ use zapper_policy::{parse_duration, NetRequest, BOARD};
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun};
-use crate::daemon::session::Session;
 use crate::Core;
+use crate::Session;
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";

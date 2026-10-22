@@ -14,7 +14,9 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon, EventBody};
 
-pub use crate::daemon::session::{NewSession, Session, SessionInfo, TermChunk, TerminalInfo};
+pub use crate::daemon::session::{
+    NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
+};
 pub use crate::daemon::{Event, Pending, Remember};
 
 /// A handle on a running daemon. Cheap to clone.
