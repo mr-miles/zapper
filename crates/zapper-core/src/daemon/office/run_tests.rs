@@ -9,7 +9,7 @@ use zapper_policy::{AnyRule, Policy, BOARD};
 
 use super::access::{self, Level};
 use super::facility::{self, Internal};
-use super::{test_run, FirmLink, FirmRun};
+use super::{labels, run_of, test_run, FirmRun};
 use crate::daemon::session::{NewSession, Session};
 use crate::daemon::testing::TestDaemon;
 
@@ -71,23 +71,16 @@ fn ids(rules: &[(String, String, Vec<u16>)]) -> Vec<&str> {
 }
 
 #[test]
-fn a_session_finds_its_run_by_its_link() {
+fn a_session_finds_its_run_by_its_labels() {
     let (t, run) = run();
-    let pat = session_of(&run, "pat");
-    let found = pat.firm.as_ref().unwrap().run().unwrap();
+    let found = run_of(&t.d, &session_of(&run, "pat")).unwrap();
     assert_eq!(found.id, run.id);
 
     // A session from an earlier run of the firm: not this run's.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    old.firm = Some(FirmLink {
-        firm: "acme".into(),
-        member: "pat".into(),
-        worker: true,
-        run: std::sync::Weak::new(),
-        role: None,
-    });
+    old.labels = labels("acme", "an-earlier-run", "pat", true);
     let old = t.test_session(old, true).unwrap();
-    assert!(old.firm.as_ref().unwrap().run().is_none());
+    assert!(run_of(&t.d, &old).is_none());
 }
 
 #[test]

@@ -70,8 +70,12 @@ async fn post(app: &Router, uri: &str, body: &str) -> Reply {
     send(app, Method::POST, uri, &[], body).await
 }
 
-fn session(t: &TestCore, profile: &str, running: bool) -> String {
-    let new = NewSession::plain(profile.into(), t.workdir(), Policy::default());
+fn session(t: &TestCore, profile: &str, labels: &[(&str, &str)], running: bool) -> String {
+    let mut new = NewSession::plain(profile.into(), t.workdir(), Policy::default());
+    new.labels = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     t.core.test_session(new, running).unwrap().id.clone()
 }
 
@@ -253,13 +257,14 @@ async fn audit_logs_by_session_id_only() {
 }
 
 #[tokio::test]
-async fn sessions_listed_and_read() {
+async fn sessions_with_their_labels() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone());
-    let id = session(&t, "web", true);
+    let id = session(&t, "web", &[("firm", "acme"), ("member", "pat")], true);
     let all = get(&app, "/v1/sessions").await.json();
     assert_eq!(all[0]["id"], id);
-    assert!(all[0].get("firm").is_none(), "of no firm");
+    assert_eq!(all[0]["labels"]["member"], "pat");
+    assert_eq!(all[0]["firm"], "acme");
     let one = get(&app, &format!("/v1/sessions/{id}")).await;
     assert_eq!(one.status, StatusCode::OK);
     assert_eq!(
@@ -272,7 +277,7 @@ async fn sessions_listed_and_read() {
 async fn deleting_a_session_stops_and_forgets_it() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone());
-    let id = session(&t, "web", true);
+    let id = session(&t, "web", &[], true);
     let r = send(&app, Method::DELETE, &format!("/v1/sessions/{id}"), &[], "").await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert!(t.core.sessions().is_empty());
@@ -291,25 +296,22 @@ async fn prompts_go_to_driven_sessions_of_no_firm() {
         StatusCode::BAD_REQUEST
     );
 
-    // A firm's worker, with the office.
-    if let Some(worker) = t.firm_worker("bot", "acme", "pat") {
-        let worker = &worker.id;
-        let r = post(&app, &format!("/v1/sessions/{worker}/prompt"), task).await;
-        assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
-        assert!(r.body.contains("pat works for firm acme"), "{}", r.body);
-    }
+    let worker = session(&t, "bot", &[("firm", "acme"), ("member", "pat")], true);
+    let r = post(&app, &format!("/v1/sessions/{worker}/prompt"), task).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert!(r.body.contains("pat works for firm acme"), "{}", r.body);
 
-    let plain = session(&t, "web", true);
+    let plain = session(&t, "web", &[], true);
     let r = post(&app, &format!("/v1/sessions/{plain}/prompt"), task).await;
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert!(r.body.contains("not driven"), "{}", r.body);
 
-    let starting = session(&t, "bot", false);
+    let starting = session(&t, "bot", &[], false);
     let r = post(&app, &format!("/v1/sessions/{starting}/prompt"), task).await;
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert!(r.body.contains("not running"), "{}", r.body);
 
-    let bot = session(&t, "bot", true);
+    let bot = session(&t, "bot", &[], true);
     let r = post(&app, &format!("/v1/sessions/{bot}/prompt"), task).await;
     assert_eq!(r.status, StatusCode::ACCEPTED, "{}", r.body);
     assert_eq!(r.json()["queued"], 1);
@@ -320,7 +322,7 @@ async fn prompts_go_to_driven_sessions_of_no_firm() {
 async fn with_the_driver_off_prompts_are_refused() {
     let t = TestCore::with_daemon("driver: false", "profiles:\n  web: {}\n");
     let app = super::api(t.core.clone());
-    let id = session(&t, "web", true);
+    let id = session(&t, "web", &[], true);
     let r = post(
         &app,
         &format!("/v1/sessions/{id}/prompt"),
@@ -410,7 +412,7 @@ async fn the_layers_a_request_is_decided_by() {
         rule(r#"{"profile":"web","net":{"host":"x.bad.example","port":443}}"#).await,
         "global-deny"
     );
-    let s = session(&t, "web", true);
+    let s = session(&t, "web", &[], true);
     let by_session = format!(r#"{{"session":"{s}","net":{{"host":"example.com","port":443}}}}"#);
     assert_eq!(
         post(&app, "/v1/evaluate", &by_session).await.json()["decision"]["rule"],
@@ -436,7 +438,7 @@ async fn audit_logs_of_sessions_listed_or_ended() {
     // A session id's form, of a session the daemon no longer lists.
     let r = get(&app, "/v1/sessions/abcdef/audit").await;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
-    let id = session(&t, "web", true);
+    let id = session(&t, "web", &[], true);
     let r = get(&app, &format!("/v1/sessions/{id}/audit")).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert!(r.body.contains("starting"), "{}", r.body);
@@ -446,7 +448,7 @@ async fn audit_logs_of_sessions_listed_or_ended() {
 async fn rules_added_to_a_session_are_its_own_and_an_event() {
     let t = TestCore::new(RULES);
     let app = super::api(t.core.clone());
-    let s = session(&t, "web", true);
+    let s = session(&t, "web", &[], true);
     let body = format!(
         r#"{{"scope":"session:{s}","rule":{{"kind":"net","action":"allow","host":"api.example.com"}}}}"#
     );

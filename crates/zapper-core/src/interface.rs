@@ -95,6 +95,14 @@ impl Core {
         self.d.sessions.read().unwrap().values().cloned().collect()
     }
 
+    /// The sessions with a label set to a value, e.g. `firm` = `acme`.
+    pub fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>> {
+        self.sessions()
+            .into_iter()
+            .filter(|s| s.label(key) == Some(value))
+            .collect()
+    }
+
     /// Starts a session; returns once its guest is ready.
     pub async fn create_session(&self, new: NewSession) -> Result<Arc<Session>> {
         session::create(self.d.clone(), new).await

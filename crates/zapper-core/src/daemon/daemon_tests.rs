@@ -98,20 +98,6 @@ fn approvals_start_empty_and_unknown_ones_are_errors() {
 
 // Sessions, registered without a VM.
 
-#[cfg(feature = "office")]
-fn firm_link(
-    member: &str,
-    role: Option<(String, std::sync::Arc<std::sync::RwLock<Policy>>)>,
-) -> super::office::FirmLink {
-    super::office::FirmLink {
-        firm: "acme".into(),
-        member: member.into(),
-        worker: true,
-        run: std::sync::Weak::new(),
-        role,
-    }
-}
-
 #[test]
 fn a_sessions_layers_its_own_then_its_profiles_then_global() {
     let t = TestDaemon::new(RULES);
@@ -131,13 +117,12 @@ fn a_sessions_layers_its_own_then_its_profiles_then_global() {
     );
 }
 
-#[cfg(feature = "office")]
 #[test]
-fn a_firm_workers_layers_have_its_role_between_its_own_and_its_profiles() {
+fn shared_layers_go_between_its_own_and_its_profiles() {
     let t = TestDaemon::new(RULES);
     let role = std::sync::Arc::new(std::sync::RwLock::new(Policy::default()));
     let mut new = new_session(&t, "web");
-    new.firm = Some(firm_link("pat", Some(("eng".into(), role))));
+    new.shared_layers = vec![(Scope::Role("acme/eng".into()), role)];
     let s = t.test_session(new, true).unwrap();
     let scopes: Vec<Scope> = s
         .layers(&t.d.config.read().unwrap())
@@ -165,12 +150,14 @@ fn a_driven_session_has_a_driver() {
     assert!(plain.driver.is_none());
 }
 
-#[cfg(feature = "office")]
 #[test]
 fn a_firms_workers_are_driven_by_the_foreman_not_a_driver() {
     let t = TestDaemon::new(RULES);
     let mut worker = new_session(&t, "bot");
-    worker.firm = Some(firm_link("pat", None));
+    worker.labels = [("firm", "acme"), ("member", "pat")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     let worker = t.test_session(worker, true).unwrap();
     assert!(worker.driver.is_none());
     let i = worker.info();

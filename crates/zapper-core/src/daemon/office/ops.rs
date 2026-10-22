@@ -16,14 +16,14 @@ use zapper_policy::proto::MAX_OFFICE_LINE;
 use zapper_policy::{parse_duration, NetRequest, BOARD};
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
-use super::{drive, now, security, FirmLink, FirmRun};
+use super::{drive, now, security, FirmRun};
 use crate::daemon::session::Session;
 use crate::daemon::Daemon;
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 
-pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, link: FirmLink, listener: UnixListener) {
+pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
     let limit = Arc::new(Semaphore::new(8));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -32,15 +32,15 @@ pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, link: FirmLink, listener: Un
         let Ok(permit) = limit.clone().try_acquire_owned() else {
             continue;
         };
-        let (d, s, link) = (d.clone(), s.clone(), link.clone());
+        let (d, s) = (d.clone(), s.clone());
         tokio::spawn(async move {
-            let _ = handle(d, s, link, stream).await;
+            let _ = handle(d, s, stream).await;
             drop(permit);
         });
     }
 }
 
-async fn handle(d: Arc<Daemon>, s: Arc<Session>, link: FirmLink, stream: UnixStream) -> Result<()> {
+async fn handle(d: Arc<Daemon>, s: Arc<Session>, stream: UnixStream) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = Vec::new();
@@ -54,19 +54,20 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, link: FirmLink, stream: UnixStr
     let reply = if n > MAX_OFFICE_LINE {
         json!({ "error": format!("request longer than {MAX_OFFICE_LINE} bytes") })
     } else {
-        let run = link.run();
+        let run = super::run_of(&d, &s);
+        let member = s.label("member").unwrap_or_default();
         match (run, serde_json::from_slice::<Value>(&line)) {
             (None, _) => json!({ "error": "the firm isn't running" }),
             (_, Err(e)) => json!({ "error": format!("bad request: {e}") }),
             (Some(run), Ok(req)) => {
                 let op = req["op"].as_str().unwrap_or("").to_string();
                 let args = req.get("args").cloned().unwrap_or(json!({}));
-                match dispatch(&d, &run, &s, &link.member, &op, &args).await {
+                match dispatch(&d, &run, &s, member, &op, &args).await {
                     Ok(v) => json!({ "ok": v }),
                     Err(e) => {
                         run.journal.append(
                             "op_error",
-                            json!({ "worker": link.member, "op": op, "error": format!("{e:#}") }),
+                            json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
                         );
                         json!({ "error": format!("{e:#}") })
                     }

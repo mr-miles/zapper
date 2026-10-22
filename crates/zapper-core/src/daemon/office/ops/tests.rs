@@ -8,15 +8,13 @@ use tokio::net::UnixStream;
 use zapper_policy::Policy;
 
 use super::super::run_tests::{run, session_of};
-use super::super::FirmLink;
 use crate::daemon::session::{NewSession, Session};
 use crate::daemon::testing::TestDaemon;
 
 /// One request over the office port, as `s`'s VM would make it.
 async fn office(t: &TestDaemon, s: &Arc<Session>, request: &str) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
-    let link = s.firm.clone().unwrap();
-    let serve = tokio::spawn(super::handle(t.d.clone(), s.clone(), link, host));
+    let serve = tokio::spawn(super::handle(t.d.clone(), s.clone(), host));
     guest
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -38,7 +36,7 @@ async fn the_office_port_answers_for_the_vm_it_serves() {
     let workers = dir["ok"]["workers"].as_array().unwrap();
     assert!(workers.iter().any(|w| w["name"] == "pat"), "{dir}");
 
-    // Who asks is the VM's member, not anything in the request.
+    // Who asks is the VM's member label, not anything in the request.
     let desk = office(&t, &pat, r#"{"op":"desk"}"#).await;
     assert!(desk["ok"].is_object(), "{desk}");
 
@@ -52,13 +50,7 @@ async fn the_office_port_answers_for_the_vm_it_serves() {
 
     // A VM of an earlier run: its firm isn't running for it.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    old.firm = Some(FirmLink {
-        firm: "acme".into(),
-        member: "pat".into(),
-        worker: true,
-        run: std::sync::Weak::new(),
-        role: None,
-    });
+    old.labels = super::super::labels("acme", "an-earlier-run", "pat", true);
     let old = t.test_session(old, true).unwrap();
     let r = office(&t, &old, r#"{"op":"directory"}"#).await;
     assert_eq!(r["error"], "the firm isn't running");

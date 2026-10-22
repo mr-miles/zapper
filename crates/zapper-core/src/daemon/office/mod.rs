@@ -25,7 +25,7 @@ pub mod workforce;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -209,21 +209,25 @@ pub struct FirmRun {
     pub stopping: Notify,
 }
 
-/// Links a session to the firm it belongs to.
-#[derive(Clone)]
-pub struct FirmLink {
-    pub firm: String,
-    /// A worker's or facility's name.
-    pub member: String,
-    pub worker: bool,
-    pub run: Weak<FirmRun>,
-    pub role: Option<(String, Arc<RwLock<Policy>>)>,
+/// The labels of a session that belongs to a firm: the firm, its run, the
+/// member (a worker's or facility's name) and which of the two it is.
+pub fn labels(firm: &str, run: &str, member: &str, worker: bool) -> BTreeMap<String, String> {
+    [
+        ("firm", firm),
+        ("run", run),
+        ("member", member),
+        ("office", if worker { "worker" } else { "facility" }),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
 
-impl FirmLink {
-    pub fn run(&self) -> Option<Arc<FirmRun>> {
-        self.run.upgrade()
-    }
+/// The run a session belongs to, from its labels: the firm's run, if it is
+/// the one that started the session.
+pub fn run_of(d: &Daemon, s: &Session) -> Option<Arc<FirmRun>> {
+    let run = d.office.runs.read().unwrap().get(s.label("firm")?)?.clone();
+    (Some(run.id.as_str()) == s.label("run")).then_some(run)
 }
 
 /// `20261016-140501-k3z`, sortable by time.
@@ -863,8 +867,7 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
 
 /// A run of `name` without VMs, for tests: built as `up_with` builds it
 /// (the middle of `up_with`, as it is), running, each founder on a session
-/// registered with its link to the run and its role layer, and their grants
-/// applied.
+/// registered with their labels and role layer, and their grants applied.
 #[cfg(test)]
 pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
     (|| -> Result<Arc<FirmRun>> {
@@ -965,13 +968,11 @@ pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
                 .and_then(|x| x.profile.clone())
                 .unwrap_or_else(|| run.config.roles[&w.role].profile.clone());
             let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
-            new.firm = Some(FirmLink {
-                firm: run.firm.clone(),
-                member: w.name.clone(),
-                worker: true,
-                run: Arc::downgrade(&run),
-                role: Some((w.role.clone(), run.roles[&w.role].clone())),
-            });
+            new.labels = labels(&run.firm, &run.id, &w.name, true);
+            new.shared_layers = vec![(
+                zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
+                run.roles[&w.role].clone(),
+            )];
             *w.session.lock().unwrap() =
                 Some(super::session::test_session(d, &new, true)?);
             access::reapply(d, &run, &w.name);
@@ -1265,18 +1266,16 @@ pub(super) async fn boot_worker(
     if let (Some(m), None) = (&role.model, &own) {
         overlay["model"] = json!(m);
     }
-    let link = FirmLink {
-        firm: run.firm.clone(),
-        member: w.name.clone(),
-        worker: true,
-        run: Arc::downgrade(run),
-        role: Some((w.role.clone(), run.roles[&w.role].clone())),
-    };
     let new = NewSession {
         profile: profile_name,
         workdir: run.dir.join("empty"),
         policy: Policy::default(),
-        firm: Some(link),
+        labels: labels(&run.firm, &run.id, &w.name, true),
+        // The role's layer, which every worker of the role shares.
+        shared_layers: vec![(
+            zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
+            run.roles[&w.role].clone(),
+        )],
         files,
         mounts: vec![],
         agent_overlay: Some(overlay),
@@ -1651,6 +1650,40 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_finds_no_run_its_firm_doesnt_have() {
+        let t = crate::daemon::testing::TestDaemon::new("profiles:\n  w: {}\n");
+        let mut new = crate::NewSession::plain("w".into(), t.workdir(), Default::default());
+        new.labels = super::labels("acme", "r1", "pat", true);
+        let worker = t.test_session(new, true).unwrap();
+        let plain = t
+            .test_session(
+                crate::NewSession::plain("w".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        // No run of acme in the registry, and a session with no firm.
+        assert!(super::run_of(&t.d, &worker).is_none());
+        assert!(super::run_of(&t.d, &plain).is_none());
+    }
+
+    #[test]
+    fn a_firms_sessions_are_labelled_with_the_run() {
+        let w = super::labels("acme", "20261022-101500-k3z", "pat", true);
+        let v: Vec<(&str, &str)> = w.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            v,
+            [
+                ("firm", "acme"),
+                ("member", "pat"),
+                ("office", "worker"),
+                ("run", "20261022-101500-k3z")
+            ]
+        );
+        let f = super::labels("acme", "r", "cluster", false);
+        assert_eq!(f["office"], "facility");
+    }
+
     #[test]
     fn task_parts() {
         assert_eq!(super::task_parts("  "), None);

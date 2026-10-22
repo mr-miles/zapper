@@ -472,10 +472,13 @@ async fn prompt(State(d): D, Path(id): Path<String>, body: String) -> R<(StatusC
         ));
     }
     let s = d.session(&id)?;
-    if let Some(f) = &s.firm {
+    if let Some(firm) = s.label("firm") {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            format!("{} works for firm {}: mail them instead", f.member, f.firm),
+            format!(
+                "{} works for firm {firm}: mail them instead",
+                s.label("member").unwrap_or("this session")
+            ),
         ));
     }
     let Some(driver) = &s.driver else {

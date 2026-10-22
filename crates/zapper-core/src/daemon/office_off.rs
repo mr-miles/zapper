@@ -36,19 +36,9 @@ pub struct FirmRun {
     never: Never,
 }
 
-#[derive(Clone)]
-pub struct FirmLink {
-    pub firm: String,
-    pub member: String,
-    pub worker: bool,
-    pub role: Option<(String, Arc<RwLock<Policy>>)>,
-    never: Never,
-}
-
-impl FirmLink {
-    pub fn run(&self) -> Option<Arc<FirmRun>> {
-        self.never.absurd()
-    }
+/// No session belongs to a firm.
+pub fn run_of(_d: &Daemon, _s: &Session) -> Option<Arc<FirmRun>> {
+    None
 }
 
 pub async fn down(_d: &Arc<Daemon>, run: &Arc<FirmRun>, _reason: &str) {
@@ -120,9 +110,8 @@ pub mod facility {
 pub mod ops {
     use super::*;
 
-    pub async fn serve(_d: Arc<Daemon>, _s: Arc<Session>, link: FirmLink, _listener: UnixListener) {
-        link.never.absurd()
-    }
+    /// No session is a firm's worker: nothing to serve.
+    pub async fn serve(_d: Arc<Daemon>, _s: Arc<Session>, _listener: UnixListener) {}
 }
 
 pub mod http {

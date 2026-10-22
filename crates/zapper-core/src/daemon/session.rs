@@ -1,5 +1,6 @@
 //! One sandbox: a microVM, its guest channel, policy layer and audit trail.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -20,7 +21,6 @@ use zapper_policy::{
     ResolvedProfile, Scope,
 };
 
-use super::office::FirmLink;
 use super::{now, proxy, spec, tls, vm, Daemon, Event, EventBody};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -72,8 +72,13 @@ pub struct Session {
     /// Bounds concurrent proxy connections from the guest.
     pub conns: Arc<Semaphore>,
     exec_checks: Arc<Semaphore>,
-    /// The firm the session works for, if any.
-    pub firm: Option<FirmLink>,
+    /// What the session is to whoever started it, e.g. `{firm: acme,
+    /// member: pat}`: shown in its info and events, and how a client finds
+    /// its own sessions.
+    pub labels: BTreeMap<String, String>,
+    /// Policy layers a client keeps for several sessions (a firm's role),
+    /// between the session's own layer and its profile's.
+    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// The driver, for a driven agent (`agent.driven`) outside a firm.
     pub driver: Option<Arc<super::driver::Driver>>,
     extra_files: Vec<GuestFile>,
@@ -104,6 +109,8 @@ pub struct SessionInfo {
     pub firm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     /// The driver's state for a driven session; `"disabled"` with the
     /// driver off (`daemon.driver: false`).
     #[serde(skip_serializing_if = "serde_json::Value::is_null")]
@@ -135,10 +142,16 @@ impl Session {
             }),
             usage: self.usage.lock().unwrap().clone(),
             rules: self.policy.read().unwrap().rules().len(),
-            firm: self.firm.as_ref().map(|f| f.firm.clone()),
-            member: self.firm.as_ref().map(|f| f.member.clone()),
+            firm: self.label("firm").map(str::to_string),
+            member: self.label("member").map(str::to_string),
+            labels: self.labels.clone(),
             driver: self.driver.as_ref().map(|d| d.info()).unwrap_or_default(),
         }
+    }
+
+    /// One of the session's labels.
+    pub fn label(&self, key: &str) -> Option<&str> {
+        self.labels.get(key).map(String::as_str)
     }
 
     pub fn is_running(&self) -> bool {
@@ -165,12 +178,8 @@ impl Session {
             Scope::Session(self.id.clone()),
             self.policy.read().unwrap().clone(),
         )];
-        if let Some((role, policy)) = self.firm.as_ref().and_then(|f| {
-            f.role
-                .as_ref()
-                .map(|r| (format!("{}/{}", f.firm, r.0), r.1.clone()))
-        }) {
-            v.push((Scope::Role(role), policy.read().unwrap().clone()));
+        for (scope, policy) in &self.shared_layers {
+            v.push((scope.clone(), policy.read().unwrap().clone()));
         }
         match config.resolve(&self.profile) {
             Ok(p) => v.extend(p.layers),
@@ -243,7 +252,10 @@ pub struct NewSession {
     pub profile: String,
     pub workdir: PathBuf,
     pub policy: Policy,
-    pub firm: Option<FirmLink>,
+    /// The session's labels (`Session::labels`).
+    pub labels: BTreeMap<String, String>,
+    /// Policy layers shared with other sessions (`Session::shared_layers`).
+    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// Files written in the guest besides the profile's.
     pub files: Vec<GuestFile>,
     /// Disks besides the profile's mounts.
@@ -259,7 +271,8 @@ impl NewSession {
             profile,
             workdir,
             policy,
-            firm: None,
+            labels: BTreeMap::new(),
+            shared_layers: vec![],
             files: vec![],
             mounts: vec![],
             agent_overlay: None,
@@ -302,8 +315,9 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
     std::fs::create_dir_all(&dir)?;
     let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
     // A firm's workers are driven by the office's foreman.
-    let driven =
-        resolved.agent.driven && new.firm.is_none() && daemon.config.read().unwrap().daemon.driver;
+    let driven = resolved.agent.driven
+        && !new.labels.contains_key("firm")
+        && daemon.config.read().unwrap().daemon.driver;
     let created = now();
     let ttl = resolved.engine.ttl_secs;
     let session = Arc::new(Session {
@@ -330,7 +344,8 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
         next_shell: AtomicU64::new(1),
         conns: Arc::new(Semaphore::new(256)),
         exec_checks: Arc::new(Semaphore::new(64)),
-        firm: new.firm.clone(),
+        labels: new.labels.clone(),
+        shared_layers: new.shared_layers.clone(),
         driver: driven.then(super::driver::Driver::new),
         extra_files: new.files.clone(),
         forwards: new.forwards.clone(),
@@ -456,13 +471,12 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let proxy_path = PathBuf::from(format!("{}_{PROXY_PORT}", vsock.display()));
     let control = UnixListener::bind(&control_path)?;
     let proxy = UnixListener::bind(&proxy_path)?;
-    if let Some(link) = session.firm.as_ref().filter(|f| f.worker) {
+    if session.label("office") == Some("worker") {
         let office =
             UnixListener::bind(PathBuf::from(format!("{}_{OFFICE_PORT}", vsock.display())))?;
         tokio::spawn(super::office::ops::serve(
             daemon.clone(),
             session.clone(),
-            link.clone(),
             office,
         ));
     }
@@ -1009,8 +1023,9 @@ pub fn test_session(
     std::fs::create_dir_all(&dir)?;
     let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
     // A firm's workers are driven by the office's foreman.
-    let driven =
-        resolved.agent.driven && new.firm.is_none() && daemon.config.read().unwrap().daemon.driver;
+    let driven = resolved.agent.driven
+        && !new.labels.contains_key("firm")
+        && daemon.config.read().unwrap().daemon.driver;
     let created = now();
     let ttl = resolved.engine.ttl_secs;
     let session = Arc::new(Session {
@@ -1037,7 +1052,8 @@ pub fn test_session(
         next_shell: AtomicU64::new(1),
         conns: Arc::new(Semaphore::new(256)),
         exec_checks: Arc::new(Semaphore::new(64)),
-        firm: new.firm.clone(),
+        labels: new.labels.clone(),
+        shared_layers: new.shared_layers.clone(),
         driver: driven.then(super::driver::Driver::new),
         extra_files: new.files.clone(),
         forwards: new.forwards.clone(),

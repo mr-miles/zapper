@@ -22,7 +22,7 @@ use zapper_policy::proto::{Forward, GuestFile};
 use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
-use super::{drive, FirmLink, FirmRun};
+use super::{drive, FirmRun};
 use crate::daemon::session::{self, NewSession, Session};
 use crate::daemon::{random_id, vm, Daemon};
 
@@ -162,11 +162,7 @@ pub async fn connect(
             let (a, b) = tokio::io::duplex(256 * 1024);
             let host = format!("git.{}", run.domain);
             let config = s.ca.server_config(&host)?;
-            let member = s
-                .firm
-                .as_ref()
-                .map(|f| f.member.clone())
-                .unwrap_or_default();
+            let member = s.label("member").unwrap_or_default().to_string();
             let run = run.clone();
             tokio::spawn(async move {
                 let Ok(Ok(tls)) = tokio::time::timeout(
@@ -594,13 +590,6 @@ pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Resu
     };
     run.journal
         .append("facility", json!({ "name": name, "state": "booting" }));
-    let link = FirmLink {
-        firm: run.firm.clone(),
-        member: CLUSTER.into(),
-        worker: false,
-        run: Arc::downgrade(run),
-        role: None,
-    };
     let forwards = [API_PORT, HTTP_PORT, HTTPS_PORT, DASHBOARD_PORT]
         .iter()
         .map(|p| Forward {
@@ -613,7 +602,8 @@ pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Resu
         profile: f.profile.clone(),
         workdir: run.dir.join("empty"),
         policy: Policy::default(),
-        firm: Some(link),
+        labels: super::labels(&run.firm, &run.id, CLUSTER, false),
+        shared_layers: vec![],
         files: vec![],
         mounts: vec![],
         // For the operator's `zapper exec --system`: kubectl as k3s's admin.

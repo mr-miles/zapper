@@ -4,9 +4,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use crate::{Core, Session};
+use crate::Core;
 
 pub struct TestCore {
     pub core: Core,
@@ -55,29 +54,6 @@ impl TestCore {
     /// A working directory for sessions.
     pub fn workdir(&self) -> PathBuf {
         self.dir.clone()
-    }
-
-    /// A running session of `firm`'s worker `member`, of no run; none
-    /// without the office.
-    pub fn firm_worker(&self, profile: &str, firm: &str, member: &str) -> Option<Arc<Session>> {
-        #[cfg(feature = "office")]
-        {
-            let mut new =
-                crate::NewSession::plain(profile.into(), self.workdir(), Default::default());
-            new.firm = Some(crate::daemon::office::FirmLink {
-                firm: firm.into(),
-                member: member.into(),
-                worker: true,
-                run: std::sync::Weak::new(),
-                role: None,
-            });
-            Some(self.core.test_session(new, true).unwrap())
-        }
-        #[cfg(not(feature = "office"))]
-        {
-            let _ = (profile, firm, member);
-            None
-        }
     }
 }
 
