@@ -106,7 +106,7 @@ pub fn client_config() -> Arc<ClientConfig> {
 ///
 /// `Ok(None)`: not TLS, or TLS without SNI. `Err(())`: a TLS record that is
 /// incomplete or malformed.
-pub fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
+pub(crate) fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
     if buf.first() != Some(&0x16) {
         return Ok(None);
     }

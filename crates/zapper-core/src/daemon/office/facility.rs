@@ -692,7 +692,7 @@ pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Resu
         {
             eprintln!(
                 "{}",
-                crate::exposed_warning(&format!(
+                crate::daemon::exposed_warning(&format!(
                     "firm {}'s Kubernetes dashboard (dashboard_port) listens on {addr}",
                     run.firm
                 ))

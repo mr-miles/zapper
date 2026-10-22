@@ -3,13 +3,11 @@
 //! the host and everything that happens recorded.
 
 mod client;
-mod daemon;
+use zapper_core::{daemon, vmm};
 #[cfg(feature = "office")]
 mod firm_cli;
 mod image;
-mod netns;
 mod term;
-mod vmm;
 
 use std::path::{Path, PathBuf};
 
@@ -1088,7 +1086,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         if remote {
             eprintln!(
                 "{}",
-                exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
+                daemon::exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
             );
         }
         eprintln!("zapper: UI at {url}");
@@ -1139,22 +1137,6 @@ fn host_name() -> String {
         Ok(h) if ok && !h.is_empty() => h.to_string(),
         _ => "localhost".into(),
     }
-}
-
-/// What `zapper serve` prints when an operator's port is reachable from
-/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
-pub(crate) fn exposed_warning(what: &str) -> String {
-    format!(
-        "\n\
-         ################################################################\n\
-         WARNING: {what}, reachable from the network.\n\
-         Whoever has the token controls zapper: sessions, rules, approvals,\n\
-         firms, and the firm's cluster as cluster-admin. It is plain HTTP:\n\
-         use it on a network you trust, or reach it through an SSH tunnel\n\
-         or a TLS proxy. zapper is not built for production. The VMs still\n\
-         can't reach it: the host's own addresses are closed to them.\n\
-         ################################################################\n"
-    )
 }
 
 async fn check(config_path: &Path) -> Result<i32> {

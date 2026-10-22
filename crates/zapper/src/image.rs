@@ -13,7 +13,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
-use crate::daemon::vm::parse_size;
+use zapper_core::daemon::vm::parse_size;
 
 /// The container engine: `$ZAPPER_OCI`, else podman, else docker.
 pub fn engine() -> String {

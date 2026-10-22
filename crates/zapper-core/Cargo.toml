@@ -1,0 +1,48 @@
+[package]
+name = "zapper-core"
+description = "zapper's daemon: sessions in Firecracker microVMs, the host proxy and gateway, policy, the driver and events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["office"]
+# The Office: firms of workers, their mail, drive, security officers and
+# cluster. Without it (`--no-default-features`), zapper runs sessions only.
+office = []
+
+[dependencies]
+zapper-policy = { path = "../zapper-policy" }
+zapper-keeper = { path = "../zapper-keeper" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "server", "service"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+similar = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webpki-roots = "0.26"
+rand = "0.8"
+time = "0.3"
+base64 = "0.22"
+http-body = "1"
+flate2 = "1"
+brotli = "8"
+libc = "0.2"
+ring = "0.17"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tower = { version = "0.5", features = ["util"] }

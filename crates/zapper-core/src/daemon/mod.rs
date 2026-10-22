@@ -256,6 +256,22 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 use std::os::unix::fs::OpenOptionsExt;
 
+/// What `zapper serve` prints when an operator's port is reachable from
+/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
+pub fn exposed_warning(what: &str) -> String {
+    format!(
+        "\n\
+         ################################################################\n\
+         WARNING: {what}, reachable from the network.\n\
+         Whoever has the token controls zapper: sessions, rules, approvals,\n\
+         firms, and the firm's cluster as cluster-admin. It is plain HTTP:\n\
+         use it on a network you trust, or reach it through an SSH tunnel\n\
+         or a TLS proxy. zapper is not built for production. The VMs still\n\
+         can't reach it: the host's own addresses are closed to them.\n\
+         ################################################################\n"
+    )
+}
+
 /// A config with firms needs a zapper built with the office.
 pub fn office_config(c: &Config) -> Result<()> {
     if !cfg!(feature = "office") && !c.firms.is_empty() {

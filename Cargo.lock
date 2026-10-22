@@ -1601,10 +1601,10 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
- "tower",
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "zapper-core",
  "zapper-keeper",
  "zapper-policy",
 ]
@@ -1620,6 +1620,43 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "ureq",
+ "zapper-policy",
+]
+
+[[package]]
+name = "zapper-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "brotli",
+ "bytes",
+ "clap",
+ "flate2",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rand",
+ "rcgen",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "similar",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots 0.26.11",
+ "zapper-keeper",
  "zapper-policy",
 ]
 
