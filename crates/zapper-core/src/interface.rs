@@ -15,6 +15,7 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon, EventBody};
 
+pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::services::{
     Handler as ServiceHandler, Info as ServiceInfo, Io as ServiceIo, Spec as ServiceSpec,
     Target as ServiceTarget,
@@ -202,6 +203,23 @@ impl Core {
             },
         );
         Some(info)
+    }
+
+    /// Makes `decider` decide the `ask`s of the sessions `sessions` picks
+    /// (by label; every session when empty), instead of the operator: they
+    /// are refused at once and referred to it. The earliest registered for
+    /// a session decides. Its id, for removing it.
+    pub fn add_decider(
+        &self,
+        sessions: BTreeMap<String, String>,
+        decider: Arc<dyn Decider>,
+    ) -> u64 {
+        self.d.deciders.add(sessions, decider)
+    }
+
+    /// Hands a decider's sessions' `ask`s back to the operator.
+    pub fn remove_decider(&self, id: u64) -> bool {
+        self.d.deciders.remove(id)
     }
 
     /// Services and zones.

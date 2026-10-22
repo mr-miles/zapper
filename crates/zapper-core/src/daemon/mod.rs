@@ -10,6 +10,7 @@ pub mod api_error;
 mod dns;
 pub mod driver;
 // Workers' conversations and the record's checks are the office's.
+pub mod deciders;
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
 pub mod httplog;
@@ -203,6 +204,7 @@ pub struct Daemon {
     pub ui_token: String,
     pub office: office::Office,
     pub services: services::Services,
+    pub deciders: deciders::Deciders,
 }
 
 pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
@@ -349,6 +351,7 @@ impl Daemon {
             ui_token: random_id(24),
             office: office::Office::default(),
             services: services::Services::default(),
+            deciders: deciders::Deciders::default(),
         }))
     }
 

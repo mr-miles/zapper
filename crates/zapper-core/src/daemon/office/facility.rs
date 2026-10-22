@@ -3,7 +3,7 @@
 //! under the firm's domain through the proxy; the daemon routes those names
 //! itself, so no VM reaches another VM or a host address.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
@@ -99,14 +99,6 @@ impl ServiceHandler for GitServer {
     }
 }
 
-/// The run's sessions: services and the zone are theirs alone.
-fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
-    [("firm", &run.firm), ("run", &run.id)]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
-}
-
 fn add_service(
     d: &Core,
     run: &FirmRun,
@@ -117,7 +109,7 @@ fn add_service(
     let id = d.add_service(ServiceSpec {
         name,
         port,
-        sessions: run_sessions(run),
+        sessions: super::run_sessions(run),
         target,
         owner: format!("firm {}", run.firm),
     })?;
@@ -130,7 +122,7 @@ fn add_service(
 pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
     let id = d.add_zone(
         &run.domain,
-        run_sessions(run),
+        super::run_sessions(run),
         &format!("firm {}", run.firm),
     )?;
     run.facility.services.lock().unwrap().push(id);

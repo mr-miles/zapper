@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use axum::Router;
 use tokio::net::UnixListener;
-use zapper_policy::{NetRequest, Policy};
+use zapper_policy::Policy;
 
 use super::session::Session;
 use crate::Core;
@@ -36,11 +36,6 @@ pub struct FirmRun {
     never: Never,
 }
 
-/// No session belongs to a firm.
-pub fn run_of(_office: &Office, _s: &Session) -> Option<Arc<FirmRun>> {
-    None
-}
-
 pub async fn down(_d: &Core, run: &Arc<FirmRun>, _reason: &str) {
     run.never.absurd()
 }
@@ -55,27 +50,12 @@ pub mod security {
         pub standing: BTreeMap<String, Never>,
     }
 
-    pub fn ask(
-        run: &FirmRun,
-        _worker: &str,
-        _req: &NetRequest,
-        _methods: Option<Vec<String>>,
-        _path: Option<String>,
-        _reason: &str,
-    ) -> Result<String> {
-        run.never.absurd()
-    }
-
     pub fn revoke(
         run: &FirmRun,
         _by: &str,
         _rule: &str,
         _reason: &str,
     ) -> Result<serde_json::Value> {
-        run.never.absurd()
-    }
-
-    pub fn used(run: &FirmRun, _rule: &str) {
         run.never.absurd()
     }
 }

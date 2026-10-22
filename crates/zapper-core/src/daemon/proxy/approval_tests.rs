@@ -200,4 +200,21 @@ firms:
         assert_eq!(t.core.approvals().len(), 1);
         assert!(net_events(&t, &plain).is_empty(), "still waiting");
     }
+
+    #[tokio::test]
+    async fn once_the_firm_stops_its_asks_are_the_operators_again() {
+        let t = TestCore::new(FIRM);
+        let run = test_run(&t.core, "acme");
+        security::unregister(&t.core, &run);
+        let pat = worker(&run, "pat");
+        let _io = dial(&t, &pat, "api.example", 443);
+        for _ in 0..200 {
+            if !t.core.approvals().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.core.approvals().len(), 1);
+        assert!(requests(&run).is_empty());
+    }
 }
