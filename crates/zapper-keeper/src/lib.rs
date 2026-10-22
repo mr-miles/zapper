@@ -661,8 +661,13 @@ pub fn verify(data_path: &Path, stream: &str, public_key: &str) -> Result<Report
 mod tests {
     use super::*;
 
+    /// A directory of the test's own: tests run in parallel, and two could
+    /// start within the same instant.
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("keeper-test-{}-{}", std::process::id(), now()));
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d =
+            std::env::temp_dir().join(format!("keeper-test-{}-{}-{n}", std::process::id(), now()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
