@@ -5,10 +5,11 @@
 //! becomes an access request; an officer (or the board) decides it, and the
 //! worker is told by mail.
 
-use crate::Core;
+use crate::{Core, Decider, Referral, Session};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
@@ -110,6 +111,8 @@ pub struct Security {
     next_officer: usize,
     /// Hosts seen so far, for "new hosts" in digests.
     seen_hosts: BTreeSet<String>,
+    /// The officers' registration as the run's sessions' decider.
+    decider: Option<u64>,
     /// Per session, the last request id put into a digest.
     digested: HashMap<String, u64>,
     pub last_digest: f64,
@@ -1056,6 +1059,53 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
 
 /// Called by the proxy when a rule allowed a request: `once` approvals are
 /// used up.
+/// The firm's officers, deciding the `ask`s of the run's sessions: each is
+/// filed as an access request; an approval for once goes with the request
+/// it allows.
+struct Officers {
+    run: Weak<FirmRun>,
+}
+
+impl Decider for Officers {
+    fn ask(&self, s: &Session, req: &NetRequest) -> Result<Referral> {
+        let run = self
+            .run
+            .upgrade()
+            .ok_or_else(|| anyhow!("the firm isn't running"))?;
+        let member = s.label("member").unwrap_or_default();
+        Ok(Referral {
+            id: ask(&run, member, req, None, None, "")?,
+            to: "security".into(),
+            then: "you'll get mail with the decision, then retry".into(),
+        })
+    }
+
+    fn allowed(&self, _s: &Session, rule: &str) {
+        if let Some(run) = self.run.upgrade() {
+            used(&run, rule);
+        }
+    }
+}
+
+/// Makes the officers the decider of the run's sessions' `ask`s.
+pub fn register(d: &Core, run: &Arc<FirmRun>) {
+    let id = d.add_decider(
+        super::run_sessions(run),
+        Arc::new(Officers {
+            run: Arc::downgrade(run),
+        }),
+    );
+    run.security.lock().unwrap().decider = Some(id);
+}
+
+/// Hands the run's sessions' `ask`s back, when the firm stops.
+pub fn unregister(d: &Core, run: &FirmRun) {
+    let id = run.security.lock().unwrap().decider.take();
+    if let Some(id) = id {
+        d.remove_decider(id);
+    }
+}
+
 pub fn used(run: &FirmRun, rule: &str) {
     let mut sec = run.security.lock().unwrap();
     let once = sec

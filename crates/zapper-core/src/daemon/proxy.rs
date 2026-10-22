@@ -32,6 +32,7 @@ use zapper_policy::{
     NetEffects, NetRequest, NetRule,
 };
 
+use super::deciders::Referral;
 use super::session::Session;
 use super::{httplog, services, spec, tls, Daemon, EventBody};
 
@@ -109,16 +110,22 @@ struct Verdict {
     decision: Decision,
     effects: NetEffects,
     allowed: bool,
-    /// In a firm: the access request an `ask` became.
-    pending: Option<String>,
+    /// Where an `ask` went, for a session whose asks a decider decides.
+    pending: Option<Referral>,
 }
 
 impl Verdict {
     /// Why a request was refused, for the guest.
     fn denial(&self, what: &str) -> String {
         match &self.pending {
-            Some(id) => format!("access to {what} requested from security (request {id}); you'll get mail with the decision, then retry"),
-            None => format!("{what} denied by {}", self.decision.rule.as_deref().unwrap_or("default")),
+            Some(r) => format!(
+                "access to {what} requested from {} (request {}); {}",
+                r.to, r.id, r.then
+            ),
+            None => format!(
+                "{what} denied by {}",
+                self.decision.rule.as_deref().unwrap_or("default")
+            ),
         }
     }
 }
@@ -130,22 +137,20 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
         evaluate_net(&spec::layers_of(&layers), req)
     };
     let mut pending = None;
-    let firm = super::office::run_of(&d.office, s)
-        .map(|r| (r, s.label("member").unwrap_or_default().to_string()));
+    let decider = d.deciders.of(s);
     let allowed = match decision.action {
         Action::Allow => {
-            if let (Some((run, _)), Some(rule)) = (&firm, &decision.rule) {
-                super::office::security::used(run, rule);
+            if let (Some(dc), Some(rule)) = (&decider, &decision.rule) {
+                dc.allowed(s, rule);
             }
             true
         }
         Action::Deny => false,
-        // In a firm an `ask` doesn't hold the request: officers take minutes.
-        Action::Ask if firm.is_some() => {
-            let (run, member) = firm.unwrap();
-            match super::office::security::ask(&run, &member, req, None, None, "") {
-                Ok(id) => pending = Some(id),
-                Err(e) => tracing::warn!(session = %s.id, "access request: {e:#}"),
+        // A decider's `ask` doesn't hold the request: it may take minutes.
+        Action::Ask if decider.is_some() => {
+            match decider.unwrap().ask(s, req) {
+                Ok(r) => pending = Some(r),
+                Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
             }
             false
         }
@@ -201,7 +206,7 @@ fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict
     let why = v
         .pending
         .as_ref()
-        .map(|id| format!("access requested from security ({id})"));
+        .map(|r| format!("access requested from {} ({})", r.to, r.id));
     note_failure(s, &rec, 403, why);
 }
 

@@ -256,6 +256,15 @@ pub fn is_run_id(s: &str) -> bool {
         && b[16..].iter().all(|c| super::ID_CHARS.contains(c))
 }
 
+/// A run's sessions, by their labels: what the run registers services, its
+/// zone and its decider for.
+pub(super) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
+    [("firm", &run.firm), ("run", &run.id)]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
 pub fn firm_dir(d: &Core, firm: &str) -> PathBuf {
     d.state_dir().join("firms").join(firm)
 }
@@ -953,6 +962,7 @@ fn create_run(
         access::owner_access(d, &run, &o, BOARD);
     }
     facility::register(d, &run)?;
+    security::register(d, &run);
     d.office()
         .runs
         .write()
@@ -1292,6 +1302,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
         let _ = t.await;
     }
     facility::stop(d, run).await;
+    security::unregister(d, run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));
