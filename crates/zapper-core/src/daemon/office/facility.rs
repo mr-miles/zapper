@@ -563,6 +563,13 @@ pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
     Ok((code, text))
 }
 
+/// For tests: `cluster` as the run's cluster, as `start` makes it once it
+/// has booted.
+#[cfg(test)]
+pub(crate) fn test_cluster(_d: &Core, run: &FirmRun, cluster: &Arc<Session>) {
+    *run.facility.cluster.lock().unwrap() = Some(cluster.clone());
+}
+
 pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let repos = run.config.git_repos();
     if !repos.is_empty() {

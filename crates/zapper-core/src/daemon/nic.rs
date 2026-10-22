@@ -183,3 +183,6 @@ async fn look_up(s: &Session, name: &str) -> Result<bool, String> {
         Err(_) => Err("lookup timed out".into()),
     }
 }
+
+#[cfg(test)]
+mod tests;
