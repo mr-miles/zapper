@@ -16,7 +16,7 @@ A harness is the coding agent a session runs: Claude Code and pi today, opencode
 | `settings` | Harness-native settings merged into its main config file |
 | `config_files`, `config_mounts` | Files and host directories placed relative to the harness's config directory |
 
-The office uses only these to set a worker up: the preamble as `instructions`, the role's skills as `skills`, the office tools (`zapper-agent office mcp`) in `mcp_servers`, and `zapper-agent office stop-hook` as `turn_end`.
+The office uses only these to set a worker up: the preamble as `instructions`, the role's skills as `skills`, the office tools (`zapper-agent office mcp`, a stdio bridge to the office's server in the daemon's MCP gateway) in `mcp_servers`, and `zapper-agent office stop-hook` as `turn_end`.
 
 **`Harness`**: setting the agent up in the guest.
 

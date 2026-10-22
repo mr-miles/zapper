@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use zapper_policy::{AnyRule, Policy, BOARD};
@@ -286,21 +286,42 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "host");
 }
 
-/// One request over the office port, as `s`'s VM would make it.
+/// One request to the office's tools, as `s`'s VM makes it through the
+/// gateway: `{"op", "args"}` as a call of that tool (anything else as the
+/// line itself). The answer as `{"ok": ...}` or `{"error": "..."}`.
 async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
-    let serve = tokio::spawn(super::ops::handle(t.core.clone(), s.clone(), host));
-    guest
-        .write_all(format!("{request}\n").as_bytes())
-        .await
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(&mut guest)
-        .read_line(&mut line)
-        .await
-        .unwrap();
-    serve.await.unwrap().unwrap();
-    serde_json::from_str(&line).unwrap()
+    let (d, vm) = (t.core.daemon().clone(), s.clone());
+    tokio::spawn(async move { crate::daemon::gateway::connection(&d, &vm, host).await });
+    let line = match serde_json::from_str::<Value>(request) {
+        Ok(v) if v.get("op").is_some() => json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": v["op"], "arguments": v.get("args").cloned().unwrap_or(json!({})) },
+        })
+        .to_string(),
+        _ => request.to_string(),
+    };
+    let (r, mut w) = guest.split();
+    let send = async move {
+        // A line too long to be read is answered before it is all sent.
+        let _ = w.write_all(format!("office\n{line}\n").as_bytes()).await;
+    };
+    let mut reply = String::new();
+    let mut r = BufReader::new(r);
+    let read = r.read_line(&mut reply);
+    let (_, n) = tokio::join!(send, read);
+    n.unwrap();
+    let v: Value = serde_json::from_str(&reply).unwrap();
+    if let Some(e) = v.get("error") {
+        return json!({ "error": e["message"] });
+    }
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    if v["result"]["isError"] == json!(true) {
+        return json!({ "error": text });
+    }
+    json!({ "ok": serde_json::from_str::<Value>(text).unwrap() })
 }
 
 #[tokio::test]
@@ -385,9 +406,42 @@ async fn the_stop_hook_asks_whether_mail_came() {
 #[tokio::test]
 async fn an_overlong_request_is_refused() {
     let (t, run) = run();
-    let body = "x".repeat(zapper_policy::proto::MAX_OFFICE_LINE + 10);
+    let body = "x".repeat(zapper_policy::proto::MAX_MCP_LINE + 10);
     let request = format!(r#"{{"op":"mail_send","args":{{"body":"{body}"}}}}"#);
     let r = office(&t, &session_of(&run, "pat"), &request).await;
     let e = r["error"].as_str().unwrap_or_default();
     assert!(e.starts_with("request longer than"), "{e}");
+}
+
+#[tokio::test]
+async fn once_the_firm_stops_its_tools_are_gone() {
+    let (t, run) = run();
+    super::ops::unregister(&t.core, &run);
+    let r = office(&t, &session_of(&run, "pat"), r#"{"op":"desk"}"#).await;
+    assert_eq!(r["error"], "no MCP server office for this session", "{r}");
+}
+
+#[tokio::test]
+async fn the_office_server_introduces_itself() {
+    let (t, run) = run();
+    let (host, guest) = UnixStream::pair().unwrap();
+    let (d, s) = (t.core.daemon().clone(), session_of(&run, "pat"));
+    tokio::spawn(async move { crate::daemon::gateway::connection(&d, &s, host).await });
+    let (r, mut w) = tokio::io::split(guest);
+    w.write_all(
+        b"office\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+    )
+    .await
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(r).read_line(&mut line).await.unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["result"]["serverInfo"]["name"], "office");
+    assert!(
+        v["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("office-mail"),
+        "{v}"
+    );
 }

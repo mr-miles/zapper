@@ -16,6 +16,7 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 use crate::daemon::{self, session, Daemon, EventBody};
 
 pub use crate::daemon::deciders::{Decider, Referral};
+pub use crate::daemon::gateway::McpServer;
 pub use crate::daemon::services::{
     Handler as ServiceHandler, Info as ServiceInfo, Io as ServiceIo, Spec as ServiceSpec,
     Target as ServiceTarget,
@@ -41,13 +42,6 @@ pub enum RuleRemoval {
 }
 
 impl Core {
-    /// Loads the startup config and starts the daemon's state.
-    /// The daemon's own handle on itself, for its parts that are clients
-    /// of `Core` (the office).
-    pub(crate) fn of(d: &Arc<Daemon>) -> Core {
-        Core { d: d.clone() }
-    }
-
     /// The office's registry of firm runs, while the office lives in the
     /// core.
     #[cfg_attr(not(feature = "office"), allow(dead_code))]
@@ -61,6 +55,7 @@ impl Core {
         &self.d
     }
 
+    /// Loads the startup config and starts the daemon's state.
     pub fn start(startup_path: PathBuf) -> Result<Core> {
         Ok(Core {
             d: Daemon::new(startup_path)?,
@@ -215,6 +210,23 @@ impl Core {
         decider: Arc<dyn Decider>,
     ) -> u64 {
         self.d.deciders.add(sessions, decider)
+    }
+
+    /// Serves `server` as the MCP server `name` to the sessions `sessions`
+    /// picks (by label; every session when empty), through the gateway on
+    /// their MCP vsock port. Its id, for removing it.
+    pub fn add_mcp_server(
+        &self,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        server: Arc<dyn McpServer>,
+    ) -> Result<u64> {
+        self.d.gateway.add(name, sessions, server)
+    }
+
+    /// Stops serving a registered MCP server.
+    pub fn remove_mcp_server(&self, id: u64) -> bool {
+        self.d.gateway.remove(id)
     }
 
     /// Hands a decider's sessions' `ask`s back to the operator.

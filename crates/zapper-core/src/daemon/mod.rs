@@ -11,6 +11,7 @@ mod dns;
 pub mod driver;
 // Workers' conversations and the record's checks are the office's.
 pub mod deciders;
+pub mod gateway;
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
 pub mod httplog;
@@ -205,6 +206,7 @@ pub struct Daemon {
     pub office: office::Office,
     pub services: services::Services,
     pub deciders: deciders::Deciders,
+    pub gateway: gateway::Gateway,
 }
 
 pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
@@ -352,6 +354,7 @@ impl Daemon {
             office: office::Office::default(),
             services: services::Services::default(),
             deciders: deciders::Deciders::default(),
+            gateway: gateway::Gateway::default(),
         }))
     }
 

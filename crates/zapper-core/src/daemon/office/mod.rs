@@ -207,6 +207,8 @@ pub struct FirmRun {
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
+    /// The office's tools' registration in the gateway.
+    pub tools: Mutex<Option<u64>>,
     pub stopping: Notify,
 }
 
@@ -941,6 +943,7 @@ fn create_run(
         state: Mutex::new(RunState::Starting),
         journal,
         workers: RwLock::new(workers),
+        tools: Mutex::new(None),
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
@@ -963,6 +966,7 @@ fn create_run(
     }
     facility::register(d, &run)?;
     security::register(d, &run);
+    ops::register(d, &run)?;
     d.office()
         .runs
         .write()
@@ -1303,6 +1307,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     }
     facility::stop(d, run).await;
     security::unregister(d, run);
+    ops::unregister(d, run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));

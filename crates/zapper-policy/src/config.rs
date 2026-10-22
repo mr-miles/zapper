@@ -864,7 +864,7 @@ impl Config {
                     crate::proto::CONTROL_PORT,
                     crate::proto::SHELL_PORT,
                     crate::proto::PROXY_PORT,
-                    crate::proto::OFFICE_PORT,
+                    crate::proto::MCP_PORT,
                 ];
                 if *port == 0 || reserved.contains(&(*port as u32)) {
                     errors.push(format!(

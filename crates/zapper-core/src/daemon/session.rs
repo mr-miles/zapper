@@ -14,7 +14,7 @@ use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Semaphore};
 use zapper_policy::proto::{
     Forward, Frame, GuestDisk, GuestFile, GuestMsg, HostMsg, ShellRequest, CONTROL_PORT, MAX_FRAME,
-    MAX_LINE, OFFICE_PORT, PROXY_PORT, SHELL_PORT,
+    MAX_LINE, MCP_PORT, PROXY_PORT, SHELL_PORT,
 };
 use zapper_policy::{
     evaluate_exec, Action, AnyRule, Config, ExecRequest, ExecRule, Kind, MountMode, Policy,
@@ -524,15 +524,9 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let proxy_path = PathBuf::from(format!("{}_{PROXY_PORT}", vsock.display()));
     let control = UnixListener::bind(&control_path)?;
     let proxy = UnixListener::bind(&proxy_path)?;
-    if session.label("office") == Some("worker") {
-        let office =
-            UnixListener::bind(PathBuf::from(format!("{}_{OFFICE_PORT}", vsock.display())))?;
-        tokio::spawn(super::office::ops::serve(
-            crate::Core::of(daemon),
-            session.clone(),
-            office,
-        ));
-    }
+    // The MCP gateway, to the servers registered for the session.
+    let mcp = UnixListener::bind(PathBuf::from(format!("{}_{MCP_PORT}", vsock.display())))?;
+    tokio::spawn(super::gateway::serve(daemon.clone(), session.clone(), mcp));
     let nic = engine.network == zapper_policy::NetworkMode::Nic;
     if nic {
         let listener = UnixListener::bind(vmdir.join(crate::netns::SOCKET))?;

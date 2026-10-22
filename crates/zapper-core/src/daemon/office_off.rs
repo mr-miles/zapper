@@ -8,10 +8,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 use axum::Router;
-use tokio::net::UnixListener;
 use zapper_policy::Policy;
 
-use super::session::Session;
 use crate::Core;
 
 /// No value: what a firm would be.
@@ -58,13 +56,6 @@ pub mod security {
     ) -> Result<serde_json::Value> {
         run.never.absurd()
     }
-}
-
-pub mod ops {
-    use super::*;
-
-    /// No session is a firm's worker: nothing to serve.
-    pub async fn serve(_d: Core, _s: Arc<Session>, _listener: UnixListener) {}
 }
 
 pub mod http {
