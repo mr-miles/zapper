@@ -21,3 +21,4 @@ The Office, a company of AI workers built on zapper:
 - [Quickstart](quickstart.md): from a fresh clone to a running firm, step by step.
 - [Office reference](office.md): firms of AI workers, one VM each: mail and wake-ups, the shared drive, security officers, the cluster, the UI, replay.
 - [Office prompts](office-prompts.md): the preamble, wake prompts, follow-ups, officers' prompts and an example kickoff.
+- [Firm separation](firm-separation.md) (design, proposed): The Office as its own crate, using only an interface zapper's core offers, and the general features the core would provide for it.
