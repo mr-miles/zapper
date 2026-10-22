@@ -12,15 +12,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::mpsc;
-use zapper_policy::proto::{Frame, ShellRequest};
+use zapper_policy::proto::ShellRequest;
 
-use super::journal::{Journal, MAX_LINE};
+use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use crate::daemon::harness::{self, Conversation, Driver, Event, Outcome, TurnEnd};
-use crate::daemon::session::{read_frame, Session};
+use crate::daemon::driver::{self, Observer, Out, Proc};
+use crate::daemon::harness::{self, Driver, Outcome};
+use crate::daemon::session::Session;
 use crate::daemon::Daemon;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
@@ -29,45 +27,36 @@ const MAX_RESTARTS: usize = 5;
 /// broken and their manager told.
 const MAX_TIMEOUTS: u32 = 3;
 
-enum Out {
-    /// A turn ended.
-    End(TurnEnd),
-    /// A line the protocol wants written back.
-    Write(Vec<u8>),
-    /// The process exited.
-    Exit(Option<i32>),
-    /// The turn ran past `budget.turn_timeout`.
-    Late,
+/// Where the agent's output goes: the worker's transcript, the
+/// conversation's id, and the worker's state.
+struct Watch {
+    run: Arc<FirmRun>,
+    w: Arc<WorkerRt>,
+    transcript: Arc<Journal>,
+    session_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
-struct Proc {
-    stdin: OwnedWriteHalf,
-    events: mpsc::Receiver<Out>,
-    conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
-    /// The harness takes messages while the agent works.
-    steers: bool,
-    /// Reads the agent's output; it holds the connection's other half.
-    reader: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for Proc {
-    /// Closes the connection both ways: the agent hangs the process up.
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
-}
-
-impl Proc {
-    async fn write(&mut self, line: Vec<u8>) -> Result<()> {
-        let mut buf = Vec::new();
-        Frame::Data(line).write_to(&mut buf)?;
-        self.stdin.write_all(&buf).await?;
-        Ok(())
+impl Observer for Watch {
+    fn transcript(&self, kind: &str, line: Value) {
+        if kind == "line" {
+            self.transcript.write(line);
+        } else {
+            self.transcript.append(kind, line);
+        }
     }
 
-    async fn send(&mut self, text: &str) -> Result<()> {
-        let line = self.conv.lock().unwrap().prompt(text);
-        self.write(line).await
+    fn conversation(&self, id: &str) {
+        let mut sid = self.session_id.lock().unwrap();
+        if sid.as_deref() != Some(id) {
+            *sid = Some(id.to_string());
+        }
+    }
+
+    fn activity(&self, a: &str) {
+        let st = self.w.state();
+        if matches!(st, WorkerState::Working | WorkerState::Reviewing) {
+            self.run.set_state(&self.w, st, Some(a.to_string()));
+        }
     }
 }
 
@@ -80,9 +69,7 @@ async fn start(
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
     let home = format!("/home/{}", s.resolved.agent.user);
-    let mut conv = driver_of(s)?.conversation(resume);
-    let opening = conv.opening();
-    let steers = conv.steers();
+    let conv = driver_of(s)?.conversation(resume);
     // The fake Claude plays a test script instead (it speaks Claude Code's
     // stream-json).
     let argv = match &run.config.roles[&w.role].fake {
@@ -98,8 +85,6 @@ async fn start(
         ],
         None => conv.argv(),
     };
-    let conv = Arc::new(std::sync::Mutex::new(conv));
-    let reader = conv.clone();
     let req = ShellRequest {
         id: 0,
         argv,
@@ -108,109 +93,13 @@ async fn start(
         system: false,
     };
     let (stream, _) = s.open_shell(req).await?;
-    let (mut r, stdin) = stream.into_split();
-    let (tx, events) = mpsc::channel(16);
-    let (run, w) = (run.clone(), w.clone());
-    let reader_task = tokio::spawn(async move {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut err: Vec<u8> = Vec::new();
-        let mut last_activity = Instant::now() - Duration::from_secs(10);
-        let mut code = None;
-        let line_out = |line: &[u8], buf_err: bool| -> Option<Value> {
-            let text = String::from_utf8_lossy(line);
-            let text = text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            if buf_err {
-                transcript.append(
-                    "stderr",
-                    json!({ "text": text.chars().take(4096).collect::<String>() }),
-                );
-                return None;
-            }
-            match serde_json::from_str::<Value>(text) {
-                Ok(v) if v.is_object() => {
-                    if reader.lock().unwrap().transcribe(&v) {
-                        transcript.write(v.clone());
-                    }
-                    Some(v)
-                }
-                _ => {
-                    transcript.append(
-                        "raw",
-                        json!({ "text": text.chars().take(4096).collect::<String>() }),
-                    );
-                    None
-                }
-            }
-        };
-        loop {
-            let frame = match read_frame(&mut r).await {
-                Ok(Some(f)) => f,
-                _ => break,
-            };
-            let (data, is_err) = match frame {
-                Frame::Data(d) => (d, false),
-                Frame::Stderr(d) => (d, true),
-                Frame::Exit(c) => {
-                    code = Some(c);
-                    break;
-                }
-                _ => continue,
-            };
-            let b = if is_err { &mut err } else { &mut buf };
-            b.extend_from_slice(&data);
-            while let Some(i) = b.iter().position(|c| *c == b'\n') {
-                let line: Vec<u8> = b.drain(..=i).collect();
-                let Some(v) = line_out(&line, is_err) else {
-                    continue;
-                };
-                let events = reader.lock().unwrap().read(&v);
-                for e in events {
-                    match e {
-                        Event::Session(id) => {
-                            let mut sid = session_id.lock().unwrap();
-                            if sid.as_deref() != Some(id.as_str()) {
-                                *sid = Some(id);
-                            }
-                        }
-                        Event::Activity(a) => {
-                            if last_activity.elapsed() > Duration::from_secs(3) {
-                                last_activity = Instant::now();
-                                let st = w.state();
-                                if matches!(st, WorkerState::Working | WorkerState::Reviewing) {
-                                    run.set_state(&w, st, Some(a));
-                                }
-                            }
-                        }
-                        Event::TurnEnd(t) => {
-                            let _ = tx.send(Out::End(t)).await;
-                        }
-                        Event::Send(line) => {
-                            let _ = tx.send(Out::Write(line)).await;
-                        }
-                    }
-                }
-            }
-            if b.len() > MAX_LINE {
-                let line: Vec<u8> = std::mem::take(b);
-                transcript.append("truncated", json!({ "bytes": line.len() }));
-            }
-        }
-        let _ = tx.send(Out::Exit(code)).await;
-    });
-    let mut p = Proc {
-        stdin,
-        events,
-        conv,
-        steers,
-        reader: reader_task,
+    let watch = Watch {
+        run: run.clone(),
+        w: w.clone(),
+        transcript,
+        session_id,
     };
-    for line in opening {
-        p.write(line).await?;
-    }
-    Ok(p)
+    driver::start(stream, conv, Arc::new(watch)).await
 }
 
 /// The worker's harness driver, from its profile's `agent.kind`.

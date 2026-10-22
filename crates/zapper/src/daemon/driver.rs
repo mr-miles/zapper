@@ -8,7 +8,9 @@
 //! does. Prompts that arrive while it works wait for the next turn, or are
 //! handed over at once for harnesses that take them (pi). Every output line
 //! goes to the session's `driver.jsonl`; turns, activity and exits are
-//! events. A firm's workers are driven by the office's foreman, not here.
+//! events. A firm's workers are driven by the office's foreman, which has
+//! its own turn loop (mail, budgets, officers) over the same `start` and
+//! `Proc`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -38,7 +40,7 @@ const MAX_RESTARTS: usize = 5;
 /// foreman's `MAX_TIMEOUTS`).
 const MAX_TIMEOUTS: u32 = 3;
 
-enum Out {
+pub(crate) enum Out {
     /// A turn ended.
     End(TurnEnd),
     /// A line the protocol wants written back.
@@ -50,7 +52,7 @@ enum Out {
 }
 
 /// Where a driven agent's output goes: its transcript and what it is doing.
-trait Observer: Send + Sync {
+pub(crate) trait Observer: Send + Sync {
     /// An output line: a JSON object, or text from stderr or not JSON
     /// (`kind` says which).
     fn transcript(&self, kind: &str, line: Value);
@@ -60,12 +62,12 @@ trait Observer: Send + Sync {
     fn activity(&self, text: &str);
 }
 
-struct Proc {
+pub(crate) struct Proc {
     stdin: OwnedWriteHalf,
-    events: mpsc::Receiver<Out>,
-    conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
+    pub(crate) events: mpsc::Receiver<Out>,
+    pub(crate) conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
-    steers: bool,
+    pub(crate) steers: bool,
     /// Reads the agent's output; it holds the connection's other half.
     reader: tokio::task::JoinHandle<()>,
 }
@@ -78,20 +80,20 @@ impl Drop for Proc {
 }
 
 impl Proc {
-    async fn write(&mut self, line: Vec<u8>) -> Result<()> {
+    pub(crate) async fn write(&mut self, line: Vec<u8>) -> Result<()> {
         let mut buf = Vec::new();
         Frame::Data(line).write_to(&mut buf)?;
         self.stdin.write_all(&buf).await?;
         Ok(())
     }
 
-    async fn send(&mut self, text: &str) -> Result<()> {
+    pub(crate) async fn send(&mut self, text: &str) -> Result<()> {
         let line = self.conv.lock().unwrap().prompt(text);
         self.write(line).await
     }
 }
 
-async fn start(
+pub(crate) async fn start(
     stream: UnixStream,
     mut conv: Box<dyn Conversation>,
     observer: Arc<dyn Observer>,
