@@ -445,3 +445,139 @@ async fn the_office_server_introduces_itself() {
         "{v}"
     );
 }
+
+// Where the office meets the core: a restart, the operator's rule changes,
+// and the daemon stopping.
+
+/// A daemon started again on `t`'s config and state, as after a restart.
+fn restart(t: &TestCore) -> crate::Core {
+    crate::Core::start(t.startup()).unwrap()
+}
+
+/// The run's journal, one JSON value a line.
+fn journal(run: &FirmRun) -> Vec<Value> {
+    std::fs::read_to_string(run.dir.join("journal.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_restart_ends_the_runs_the_daemon_left_running() {
+    let (t, run) = run();
+    assert_ne!(journal(&run).last().unwrap()["state"], "ended");
+    let _again = restart(&t);
+    let last = journal(&run).last().unwrap().clone();
+    assert_eq!(last["type"], "run", "{last}");
+    assert_eq!(last["state"], "ended", "{last}");
+    assert_eq!(last["reason"], "the daemon stopped", "{last}");
+}
+
+#[test]
+fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
+    use super::security::{self, DecideArgs};
+    let (t, run) = run();
+    let req = zapper_policy::NetRequest {
+        host: "api.example".into(),
+        port: 443,
+        method: None,
+        path: None,
+    };
+    let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
+    security::decide(
+        &run,
+        BOARD,
+        &id,
+        DecideArgs {
+            allow: true,
+            scope: "role".into(),
+            reason: "everyone in eng".into(),
+            methods: None,
+            path: None,
+            expires_in: None,
+        },
+    )
+    .unwrap();
+    let rule = security::standing(&run)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let role = zapper_policy::Scope::Role("acme/eng".into());
+    let in_layers = |t: &TestCore| {
+        t.core
+            .rule_layers()
+            .into_iter()
+            .any(|(s, p)| s == role && p.rules().iter().any(|r| r.id() == Some(rule.as_str())))
+    };
+    assert!(in_layers(&t), "listed with the role's layer");
+
+    assert!(matches!(
+        t.core.remove_rule(&rule).unwrap(),
+        crate::RuleRemoval::Revoked
+    ));
+    assert!(security::standing(&run).is_empty());
+    assert!(!in_layers(&t));
+    let revoked = journal(&run)
+        .into_iter()
+        .any(|e| e["type"] == "access" && e["event"] == "revoked" && e["rule"] == rule.as_str());
+    assert!(revoked, "{:?}", journal(&run));
+}
+
+#[tokio::test]
+async fn the_daemon_stopping_ends_its_firms() {
+    let (t, run) = run();
+    t.core.shutdown().await;
+    assert!(run.ended());
+    let ended = journal(&run)
+        .into_iter()
+        .any(|e| e["type"] == "run" && e["state"] == "ended");
+    assert!(ended, "{:?}", journal(&run));
+}
+
+// The firms' config, checked with the rest.
+
+#[test]
+fn a_firm_that_doesnt_add_up_is_refused_with_the_whole_change() {
+    let (t, _run) = run();
+    let e = t
+        .core
+        .change("a firm", |c| {
+            c.profiles.insert("extra".into(), Default::default());
+            let mut bad = c.firms["acme"].clone();
+            bad.workers[1].role = "nosuch".into();
+            c.firms.insert("broken".into(), bad);
+            Ok(())
+        })
+        .unwrap_err();
+    let e = format!("{e:#}");
+    assert!(e.contains("firm broken:"), "{e}");
+    let c = t.core.config();
+    assert!(!c.firms.contains_key("broken") && !c.profiles.contains_key("extra"));
+}
+
+#[test]
+fn firms_need_the_driver() {
+    let (t, _run) = run();
+    let e = t
+        .core
+        .change("driver off", |c| {
+            c.daemon.driver = false;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("firms need the driver"), "{e:#}");
+}
+
+#[test]
+fn a_startup_config_with_a_broken_firm_doesnt_load() {
+    let t = TestCore::new("profiles:\n  w: {}\n");
+    std::fs::write(
+        t.startup(),
+        std::fs::read_to_string(t.startup()).unwrap()
+            + "firms:\n  acme:\n    roles: { ceo: { profile: nosuch, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+    )
+    .unwrap();
+    let e = crate::Core::start(t.startup()).err().unwrap();
+    assert!(format!("{e:#}").contains("firm acme:"), "{e:#}");
+}
