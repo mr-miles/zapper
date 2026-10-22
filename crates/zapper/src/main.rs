@@ -1264,7 +1264,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             "sudo apt install iproute2 nftables, or use network: vsock",
         );
     }
-    let oci = std::env::var("ZAPPER_OCI").unwrap_or_else(|_| "podman".into());
+    let oci = image::engine();
     let oci_ok = std::process::Command::new(&oci)
         .arg("--version")
         .output()
@@ -1272,7 +1272,7 @@ async fn check(config_path: &Path) -> Result<i32> {
     report(
         oci_ok,
         &format!("{oci} (to build images)"),
-        "sudo apt install podman",
+        "sudo apt install podman, or install docker",
     );
     let mkfs = std::process::Command::new("mkfs.ext4")
         .arg("-V")

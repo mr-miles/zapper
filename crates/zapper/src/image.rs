@@ -1,10 +1,11 @@
 //! Root filesystem images from OCI images.
 //!
-//! An image is an ext4 file made from a container image's filesystem. The
-//! extraction runs inside the container engine's user namespace
-//! (`podman unshare`), so file ownership comes out as in the image without
-//! root. The guest agent is not part of the image: it boots from an
-//! initramfs the daemon builds.
+//! An image is an ext4 file made from a container image's filesystem. With
+//! podman the extraction runs inside its user namespace (`podman unshare`),
+//! so file ownership comes out as in the image without root. Other engines
+//! (docker) have no such thing: a helper container with e2fsprogs extracts
+//! the filesystem as root and writes the ext4 file. The guest agent is not
+//! part of the image: it boots from an initramfs the daemon builds.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,8 +15,51 @@ use serde_json::json;
 
 use crate::daemon::vm::parse_size;
 
-fn engine() -> String {
-    std::env::var("ZAPPER_OCI").unwrap_or_else(|_| "podman".into())
+/// The container engine: `$ZAPPER_OCI`, else podman, else docker.
+pub fn engine() -> String {
+    if let Ok(e) = std::env::var("ZAPPER_OCI") {
+        return e;
+    }
+    let has = |e: &str| {
+        Command::new(e)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !has("podman") && has("docker") {
+        "docker".into()
+    } else {
+        "podman".into()
+    }
+}
+
+/// Whether the engine can extract in a user namespace (`unshare`).
+fn has_unshare(engine: &str) -> bool {
+    Path::new(engine).file_name().is_some_and(|n| n == "podman")
+}
+
+/// A local image with tar and mkfs.ext4, built once.
+fn mkfs_image(oci: &str) -> Result<String> {
+    let tag = "localhost/zapper-mkfs:1";
+    if run(Command::new(oci).args(["image", "inspect", tag])).is_ok() {
+        return Ok(tag.into());
+    }
+    let work = tempdir()?;
+    std::fs::write(
+        work.join("Containerfile"),
+        "FROM docker.io/library/ubuntu:26.04\nRUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs tar && rm -rf /var/lib/apt/lists/*\n",
+    )?;
+    eprintln!("building {tag}");
+    let status = Command::new(oci)
+        .args(["build", "-t", tag, "-f"])
+        .arg(work.join("Containerfile"))
+        .arg(&work)
+        .status()?;
+    let _ = std::fs::remove_dir_all(&work);
+    if !status.success() {
+        bail!("{oci} build of {tag} failed");
+    }
+    Ok(tag.into())
 }
 
 fn run(cmd: &mut Command) -> Result<String> {
@@ -89,15 +133,36 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
     let tmp = b.dir.join(format!(".{}.ext4.tmp", b.name));
     let root = work.join("root");
     eprintln!("writing {} ({} MiB)", out.display(), size >> 20);
-    let script = r#"set -e; mkdir "$1"; tar -C "$1" -xf "$2"; mkfs.ext4 -q -F -L zapper -d "$1" "$3" "$4"; rm -rf "$1""#;
-    let mut unshare = Command::new(&oci);
-    unshare
-        .args(["unshare", "sh", "-c", script, "sh"])
-        .arg(&root)
-        .arg(&tar)
-        .arg(&tmp)
-        .arg(format!("{}k", size / 1024));
-    run(&mut unshare)?;
+    let kib = format!("{}k", size / 1024);
+    if has_unshare(&oci) {
+        let script = r#"set -e; mkdir "$1"; tar -C "$1" -xf "$2"; mkfs.ext4 -q -F -L zapper -d "$1" "$3" "$4"; rm -rf "$1""#;
+        let mut unshare = Command::new(&oci);
+        unshare
+            .args(["unshare", "sh", "-c", script, "sh"])
+            .arg(&root)
+            .arg(&tar)
+            .arg(&tmp)
+            .arg(&kib);
+        run(&mut unshare)?;
+    } else {
+        // As root in a container, which also owns the output until chown.
+        let helper = mkfs_image(&oci)?;
+        let out_dir = std::fs::canonicalize(b.dir)?;
+        let tmp_name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        let script = r#"set -e; mkdir /r; tar -C /r -xpf /w/rootfs.tar; mkfs.ext4 -q -F -L zapper -d /r "/out/$1" "$2"; chown "$3" "/out/$1""#;
+        let owner = format!("{}:{}", unsafe { libc::getuid() }, unsafe {
+            libc::getgid()
+        });
+        let mut docker = Command::new(&oci);
+        docker
+            .args(["run", "--rm", "-v"])
+            .arg(format!("{}:/w:ro", work.display()))
+            .arg("-v")
+            .arg(format!("{}:/out", out_dir.display()))
+            .arg(&helper)
+            .args(["sh", "-c", script, "sh", &tmp_name, &kib, &owner]);
+        run(&mut docker)?;
+    }
     std::fs::rename(&tmp, &out)?;
     let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "size": size, "built": crate::daemon::now() as u64 });
     std::fs::write(
