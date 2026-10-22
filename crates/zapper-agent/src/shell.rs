@@ -227,6 +227,8 @@ fn spawn(req: &ShellRequest, env: &BTreeMap<String, String>, spec: &GuestSpec) -
     });
     let filter = sys::exec_filter();
     let drop_privs = !spec.root && !req.system;
+    // With `sudo`, setuid binaries must work: no `no_new_privs`.
+    let keep_privs = spec.sudo && !req.system;
     // Said by the child if exec fails; prepared here, as the child may only
     // make async-signal-safe calls.
     let denied = format!(
@@ -311,7 +313,7 @@ fn spawn(req: &ShellRequest, env: &BTreeMap<String, String>, spec: &GuestSpec) -
                     fail(126);
                 }
             }
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
+            if !keep_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
                 fail(126);
             }
             if let Some(sock) = child_sock {

@@ -40,7 +40,7 @@ BINS     := zapper zapper-agent zapper-inspect
 endif
 
 # Image recipes: name → base and build steps.
-BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps && rm -rf /var/lib/apt/lists/*
+BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps sudo && rm -rf /var/lib/apt/lists/*
 IMAGE_FROM_ubuntu-26.04 := docker.io/library/ubuntu:26.04
 IMAGE_RUN_ubuntu-26.04  := --run "$(BASE_PKGS)"
 # Office workers: Claude Code at a pinned version (auto-update is off in
@@ -58,7 +58,7 @@ NODE_SHA256 := df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
 KUBECTL_VERSION := v1.36.5
 KUBECTL_SHA256 := 33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e
 IMAGE_FROM_office := docker.io/library/ubuntu:26.04
-IMAGE_RUN_office  := --run "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*" \
+IMAGE_RUN_office  := --run "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps sudo ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*" \
 	--run "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/$(NODE_VERSION)/node-$(NODE_VERSION)-linux-x64.tar.xz && echo '$(NODE_SHA256)  /tmp/node.tar.xz' | sha256sum -c && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE && rm /tmp/node.tar.xz && node --version" \
 	--run "curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/linux/amd64/kubectl && echo '$(KUBECTL_SHA256)  /usr/local/bin/kubectl' | sha256sum -c && chmod 755 /usr/local/bin/kubectl" \
 	--run "curl -fsSL https://claude.ai/install.sh | bash -s $(CLAUDE_VERSION) && cp -L /root/.local/bin/claude /usr/local/bin/claude && rm -rf /root/.local /root/.claude* && claude --version" \

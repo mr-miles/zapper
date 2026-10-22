@@ -1364,6 +1364,7 @@ mod tests {
         assert_eq!(p.agent.kind, "claude-code");
         assert_eq!(p.agent.command, ["claude"]);
         assert_eq!(p.agent.user, "agent");
+        assert!(p.agent.sudo && !p.agent.root);
         assert_eq!(p.engine.image, "office");
         assert!(p
             .mounts

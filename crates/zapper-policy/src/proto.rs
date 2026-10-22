@@ -50,6 +50,10 @@ pub struct GuestSpec {
     pub hostname: String,
     pub user: String,
     pub root: bool,
+    /// The workload keeps `sudo` (passwordless) and runs without
+    /// `no_new_privs`.
+    #[serde(default)]
+    pub sudo: bool,
     pub home: String,
     pub workdir: String,
     /// Environment of every process started over the shell port.

@@ -134,7 +134,8 @@ profiles:
   # `zapper run -p claude`: Claude Code on a copy of the current directory.
   # The Claude API is allowed with the token the host adds; every other
   # host waits for an answer (the UI, or zapper approve). Image: make image
-  # IMAGE=office.
+  # IMAGE=office. The agent has passwordless sudo, so exec rules don't apply
+  # and the VM is the boundary (docs/security.md).
   claude:
     extends: default
     description: Claude Code on a copy of the current directory
@@ -143,6 +144,7 @@ profiles:
       kind: claude-code
       command: [claude]
       user: agent
+      sudo: true
       env:
         CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
     policy:

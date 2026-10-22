@@ -75,6 +75,7 @@ profiles:
 | `command` | `[claude]` | What `zapper run` and `zapper attach` start |
 | `user` | `agent` | The user the command runs as, created with uid 1000 |
 | `root` | `false` | Run as root; this gives up the in-guest guardrails ([security](security.md#what-is-enforced-where)) |
+| `sudo` | `false` | Run as `user` with passwordless `sudo` and none of the in-guest controls: no `no_new_privs` and no exec supervision, so exec rules don't apply and setuid binaries work. The image needs `sudo` (`make image` installs it). Like `root`, this gives up the in-guest guardrails and keeps the host-side ones; unlike `root`, the agent keeps its own home, files and user, which agents such as Claude Code need for their bypass modes. Not together with `root` |
 | `workdir` | `/work` | Working directory |
 | `env` | | Environment. `{{secret:NAME}}` becomes a placeholder for `proxy` secrets and the value for `guest` secrets |
 | `files` | | Guest path (`~` is the home directory) → content, with `{{secret:NAME}}` as in `env`. Files with a `guest` secret are created 0600 |
