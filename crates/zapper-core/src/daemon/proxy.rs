@@ -33,7 +33,7 @@ use zapper_policy::{
 };
 
 use super::session::Session;
-use super::{httplog, spec, tls, Daemon, EventBody};
+use super::{httplog, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -275,37 +275,32 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
     );
 }
 
-/// Where a connection goes: an address on the network, or one of the firm's
-/// own services, which the daemon routes itself.
+/// Where a connection goes: an address on the network, or a service the
+/// daemon connects itself, by the name asked for.
 #[derive(Clone)]
 enum Target {
     Addr(SocketAddr),
-    Firm(
-        Arc<super::office::FirmRun>,
-        super::office::facility::Internal,
-    ),
+    Service(String, services::Target),
 }
 
-/// The target for `host:port`: the firm's services by name, anything else
-/// resolved on the host and checked against the address policy.
+/// The target for `host:port`: a service by name, anything else resolved on
+/// the host and checked against the address policy.
 async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
-    if let Some(run) = super::office::run_of(&d.office, s) {
-        if let Some(r) = super::office::facility::route(&run, host, port) {
-            return r
-                .map(|i| Target::Firm(run.clone(), i))
-                .map_err(|e| e.to_string());
-        }
+    match d.services.route(s, host, port) {
+        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), t)),
+        Some(services::Route::Unserved) => Err(format!("nothing serves {host}:{port}")),
+        None => resolve(d, host, port).await.map(Target::Addr),
     }
-    resolve(d, host, port).await.map(Target::Addr)
 }
 
 async fn dial_target(
+    d: &Daemon,
     s: &Arc<Session>,
     t: &Target,
-) -> std::io::Result<Box<dyn super::office::facility::Io>> {
+) -> std::io::Result<Box<dyn services::Io>> {
     match t {
         Target::Addr(a) => Ok(Box::new(dial(*a).await?)),
-        Target::Firm(run, i) => super::office::facility::connect(run, s, *i)
+        Target::Service(host, t) => services::connect(d, s, host, t)
             .await
             .map_err(|e| std::io::Error::other(format!("{e:#}"))),
     }
@@ -599,7 +594,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
             return;
         }
     }
-    let mut upstream = match dial_target(s, addr).await {
+    let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
         Err(e) => {
             log(
@@ -1028,7 +1023,9 @@ async fn inspected(
 
 async fn open_tls(host: &str, addr: &Target) -> Result<SendRequest<Body>, String> {
     let Target::Addr(addr) = addr else {
-        return Err(format!("{host} is one of the firm's services; rules with methods, paths or secrets don't apply to it"));
+        return Err(format!(
+            "{host} is a service; rules with methods, paths or secrets don't apply to it"
+        ));
     };
     let tcp = dial(*addr)
         .await
@@ -1172,7 +1169,9 @@ async fn forward_plain(
     );
     let out = Request::from_parts(parts, body);
     let result = async {
-        let tcp = dial_target(&s, &addr).await.map_err(|e| e.to_string())?;
+        let tcp = dial_target(&d, &s, &addr)
+            .await
+            .map_err(|e| e.to_string())?;
         let (mut sender, conn) =
             hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
                 .await
@@ -1216,8 +1215,7 @@ async fn forward_plain(
     }
 }
 
-// The office's names; any session's services come with them.
-#[cfg(all(test, feature = "office"))]
+#[cfg(test)]
 pub(crate) mod service_tests;
 
 #[cfg(test)]

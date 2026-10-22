@@ -73,7 +73,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 
 | Command | Purpose |
 |---|---|
-| `zapper run [-p PROFILE] [-C DIR] [--keep] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep` |
+| `zapper run [-p PROFILE] [-C DIR] [--keep] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. Labels pick it for services |
 | `zapper attach ID [-- CMD…]` | Another terminal in a running session |
 | `zapper exec ID [--system] -- CMD…` | Run a command without a terminal, returning its exit code; `--system` runs it as root without exec supervision, for the operator's own maintenance (e.g. a firm's cluster VM) |
 | `zapper cp ID:/path DIR` | Copy a guest directory out |
@@ -85,6 +85,9 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper approvals` | Pending `ask` decisions (outside firms; in a firm, see `zapper firm security`) |
 | `zapper approve ID [--remember session]` / `zapper deny …` | Answer one, for this request or the rest of the session |
 | `zapper rules [--scope S]` | List rules of all layers, or of `global`, `profile:NAME` or `session:ID` |
+| `zapper service ls` | Services and zones, a firm's included ([network: services](network.md#services)) |
+| `zapper service add NAME:PORT (--to IP:PORT \| --to-session ID:PORT) [--for KEY=VALUE…]` | A name sessions use that the daemon connects: to an address, or a port of a session's VM; for sessions with those labels, else every session. They still need a net rule for it |
+| `zapper service rm ID` | Remove a service added with `add` |
 | `zapper rule add SCOPE 'YAML' [--at N]` / `zapper rule rm ID` | Change rules in the running config |
 | `zapper eval [-s ID\|-p PROFILE] net HOST[:PORT] [METHOD PATH]` | Dry run of a connection or request |
 | `zapper eval [-s ID\|-p PROFILE] exec PATH [ARGV…]` | Dry run of an exec |

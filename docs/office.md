@@ -431,7 +431,7 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 ### Names and who reaches what
 
-Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The guest's resolver answers these names only when a rule could allow them, as for any host; they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly.
+Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a [service](network.md#services) the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
 
 | Name | Port | What | Who reaches it |
 |---|---|---|---|

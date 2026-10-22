@@ -101,3 +101,31 @@ async fn a_name_no_rule_allows_is_refused() {
         .unwrap();
     assert_eq!(ask(&t, &s, "example.com").await, Err(REFUSED));
 }
+
+#[tokio::test]
+async fn a_service_resolves_only_for_the_sessions_it_picks() {
+    let t = TestCore::new("profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.internal }\n");
+    let session = |team: &str| {
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.labels = [("team".to_string(), team.to_string())].into();
+        t.core.test_session(new, true).unwrap()
+    };
+    let (a, b) = (session("a"), session("b"));
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "db.internal".into(),
+            port: 5432,
+            sessions: [("team".to_string(), "a".to_string())].into(),
+            target: crate::ServiceTarget::Session {
+                id: "abcdef".into(),
+                port: 5432,
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    assert!(ask(&t, &a, "db.internal").await.is_ok());
+    assert!(
+        ask(&t, &b, "db.internal").await.is_err(),
+        "the host's to say"
+    );
+}

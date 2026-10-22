@@ -2,6 +2,7 @@
 //! the binary, and in time the office), and nothing of its internals.
 //! Clients hold a `Core` and call it; the daemon's state stays behind it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +15,10 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon, EventBody};
 
+pub use crate::daemon::services::{
+    Handler as ServiceHandler, Info as ServiceInfo, Io as ServiceIo, Spec as ServiceSpec,
+    Target as ServiceTarget,
+};
 pub use crate::daemon::session::{
     NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
 };
@@ -164,6 +169,56 @@ impl Core {
             s.status.send_replace(session::Status::Running);
         }
         Ok(s)
+    }
+
+    /// Registers a service; its id, for removing it.
+    pub fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
+        let id = self.d.services.add(spec)?;
+        self.service_event("added", id);
+        Ok(id)
+    }
+
+    /// Makes `domain` a zone for the sessions `sessions` picks: its names
+    /// resolve only to services, never on the host. Its id, for removing it.
+    pub fn add_zone(
+        &self,
+        domain: &str,
+        sessions: BTreeMap<String, String>,
+        owner: &str,
+    ) -> Result<u64> {
+        let id = self.d.services.add_zone(domain, sessions, owner)?;
+        self.service_event("added", id);
+        Ok(id)
+    }
+
+    /// Removes a service or zone; what it was, if it was there.
+    pub fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
+        let info = self.d.services.remove(id)?;
+        self.d.emit(
+            None,
+            EventBody::Service {
+                change: "removed".into(),
+                service: info.clone(),
+            },
+        );
+        Some(info)
+    }
+
+    /// Services and zones.
+    pub fn services(&self) -> Vec<ServiceInfo> {
+        self.d.services.list()
+    }
+
+    fn service_event(&self, change: &str, id: u64) {
+        if let Some(service) = self.d.services.info(id) {
+            self.d.emit(
+                None,
+                EventBody::Service {
+                    change: change.into(),
+                    service,
+                },
+            );
+        }
     }
 
     /// A session's info, saying so when the driver is off.

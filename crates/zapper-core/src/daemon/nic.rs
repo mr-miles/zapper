@@ -119,10 +119,9 @@ async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Ve
         );
         return Some(dns::respond(query, Some(&q), dns::REFUSED, None));
     }
-    // The firm's own services are answered here, never looked up on the host.
-    let firm = super::office::run_of(&d.office, s)
-        .and_then(|r| super::office::facility::serves_name(&r, &q.name));
-    if let Some(exists) = firm {
+    // Services and their zones are answered here, never looked up on the
+    // host.
+    if let Some(exists) = d.services.resolves(s, &q.name) {
         s.dns.lock().unwrap().remember(&q.name, exists);
     }
     // Allowed: say whether the name exists, from a real lookup on the host.

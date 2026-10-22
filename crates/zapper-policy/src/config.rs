@@ -449,6 +449,10 @@ pub struct Engine {
     pub boot_args: String,
     /// How the guest reaches the network.
     pub network: NetworkMode,
+    /// Guest TCP ports the host may connect to over vsock, for services
+    /// other sessions reach (`zapper service add --to-session ID:PORT`):
+    /// each goes to the guest's NIC address, or loopback without a NIC.
+    pub ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +479,7 @@ impl Default for Engine {
             ttl_secs: 0,
             boot_args: String::new(),
             network: NetworkMode::Nic,
+            ports: vec![],
         }
     }
 }
@@ -854,6 +859,19 @@ impl Config {
             .keys()
             .filter_map(|n| Some((n, self.resolve(n).ok()?)))
         {
+            for port in &p.engine.ports {
+                let reserved = [
+                    crate::proto::CONTROL_PORT,
+                    crate::proto::SHELL_PORT,
+                    crate::proto::PROXY_PORT,
+                    crate::proto::OFFICE_PORT,
+                ];
+                if *port == 0 || reserved.contains(&(*port as u32)) {
+                    errors.push(format!(
+                        "profile {name}: engine.ports: {port} is not a port the guest can offer"
+                    ));
+                }
+            }
             if !p.agent.driven {
                 continue;
             }
@@ -984,6 +1002,30 @@ mod tests {
         let e = ok(&format!("{off}{firm}")).unwrap_err();
         assert!(e.contains("firms need the driver"), "{e}");
         assert!(DaemonConfig::default().driver, "on unless turned off");
+    }
+
+    #[test]
+    fn a_profile_offers_guest_ports_for_services() {
+        use super::Config;
+        let c = Config::from_yaml(
+            "profiles:\n  k: { engine: { ports: [6443] } }\n  l: { extends: k }\n",
+        )
+        .unwrap();
+        assert_eq!(c.resolve("l").unwrap().engine.ports, [6443], "inherited");
+        for port in [0, 1000, 1024, 1100, 3128] {
+            let e = Config::from_yaml(&format!(
+                "profiles:\n  k: {{ engine: {{ ports: [{port}] }} }}\n"
+            ))
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+            assert!(
+                e.contains(&format!(
+                    "engine.ports: {port} is not a port the guest can offer"
+                )),
+                "{port}: {e}"
+            );
+        }
     }
 
     #[test]

@@ -80,33 +80,6 @@ pub mod security {
     }
 }
 
-pub mod facility {
-    use super::*;
-    use tokio::io::{AsyncRead, AsyncWrite};
-
-    #[derive(Debug, Clone, Copy)]
-    pub enum Internal {}
-
-    pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-    impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
-
-    pub fn route(run: &FirmRun, _host: &str, _port: u16) -> Option<Result<Internal>> {
-        run.never.absurd()
-    }
-
-    pub fn serves_name(run: &FirmRun, _name: &str) -> Option<bool> {
-        run.never.absurd()
-    }
-
-    pub async fn connect(
-        _run: &Arc<FirmRun>,
-        _s: &Arc<Session>,
-        target: Internal,
-    ) -> Result<Box<dyn Io>> {
-        match target {}
-    }
-}
-
 pub mod ops {
     use super::*;
 
