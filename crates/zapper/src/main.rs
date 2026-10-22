@@ -3,7 +3,7 @@
 //! the host and everything that happens recorded.
 
 mod client;
-use zapper_core::{daemon, vmm};
+use zapper_core::{util, vmm};
 #[cfg(feature = "office")]
 mod firm_cli;
 mod image;
@@ -295,7 +295,7 @@ fn load_config(path: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| daemon::office_config(&c).map(|_| c))
+        .and_then(|c| util::office_config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
 }
 
@@ -411,7 +411,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("{} exists; not touching it", config_path.display());
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
-                daemon::write_private(&config_path, example().as_bytes())?;
+                util::write_private(&config_path, example().as_bytes())?;
                 println!("wrote {}", config_path.display());
             }
             // Skills are the office's workers'.
@@ -420,8 +420,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 let dir = config_path
                     .parent()
                     .unwrap()
-                    .join(daemon::office::skills::DEFAULT_DIR);
-                let written = daemon::office::skills::install(&dir)?;
+                    .join(zapper_core::skills::DEFAULT_DIR);
+                let written = zapper_core::skills::install(&dir)?;
                 if written.is_empty() {
                     println!("{}: the default skills are all there", dir.display());
                 } else {
@@ -487,7 +487,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let mut stdin = tar.stdin.take().unwrap();
             let (mut r, _w) = tokio::io::split(io);
             let mut code = 255;
-            while let Some(f) = daemon::session::read_frame(&mut r).await? {
+            while let Some(f) = util::read_frame(&mut r).await? {
                 use tokio::io::AsyncWriteExt;
                 match f {
                     zapper_policy::proto::Frame::Data(d) => stdin.write_all(&d).await?,
@@ -704,9 +704,8 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             ConfigCmd::Edit => {
                 let current = c.text("/v1/config").await?;
-                let tmp =
-                    std::env::temp_dir().join(format!("zapper-{}.yaml", daemon::random_id(6)));
-                daemon::write_private(&tmp, current.as_bytes())?;
+                let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
+                util::write_private(&tmp, current.as_bytes())?;
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
                 let status = std::process::Command::new("sh")
                     .arg("-c")
@@ -1082,11 +1081,11 @@ async fn serve(config_path: PathBuf) -> Result<()> {
             bound.to_string()
         };
         let url = format!("http://{shown}/?token={}", d.ui_token());
-        daemon::write_private(&d.state_dir().join("ui-url"), format!("{url}\n").as_bytes())?;
+        util::write_private(&d.state_dir().join("ui-url"), format!("{url}\n").as_bytes())?;
         if remote {
             eprintln!(
                 "{}",
-                daemon::exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
+                util::exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
             );
         }
         eprintln!("zapper: UI at {url}");
@@ -1221,8 +1220,8 @@ async fn check(config_path: &Path) -> Result<i32> {
     }
     #[cfg(feature = "office")]
     for (name, firm) in &config.firms {
-        let dir = daemon::office::skills::dir(firm);
-        let missing = daemon::office::skills::missing(firm);
+        let dir = zapper_core::skills::dir(firm);
+        let missing = zapper_core::skills::missing(firm);
         report(
             missing.is_empty(),
             &format!("firm {name}: skills in {}", dir.display()),
@@ -1402,7 +1401,7 @@ mod tests {
     #[test]
     fn init_writes_a_config_this_build_loads() {
         let c = zapper_policy::Config::from_yaml(super::example()).unwrap();
-        super::daemon::office_config(&c).unwrap();
+        super::util::office_config(&c).unwrap();
         assert!(c.profiles.contains_key("claude"));
         if !cfg!(feature = "office") {
             assert!(!super::example().contains("Firms (docs/office.md)"));

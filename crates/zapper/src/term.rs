@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
 use zapper_policy::proto::Frame;
 
-use zapper_core::daemon::session::read_frame;
+use zapper_core::util::read_frame;
 
 pub fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }

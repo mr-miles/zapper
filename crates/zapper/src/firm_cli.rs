@@ -829,7 +829,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
                         print_json(&v);
                         return Ok(0);
                     }
-                    let now = crate::daemon::now();
+                    let now = crate::util::now();
                     println!(
                         "{:<12} {:<20} {:<7} {:<10} EXPIRES",
                         "WORKER", "RESOURCE", "LEVEL", "BY"
