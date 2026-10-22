@@ -1293,9 +1293,9 @@ pub(super) async fn boot_worker(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn crate::daemon::harness::Driver> {
+) -> Result<&'static dyn crate::harness::Driver> {
     let kind = &profile.agent.kind;
-    crate::daemon::harness::get(kind)
+    crate::harness::get(kind)
         .and_then(|h| h.driver())
         .ok_or_else(|| anyhow!("profile {}: agent kind {kind} can't run an office worker (those that can: claude-code, pi)", profile.name))
 }

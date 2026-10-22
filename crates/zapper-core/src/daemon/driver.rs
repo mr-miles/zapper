@@ -40,7 +40,7 @@ const MAX_RESTARTS: usize = 5;
 /// foreman's `MAX_TIMEOUTS`).
 const MAX_TIMEOUTS: u32 = 3;
 
-pub(crate) enum Out {
+pub enum Out {
     /// A turn ended.
     End(TurnEnd),
     /// A line the protocol wants written back.
@@ -52,7 +52,7 @@ pub(crate) enum Out {
 }
 
 /// Where a driven agent's output goes: its transcript and what it is doing.
-pub(crate) trait Observer: Send + Sync {
+pub trait Observer: Send + Sync {
     /// An output line: a JSON object, or text from stderr or not JSON
     /// (`kind` says which).
     fn transcript(&self, kind: &str, line: Value);
@@ -62,12 +62,12 @@ pub(crate) trait Observer: Send + Sync {
     fn activity(&self, text: &str);
 }
 
-pub(crate) struct Proc {
+pub struct Proc {
     stdin: OwnedWriteHalf,
-    pub(crate) events: mpsc::Receiver<Out>,
-    pub(crate) conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
+    pub events: mpsc::Receiver<Out>,
+    pub conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
-    pub(crate) steers: bool,
+    pub steers: bool,
     /// Reads the agent's output; it holds the connection's other half.
     reader: tokio::task::JoinHandle<()>,
 }
@@ -80,20 +80,20 @@ impl Drop for Proc {
 }
 
 impl Proc {
-    pub(crate) async fn write(&mut self, line: Vec<u8>) -> Result<()> {
+    pub async fn write(&mut self, line: Vec<u8>) -> Result<()> {
         let mut buf = Vec::new();
         Frame::Data(line).write_to(&mut buf)?;
         self.stdin.write_all(&buf).await?;
         Ok(())
     }
 
-    pub(crate) async fn send(&mut self, text: &str) -> Result<()> {
+    pub async fn send(&mut self, text: &str) -> Result<()> {
         let line = self.conv.lock().unwrap().prompt(text);
         self.write(line).await
     }
 }
 
-pub(crate) async fn start(
+pub async fn start(
     stream: UnixStream,
     mut conv: Box<dyn Conversation>,
     observer: Arc<dyn Observer>,
@@ -597,7 +597,7 @@ impl Report for SessionReport {
 /// Starts the driver of a driven session that has just come up: its agent
 /// runs over a terminal channel, its output goes to `driver.jsonl` in the
 /// session's directory.
-pub fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::Session>) {
+pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::Session>) {
     let Some(driver) = session.driver.clone() else {
         return;
     };

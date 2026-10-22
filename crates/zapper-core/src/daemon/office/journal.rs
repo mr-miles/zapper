@@ -20,7 +20,7 @@ pub const MAX_LINE: usize = 256 * 1024;
 pub struct Journal {
     /// Where it is read from.
     path: PathBuf,
-    file: Mutex<crate::daemon::record::Writer>,
+    file: Mutex<crate::record::Writer>,
     offset: AtomicU64,
     seq: AtomicU64,
 }
@@ -34,9 +34,9 @@ pub struct At {
 
 impl Journal {
     pub fn create(path: &Path) -> Result<Journal> {
-        let file = crate::daemon::record::Writer::open(path)
+        let file = crate::record::Writer::open(path)
             .with_context(|| format!("creating {}", path.display()))?;
-        let path = crate::daemon::record::view(path);
+        let path = crate::record::view(path);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         // An existing journal continues its sequence.
         let last = std::fs::read(&path).ok().and_then(|b| {
