@@ -106,6 +106,7 @@ config/                  zapper.yaml: the config, used when zapper runs in the c
   skills/                  office workers' skills: built in, and read live through the acme firm's `skills_dir: skills`
   kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
 scripts/fetch-deps.sh    Firecracker and kernel download
+scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
 tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
 tests/e2e-office.sh      end-to-end tests of firms, with the fake Claude
 docs/                    one page per topic; index in docs/README.md
