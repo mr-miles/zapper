@@ -9,9 +9,11 @@ license.workspace = true
 default = ["office"]
 # The Office: firms of workers, their mail, drive, security officers and
 # cluster. Without it (`--no-default-features`), zapper runs sessions only.
-office = []
+office = ["zapper-core/office"]
 
 [dependencies]
+zapper-core = { path = "../zapper-core", default-features = false }
+zapper-api = { path = "../zapper-api" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }
 anyhow.workspace = true
@@ -44,4 +46,4 @@ libc = "0.2"
 ring = "0.17"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
+zapper-core = { path = "../zapper-core", default-features = false, features = ["test-util"] }

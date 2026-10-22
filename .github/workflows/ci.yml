@@ -1,6 +1,8 @@
 # Lint, unit tests and the release build, as `make lint`, `make test` and
-# `make build` run them. The end-to-end tests need KVM, images and network,
-# and stay local (`make test-e2e`).
+# `make build` run them, with the office and without (OFFICE=0); the
+# release's package, installed under a fresh home; and the pages' scripts.
+# The end-to-end tests need KVM, images and network, and stay local
+# (`make test-e2e`).
 name: ci
 
 on:
@@ -27,6 +29,12 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        office: [1, 0]
+    env:
+      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -34,10 +42,18 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt,clippy
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: office-${{ matrix.office }}
       - run: make lint
 
   test:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        office: [1, 0]
+    env:
+      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -45,10 +61,18 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: office-${{ matrix.office }}
       - run: make test
 
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        office: [1, 0]
+    env:
+      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -56,13 +80,52 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: office-${{ matrix.office }}
       - run: make build
       # It runs as PID 1 in any image, so it must not need a dynamic loader.
       - name: The guest agent is static
         run: "! readelf -l target/release/zapper-agent | grep -q INTERP"
+      # As the release job packages it, installed as a user would: under a
+      # home of its own, with Firecracker and the kernel downloaded.
+      - name: Package, and install under a fresh home
+        run: |
+          scripts/package.sh ci
+          pkg="$RUNNER_TEMP/pkg"
+          mkdir -p "$pkg"
+          tar -C "$pkg" -xzf "dist/zapper-ci-$(uname -m)-linux.tar.gz"
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          sh "$pkg"/zapper-ci-*/install.sh
+          conf="$HOME/.config/zapper"
+          bin="$HOME/.local/bin"
+          "$bin/zapper" --version
+          test "$(stat -c %a "$conf/zapper.yaml")" = 600
+          test -x "$HOME/.local/share/zapper/bin/firecracker"
+          test -s "$HOME/.local/share/zapper/kernels/vmlinux-6.1"
+          if [ "$OFFICE" = 0 ]; then
+            test ! -e "$bin/zapper-inspect"
+            test ! -e "$conf/skills"
+            if grep -q '^firms:' "$conf/zapper.yaml"; then exit 1; fi
+          else
+            test -x "$bin/zapper-inspect"
+            ls "$conf"/skills/*/SKILL.md
+          fi
+          # No KVM or images here: check fails, but finds what was installed.
+          # Out of the checkout, whose config it would take.
+          (cd "$HOME" && "$bin/zapper" check) > "$RUNNER_TEMP/check.txt" || true
+          cat "$RUNNER_TEMP/check.txt"
+          grep -q "^ok     config $conf/zapper.yaml" "$RUNNER_TEMP/check.txt"
+          grep -q "^ok     firecracker at " "$RUNNER_TEMP/check.txt"
+          grep -q "^ok     zapper-agent next to zapper" "$RUNNER_TEMP/check.txt"
+          # Installing again keeps the config.
+          echo "# mine" >> "$conf/zapper.yaml"
+          sh "$pkg"/zapper-ci-*/install.sh | tee "$RUNNER_TEMP/again.txt"
+          grep -q "exists; not touching it" "$RUNNER_TEMP/again.txt"
+          tail -n1 "$conf/zapper.yaml" | grep -qx "# mine"
       - uses: actions/upload-artifact@v4
         with:
-          name: zapper-${{ github.sha }}
+          name: zapper-${{ matrix.office == 1 && 'office' || 'no-office' }}-${{ github.sha }}
           path: |
             target/release/zapper
             target/release/zapper-agent
@@ -70,3 +133,13 @@ jobs:
             target/release/zapper-keeper
           if-no-files-found: error
           retention-days: 7
+
+  # The pages' scripts: no Rust build looks at them.
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: scripts/check-js.sh

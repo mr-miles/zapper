@@ -13,7 +13,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
-use crate::daemon::vm::parse_size;
+use zapper_policy::parse_size;
 
 /// The container engine: `$ZAPPER_OCI`, else podman, else docker.
 pub fn engine() -> String {
@@ -164,7 +164,7 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
         run(&mut docker)?;
     }
     std::fs::rename(&tmp, &out)?;
-    let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "size": size, "built": crate::daemon::now() as u64 });
+    let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "size": size, "built": crate::util::now() as u64 });
     std::fs::write(
         b.dir.join(format!("{}.json", b.name)),
         serde_json::to_vec_pretty(&meta)?,
@@ -198,7 +198,7 @@ pub fn list(dir: &Path) -> Result<Vec<serde_json::Value>> {
 
 fn tempdir() -> Result<PathBuf> {
     let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/var/tmp".into());
-    let dir = PathBuf::from(base).join(format!("zapper-image-{}", crate::daemon::random_id(8)));
+    let dir = PathBuf::from(base).join(format!("zapper-image-{}", crate::util::random_id(8)));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }

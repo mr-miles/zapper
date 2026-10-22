@@ -1,0 +1,294 @@
+//! A firm's run without VMs (`test_run`): finding a session's run, grants
+//! and their network rules per repository, the git server's checks, the
+//! firm's service names, and the office port's requests.
+
+use std::sync::Arc;
+
+use base64::Engine as _;
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use zapper_policy::{AnyRule, Policy, BOARD};
+
+use super::access::{self, Level};
+use super::facility::{self, Internal};
+use super::{labels, run_of, test_run, FirmRun};
+use crate::testing::TestCore;
+use crate::{NewSession, Session};
+
+const FIRM: &str = "
+profiles:
+  w: { agent: { kind: claude-code } }
+firms:
+  acme:
+    roles:
+      ceo: { profile: w, skills: { work: ceo } }
+      eng: { profile: w, skills: { work: software-engineer } }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: pat, role: eng, reports_to: ceo }
+    git: { repos: [api, web] }
+";
+
+fn run() -> (TestCore, Arc<FirmRun>) {
+    let t = TestCore::new(FIRM);
+    let run = test_run(&t.core, "acme");
+    (t, run)
+}
+
+fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
+    run.rt(worker)
+        .unwrap()
+        .session
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap()
+}
+
+/// The ids of a worker's credential rules, and where the first allows.
+fn credential_rules(run: &FirmRun, worker: &str) -> Vec<(String, String, Vec<u16>)> {
+    let mut v: Vec<(String, String, Vec<u16>)> = session_of(run, worker)
+        .policy
+        .read()
+        .unwrap()
+        .rules()
+        .into_iter()
+        .filter_map(|r| match r {
+            AnyRule::Net(n)
+                if n.id
+                    .as_deref()
+                    .is_some_and(|i| i.starts_with("credentials-")) =>
+            {
+                Some((n.id.unwrap(), n.host, n.ports))
+            }
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn ids(rules: &[(String, String, Vec<u16>)]) -> Vec<&str> {
+    rules.iter().map(|(i, ..)| i.as_str()).collect()
+}
+
+#[test]
+fn a_session_finds_its_run_by_its_labels() {
+    let (t, run) = run();
+    let found = run_of(t.core.office(), &session_of(&run, "pat")).unwrap();
+    assert_eq!(found.id, run.id);
+
+    // A session from an earlier run of the firm: not this run's.
+    let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
+    old.labels = labels("acme", "an-earlier-run", "pat", true);
+    let old = t.core.test_session(old, true).unwrap();
+    assert!(run_of(t.core.office(), &old).is_none());
+}
+
+#[test]
+fn the_ceo_holds_every_repository_and_others_nothing() {
+    let (_t, run) = run();
+    let host = format!("git.{}", run.domain);
+    let ceo = credential_rules(&run, "ceo");
+    assert_eq!(ids(&ceo), ["credentials-git-api", "credentials-git-web"]);
+    assert!(ceo.iter().all(|(_, h, p)| *h == host && *p == [443]));
+    assert!(credential_rules(&run, "pat").is_empty());
+}
+
+#[test]
+fn a_git_grant_is_per_repository_with_its_own_network_rule() {
+    let (t, run) = run();
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
+    assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
+    assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
+
+    access::board_grant(&t.core, &run, "pat", "git:web", Level::Read, None, "test").unwrap();
+    assert_eq!(
+        ids(&credential_rules(&run, "pat")),
+        ["credentials-git-api", "credentials-git-web"]
+    );
+
+    // Revoking one repository leaves the other's rule, and so its host.
+    access::revoke(&t.core, &run, BOARD, "pat", "git:api", "done").unwrap();
+    assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-web"]);
+    assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
+
+    // With two repositories, plain `git` names none of them.
+    let e = access::board_grant(&t.core, &run, "pat", "git", Level::Read, None, "test")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("name the repository"), "{e}");
+}
+
+/// The git server's answer to `member` asking for `path`, with `auth` as
+/// their Basic credentials: their level, or the refusal's status and text.
+fn git(
+    run: &FirmRun,
+    member: &str,
+    auth: Option<&str>,
+    path: &str,
+) -> Result<Level, (u16, String)> {
+    let mut headers = hyper::HeaderMap::new();
+    if let Some(a) = auth {
+        let v = base64::engine::general_purpose::STANDARD.encode(a);
+        headers.insert(
+            hyper::header::AUTHORIZATION,
+            format!("Basic {v}").parse().unwrap(),
+        );
+    }
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    facility::authorize(run, member, &headers, path, query).map_err(|r| {
+        let r = *r;
+        let status = r.status().as_u16();
+        let body =
+            futures_util::FutureExt::now_or_never(http_body_util::BodyExt::collect(r.into_body()))
+                .unwrap()
+                .unwrap()
+                .to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    })
+}
+
+#[test]
+fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
+    let (t, run) = run();
+    run.facility
+        .git_passwords
+        .lock()
+        .unwrap()
+        .insert("pat".into(), "pw".into());
+    let refs = "/api.git/info/refs?service=git-upload-pack";
+    let push = "/api.git/git-receive-pack";
+
+    // Who: the password, for the worker the connection came from.
+    assert_eq!(git(&run, "pat", None, refs).unwrap_err().0, 401);
+    assert_eq!(
+        git(&run, "pat", Some("pat:wrong"), refs).unwrap_err().0,
+        401
+    );
+    assert_eq!(git(&run, "pat", Some("ceo:pw"), refs).unwrap_err().0, 401);
+
+    // What: a grant on this repository.
+    let (status, text) = git(&run, "pat", Some("pat:pw"), refs).unwrap_err();
+    assert_eq!(status, 403);
+    assert!(text.contains("no access to api"), "{text}");
+
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Read, None, "test").unwrap();
+    assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
+    let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
+    assert_eq!(status, 403);
+    assert!(text.contains("you can read api"), "{text}");
+    assert_eq!(
+        git(
+            &run,
+            "pat",
+            Some("pat:pw"),
+            "/api.git/info/refs?service=git-receive-pack"
+        )
+        .unwrap_err()
+        .0,
+        403,
+        "asking to push is a push"
+    );
+
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
+
+    // Other repositories: their own grant; unknown ones aren't there.
+    assert_eq!(
+        git(&run, "pat", Some("pat:pw"), "/web.git/info/refs")
+            .unwrap_err()
+            .0,
+        403
+    );
+    let (status, text) = git(&run, "pat", Some("pat:pw"), "/other.git/info/refs").unwrap_err();
+    assert_eq!(status, 404);
+    assert!(
+        text.contains("api.git") && text.contains("web.git"),
+        "{text}"
+    );
+    assert_eq!(
+        git(&run, "pat", Some("pat:pw"), "/api.git/../web.git/HEAD")
+            .unwrap_err()
+            .0,
+        400
+    );
+}
+
+#[test]
+fn the_firms_names_are_its_own() {
+    let (_t, run) = run();
+    let d = run.domain.clone();
+    assert!(matches!(
+        facility::route(&run, &format!("git.{d}"), 443),
+        Some(Ok(Internal::Git))
+    ));
+    assert!(matches!(
+        facility::route(&run, &format!("git.{d}"), 80),
+        Some(Err(_))
+    ));
+    // No cluster in this firm: its names exist in the domain, unserved.
+    assert!(matches!(
+        facility::route(&run, &format!("cluster.{d}"), 6443),
+        Some(Err(_))
+    ));
+    assert!(matches!(
+        facility::route(&run, &format!("x.{d}"), 443),
+        Some(Err(_))
+    ));
+    assert!(facility::route(&run, "example.com", 443).is_none());
+
+    assert_eq!(facility::serves_name(&run, &format!("git.{d}")), Some(true));
+    assert_eq!(
+        facility::serves_name(&run, &format!("nope.{d}")),
+        Some(false)
+    );
+    assert_eq!(facility::serves_name(&run, "example.com"), None);
+}
+
+/// One request over the office port, as `s`'s VM would make it.
+async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
+    let (host, mut guest) = UnixStream::pair().unwrap();
+    let serve = tokio::spawn(super::ops::handle(t.core.clone(), s.clone(), host));
+    guest
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut guest)
+        .read_line(&mut line)
+        .await
+        .unwrap();
+    serve.await.unwrap().unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+#[tokio::test]
+async fn the_office_port_answers_for_the_vm_it_serves() {
+    let (t, run) = run();
+    let pat = session_of(&run, "pat");
+    let dir = office(&t, &pat, r#"{"op":"directory"}"#).await;
+    let workers = dir["ok"]["workers"].as_array().unwrap();
+    assert!(workers.iter().any(|w| w["name"] == "pat"), "{dir}");
+
+    // Who asks is the VM's member label, not anything in the request.
+    let desk = office(&t, &pat, r#"{"op":"desk"}"#).await;
+    assert!(desk["ok"].is_object(), "{desk}");
+
+    let unknown = office(&t, &pat, r#"{"op":"no_such_op"}"#).await;
+    assert!(unknown["error"].is_string(), "{unknown}");
+    let bad = office(&t, &pat, "not json").await;
+    assert!(
+        bad["error"].as_str().unwrap().starts_with("bad request"),
+        "{bad}"
+    );
+
+    // A VM of an earlier run: its firm isn't running for it.
+    let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
+    old.labels = labels("acme", "an-earlier-run", "pat", true);
+    let old = t.core.test_session(old, true).unwrap();
+    let r = office(&t, &old, r#"{"op":"directory"}"#).await;
+    assert_eq!(r["error"], "the firm isn't running");
+}

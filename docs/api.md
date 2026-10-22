@@ -71,7 +71,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `DELETE /v1/rules/{id}` | | Remove a rule from any layer |
 | `GET /v1/profiles` | ✓ | Summaries |
 | `GET\|PUT\|DELETE /v1/profiles/{name}` | | Profile and its resolved form / set / remove |
-| `GET /v1/sessions` | ✓ | Sessions |
+| `GET /v1/sessions` | ✓ | Sessions, each with its `labels` (a firm's: `firm`, `run`, `member` and `office`, `worker` or `facility`) |
 | `POST /v1/sessions` | | `{profile, workdir, rules?}`; returns once the guest is ready |
 | `GET /v1/sessions/{id}` | ✓ | One session |
 | `POST /v1/sessions/{id}/stop` | | Stop, keep listed |

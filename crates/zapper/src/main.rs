@@ -3,13 +3,11 @@
 //! the host and everything that happens recorded.
 
 mod client;
-mod daemon;
+use zapper_core::{util, vmm};
 #[cfg(feature = "office")]
 mod firm_cli;
 mod image;
-mod netns;
 mod term;
-mod vmm;
 
 use std::path::{Path, PathBuf};
 
@@ -297,7 +295,7 @@ fn load_config(path: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| daemon::office_config(&c).map(|_| c))
+        .and_then(|c| util::office_config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
 }
 
@@ -413,7 +411,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("{} exists; not touching it", config_path.display());
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
-                daemon::write_private(&config_path, example().as_bytes())?;
+                util::write_private(&config_path, example().as_bytes())?;
                 println!("wrote {}", config_path.display());
             }
             // Skills are the office's workers'.
@@ -422,8 +420,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 let dir = config_path
                     .parent()
                     .unwrap()
-                    .join(daemon::office::skills::DEFAULT_DIR);
-                let written = daemon::office::skills::install(&dir)?;
+                    .join(zapper_core::skills::DEFAULT_DIR);
+                let written = zapper_core::skills::install(&dir)?;
                 if written.is_empty() {
                     println!("{}: the default skills are all there", dir.display());
                 } else {
@@ -489,7 +487,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let mut stdin = tar.stdin.take().unwrap();
             let (mut r, _w) = tokio::io::split(io);
             let mut code = 255;
-            while let Some(f) = daemon::session::read_frame(&mut r).await? {
+            while let Some(f) = util::read_frame(&mut r).await? {
                 use tokio::io::AsyncWriteExt;
                 match f {
                     zapper_policy::proto::Frame::Data(d) => stdin.write_all(&d).await?,
@@ -706,9 +704,8 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             ConfigCmd::Edit => {
                 let current = c.text("/v1/config").await?;
-                let tmp =
-                    std::env::temp_dir().join(format!("zapper-{}.yaml", daemon::random_id(6)));
-                daemon::write_private(&tmp, current.as_bytes())?;
+                let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
+                util::write_private(&tmp, current.as_bytes())?;
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
                 let status = std::process::Command::new("sh")
                     .arg("-c")
@@ -1046,7 +1043,7 @@ fn event_line(e: &Value) -> String {
 }
 
 async fn serve(config_path: PathBuf) -> Result<()> {
-    let d = daemon::Daemon::new(config_path)?;
+    let d = zapper_core::Core::start(config_path)?;
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1065,7 +1062,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
-    let ui_addr = d.config.read().unwrap().daemon.ui.clone();
+    let ui_addr = d.config().daemon.ui;
     if !ui_addr.is_empty() {
         let addr: std::net::SocketAddr = ui_addr
             .parse()
@@ -1083,16 +1080,16 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         } else {
             bound.to_string()
         };
-        let url = format!("http://{shown}/?token={}", d.ui_token);
-        daemon::write_private(&d.paths.state.join("ui-url"), format!("{url}\n").as_bytes())?;
+        let url = format!("http://{shown}/?token={}", d.ui_token());
+        util::write_private(&d.state_dir().join("ui-url"), format!("{url}\n").as_bytes())?;
         if remote {
             eprintln!(
                 "{}",
-                exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
+                util::exposed_warning(&format!("the UI (daemon.ui) listens on {bound}"))
             );
         }
         eprintln!("zapper: UI at {url}");
-        let app = daemon::api::ui(d.clone(), port, remote);
+        let app = zapper_api::ui(d.clone(), port, remote);
         tokio::spawn(async move {
             if let Err(e) = axum::serve(tcp, app).await {
                 tracing::error!("UI: {e}");
@@ -1100,7 +1097,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         });
     }
     eprintln!("zapper: API on {}", socket.display());
-    let app = daemon::api::api(d.clone());
+    let app = zapper_api::api(d.clone());
     let shutdown = {
         let d = d.clone();
         async move {
@@ -1111,14 +1108,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
                 _ = term.recv() => {}
             }
             eprintln!("zapper: stopping sessions");
-            let runs: Vec<_> = d.office.runs.read().unwrap().values().cloned().collect();
-            for r in runs {
-                daemon::office::down(&d, &r, "daemon shutdown").await;
-            }
-            let sessions: Vec<_> = d.sessions.read().unwrap().values().cloned().collect();
-            for s in sessions {
-                daemon::session::stop(&d, &s, "daemon shutdown").await;
-            }
+            d.shutdown().await;
         }
     };
     axum::serve(listener, app)
@@ -1139,22 +1129,6 @@ fn host_name() -> String {
         Ok(h) if ok && !h.is_empty() => h.to_string(),
         _ => "localhost".into(),
     }
-}
-
-/// What `zapper serve` prints when an operator's port is reachable from
-/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
-pub(crate) fn exposed_warning(what: &str) -> String {
-    format!(
-        "\n\
-         ################################################################\n\
-         WARNING: {what}, reachable from the network.\n\
-         Whoever has the token controls zapper: sessions, rules, approvals,\n\
-         firms, and the firm's cluster as cluster-admin. It is plain HTTP:\n\
-         use it on a network you trust, or reach it through an SSH tunnel\n\
-         or a TLS proxy. zapper is not built for production. The VMs still\n\
-         can't reach it: the host's own addresses are closed to them.\n\
-         ################################################################\n"
-    )
 }
 
 async fn check(config_path: &Path) -> Result<i32> {
@@ -1246,8 +1220,8 @@ async fn check(config_path: &Path) -> Result<i32> {
     }
     #[cfg(feature = "office")]
     for (name, firm) in &config.firms {
-        let dir = daemon::office::skills::dir(firm);
-        let missing = daemon::office::skills::missing(firm);
+        let dir = zapper_core::skills::dir(firm);
+        let missing = zapper_core::skills::missing(firm);
         report(
             missing.is_empty(),
             &format!("firm {name}: skills in {}", dir.display()),
@@ -1427,7 +1401,7 @@ mod tests {
     #[test]
     fn init_writes_a_config_this_build_loads() {
         let c = zapper_policy::Config::from_yaml(super::example()).unwrap();
-        super::daemon::office_config(&c).unwrap();
+        super::util::office_config(&c).unwrap();
         assert!(c.profiles.contains_key("claude"));
         if !cfg!(feature = "office") {
             assert!(!super::example().contains("Firms (docs/office.md)"));
