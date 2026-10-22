@@ -1,13 +1,13 @@
-//! The `zapper` binary against `zapper serve` on a config and socket of its
-//! own (no VMs, so no sessions), and `init` and `check`, which need no
-//! daemon.
+//! The `zapper` binary against a daemon in the test: the API served on a
+//! socket of its own over a `TestCore` (no VMs), and `init` and `check`,
+//! which need none.
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use serde_json::Value;
+use zapper_core::testing::TestCore;
+use zapper_core::NewSession;
 
 const CONFIG: &str = "
 policy:
@@ -22,80 +22,18 @@ profiles:
     agent: { kind: claude-code, driven: true }
 ";
 
-/// A directory with a config whose daemon section points into it:
-/// placeholder agent and Firecracker files, no UI.
-struct Dir {
-    dir: PathBuf,
-}
-
-impl Dir {
-    fn new(daemon: &str, yaml: &str) -> Dir {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "zapper-cli-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for f in ["agent", "firecracker"] {
-            std::fs::write(dir.join(f), f).unwrap();
-        }
-        let mut extra = String::new();
-        for l in daemon.lines().filter(|l| !l.trim().is_empty()) {
-            extra.push_str(&format!("  {}\n", l.trim()));
-        }
-        let d = dir.display();
-        let config = format!(
-            "daemon:\n  state: {d}/state\n  agent: {d}/agent\n  firecracker: {d}/firecracker\n  images: {d}/images\n  kernels: {d}/kernels\n  ui: \"\"\n{extra}{yaml}"
-        );
-        std::fs::write(dir.join("zapper.yaml"), config).unwrap();
-        Dir { dir }
-    }
-
-    fn startup(&self) -> PathBuf {
-        self.dir.join("zapper.yaml")
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// `zapper serve` on the directory's config, its API on a socket there.
 struct Daemon {
-    t: Dir,
+    t: TestCore,
     socket: PathBuf,
-    serve: tokio::process::Child,
 }
 
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.serve.start_kill();
-    }
-}
-
-async fn daemon(t: Dir) -> Daemon {
-    let socket = t.dir.join("run").join("api.sock");
-    let serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
-        .arg("--config")
-        .arg(t.startup())
-        .arg("serve")
-        .env("ZAPPER_SOCKET", &socket)
-        .env("HOME", &t.dir)
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    for _ in 0..200 {
-        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
-            return Daemon { t, socket, serve };
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("zapper serve did not listen on {}", socket.display());
+/// A daemon whose config is `yaml`, its API on a socket in its directory.
+async fn daemon(t: TestCore) -> Daemon {
+    let socket = t.dir.join("api.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = zapper_api::api(t.core.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Daemon { t, socket }
 }
 
 /// Runs `zapper` with the daemon's config and socket.
@@ -135,26 +73,75 @@ fn failed(o: Output) -> String {
     err(&o)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn ps_lists_sessions() {
-    let d = daemon(Dir::new("", CONFIG)).await;
-    let text = ok(zapper(&d, &["ps"]).await);
-    assert_eq!(text.lines().count(), 1, "the header only: {text}");
-    assert!(text.starts_with("ID"), "{text}");
-    let v: Value = serde_json::from_str(&ok(zapper(&d, &["--json", "ps"]).await)).unwrap();
-    assert_eq!(v, serde_json::json!([]));
+fn session(d: &Daemon, profile: &str) -> String {
+    let new = NewSession::plain(profile.into(), d.t.workdir(), Default::default());
+    d.t.core.test_session(new, true).unwrap().id.clone()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tell_needs_a_session() {
-    let d = daemon(Dir::new("", CONFIG)).await;
+async fn ps_lists_sessions() {
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let text = ok(zapper(&d, &["ps"]).await);
+    assert_eq!(text.lines().count(), 1, "the header only: {text}");
+    assert!(text.starts_with("ID"), "{text}");
+
+    let id = session(&d, "web");
+    let text = ok(zapper(&d, &["ps"]).await);
+    let row = text.lines().nth(1).unwrap();
+    assert!(row.starts_with(&format!("{id}  web")), "{text}");
+    assert!(row.contains("running"), "{text}");
+
+    let v: Value = serde_json::from_str(&ok(zapper(&d, &["--json", "ps"]).await)).unwrap();
+    assert_eq!(v[0]["id"], id.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tell_gives_a_driven_session_a_task() {
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let bot = session(&d, "bot");
+    let text = ok(zapper(&d, &["tell", &bot, "fix", "the", "build"]).await);
+    assert_eq!(text, format!("queued for {bot} (the agent is idle)\n"));
+    let text = ok(zapper(&d, &["tell", &bot, "and the tests"]).await);
+    assert_eq!(
+        text,
+        format!("queued for {bot}: 2 waiting (the agent is idle)\n")
+    );
+
+    let web = session(&d, "web");
+    let e = failed(zapper(&d, &["tell", &web, "hi"]).await);
+    assert!(e.contains("is not driven"), "{e}");
     let e = failed(zapper(&d, &["tell", "nosuch", "hi"]).await);
     assert!(e.contains("nosuch"), "{e}");
+
+    let mut worker = NewSession::plain("bot".into(), d.t.workdir(), Default::default());
+    worker.labels = [("firm", "acme"), ("member", "pat")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let worker = d.t.core.test_session(worker, true).unwrap();
+    let e = failed(zapper(&d, &["tell", &worker.id, "hi"]).await);
+    assert!(
+        e.contains("pat works for firm acme: mail them instead"),
+        "{e}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tell_with_the_driver_off() {
+    // No profile can be driven then: that config doesn't load.
+    let d = daemon(TestCore::with_daemon(
+        "driver: false",
+        "profiles:\n  web: {}\n",
+    ))
+    .await;
+    let web = session(&d, "web");
+    let e = failed(zapper(&d, &["tell", &web, "hi"]).await);
+    assert!(e.contains("the driver is disabled"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rules_changed_diffed_and_saved() {
-    let d = daemon(Dir::new("", CONFIG)).await;
+    let d = daemon(TestCore::new(CONFIG)).await;
     let text = ok(zapper(&d, &["rules"]).await);
     assert!(text.lines().next().unwrap().starts_with("SCOPE"), "{text}");
     for want in ["global-deny", "web-allow", "*.bad.example", "example.com"] {
@@ -203,7 +190,7 @@ async fn rules_changed_diffed_and_saved() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn answering_an_approval_that_isnt_there() {
-    let d = daemon(Dir::new("", CONFIG)).await;
+    let d = daemon(TestCore::new(CONFIG)).await;
     let v: Value = serde_json::from_str(&ok(zapper(&d, &["--json", "approvals"]).await)).unwrap();
     assert_eq!(v, serde_json::json!([]));
     for verb in ["approve", "deny"] {
@@ -214,16 +201,45 @@ async fn answering_an_approval_that_isnt_there() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_daemon_the_error_says_how_to_start_one() {
-    let t = Dir::new("", CONFIG);
+    let t = TestCore::new(CONFIG);
     let e = failed(run(&t.startup(), None, &["ps"]).await);
     assert!(e.contains("is `zapper serve` running?"), "{e}");
+}
+
+/// `zapper serve` itself: the API on the socket it is given, which the CLI
+/// answers through.
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_listens_on_its_socket() {
+    let t = TestCore::new(CONFIG);
+    let socket = t.dir.join("run").join("api.sock");
+    let mut serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("--config")
+        .arg(t.startup())
+        .arg("serve")
+        .env("ZAPPER_SOCKET", &socket)
+        .env("HOME", &t.dir)
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let text = ok(run(&t.startup(), Some(&socket), &["rules"]).await);
+    assert!(text.contains("global-deny"), "{text}");
+    let text = ok(run(&t.startup(), Some(&socket), &["ps"]).await);
+    assert_eq!(text.lines().count(), 1, "the header only: {text}");
+    serve.start_kill().unwrap();
 }
 
 // `init` and `check`: no daemon needed.
 
 #[tokio::test]
 async fn init_writes_the_config_and_skills_once() {
-    let t = Dir::new("", "");
+    let t = TestCore::new("");
     let config = t.dir.join("fresh").join("zapper.yaml");
     let text = ok(run(&config, None, &["init"]).await);
     assert!(
@@ -277,7 +293,7 @@ fn lines_of(text: &str, prefix: &str) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn check_reports_the_driver_and_the_daemon() {
-    let d = daemon(Dir::new("", CONFIG)).await;
+    let d = daemon(TestCore::new(CONFIG)).await;
     let text = out(&zapper(&d, &["check"]).await);
     assert!(
         text.contains("note   the driver is on: driven profiles: bot\n"),
@@ -296,14 +312,14 @@ async fn check_reports_the_driver_and_the_daemon() {
         "{text}"
     );
 
-    let t = Dir::new("driver: false", "profiles:\n  web: {}\n");
+    let t = TestCore::with_daemon("driver: false", "profiles:\n  web: {}\n");
     let text = out(&run(&t.startup(), None, &["check"]).await);
     assert!(
         text.contains("note   the driver is disabled (daemon.driver: false)"),
         "{text}"
     );
     assert!(text.contains("note   the daemon isn't running"), "{text}");
-    let t = Dir::new("", "profiles:\n  web: {}\n");
+    let t = TestCore::new("profiles:\n  web: {}\n");
     let text = out(&run(&t.startup(), None, &["check"]).await);
     assert!(
         text.contains("no profile is driven (agent.driven)"),
@@ -325,8 +341,7 @@ async fn check_reports_the_driver_and_the_daemon() {
 #[cfg(feature = "office")]
 #[tokio::test]
 async fn check_reports_a_firms_missing_skills_until_init() {
-    let t = Dir::new(
-        "",
+    let t = TestCore::new(
         "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles:\n      ceo: { profile: w, skills: { work: ceo } }\n    workers:\n      - { name: ceo, role: ceo }\n",
     );
     let skills = t.dir.join("skills");
