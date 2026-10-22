@@ -1216,6 +1216,10 @@ async fn forward_plain(
     }
 }
 
+// The office's names; any session's services come with them.
+#[cfg(all(test, feature = "office"))]
+pub(crate) mod service_tests;
+
 #[cfg(test)]
 mod tests {
     use super::split_authority;
