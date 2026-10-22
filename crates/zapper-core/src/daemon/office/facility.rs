@@ -23,8 +23,10 @@ use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::{drive, FirmRun};
-use crate::daemon::session::{self, NewSession, Session};
-use crate::daemon::{random_id, vm, Daemon};
+use crate::daemon::session::{NewSession, Session};
+use crate::daemon::vm;
+use crate::util::random_id;
+use crate::Core;
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -443,7 +445,7 @@ pub fn network_follows_grant(
 /// dev; admin: also `admin` in prod), and a kubeconfig in their VM with its
 /// token. No grant: no account, no kubeconfig. Kubernetes enforces it.
 pub async fn cluster_access(
-    _d: &Arc<Daemon>,
+    _d: &Core,
     run: &FirmRun,
     worker: &str,
     level: super::access::Level,
@@ -545,7 +547,7 @@ pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
     Ok((code, text))
 }
 
-pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let repos = run.config.git_repos();
     if !repos.is_empty() {
         for name in &repos {
@@ -611,9 +613,7 @@ pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Resu
         forwards,
     };
     let _ = config;
-    let s = session::create(d.clone(), new)
-        .await
-        .context("booting the cluster")?;
+    let s = d.create_session(new).await.context("booting the cluster")?;
     *run.facility.cluster.lock().unwrap() = Some(s.clone());
     run.journal.append(
         "facility",
@@ -682,7 +682,7 @@ pub async fn start(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Resu
         {
             eprintln!(
                 "{}",
-                crate::daemon::exposed_warning(&format!(
+                crate::util::exposed_warning(&format!(
                     "firm {}'s Kubernetes dashboard (dashboard_port) listens on {addr}",
                     run.firm
                 ))
@@ -899,7 +899,7 @@ async fn deploy_landing(run: &FirmRun, s: &Session, manifest: String) {
         .append("facility", json!({ "name": "landing", "state": "failed" }));
 }
 
-pub async fn stop(d: &Arc<Daemon>, run: &Arc<FirmRun>) {
+pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
     for t in [
         run.facility.product.lock().unwrap().take(),
         run.facility.dashboard.lock().unwrap().take(),
@@ -911,8 +911,8 @@ pub async fn stop(d: &Arc<Daemon>, run: &Arc<FirmRun>) {
     }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
-        session::stop(d, &s, "firm down").await;
-        d.sessions.write().unwrap().remove(&s.id);
+        d.stop_session(&s, "firm down").await;
+        let _ = d.forget_session(&s.id);
     }
 }
 

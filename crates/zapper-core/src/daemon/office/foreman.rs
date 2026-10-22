@@ -19,7 +19,7 @@ use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
 use crate::daemon::driver::{self, Observer, Out, Proc};
 use crate::daemon::harness::{self, Driver, Outcome};
 use crate::daemon::session::Session;
-use crate::daemon::Daemon;
+use crate::Core;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;
@@ -165,7 +165,7 @@ fn blocked(
     None
 }
 
-pub async fn run(_d: Arc<Daemon>, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
+pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
     let transcript = match Journal::create(
         &run.dir
             .join("transcripts")

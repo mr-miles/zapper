@@ -9,12 +9,12 @@ use zapper_policy::Policy;
 
 use super::super::run_tests::{run, session_of};
 use crate::daemon::session::{NewSession, Session};
-use crate::daemon::testing::TestDaemon;
+use crate::testing::TestCore;
 
 /// One request over the office port, as `s`'s VM would make it.
-async fn office(t: &TestDaemon, s: &Arc<Session>, request: &str) -> Value {
+async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
-    let serve = tokio::spawn(super::handle(t.d.clone(), s.clone(), host));
+    let serve = tokio::spawn(super::handle(t.core.clone(), s.clone(), host));
     guest
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -51,7 +51,7 @@ async fn the_office_port_answers_for_the_vm_it_serves() {
     // A VM of an earlier run: its firm isn't running for it.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
     old.labels = super::super::labels("acme", "an-earlier-run", "pat", true);
-    let old = t.test_session(old, true).unwrap();
+    let old = t.core.test_session(old, true).unwrap();
     let r = office(&t, &old, r#"{"op":"directory"}"#).await;
     assert_eq!(r["error"], "the firm isn't running");
 }

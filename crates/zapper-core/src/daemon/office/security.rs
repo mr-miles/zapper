@@ -5,6 +5,7 @@
 //! becomes an access request; an officer (or the board) decides it, and the
 //! worker is told by mail.
 
+use crate::Core;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
@@ -344,7 +345,7 @@ pub fn screening_pending(run: &FirmRun, worker: &str) -> bool {
 /// An officer (or the board) clears a new hire, or objects; an objection
 /// cancels the hire, and the hirer gets the budget back with the reason.
 pub fn decide_screening(
-    d: &std::sync::Arc<crate::daemon::Daemon>,
+    d: &Core,
     run: &std::sync::Arc<FirmRun>,
     by: &str,
     id: &str,
@@ -600,12 +601,7 @@ pub fn requeue(run: &FirmRun, from: &str) {
 
 /// A hired security officer, cleared: they join the officers. While the
 /// CEO held security alone, it passes to the officer.
-pub fn appoint(
-    d: &std::sync::Arc<crate::daemon::Daemon>,
-    run: &std::sync::Arc<FirmRun>,
-    worker: &str,
-    by: &str,
-) {
+pub fn appoint(d: &Core, run: &std::sync::Arc<FirmRun>, worker: &str, by: &str) {
     // A policy owner now: admin on everything, for as long as they hold it.
     super::access::owner_access(d, run, worker, by);
     let chart = run.chart();

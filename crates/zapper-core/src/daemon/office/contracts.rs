@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use super::mail::{Draft, Expects, Kind};
 use super::workforce::{fmt_tokens, join, let_go, room};
 use super::{now, prompts, FirmRun, WorkerState};
-use crate::daemon::Daemon;
+use crate::Core;
 use zapper_policy::BOARD;
 
 /// Counter-offers before the hirer must accept or walk away.
@@ -179,7 +179,7 @@ pub struct OfferArgs {
 
 /// A hirer offers a job: a candidate of the role boots, is checked by the
 /// officers, and gets the offer as a question to quote on.
-pub async fn offer(d: &Arc<Daemon>, run: &Arc<FirmRun>, by: &str, a: OfferArgs) -> Result<Value> {
+pub async fn offer(d: &Core, run: &Arc<FirmRun>, by: &str, a: OfferArgs) -> Result<Value> {
     let hirer = run.worker(by)?;
     if run
         .config
@@ -495,7 +495,7 @@ pub fn add(run: &FirmRun, by: &str, id: &str, worker: &str) -> Result<Value> {
 
 /// The contractor delivers: the report goes to the hirer, the contract ends.
 pub fn complete(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     me: &str,
     id: &str,
@@ -538,13 +538,7 @@ pub fn complete(
 }
 
 /// The candidate turns the offer down.
-pub fn decline(
-    d: &Arc<Daemon>,
-    run: &Arc<FirmRun>,
-    me: &str,
-    id: &str,
-    reason: &str,
-) -> Result<Value> {
+pub fn decline(d: &Core, run: &Arc<FirmRun>, me: &str, id: &str, reason: &str) -> Result<Value> {
     let c = get(run, id)?;
     if c.worker != me {
         bail!("contract {id} isn't yours");
@@ -566,13 +560,7 @@ pub fn decline(
 }
 
 /// The hirer walks away from an offer.
-pub fn withdraw(
-    d: &Arc<Daemon>,
-    run: &Arc<FirmRun>,
-    by: &str,
-    id: &str,
-    reason: &str,
-) -> Result<Value> {
+pub fn withdraw(d: &Core, run: &Arc<FirmRun>, by: &str, id: &str, reason: &str) -> Result<Value> {
     let c = get(run, id)?;
     if c.by != by {
         bail!("contract {id} is {}'s", c.by);
@@ -594,7 +582,7 @@ pub fn withdraw(
 
 /// A contract ends: the contractor's VM stops, and what is left of their
 /// budget returns to the hirer.
-fn end(d: &Arc<Daemon>, run: &Arc<FirmRun>, id: &str, state: &str, reason: &str) -> Value {
+fn end(d: &Core, run: &Arc<FirmRun>, id: &str, state: &str, reason: &str) -> Value {
     let started = get(run, id).is_ok_and(|c| c.state == "active");
     let c = update(run, id, |c| {
         c.state = state.into();
@@ -667,13 +655,7 @@ pub fn may_mail(run: &FirmRun, from: &str, recipients: &[String]) -> Result<()> 
 
 /// An active contract ends for want of budget or time. A contractor with a
 /// board line first gets a last turn to debrief the board.
-fn finish(
-    d: &Arc<Daemon>,
-    run: &Arc<FirmRun>,
-    c: &Contract,
-    state: &'static str,
-    reason: &'static str,
-) {
+fn finish(d: &Core, run: &Arc<FirmRun>, c: &Contract, state: &'static str, reason: &'static str) {
     if !super::scenario::board_line(run, &c.worker) {
         end(d, run, &c.id, state, reason);
     } else if super::scenario::begin_debrief(run, &c.worker) {
@@ -688,7 +670,7 @@ fn finish(
 }
 
 /// Offers that went quiet lapse; due dates and spent budgets end contracts.
-pub fn tick(d: &Arc<Daemon>, run: &Arc<FirmRun>) {
+pub fn tick(d: &Core, run: &Arc<FirmRun>) {
     let t = now();
     let list: Vec<Contract> = run
         .contracts

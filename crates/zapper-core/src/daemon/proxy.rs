@@ -130,8 +130,8 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
         evaluate_net(&spec::layers_of(&layers), req)
     };
     let mut pending = None;
-    let firm =
-        super::office::run_of(d, s).map(|r| (r, s.label("member").unwrap_or_default().to_string()));
+    let firm = super::office::run_of(&d.office, s)
+        .map(|r| (r, s.label("member").unwrap_or_default().to_string()));
     let allowed = match decision.action {
         Action::Allow => {
             if let (Some((run, _)), Some(rule)) = (&firm, &decision.rule) {
@@ -289,7 +289,7 @@ enum Target {
 /// The target for `host:port`: the firm's services by name, anything else
 /// resolved on the host and checked against the address policy.
 async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
-    if let Some(run) = super::office::run_of(d, s) {
+    if let Some(run) = super::office::run_of(&d.office, s) {
         if let Some(r) = super::office::facility::route(&run, host, port) {
             return r
                 .map(|i| Target::Firm(run.clone(), i))

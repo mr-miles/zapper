@@ -34,6 +34,19 @@ pub enum RuleRemoval {
 
 impl Core {
     /// Loads the startup config and starts the daemon's state.
+    /// The daemon's own handle on itself, for its parts that are clients
+    /// of `Core` (the office).
+    pub(crate) fn of(d: &Arc<Daemon>) -> Core {
+        Core { d: d.clone() }
+    }
+
+    /// The office's registry of firm runs, while the office lives in the
+    /// core.
+    #[cfg_attr(not(feature = "office"), allow(dead_code))]
+    pub(crate) fn office(&self) -> &daemon::office::Office {
+        &self.d.office
+    }
+
     pub fn start(startup_path: PathBuf) -> Result<Core> {
         Ok(Core {
             d: Daemon::new(startup_path)?,
@@ -333,7 +346,7 @@ impl Core {
     pub fn office_routes(&self) -> Router {
         daemon::office::http::read_routes()
             .merge(daemon::office::http::board_routes())
-            .with_state(self.d.clone())
+            .with_state(self.clone())
     }
 
     /// The office's page, the UI's front page when there is an office.
@@ -356,7 +369,7 @@ impl Core {
             .cloned()
             .collect();
         for r in runs {
-            daemon::office::down(&self.d, &r, "daemon shutdown").await;
+            daemon::office::down(self, &r, "daemon shutdown").await;
         }
         for s in self.sessions() {
             session::stop(&self.d, &s, "daemon shutdown").await;

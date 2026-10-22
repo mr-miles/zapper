@@ -12,7 +12,7 @@ use tokio::net::UnixListener;
 use zapper_policy::{NetRequest, Policy};
 
 use super::session::Session;
-use super::Daemon;
+use crate::Core;
 
 /// No value: what a firm would be.
 #[derive(Debug, Clone, Copy)]
@@ -37,11 +37,11 @@ pub struct FirmRun {
 }
 
 /// No session belongs to a firm.
-pub fn run_of(_d: &Daemon, _s: &Session) -> Option<Arc<FirmRun>> {
+pub fn run_of(_office: &Office, _s: &Session) -> Option<Arc<FirmRun>> {
     None
 }
 
-pub async fn down(_d: &Arc<Daemon>, run: &Arc<FirmRun>, _reason: &str) {
+pub async fn down(_d: &Core, run: &Arc<FirmRun>, _reason: &str) {
     run.never.absurd()
 }
 
@@ -111,17 +111,17 @@ pub mod ops {
     use super::*;
 
     /// No session is a firm's worker: nothing to serve.
-    pub async fn serve(_d: Arc<Daemon>, _s: Arc<Session>, _listener: UnixListener) {}
+    pub async fn serve(_d: Core, _s: Arc<Session>, _listener: UnixListener) {}
 }
 
 pub mod http {
     use super::*;
 
-    pub fn read_routes() -> Router<Arc<Daemon>> {
+    pub fn read_routes() -> Router<Core> {
         Router::new()
     }
 
-    pub fn board_routes() -> Router<Arc<Daemon>> {
+    pub fn board_routes() -> Router<Core> {
         Router::new()
     }
 }

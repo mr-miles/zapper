@@ -1005,7 +1005,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { r: { profile: w, skills: { work: x } } }\n    workers:\n      - { name: ceo, role: r }\n      - { name: cto, role: r, reports_to: ceo }\n      - { name: ada, role: r, reports_to: cto }\n      - { name: ken, role: r, reports_to: ceo }\n",
         )
         .unwrap();
-        let dir = std::env::temp_dir().join(format!("zapper-mail-{}", crate::daemon::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-mail-{}", crate::util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("journal.jsonl")).unwrap();
         let f = c.firms["acme"].clone();

@@ -15,7 +15,7 @@ use zapper_policy::{valid_worker_name, Firm, Worker, BOARD};
 
 use super::mail::{Draft, Expects, Kind};
 use super::{now, FirmRun, WorkerRt, WorkerState};
-use crate::daemon::Daemon;
+use crate::Core;
 
 /// Longest budget plan or reason, in bytes.
 const MAX_PLAN: usize = 20_000;
@@ -896,7 +896,7 @@ pub struct HireArgs {
 /// Hires a worker under `by`: checks the role, the money and the host,
 /// adds them to the chart, funds them, boots their VM, and sends them the
 /// brief as their first assignment.
-pub async fn hire(d: &Arc<Daemon>, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
+pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     let hirer = run.worker(by)?;
     let can = run
         .config
@@ -1018,18 +1018,18 @@ pub async fn hire(d: &Arc<Daemon>, run: &Arc<FirmRun>, by: &str, a: HireArgs) ->
 
 /// Room on the host for one more VM of `role`: the config, or why not.
 pub(super) fn room(
-    d: &Arc<Daemon>,
+    d: &Core,
     role_name: &str,
     role: &zapper_policy::Role,
 ) -> Result<zapper_policy::Config> {
-    let config = d.config.read().unwrap().clone();
+    let config = d.config();
     let profile = config.resolve(&role.profile)?;
     if let Some(avail) = super::mem_available_mib() {
         if profile.engine.memory_mib as u64 > avail {
             bail!("the host has {avail} MiB of memory available, and a {role_name} needs {} MiB; tell the board", profile.engine.memory_mib);
         }
     }
-    let running = d.sessions.read().unwrap().len();
+    let running = d.sessions().len();
     if running >= config.daemon.max_sessions {
         bail!("the host runs {running} sessions, its limit; tell the board");
     }
@@ -1122,7 +1122,7 @@ pub(super) fn join(
             .git_passwords
             .lock()
             .unwrap()
-            .insert(name.clone(), crate::daemon::random_id(24));
+            .insert(name.clone(), crate::util::random_id(24));
     }
     Ok((name, firm, rt))
 }
@@ -1130,7 +1130,7 @@ pub(super) fn join(
 /// Lets a worker go: their VM stops, their reports and open work move to
 /// their manager, and so does their unspent budget.
 pub async fn release(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -1164,7 +1164,7 @@ pub async fn release(
 /// reports, open work, mail and unspent budget go to their manager, who is
 /// told when someone else (`by`) made the call and `tell` is set.
 pub fn let_go(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -1229,8 +1229,8 @@ pub fn let_go(
         if let Some(s) = s {
             let d = d.clone();
             tokio::spawn(async move {
-                crate::daemon::session::stop(&d, &s, "let go").await;
-                d.sessions.write().unwrap().remove(&s.id);
+                d.stop_session(&s, "let go").await;
+                let _ = d.forget_session(&s.id);
             });
         }
     }

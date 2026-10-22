@@ -36,7 +36,8 @@ use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Firm, Policy, BOARD};
 
 use super::session::{self, NewSession, Session};
-use super::{now, random_id, Daemon};
+use crate::util::{now, random_id};
+use crate::Core;
 use journal::Journal;
 use mail::{Draft, Kind, PostOffice};
 
@@ -225,8 +226,8 @@ pub fn labels(firm: &str, run: &str, member: &str, worker: bool) -> BTreeMap<Str
 
 /// The run a session belongs to, from its labels: the firm's run, if it is
 /// the one that started the session.
-pub fn run_of(d: &Daemon, s: &Session) -> Option<Arc<FirmRun>> {
-    let run = d.office.runs.read().unwrap().get(s.label("firm")?)?.clone();
+pub fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
+    let run = office.runs.read().unwrap().get(s.label("firm")?)?.clone();
     (Some(run.id.as_str()) == s.label("run")).then_some(run)
 }
 
@@ -255,8 +256,8 @@ pub fn is_run_id(s: &str) -> bool {
         && b[16..].iter().all(|c| super::ID_CHARS.contains(c))
 }
 
-pub fn firm_dir(d: &Daemon, firm: &str) -> PathBuf {
-    d.paths.state.join("firms").join(firm)
+pub fn firm_dir(d: &Core, firm: &str) -> PathBuf {
+    d.state_dir().join("firms").join(firm)
 }
 
 fn utc_day(ts: f64) -> i64 {
@@ -595,7 +596,7 @@ pub(super) fn mem_available_mib() -> Option<u64> {
 }
 
 /// Checks that the firm fits before booting anything.
-fn check_resources(d: &Daemon, config: &Config, firm: &Firm) -> Result<()> {
+fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
     let mut mib = 0u64;
     let mut count = 0usize;
     for w in &firm.workers {
@@ -608,10 +609,8 @@ fn check_resources(d: &Daemon, config: &Config, firm: &Firm) -> Result<()> {
         count += 1;
     }
     let running = d
-        .sessions
-        .read()
-        .unwrap()
-        .values()
+        .sessions()
+        .iter()
         .filter(|s| {
             !matches!(
                 *s.status.borrow(),
@@ -869,9 +868,9 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
 /// (the middle of `up_with`, as it is), running, each founder on a session
 /// registered with their labels and role layer, and their grants applied.
 #[cfg(test)]
-pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
+pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
     (|| -> Result<Arc<FirmRun>> {
-        let config = d.config.read().unwrap().clone();
+        let config = d.config();
         let firm = config.firms[name].clone();
         let Started {
             firm,
@@ -955,7 +954,7 @@ pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
         for o in access::owners(&run) {
             access::owner_access(d, &run, &o, BOARD);
         }
-        d.office
+        d.office()
             .runs
             .write()
             .unwrap()
@@ -973,8 +972,7 @@ pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
                 zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
                 run.roles[&w.role].clone(),
             )];
-            *w.session.lock().unwrap() =
-                Some(super::session::test_session(d, &new, true)?);
+            *w.session.lock().unwrap() = Some(d.test_session(new, true)?);
             access::reapply(d, &run, &w.name);
         }
         drop(boot_rx);
@@ -983,19 +981,19 @@ pub(crate) fn test_run(d: &Arc<Daemon>, name: &str) -> Arc<FirmRun> {
     .unwrap()
 }
 
-pub async fn up_with(d: &Arc<Daemon>, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
+pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
     let task = opts.task.as_deref().and_then(task_parts);
     if let Some((_, body)) = &task {
         if body.len() > mail::MAX_BODY {
             bail!("the task is too long: at most {} bytes", mail::MAX_BODY);
         }
     }
-    if let Ok(r) = d.office.run(name) {
+    if let Ok(r) = d.office().run(name) {
         if !r.ended() {
             bail!("firm {name} is already running (run {})", r.id);
         }
     }
-    let config = d.config.read().unwrap().clone();
+    let config = d.config();
     let firm = config
         .firms
         .get(name)
@@ -1087,7 +1085,7 @@ pub async fn up_with(d: &Arc<Daemon>, name: &str, opts: &StartOptions) -> Result
     for o in access::owners(&run) {
         access::owner_access(d, &run, &o, BOARD);
     }
-    d.office
+    d.office()
         .runs
         .write()
         .unwrap()
@@ -1125,7 +1123,7 @@ pub async fn up_with(d: &Arc<Daemon>, name: &str, opts: &StartOptions) -> Result
 
 /// Boots the VMs of workers hired during the run, and starts their foremen.
 async fn booter(
-    d: Arc<Daemon>,
+    d: Core,
     run: Arc<FirmRun>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<WorkerRt>>,
 ) {
@@ -1136,7 +1134,7 @@ async fn booter(
         let Some(role) = run.config.roles.get(&w.role).cloned() else {
             continue;
         };
-        let config = d.config.read().unwrap().clone();
+        let config = d.config();
         let (d, run) = (d.clone(), run.clone());
         tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);
@@ -1146,8 +1144,8 @@ async fn booter(
                     if let Some(s) = w.session.lock().unwrap().take() {
                         let d = d.clone();
                         tokio::spawn(async move {
-                            session::stop(&d, &s, "let go").await;
-                            d.sessions.write().unwrap().remove(&s.id);
+                            d.stop_session(&s, "let go").await;
+                            let _ = d.forget_session(&s.id);
                         });
                     }
                 }
@@ -1166,7 +1164,7 @@ async fn booter(
     }
 }
 
-async fn boot(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let firm = &run.config;
     facility::start(d, run, config).await?;
     skills::prepare(run, config)?;
@@ -1197,7 +1195,7 @@ async fn boot(d: &Arc<Daemon>, run: &Arc<FirmRun>, config: &Config) -> Result<()
 }
 
 pub(super) async fn boot_worker(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     config: &Config,
     w: &Arc<WorkerRt>,
@@ -1281,7 +1279,7 @@ pub(super) async fn boot_worker(
         agent_overlay: Some(overlay),
         forwards: vec![],
     };
-    let s = session::create(d.clone(), new).await?;
+    let s = d.create_session(new).await?;
     run.journal.append(
         "worker_session",
         json!({ "worker": w.name, "session": s.id }),
@@ -1303,7 +1301,7 @@ fn harness_driver(
 }
 
 /// Follow-ups, digests and expiries.
-async fn ticker(d: Arc<Daemon>, run: Arc<FirmRun>) {
+async fn ticker(d: Core, run: Arc<FirmRun>) {
     let mut last_digest = now();
     loop {
         tokio::select! {
@@ -1327,7 +1325,7 @@ async fn ticker(d: Arc<Daemon>, run: Arc<FirmRun>) {
 }
 
 /// Stops a run: its workers' sessions, its facilities, its tasks.
-pub async fn down(d: &Arc<Daemon>, run: &Arc<FirmRun>, reason: &str) {
+pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     {
         let mut st = run.state.lock().unwrap();
         if matches!(*st, RunState::Ended) {
@@ -1344,8 +1342,8 @@ pub async fn down(d: &Arc<Daemon>, run: &Arc<FirmRun>, reason: &str) {
         if let Some(s) = w.session.lock().unwrap().take() {
             let d = d.clone();
             tasks.push(tokio::spawn(async move {
-                session::stop(&d, &s, "firm down").await;
-                d.sessions.write().unwrap().remove(&s.id);
+                d.stop_session(&s, "firm down").await;
+                let _ = d.forget_session(&s.id);
             }));
         }
         run.set_state(&w, WorkerState::Off, None);
@@ -1424,7 +1422,7 @@ pub fn close_orphans(state: &std::path::Path) {
 }
 
 /// Past runs of a firm, newest first.
-pub fn list_runs(d: &Daemon, firm: &str) -> Vec<Value> {
+pub fn list_runs(d: &Core, firm: &str) -> Vec<Value> {
     let dir = firm_dir(d, firm).join("runs");
     let mut out: Vec<Value> = std::fs::read_dir(&dir)
         .into_iter()
@@ -1447,7 +1445,7 @@ pub fn list_runs(d: &Daemon, firm: &str) -> Vec<Value> {
         })
         .collect();
     out.sort_by(|a, b| b["run"].as_str().cmp(&a["run"].as_str()));
-    if let Ok(r) = d.office.run(firm) {
+    if let Ok(r) = d.office().run(firm) {
         for v in out.iter_mut() {
             if v["run"] == json!(r.id) {
                 v["state"] = json!(*r.state.lock().unwrap());
@@ -1467,7 +1465,7 @@ pub const RUN_NOTE: &str = "note.txt";
 const MAX_NOTE: usize = 4000;
 
 /// Sets the board's note on a run; empty removes it.
-pub fn set_note(d: &Daemon, firm: &str, run: &str, note: &str) -> Result<()> {
+pub fn set_note(d: &Core, firm: &str, run: &str, note: &str) -> Result<()> {
     let dir = run_dir(d, firm, run)?;
     let note = note.trim();
     if note.len() > MAX_NOTE {
@@ -1612,12 +1610,12 @@ fn ts_of(line: &[u8]) -> Option<f64> {
 }
 
 /// A run's directory; `current` is the firm's current or last run.
-pub fn run_dir(d: &Daemon, firm: &str, run: &str) -> Result<PathBuf> {
+pub fn run_dir(d: &Core, firm: &str, run: &str) -> Result<PathBuf> {
     if !zapper_policy::valid_worker_name(firm) {
         bail!("{firm:?} is not a firm name");
     }
     let id = if run == "current" {
-        d.office.run(firm)?.id.clone()
+        d.office().run(firm)?.id.clone()
     } else {
         run.to_string()
     };
@@ -1631,9 +1629,9 @@ pub fn run_dir(d: &Daemon, firm: &str, run: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn prune(d: &Daemon, firm: &str, run: &str) -> Result<()> {
+pub fn prune(d: &Core, firm: &str, run: &str) -> Result<()> {
     let dir = run_dir(d, firm, run)?;
-    if let Ok(r) = d.office.run(firm) {
+    if let Ok(r) = d.office().run(firm) {
         if r.dir == dir && !r.ended() {
             bail!("run {run} is running; stop the firm first");
         }
@@ -1652,19 +1650,20 @@ mod http_tests;
 mod tests {
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {
-        let t = crate::daemon::testing::TestDaemon::new("profiles:\n  w: {}\n");
+        let t = crate::testing::TestCore::new("profiles:\n  w: {}\n");
         let mut new = crate::NewSession::plain("w".into(), t.workdir(), Default::default());
         new.labels = super::labels("acme", "r1", "pat", true);
-        let worker = t.test_session(new, true).unwrap();
+        let worker = t.core.test_session(new, true).unwrap();
         let plain = t
+            .core
             .test_session(
                 crate::NewSession::plain("w".into(), t.workdir(), Default::default()),
                 true,
             )
             .unwrap();
         // No run of acme in the registry, and a session with no firm.
-        assert!(super::run_of(&t.d, &worker).is_none());
-        assert!(super::run_of(&t.d, &plain).is_none());
+        assert!(super::run_of(t.core.office(), &worker).is_none());
+        assert!(super::run_of(t.core.office(), &plain).is_none());
     }
 
     #[test]
@@ -1802,8 +1801,7 @@ mod tests {
 
     #[test]
     fn run_summaries() {
-        let dir =
-            std::env::temp_dir().join(format!("zapper-runsum-{}", crate::daemon::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-runsum-{}", crate::util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = dir.join("journal.jsonl");
         std::fs::write(&j, concat!(

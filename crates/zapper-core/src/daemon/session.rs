@@ -475,7 +475,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
         let office =
             UnixListener::bind(PathBuf::from(format!("{}_{OFFICE_PORT}", vsock.display())))?;
         tokio::spawn(super::office::ops::serve(
-            daemon.clone(),
+            crate::Core::of(daemon),
             session.clone(),
             office,
         ));

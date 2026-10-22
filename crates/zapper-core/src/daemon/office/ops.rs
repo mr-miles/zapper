@@ -18,12 +18,12 @@ use zapper_policy::{parse_duration, NetRequest, BOARD};
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun};
 use crate::daemon::session::Session;
-use crate::daemon::Daemon;
+use crate::Core;
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 
-pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
+pub async fn serve(d: Core, s: Arc<Session>, listener: UnixListener) {
     let limit = Arc::new(Semaphore::new(8));
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -40,7 +40,7 @@ pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
     }
 }
 
-async fn handle(d: Arc<Daemon>, s: Arc<Session>, stream: UnixStream) -> Result<()> {
+async fn handle(d: Core, s: Arc<Session>, stream: UnixStream) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = Vec::new();
@@ -54,7 +54,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, stream: UnixStream) -> Result<(
     let reply = if n > MAX_OFFICE_LINE {
         json!({ "error": format!("request longer than {MAX_OFFICE_LINE} bytes") })
     } else {
-        let run = super::run_of(&d, &s);
+        let run = super::run_of(d.office(), &s);
         let member = s.label("member").unwrap_or_default();
         match (run, serde_json::from_slice::<Value>(&line)) {
             (None, _) => json!({ "error": "the firm isn't running" }),
@@ -471,7 +471,7 @@ pub fn reply_from(from: &str, v: &Value, po: &PostOffice) -> Result<Draft> {
 }
 
 pub async fn dispatch(
-    _d: &Arc<Daemon>,
+    _d: &Core,
     run: &Arc<FirmRun>,
     s: &Arc<Session>,
     me: &str,

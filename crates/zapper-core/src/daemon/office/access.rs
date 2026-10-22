@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use zapper_policy::{parse_duration, BOARD};
 
 use super::{now, FirmRun};
-use crate::daemon::Daemon;
+use crate::Core;
 
 /// How far a grant reaches. For git: read is fetch, write is push to
 /// branches, admin is also `main` and tags. For the cluster: read and write
@@ -215,7 +215,7 @@ fn every_resource(run: &FirmRun) -> Vec<String> {
 /// Puts a grant in place: recorded, enforced, and the worker told.
 #[allow(clippy::too_many_arguments)]
 fn put(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -269,7 +269,7 @@ fn put(
 
 /// Takes a grant back.
 fn take(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -299,7 +299,7 @@ fn take(
 /// Makes the platform match the grant: the cluster's RBAC and the worker's
 /// kubeconfig, and the network rules for git and the cluster. git and the
 /// drive are checked on every request, so they need nothing more here.
-fn enforce(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, resource: &str) {
+fn enforce(d: &Core, run: &Arc<FirmRun>, worker: &str, resource: &str) {
     if resource.starts_with("git:") || resource == "cluster" {
         super::facility::network_follows_grant(run, worker, resource, level(run, worker, resource));
     }
@@ -324,7 +324,7 @@ fn enforce(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, resource: &str) {
 }
 
 /// Puts a worker's grants in place again: their VM came up after them.
-pub fn reapply(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str) {
+pub fn reapply(d: &Core, run: &Arc<FirmRun>, worker: &str) {
     let repos = run
         .config
         .git_repos()
@@ -339,7 +339,7 @@ pub fn reapply(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str) {
 
 /// The policy owners' own access: admin on git and the cluster, write on
 /// every drive space, for as long as they hold the role.
-pub fn owner_access(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, by: &str) {
+pub fn owner_access(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str) {
     for r in every_resource(run) {
         let lvl = max_level(&r);
         put(
@@ -358,7 +358,7 @@ pub fn owner_access(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, by: &str)
 }
 
 /// Everything a worker holds, revoked: they are leaving, or stepping down.
-pub fn revoke_all(d: &Arc<Daemon>, run: &Arc<FirmRun>, worker: &str, by: &str, reason: &str) {
+pub fn revoke_all(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str, reason: &str) {
     let held: Vec<String> = run
         .access
         .lock()
@@ -549,7 +549,7 @@ pub fn request(
 /// The decider (or the CEO above them, or the board) grants or denies.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     id: &str,
@@ -672,7 +672,7 @@ pub fn escalate(run: &FirmRun, by: &str, id: &str, recommendation: &str) -> Resu
 
 /// A policy owner (or the board) takes a grant back.
 pub fn revoke(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -749,7 +749,7 @@ pub fn check_clearance(
 
 /// Makes the grants of a background check, and tells the hire once.
 pub fn grant_at_clearance(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -793,7 +793,7 @@ pub fn grant_at_clearance(
 
 /// The board grants directly.
 pub fn board_grant(
-    d: &Arc<Daemon>,
+    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -914,7 +914,7 @@ fn escalate_late(run: &FirmRun) {
 type Held = (String, String);
 
 /// Grants that lapse, and a warning before they do.
-pub fn tick(d: &Arc<Daemon>, run: &Arc<FirmRun>) {
+pub fn tick(d: &Core, run: &Arc<FirmRun>) {
     escalate_late(run);
     let t = now();
     // (worker, resource) that lapsed; and those to warn, with their expiry.

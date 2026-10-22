@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::daemon::now;
+use crate::util::now;
 
 /// Longest line kept; longer ones are cut and marked.
 pub const MAX_LINE: usize = 256 * 1024;
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn append_and_read_back() {
         let dir =
-            std::env::temp_dir().join(format!("zapper-journal-{}", crate::daemon::random_id(6)));
+            std::env::temp_dir().join(format!("zapper-journal-{}", crate::util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("j.jsonl")).unwrap();
         let a = j.append("mail", json!({ "subject": "hi" }));

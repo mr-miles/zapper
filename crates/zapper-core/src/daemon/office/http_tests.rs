@@ -10,7 +10,7 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::daemon::testing::TestDaemon;
+use crate::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -28,16 +28,13 @@ const NEW: &str = "20261021-090000-def";
 
 /// A request to the office's routes: its status and body (JSON, or the
 /// text as a string).
-async fn call(t: &TestDaemon, method: Method, uri: &str, body: &str) -> (StatusCode, Value) {
+async fn call(t: &TestCore, method: Method, uri: &str, body: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let routes = super::http::read_routes()
-        .merge(super::http::board_routes())
-        .with_state(t.d.clone());
-    let r = routes.oneshot(req).await.unwrap();
+    let r = t.core.office_routes().oneshot(req).await.unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await
@@ -50,12 +47,12 @@ async fn call(t: &TestDaemon, method: Method, uri: &str, body: &str) -> (StatusC
     )
 }
 
-async fn get(t: &TestDaemon, uri: &str) -> (StatusCode, Value) {
+async fn get(t: &TestCore, uri: &str) -> (StatusCode, Value) {
     call(t, Method::GET, uri, "").await
 }
 
-fn run_dir(t: &TestDaemon, run: &str) -> PathBuf {
-    let dir = t.d.paths.state.join("firms/acme/runs").join(run);
+fn run_dir(t: &TestCore, run: &str) -> PathBuf {
+    let dir = t.core.state_dir().join("firms/acme/runs").join(run);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -66,7 +63,7 @@ fn journal(lines: &[Value]) -> String {
 
 /// Two past runs: the old one kicked off by the board and ended, the new
 /// one never kicked off.
-fn two_runs(t: &TestDaemon) {
+fn two_runs(t: &TestCore) {
     let old = run_dir(t, OLD);
     std::fs::write(old.join("run.json"), r#"{"started": 100.0}"#).unwrap();
     std::fs::write(
@@ -88,7 +85,7 @@ fn two_runs(t: &TestDaemon) {
 
 #[tokio::test]
 async fn past_runs_newest_first_with_what_their_journal_says() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     two_runs(&t);
     let (status, runs) = get(&t, "/firms/acme/runs").await;
     assert_eq!(status, StatusCode::OK);
@@ -118,7 +115,7 @@ async fn past_runs_newest_first_with_what_their_journal_says() {
 
 #[tokio::test]
 async fn notes_on_runs_and_deleting_runs() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     two_runs(&t);
     let note = |run: &str| format!("/firms/acme/runs/{run}/note");
 
@@ -173,8 +170,8 @@ async fn notes_on_runs_and_deleting_runs() {
 
 #[tokio::test]
 async fn deleting_the_running_run_is_refused() {
-    let t = TestDaemon::new(FIRM);
-    let run = super::test_run(&t.d, "acme");
+    let t = TestCore::new(FIRM);
+    let run = super::test_run(&t.core, "acme");
     let (status, v) = call(
         &t,
         Method::DELETE,
@@ -189,7 +186,7 @@ async fn deleting_the_running_run_is_refused() {
 
 #[tokio::test]
 async fn journals_transcripts_and_a_runs_config() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     two_runs(&t);
     let old = run_dir(&t, OLD);
     std::fs::create_dir_all(old.join("transcripts")).unwrap();
@@ -282,7 +279,7 @@ fn repo(run: &Path, name: &str, commits: &[(&str, &[u8], &str, u64)]) {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
-fn repos(t: &TestDaemon) -> String {
+fn repos(t: &TestCore) -> String {
     let run = run_dir(t, OLD);
     repo(
         &run,
@@ -310,7 +307,7 @@ fn repos(t: &TestDaemon) -> String {
 
 #[tokio::test]
 async fn the_git_browser_reads_a_runs_repositories() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     let base = repos(&t);
 
     let (_, r) = get(&t, &format!("{base}/repos")).await;
@@ -386,7 +383,7 @@ async fn the_git_browser_reads_a_runs_repositories() {
 
 #[tokio::test]
 async fn the_git_browser_refuses_what_isnt_a_ref_path_or_repository() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     let base = repos(&t);
     let bad = [
         "log?ref=--output=/tmp/x",
@@ -432,7 +429,7 @@ async fn the_git_browser_refuses_what_isnt_a_ref_path_or_repository() {
 
 #[tokio::test]
 async fn the_runs_git_log_is_every_repository_newest_first() {
-    let t = TestDaemon::new(FIRM);
+    let t = TestCore::new(FIRM);
     let base = repos(&t);
     let (_, all) = get(&t, &base).await;
     let seen: Vec<(&str, &str)> = all

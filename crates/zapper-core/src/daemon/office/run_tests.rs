@@ -11,7 +11,7 @@ use super::access::{self, Level};
 use super::facility::{self, Internal};
 use super::{labels, run_of, test_run, FirmRun};
 use crate::daemon::session::{NewSession, Session};
-use crate::daemon::testing::TestDaemon;
+use crate::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -27,9 +27,9 @@ firms:
     git: { repos: [api, web] }
 ";
 
-pub(crate) fn run() -> (TestDaemon, Arc<FirmRun>) {
-    let t = TestDaemon::new(FIRM);
-    let run = test_run(&t.d, "acme");
+pub(crate) fn run() -> (TestCore, Arc<FirmRun>) {
+    let t = TestCore::new(FIRM);
+    let run = test_run(&t.core, "acme");
     (t, run)
 }
 
@@ -73,14 +73,14 @@ fn ids(rules: &[(String, String, Vec<u16>)]) -> Vec<&str> {
 #[test]
 fn a_session_finds_its_run_by_its_labels() {
     let (t, run) = run();
-    let found = run_of(&t.d, &session_of(&run, "pat")).unwrap();
+    let found = run_of(t.core.office(), &session_of(&run, "pat")).unwrap();
     assert_eq!(found.id, run.id);
 
     // A session from an earlier run of the firm: not this run's.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
     old.labels = labels("acme", "an-earlier-run", "pat", true);
-    let old = t.test_session(old, true).unwrap();
-    assert!(run_of(&t.d, &old).is_none());
+    let old = t.core.test_session(old, true).unwrap();
+    assert!(run_of(t.core.office(), &old).is_none());
 }
 
 #[test]
@@ -96,24 +96,24 @@ fn the_ceo_holds_every_repository_and_others_nothing() {
 #[test]
 fn a_git_grant_is_per_repository_with_its_own_network_rule() {
     let (t, run) = run();
-    access::board_grant(&t.d, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
     assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
 
-    access::board_grant(&t.d, &run, "pat", "git:web", Level::Read, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:web", Level::Read, None, "test").unwrap();
     assert_eq!(
         ids(&credential_rules(&run, "pat")),
         ["credentials-git-api", "credentials-git-web"]
     );
 
     // Revoking one repository leaves the other's rule, and so its host.
-    access::revoke(&t.d, &run, BOARD, "pat", "git:api", "done").unwrap();
+    access::revoke(&t.core, &run, BOARD, "pat", "git:api", "done").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-web"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
 
     // With two repositories, plain `git` names none of them.
-    let e = access::board_grant(&t.d, &run, "pat", "git", Level::Read, None, "test")
+    let e = access::board_grant(&t.core, &run, "pat", "git", Level::Read, None, "test")
         .unwrap_err()
         .to_string();
     assert!(e.contains("name the repository"), "{e}");
