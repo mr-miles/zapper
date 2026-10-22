@@ -73,6 +73,8 @@
   @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
   ul.kv { list-style: disc; margin:0; padding-left:20px; line-height:1.9; }
   ul.kv .k { color:var(--dim); }
+  #session-prompt textarea { width:100%; box-sizing:border-box; font:inherit; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; }
+  #session-prompt .bar { display:flex; gap:10px; align-items:center; margin-top:6px; }
   .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:8px; margin-bottom:12px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
   .card .k { color:var(--dim); font-size:11px; } .card .v { font-size:15px; }
@@ -96,13 +98,14 @@
       <div class="bar"><input id="net-q" placeholder="filter: method, host, path, status"><span class="dim" id="net-count"></span></div>
       <table class="net"><thead><tr><th>#</th><th>method</th><th>url</th><th>status</th><th>type</th><th>size</th><th>time</th><th>rule</th></tr></thead><tbody id="net-body"></tbody></table>
     </div>
+    <div id="session-prompt"></div>
     <div id="session-req"></div>
     <div id="session-more"></div>
   </section>
   <section id="events">
     <div class="bar">
       <select id="ev-session"><option value="">all sessions</option></select>
-      <select id="ev-type"><option value="">all types</option><option>net</option><option>dns</option><option>exec</option><option>ask</option><option>answer</option><option>guest</option><option>shell</option><option>session</option><option>config</option></select>
+      <select id="ev-type"><option value="">all types</option><option>net</option><option>dns</option><option>exec</option><option>ask</option><option>answer</option><option>guest</option><option>shell</option><option>session</option><option>driver</option><option>config</option></select>
       <select id="ev-action"><option value="">any action</option><option>allow</option><option>deny</option></select>
       <input id="ev-q" placeholder="filter text">
       <span class="dim" id="ev-count"></span>
@@ -231,7 +234,9 @@ async function renderSession(id) {
     item('network', el('span', { class: 'allow' }, c.net_allowed + ' allowed'), ' · ', el('span', { class: 'deny' }, c.net_denied + ' denied')),
     item('programs', el('span', { class: 'allow' }, c.exec_allowed + ' allowed'), ' · ', el('span', { class: 'deny' }, c.exec_denied + ' denied')),
     item('process exits', c.exits),
-    item('session rules', s.rules))));
+    item('session rules', s.rules),
+    ...(s.driver ? [item('driver', ...driverView(s.driver))] : []))));
+  renderPrompt(s);
   showTerminal(id, terms);
   renderNetwork(id);
   $('session-more').replaceChildren(
@@ -244,6 +249,45 @@ async function renderSession(id) {
       el('tbody', {}, exits.map(({ ts, event: x }) => el('tr', {}, el('td', {}, time(ts)), el('td', { class: 'mono' }, x.pid), el('td', { class: 'mono' }, x.comm),
         el('td', {}, x.signal ? pill('deny', 'sig ' + x.signal) : x.exit_code ? pill('deny', x.exit_code) : pill('allow', '0')),
         el('td', {}, x.elapsed_ms + ' ms'), el('td', {}, x.user_ms + ' / ' + x.sys_ms + ' ms'), el('td', {}, x.mem_kib + ' KiB'), el('td', {}, x.io_bytes + ' B'))))) : el('div', { class: 'empty' }, 'no exits yet'));
+}
+
+// A driven session's driver: what it is doing, or that the driver is off.
+function driverView(d) {
+  if (d === 'disabled') return [el('span', { class: 'dim' }, 'disabled (daemon.driver: false)')];
+  const cls = d.status === 'error' ? 'deny' : d.status === 'idle' ? 'allow' : 'ask';
+  const v = [pill(cls, d.status)];
+  if (d.activity) v.push(' ', el('span', { class: 'mono' }, d.activity));
+  v.push(el('span', { class: 'dim' }, ' · ' + d.turns + ' turns · ' + d.tokens + ' tokens' + (d.queued ? ' · ' + d.queued + ' waiting' : '')));
+  if (d.error) v.push(el('div', { class: 'deny' }, d.error));
+  return v;
+}
+
+// A driven session's prompt box. Built once per session, so what is being
+// typed survives the page's refreshes; a firm's workers get their work by
+// mail, not here.
+function renderPrompt(s) {
+  const box = $('session-prompt');
+  const show = s.driver && typeof s.driver === 'object' && !s.firm;
+  const sig = show ? s.id : '';
+  if (box.dataset.sid === sig) return;
+  box.dataset.sid = sig;
+  if (!show) return box.replaceChildren();
+  const text = el('textarea', { rows: 3, placeholder: 'A task for the agent: it runs at its next turn (ctrl+enter sends)' });
+  const msg = el('span', { class: 'dim' });
+  const send = async () => {
+    const t = text.value.trim();
+    if (!t) return;
+    const r = await fetch('/api/sessions/' + encodeURIComponent(s.id) + '/prompt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-zapper-ui': '1' },
+      body: JSON.stringify({ text: t }),
+    });
+    if (r.ok) { text.value = ''; msg.textContent = 'queued'; }
+    else { const b = await r.text(); let e = b; try { e = JSON.parse(b).error || b; } catch {} msg.textContent = 'Not sent: ' + e; }
+    await refresh();
+  };
+  text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send(); });
+  box.replaceChildren(el('h2', {}, 'tell the agent'), text, el('div', { class: 'bar' }, el('button', { on: send }, 'send'), msg));
 }
 
 // How each pending approval should be remembered, kept across refreshes.
@@ -446,6 +490,7 @@ function eventRow(e) {
     case 'dns': action = e.allowed ? 'allow' : 'deny'; detail = e.rcode + ' ' + (e.name || '(invalid query)') + (e.answer ? ' → ' + e.answer : '') + (e.reason ? '  (' + e.reason + ')' : ''); break;
     case 'session': detail = e.state + (e.detail ? ': ' + e.detail : ''); break;
     case 'config': detail = e.change; break;
+    case 'driver': { const x = e.detail || {}; action = x.outcome === 'failed' || e.event === 'error' ? 'deny' : ''; detail = e.event + (x.activity ? ' ' + x.activity : '') + (x.outcome ? ' ' + x.outcome : '') + (x.tokens != null ? ' · ' + x.tokens + ' tokens' : '') + (x.prompts != null ? ' · ' + x.prompts + ' prompts' : '') + (x.error ? '  ' + x.error : ''); break; }
   }
   return { e, action: action || '', detail, rule };
 }

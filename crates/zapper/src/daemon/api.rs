@@ -108,6 +108,7 @@ pub fn api(daemon: Arc<Daemon>) -> Router {
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
+        .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
         .route("/evaluate", post(evaluate))
         .route("/approvals/{id}", post(answer))
@@ -131,6 +132,7 @@ pub fn ui(daemon: Arc<Daemon>, port: u16, remote: bool) -> Router {
             "/api",
             read_routes()
                 .route("/approvals/{id}", post(answer))
+                .route("/sessions/{id}/prompt", post(prompt))
                 .merge(super::office::http::board_routes()),
         )
         .layer(middleware::from_fn_with_state(
@@ -515,13 +517,63 @@ async fn list_sessions(State(d): D) -> Json<Vec<session::SessionInfo>> {
             .read()
             .unwrap()
             .values()
-            .map(|s| s.info())
+            .map(|s| info(&d, s))
             .collect(),
     )
 }
 
 async fn get_session(State(d): D, Path(id): Path<String>) -> R<Json<session::SessionInfo>> {
-    Ok(Json(d.session(&id)?.info()))
+    let s = d.session(&id)?;
+    Ok(Json(info(&d, &s)))
+}
+
+/// A session's info, saying so when the driver is off.
+fn info(d: &Daemon, s: &session::Session) -> session::SessionInfo {
+    let mut i = s.info();
+    if !d.config.read().unwrap().daemon.driver {
+        i.driver = json!("disabled");
+    }
+    i
+}
+
+#[derive(Deserialize)]
+struct Prompt {
+    text: String,
+}
+
+/// Gives a driven session's agent a task: queued for its next turn.
+async fn prompt(State(d): D, Path(id): Path<String>, body: String) -> R<(StatusCode, Json<Value>)> {
+    let p: Prompt = parse_body(&body)?;
+    if !d.config.read().unwrap().daemon.driver {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "the driver is disabled (daemon.driver: false)".into(),
+        ));
+    }
+    let s = d.session(&id)?;
+    if let Some(f) = &s.firm {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("{} works for firm {}: mail them instead", f.member, f.firm),
+        ));
+    }
+    let Some(driver) = &s.driver else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("session {id} is not driven (agent.driven: false); attach to it instead"),
+        ));
+    };
+    if !s.is_running() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("session {id} is not running"),
+        ));
+    }
+    let queued = driver.prompt(&p.text)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "queued": queued, "driver": driver.info() })),
+    ))
 }
 
 /// Who keeps the record, and whether it is being written.
@@ -647,13 +699,13 @@ async fn create_session(State(d): D, body: String) -> R<Json<session::SessionInf
         NewSession::plain(req.profile, req.workdir, policy),
     )
     .await?;
-    Ok(Json(s.info()))
+    Ok(Json(info(&d, &s)))
 }
 
 async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<session::SessionInfo>> {
     let s = d.session(&id)?;
     session::stop(&d, &s, "stopped by operator").await;
-    Ok(Json(s.info()))
+    Ok(Json(info(&d, &s)))
 }
 
 async fn delete_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {

@@ -86,6 +86,14 @@ enum Cmd {
     Ps,
     /// Stop a session; it stays listed with its audit log.
     Stop { id: String },
+    /// Give a driven session's agent a task (`agent.driven`); it waits for
+    /// the agent's next turn. Follow it with `zapper events --session ID`.
+    Tell {
+        id: String,
+        /// The task; several words are joined with spaces.
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
     /// Stop and forget a session (its audit log stays on disk).
     Rm { id: String },
     /// Print a session's audit log.
@@ -542,6 +550,25 @@ async fn run(cli: Cli) -> Result<i32> {
             &c.json(Method::POST, &format!("/v1/sessions/{id}/stop"), None)
                 .await?,
         ),
+        Cmd::Tell { id, text } => {
+            let body = json!({ "text": text.join(" ") }).to_string();
+            let v = c
+                .json(
+                    Method::POST,
+                    &format!("/v1/sessions/{id}/prompt"),
+                    Some(body),
+                )
+                .await?;
+            if cli.json {
+                print_json(&v);
+            } else {
+                let status = v["driver"]["status"].as_str().unwrap_or("");
+                match v["queued"].as_u64().unwrap_or(1) {
+                    1 => println!("queued for {id} (the agent is {status})"),
+                    n => println!("queued for {id}: {n} waiting (the agent is {status})"),
+                }
+            }
+        }
         Cmd::Rm { id } => print_json(
             &c.json(Method::DELETE, &format!("/v1/sessions/{id}"), None)
                 .await?,
@@ -1316,6 +1343,26 @@ async fn check(config_path: &Path) -> Result<i32> {
             }
             report(!writable, "the record can't be written by this user", "the keeper's directory must belong to the keeper's user (scripts/install-keeper.sh)");
         }
+    }
+    if config.daemon.driver {
+        let driven: Vec<&str> = config
+            .profiles
+            .keys()
+            .filter(|n| config.resolve(n).is_ok_and(|p| p.agent.driven))
+            .map(String::as_str)
+            .collect();
+        println!(
+            "note   the driver is on: {}",
+            if driven.is_empty() {
+                "no profile is driven (agent.driven)".to_string()
+            } else {
+                format!("driven profiles: {}", driven.join(", "))
+            }
+        );
+    } else {
+        println!(
+            "note   the driver is disabled (daemon.driver: false): sandboxing and monitoring only"
+        );
     }
     // Not a prerequisite: the daemon is started after setup.
     let socket = client::socket_path();

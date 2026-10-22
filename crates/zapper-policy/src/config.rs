@@ -56,6 +56,10 @@ pub struct DaemonConfig {
     /// is written under `state`, by the daemon's own user.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keeper: Option<KeeperConfig>,
+    /// The driver: agents run headless and given tasks (`agent.driven`),
+    /// and The Office's workers. Off, zapper only sandboxes and monitors:
+    /// it starts no agent on its own and gives none any input.
+    pub driver: bool,
 }
 
 /// Where the keeper listens and where its files are.
@@ -82,6 +86,7 @@ impl Default for DaemonConfig {
             max_sessions: 16,
             private_networks: Vec::new(),
             keeper: None,
+            driver: true,
         }
     }
 }
@@ -478,6 +483,9 @@ impl Default for Engine {
 /// daemon's `harness` module.
 pub const AGENT_KINDS: &[&str] = &["claude-code", "pi", "generic"];
 
+/// The harnesses the driver can run headless (`agent.driven`).
+pub const DRIVABLE_KINDS: &[&str] = &["claude-code", "pi"];
+
 /// What runs inside the sandbox and how it is configured.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -488,6 +496,10 @@ pub struct AgentSpec {
     pub kind: String,
     /// Default command of `zapper run`.
     pub command: Vec<String>,
+    /// Run the agent headless, given tasks through the API, `zapper tell`
+    /// or the UI instead of a terminal (`DRIVABLE_KINDS` only; needs
+    /// `daemon.driver`).
+    pub driven: bool,
     /// User the command runs as, created with uid 1000 if missing.
     pub user: String,
     /// Run as root instead. The workload can then tamper with in-guest
@@ -536,6 +548,7 @@ impl Default for AgentSpec {
         Self {
             kind: "claude-code".into(),
             command: vec!["claude".into()],
+            driven: false,
             user: "agent".into(),
             root: false,
             workdir: "/work".into(),
@@ -836,6 +849,29 @@ impl Config {
                 errors.push(format!("profile {name}: {e:#}"));
             }
         }
+        for (name, p) in self
+            .profiles
+            .keys()
+            .filter_map(|n| Some((n, self.resolve(n).ok()?)))
+        {
+            if !p.agent.driven {
+                continue;
+            }
+            if !DRIVABLE_KINDS.contains(&p.agent.kind.as_str()) {
+                errors.push(format!(
+                    "profile {name}: agent.driven needs a kind the driver runs ({})",
+                    DRIVABLE_KINDS.join(", ")
+                ));
+            }
+            if !self.daemon.driver {
+                errors.push(format!(
+                    "profile {name}: agent.driven, but the driver is off (daemon.driver: false)"
+                ));
+            }
+        }
+        if !self.daemon.driver && !self.firms.is_empty() {
+            errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
+        }
         for (name, firm) in &self.firms {
             errors.extend(firm.validate(name, self));
         }
@@ -919,6 +955,37 @@ pub fn merge(base: &mut Value, over: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn driven_agents_and_the_driver_switch() {
+        use super::{Config, DaemonConfig};
+        let ok = |y: &str| {
+            Config::from_yaml(y)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        };
+        let driven =
+            "profiles:\n  a: { agent: { kind: claude-code, driven: true } }\n  b: { extends: a }\n";
+        ok(driven).unwrap();
+        let c = Config::from_yaml(driven).unwrap();
+        assert!(c.resolve("b").unwrap().agent.driven, "inherited");
+        assert!(!c.resolve("a").unwrap().agent.user.is_empty());
+        let e = ok("profiles:\n  g: { agent: { kind: generic, driven: true } }\n").unwrap_err();
+        assert!(e.contains("needs a kind the driver runs"), "{e}");
+        let off = "daemon: { driver: false }\n";
+        ok(off).unwrap();
+        let e = ok(&format!("{off}{driven}")).unwrap_err();
+        assert!(
+            e.contains("profile a: agent.driven, but the driver is off"),
+            "{e}"
+        );
+        assert!(e.contains("profile b: agent.driven"), "{e}");
+        let firm = "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n";
+        ok(firm).unwrap();
+        let e = ok(&format!("{off}{firm}")).unwrap_err();
+        assert!(e.contains("firms need the driver"), "{e}");
+        assert!(DaemonConfig::default().driver, "on unless turned off");
+    }
+
     #[test]
     fn relative_paths_resolve_against_the_config() {
         super::set_config_dir(std::path::Path::new("/repo/config"));

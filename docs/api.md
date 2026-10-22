@@ -75,6 +75,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `POST /v1/sessions` | | `{profile, workdir, rules?}`; returns once the guest is ready |
 | `GET /v1/sessions/{id}` | ✓ | One session |
 | `POST /v1/sessions/{id}/stop` | | Stop, keep listed |
+| `POST /v1/sessions/{id}/prompt` | | `{text}`: a task for a driven session's agent, queued for its next turn → `202` `{queued, driver}`. `409` if the driver is off or the session isn't driven or running, `403` for a firm's worker (mail them instead) |
 | `DELETE /v1/sessions/{id}` | | Stop and forget |
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |

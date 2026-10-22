@@ -46,6 +46,7 @@ zapper run -C $(mktemp -d)               # shell on a copy of an empty directory
 zapper run -p claude --keep              # Claude Code on a copy of the current directory; other hosts are asks
 zapper run -p PROFILE --keep             # keep it after the command exits
 zapper attach ID                         # another terminal (profile command, or -- CMD)
+zapper tell ID "a task"                  # a driven session (agent.driven): queued for its next turn; not a firm's worker (mail them)
 zapper cp ID:/work ./out                 # results out (mounts are copies)
 zapper stop ID ; zapper rm ID
 ```
