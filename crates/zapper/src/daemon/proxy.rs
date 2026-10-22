@@ -354,6 +354,21 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
     else {
         return text(StatusCode::BAD_REQUEST, "bad CONNECT target");
     };
+    if super::mcp::serves(&s, &host, port) {
+        tokio::spawn(async move {
+            if let Ok(up) = hyper::upgrade::on(req).await {
+                super::mcp::serve(d, s, TokioIo::new(up)).await;
+            }
+        });
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|n: Infallible| match n {})
+                    .boxed(),
+            )
+            .unwrap();
+    }
     let endpoint = NetRequest {
         host: host.clone(),
         port,
@@ -434,6 +449,10 @@ pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: Ip
         .name(ip)
         .map(str::to_string)
         .unwrap_or_else(|| ip.to_string());
+    if super::mcp::serves(&s, &host, port) {
+        super::mcp::serve(d, s, io).await;
+        return;
+    }
     let endpoint = NetRequest {
         host: host.clone(),
         port,
@@ -1062,6 +1081,10 @@ async fn plain(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Respo
     else {
         return text(StatusCode::BAD_REQUEST, "bad request target");
     };
+    // The MCP gateway answers here; it is not a destination.
+    if super::mcp::serves(&s, &host, port) {
+        return super::mcp::handle(d, s, req).await;
+    }
     forward_plain(d, s, req, host, port).await
 }
 

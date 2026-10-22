@@ -45,6 +45,23 @@ pub fn build(
     extra_files: Vec<GuestFile>,
     forwards: Vec<zapper_policy::proto::Forward>,
 ) -> Result<GuestSpec> {
+    // A session with MCP servers finds the gateway in its agent's config.
+    let mut with_gateway;
+    let profile = if profile.mcp.is_empty() {
+        profile
+    } else {
+        with_gateway = profile.clone();
+        let servers = with_gateway
+            .agent
+            .mcp_servers
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(servers) = servers.as_object_mut() {
+            servers
+                .entry("zapper")
+                .or_insert_with(|| serde_json::json!({ "url": super::mcp::ENDPOINT }));
+        }
+        &with_gateway
+    };
     let agent = &profile.agent;
     let home = format!("/home/{}", agent.user);
     let nic = profile.engine.network == NetworkMode::Nic;
@@ -56,6 +73,10 @@ pub fn build(
         }
         env.insert("NO_PROXY".into(), "localhost,127.0.0.1".into());
         env.insert("no_proxy".into(), "localhost,127.0.0.1".into());
+    }
+    // Whatever the agent is, the gateway's address is all it needs to know.
+    if !profile.mcp.is_empty() {
+        env.insert("ZAPPER_MCP_URL".into(), super::mcp::ENDPOINT.into());
     }
     for (k, v) in [
         ("NODE_EXTRA_CA_CERTS", CA_PATH),
@@ -145,6 +166,54 @@ mod tests {
     use super::*;
     use crate::daemon::harness::MANAGED_SETTINGS;
     use serde_json::Value;
+
+    #[test]
+    fn mcp_servers_get_the_gateway_in_the_agents_config() {
+        let config = Config::from_yaml(
+            "mcp: { servers: { a: { url: 'https://x.example/mcp' } } }\nprofiles:\n  c:\n    mcp: [a]\n    agent: { kind: claude-code }\n  p:\n    agent: { kind: claude-code }\n",
+        )
+        .unwrap();
+        let state = |profile: &str| {
+            let spec = build(
+                &config,
+                &config.resolve(profile).unwrap(),
+                "s",
+                "",
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            let f = spec
+                .files
+                .iter()
+                .find(|f| f.path == "/home/agent/.claude.json")
+                .unwrap();
+            serde_json::from_str::<Value>(&f.content).unwrap()
+        };
+        let s = state("c");
+        assert_eq!(s["mcpServers"]["zapper"]["type"], "http");
+        assert_eq!(
+            s["mcpServers"]["zapper"]["url"],
+            "http://mcp.zapper.internal/mcp"
+        );
+        assert!(state("p").get("mcpServers").is_none());
+        let env = |profile: &str| {
+            build(
+                &config,
+                &config.resolve(profile).unwrap(),
+                "s",
+                "",
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap()
+            .env
+        };
+        assert_eq!(env("c")["ZAPPER_MCP_URL"], "http://mcp.zapper.internal/mcp");
+        assert!(!env("p").contains_key("ZAPPER_MCP_URL"));
+    }
 
     #[test]
     fn permission_mode_goes_to_managed_settings() {

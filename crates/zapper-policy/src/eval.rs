@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
-use crate::{Action, ExecRule, NetRule, Policy, Scope};
+use crate::{Action, ExecRule, McpKind, McpRule, NetRule, Policy, Scope};
 
 /// Policy layers in evaluation order: most specific first, global last.
 pub type Layers<'a> = [(Scope, &'a Policy)];
@@ -16,6 +16,15 @@ pub struct NetRequest {
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+/// A tool call, resource read or prompt through the MCP gateway.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpRequest {
+    pub server: String,
+    pub kind: McpKind,
+    /// Tool or prompt name, or resource URI, as the server knows it.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,6 +91,10 @@ pub fn check_globs(policy: &Policy) -> Result<()> {
     for r in &policy.fs {
         path_glob(&r.path).with_context(|| format!("path {:?}", r.path))?;
     }
+    for r in &policy.mcp {
+        args_glob(&r.server).with_context(|| format!("server {:?}", r.server))?;
+        args_glob(&r.name).with_context(|| format!("name {:?}", r.name))?;
+    }
     Ok(())
 }
 
@@ -129,6 +142,14 @@ impl ExecRule {
                 args_glob(pattern).is_ok_and(|g| g.is_match(&args))
             }
         }
+    }
+}
+
+impl McpRule {
+    pub fn matches(&self, req: &McpRequest) -> bool {
+        self.kind.is_none_or(|k| k == req.kind)
+            && args_glob(&self.server).is_ok_and(|g| g.is_match(&req.server))
+            && args_glob(&self.name).is_ok_and(|g| g.is_match(&req.name))
     }
 }
 
@@ -188,6 +209,16 @@ impl RuleInfo for NetRule {
 }
 
 impl RuleInfo for ExecRule {
+    fn decision(&self, scope: &Scope) -> Decision {
+        Decision {
+            action: self.action,
+            rule: self.id.clone(),
+            scope: Some(scope.clone()),
+        }
+    }
+}
+
+impl RuleInfo for McpRule {
     fn decision(&self, scope: &Scope) -> Decision {
         Decision {
             action: self.action,
@@ -291,6 +322,17 @@ pub fn resolvable(layers: &Layers<'_>, name: &str) -> bool {
     reach(layers, name) != Reach::Never
 }
 
+pub fn evaluate_mcp(layers: &Layers<'_>, req: &McpRequest) -> Decision {
+    evaluate(
+        layers,
+        |p| &p.mcp,
+        |r| r.final_,
+        |r| r.matches(req),
+        |p| p.defaults.mcp,
+    )
+    .0
+}
+
 pub fn evaluate_exec(layers: &Layers<'_>, req: &ExecRequest) -> Decision {
     evaluate(
         layers,
@@ -305,7 +347,7 @@ pub fn evaluate_exec(layers: &Layers<'_>, req: &ExecRequest) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
+    use crate::{mcp_url_host, AnyRule, Config};
 
     const CONFIG: &str = r#"
 secrets:
@@ -538,5 +580,149 @@ profiles:
         assert_eq!(rule.id(), Some("net-3"));
         c.policy.insert(rule, Some(0));
         assert_eq!(c.policy.net[0].id.as_deref(), Some("net-3"));
+    }
+
+    const MCP: &str = r#"
+secrets:
+  gh: { value: "tok", hosts: ["mcp.example.com"] }
+  other: { value: "tok2", hosts: ["elsewhere.example"] }
+mcp:
+  servers:
+    github: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer {{secret:gh}}" } }
+    files: { command: [mcp-files, /srv], env: { TOKEN: "{{secret:other}}" } }
+policy:
+  defaults: { mcp: deny }
+  mcp:
+    - { action: deny, server: "*", name: "delete_*", final: true }
+profiles:
+  dev:
+    mcp: [github, files]
+    policy:
+      mcp:
+        - { action: allow, server: github, type: tool, name: "get_*" }
+        - { action: ask, server: github, type: tool }
+        - { action: allow, server: files, type: resource, name: "file:///srv/**" }
+  inherit:
+    extends: dev
+    mcp: [github]
+"#;
+
+    fn mcp(c: &Config, profile: &str, server: &str, kind: McpKind, name: &str) -> Decision {
+        let p = &c.profiles[profile].policy;
+        let layers = [
+            (Scope::Profile(profile.into()), p),
+            (Scope::Global, &c.policy),
+        ];
+        evaluate_mcp(
+            &layers,
+            &McpRequest {
+                server: server.into(),
+                kind,
+                name: name.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn mcp_rules() {
+        let c = Config::from_yaml(MCP).unwrap();
+        let t = McpKind::Tool;
+        assert_eq!(
+            mcp(&c, "dev", "github", t, "get_issue").action,
+            Action::Allow
+        );
+        assert_eq!(
+            mcp(&c, "dev", "github", t, "create_issue").action,
+            Action::Ask
+        );
+        // A final global deny wins over the profile's allow.
+        let d = mcp(&c, "dev", "github", t, "delete_repo");
+        assert_eq!((d.action, d.scope), (Action::Deny, Some(Scope::Global)));
+        // Kind matters: the rule for tools doesn't cover prompts.
+        assert_eq!(
+            mcp(&c, "dev", "github", McpKind::Prompt, "get_x").action,
+            Action::Deny
+        );
+        // `*` in a name glob crosses `/`.
+        let r = McpKind::Resource;
+        assert_eq!(
+            mcp(&c, "dev", "files", r, "file:///srv/a/b.txt").action,
+            Action::Allow
+        );
+        assert_eq!(
+            mcp(&c, "dev", "files", r, "file:///etc/passwd").action,
+            Action::Deny
+        );
+        // Ids are assigned.
+        assert!(c.profiles["dev"].policy.mcp[0]
+            .id
+            .as_deref()
+            .is_some_and(|i| i.starts_with("mcp-")));
+    }
+
+    #[test]
+    fn mcp_rules_in_the_rules_api() {
+        let rule = AnyRule::Mcp(McpRule {
+            id: Some("mcp-9".into()),
+            action: Action::Ask,
+            server: "gh".into(),
+            kind: Some(McpKind::Tool),
+            name: "create_*".into(),
+            final_: false,
+            comment: None,
+        });
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["kind"], "mcp");
+        assert_eq!(json["type"], "tool");
+        assert_eq!(serde_json::from_value::<AnyRule>(json).unwrap(), rule);
+        let from_yaml: AnyRule = serde_yaml::from_str(
+            "{kind: mcp, action: ask, server: gh, type: tool, name: 'create_*', id: mcp-9}",
+        )
+        .unwrap();
+        assert_eq!(from_yaml, rule);
+    }
+
+    #[test]
+    fn profiles_see_only_their_own_mcp_servers() {
+        let c = Config::from_yaml(
+            "mcp: { servers: { A: { url: 'https://a.example/mcp' }, B: { url: 'https://b.example/mcp' }, C: { url: 'https://c.example/mcp' } } }\nprofiles:\n  agent1: { mcp: [A, B] }\n  agent2: { mcp: [B, C] }\n  agent3: { extends: agent1, mcp: [C] }\n  none: {}\n",
+        )
+        .unwrap();
+        assert_eq!(c.resolve("agent1").unwrap().mcp, ["A", "B"]);
+        assert_eq!(c.resolve("agent2").unwrap().mcp, ["B", "C"]);
+        assert_eq!(c.resolve("agent3").unwrap().mcp, ["A", "B", "C"]);
+        assert!(c.resolve("none").unwrap().mcp.is_empty());
+    }
+
+    #[test]
+    fn mcp_profile_servers_and_validation() {
+        let c = Config::from_yaml(MCP).unwrap();
+        assert_eq!(c.resolve("dev").unwrap().mcp, ["github", "files"]);
+        assert_eq!(c.resolve("inherit").unwrap().mcp, ["github", "files"]);
+        let bad = |yaml: &str| Config::from_yaml(yaml).unwrap_err().to_string();
+        let e = bad("mcp: { servers: { a: {} } }");
+        assert!(e.contains("needs a `url` or a `command`"), "{e}");
+        let e = bad("mcp: { servers: { a: { url: 'https://x', command: [y] } } }");
+        assert!(e.contains("alternatives"), "{e}");
+        let e = bad("mcp: { servers: { 'a__b': { url: 'https://x' } } }");
+        assert!(e.contains("without `__`"), "{e}");
+        let e = bad("mcp: { servers: { a: { url: 'ftp://x' } } }");
+        assert!(e.contains("expected http"), "{e}");
+        // A secret may only go to the hosts it is bound to, and only over TLS.
+        let e = bad("secrets: { s: { value: v, hosts: [good.example] } }\nmcp: { servers: { a: { url: 'https://evil.example/mcp', headers: { Authorization: '{{secret:s}}' } } } }");
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        let e = bad("secrets: { s: { value: v, hosts: ['*'] } }\nmcp: { servers: { a: { url: 'http://x.example/mcp', headers: { A: '{{secret:s}}' } } } }");
+        assert!(e.contains("only sent over https"), "{e}");
+        let e = bad("profiles: { p: { mcp: ['*'] } }");
+        assert!(e.contains("unknown mcp server *"), "{e}");
+        let e = bad("profiles: { p: { mcp: [nope] } }");
+        assert!(e.contains("unknown mcp server nope"), "{e}");
+        let e = bad("policy: { mcp: [ { action: allow, server: '[' } ] }");
+        assert!(e.contains("server"), "{e}");
+        assert_eq!(
+            mcp_url_host("https://User@MCP.example.com:8443/x?y"),
+            Some("mcp.example.com".into())
+        );
+        assert_eq!(mcp_url_host("http://[::1]:80/"), Some("::1".into()));
     }
 }

@@ -104,7 +104,9 @@ async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Ve
     }
     // `ask` decides access, not resolution: a name some request could reach,
     // with or without an approval, is looked up.
-    let reachable = {
+    // The MCP gateway's name is the session's own, whatever the net rules say.
+    let gateway = s.mcp.is_some() && q.name == super::mcp::GATEWAY_HOST;
+    let reachable = gateway || {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
         resolvable(&spec::layers_of(&layers), &q.name)
@@ -127,6 +129,9 @@ async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Ve
         .and_then(|r| super::office::facility::serves_name(&r, &q.name));
     if let Some(exists) = firm {
         s.dns.lock().unwrap().remember(&q.name, exists);
+    }
+    if gateway {
+        s.dns.lock().unwrap().remember(&q.name, true);
     }
     // Allowed: say whether the name exists, from a real lookup on the host.
     let cached = s.dns.lock().unwrap().cached(&q.name);

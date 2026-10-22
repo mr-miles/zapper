@@ -24,6 +24,128 @@ pub struct Config {
     /// Org charts of workers run by the office layer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub firms: BTreeMap<String, crate::Firm>,
+    /// MCP servers the gateway can put in front of sessions.
+    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
+    pub mcp: McpConfig,
+}
+
+/// The MCP gateway's registry. The daemon serves one endpoint per session
+/// that has `mcp` servers in its profile, and calls the registered servers on
+/// the session's behalf, each call decided by the session's `mcp` rules.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    pub servers: BTreeMap<String, McpServer>,
+}
+
+impl McpConfig {
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
+}
+
+/// A server behind the gateway: a remote endpoint (`url`, MCP over HTTP) or a
+/// program the daemon starts on the host (`command`, MCP over stdio). Either
+/// runs outside the sandbox, with the daemon's own network access and
+/// privileges: the guest reaches it only through the gateway's rules.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpServer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Streamable HTTP endpoint, `https://host/mcp`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Headers sent to `url`; values may use `{{secret:NAME}}`. The secret's
+    /// `hosts` must include the endpoint's host.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Program and arguments, started on the host once per session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// Environment of `command`, which starts with nothing but `PATH` and
+    /// `HOME`; values may use `{{secret:NAME}}`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Working directory of `command`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+impl McpServer {
+    pub fn check(&self, name: &str, secrets: &BTreeMap<String, Secret>) -> Vec<String> {
+        let mut errors = Vec::new();
+        let mut err = |m: String| errors.push(format!("mcp.servers.{name}: {m}"));
+        let valid = !name.is_empty()
+            && name.len() <= 40
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !name.contains("__");
+        if !valid {
+            err("the name is 1-40 letters, digits, `-` and `_`, without `__`".into());
+        }
+        match (&self.url, self.command.is_empty()) {
+            (Some(_), false) => err("`url` and `command` are alternatives".into()),
+            (None, true) => err("needs a `url` or a `command`".into()),
+            _ => {}
+        }
+        if let Some(url) = &self.url {
+            match url.split_once("://") {
+                Some(("http" | "https", rest)) if !rest.is_empty() => {
+                    let host = mcp_url_host(url).unwrap_or_default();
+                    for (k, v) in &self.headers {
+                        for s in crate::secret_refs(v) {
+                            match secrets.get(&s) {
+                                None => err(format!("header {k} uses unknown secret {s}")),
+                                Some(sec) if sec.mode == SecretMode::Guest => {
+                                    err(format!("header {k}: secret {s} is a guest secret"))
+                                }
+                                Some(sec) if !sec.allows_host(&host) => err(format!(
+                                    "header {k}: secret {s} may not be sent to {host} (its `hosts`)"
+                                )),
+                                Some(_) => {}
+                            }
+                        }
+                    }
+                    if url.starts_with("http://")
+                        && self.headers.values().any(|v| v.contains("{{secret:"))
+                    {
+                        err("secrets are only sent over https".into());
+                    }
+                }
+                _ => err(format!("url {url:?}: expected http:// or https://")),
+            }
+            if !self.env.is_empty() || self.cwd.is_some() {
+                err("`env` and `cwd` are for `command`".into());
+            }
+        } else {
+            if !self.headers.is_empty() {
+                err("`headers` are for `url`".into());
+            }
+            for (k, v) in &self.env {
+                for s in crate::secret_refs(v) {
+                    if !secrets.contains_key(&s) {
+                        err(format!("env {k} uses unknown secret {s}"));
+                    }
+                }
+            }
+        }
+        errors
+    }
+}
+
+/// The host of an `http(s)://` URL, without port or userinfo.
+pub fn mcp_url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split_once(']')?.0
+    } else {
+        authority.split(':').next()?
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +376,8 @@ pub struct Policy {
     pub exec: Vec<ExecRule>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fs: Vec<FsRule>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<McpRule>,
     /// Action when no rule matches. The most specific layer that sets it wins;
     /// `deny` if none does.
     #[serde(skip_serializing_if = "Defaults::is_empty")]
@@ -265,6 +389,7 @@ impl Policy {
         self.net.is_empty()
             && self.exec.is_empty()
             && self.fs.is_empty()
+            && self.mcp.is_empty()
             && self.defaults.is_empty()
     }
 }
@@ -276,11 +401,13 @@ pub struct Defaults {
     pub net: Option<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec: Option<Action>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Action>,
 }
 
 impl Defaults {
     pub fn is_empty(&self) -> bool {
-        self.net.is_none() && self.exec.is_none()
+        self.net.is_none() && self.exec.is_none() && self.mcp.is_none()
     }
 }
 
@@ -348,6 +475,53 @@ pub struct ExecRule {
     pub comment: Option<String>,
 }
 
+/// What a gateway request is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpKind {
+    /// `tools/call`
+    Tool,
+    /// `resources/read`
+    Resource,
+    /// `prompts/get`
+    Prompt,
+}
+
+impl fmt::Display for McpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            McpKind::Tool => "tool",
+            McpKind::Resource => "resource",
+            McpKind::Prompt => "prompt",
+        })
+    }
+}
+
+/// MCP rule, matched against every tool call, resource read and prompt the
+/// session makes through the gateway.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub action: Action,
+    /// Glob over the server's name in `mcp.servers`.
+    #[serde(default = "any")]
+    pub server: String,
+    /// `tool`, `resource` or `prompt`; unset matches any. (Named `type` in
+    /// the config, as `kind` tags the rule's own kind in the rules API.)
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<McpKind>,
+    /// Glob over the tool or prompt name, or the resource URI, as the server
+    /// knows it.
+    #[serde(default = "any")]
+    pub name: String,
+    #[serde(default, rename = "final", skip_serializing_if = "is_false")]
+    pub final_: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
 /// Filesystem rule, applied inside the sandbox when the session starts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -398,6 +572,11 @@ pub struct Profile {
     /// parent's. Network goes through the proxy with this profile's policy.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub setup: Vec<String>,
+    /// The servers of `mcp.servers` the session may reach through the
+    /// gateway, added to the parent's. It knows no others. Without any, the
+    /// session has no gateway.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<String>,
     #[serde(skip_serializing_if = "Policy::is_empty")]
     pub policy: Policy,
 }
@@ -562,6 +741,8 @@ pub struct ResolvedProfile {
     pub agent: AgentSpec,
     pub mounts: Vec<Mount>,
     pub setup: Vec<String>,
+    /// Servers behind the session's MCP gateway: the whitelist.
+    pub mcp: Vec<String>,
     /// Policy layers from the profile itself up to its root ancestor, global
     /// layer excluded.
     pub layers: Vec<(Scope, Policy)>,
@@ -624,6 +805,7 @@ pub enum Kind {
     Net,
     Exec,
     Fs,
+    Mcp,
 }
 
 impl fmt::Display for Kind {
@@ -632,6 +814,7 @@ impl fmt::Display for Kind {
             Kind::Net => "net",
             Kind::Exec => "exec",
             Kind::Fs => "fs",
+            Kind::Mcp => "mcp",
         })
     }
 }
@@ -643,6 +826,7 @@ pub enum AnyRule {
     Net(NetRule),
     Exec(ExecRule),
     Fs(FsRule),
+    Mcp(McpRule),
 }
 
 impl AnyRule {
@@ -651,6 +835,7 @@ impl AnyRule {
             AnyRule::Net(_) => Kind::Net,
             AnyRule::Exec(_) => Kind::Exec,
             AnyRule::Fs(_) => Kind::Fs,
+            AnyRule::Mcp(_) => Kind::Mcp,
         }
     }
 
@@ -659,6 +844,7 @@ impl AnyRule {
             AnyRule::Net(r) => r.id = Some(id),
             AnyRule::Exec(r) => r.id = Some(id),
             AnyRule::Fs(r) => r.id = Some(id),
+            AnyRule::Mcp(r) => r.id = Some(id),
         }
     }
 
@@ -667,6 +853,7 @@ impl AnyRule {
             AnyRule::Net(r) => r.id.as_deref(),
             AnyRule::Exec(r) => r.id.as_deref(),
             AnyRule::Fs(r) => r.id.as_deref(),
+            AnyRule::Mcp(r) => r.id.as_deref(),
         }
     }
 }
@@ -676,7 +863,8 @@ impl Policy {
         let net = self.net.iter().filter_map(|r| r.id.as_deref());
         let exec = self.exec.iter().filter_map(|r| r.id.as_deref());
         let fs = self.fs.iter().filter_map(|r| r.id.as_deref());
-        net.chain(exec).chain(fs)
+        let mcp = self.mcp.iter().filter_map(|r| r.id.as_deref());
+        net.chain(exec).chain(fs).chain(mcp)
     }
 
     /// Gives every rule without an id one that is not in `taken`.
@@ -698,6 +886,9 @@ impl Policy {
         for r in &mut self.fs {
             r.id.get_or_insert_with(|| fresh(Kind::Fs, taken));
         }
+        for r in &mut self.mcp {
+            r.id.get_or_insert_with(|| fresh(Kind::Mcp, taken));
+        }
     }
 
     /// Inserts a rule at `position` within its kind's list (end if `None`).
@@ -710,6 +901,7 @@ impl Policy {
             AnyRule::Net(r) => put(&mut self.net, r, position),
             AnyRule::Exec(r) => put(&mut self.exec, r, position),
             AnyRule::Fs(r) => put(&mut self.fs, r, position),
+            AnyRule::Mcp(r) => put(&mut self.mcp, r, position),
         }
     }
 
@@ -724,6 +916,9 @@ impl Policy {
         if let Some(i) = self.fs.iter().position(|r| r.id.as_deref() == Some(id)) {
             return Some(AnyRule::Fs(self.fs.remove(i)));
         }
+        if let Some(i) = self.mcp.iter().position(|r| r.id.as_deref() == Some(id)) {
+            return Some(AnyRule::Mcp(self.mcp.remove(i)));
+        }
         None
     }
 
@@ -732,7 +927,8 @@ impl Policy {
         let net = self.net.iter().cloned().map(AnyRule::Net);
         let exec = self.exec.iter().cloned().map(AnyRule::Exec);
         let fs = self.fs.iter().cloned().map(AnyRule::Fs);
-        net.chain(exec).chain(fs).collect()
+        let mcp = self.mcp.iter().cloned().map(AnyRule::Mcp);
+        net.chain(exec).chain(fs).chain(mcp).collect()
     }
 }
 
@@ -831,6 +1027,16 @@ impl Config {
                 ));
             }
         }
+        for (name, server) in &self.mcp.servers {
+            errors.extend(server.check(name, &self.secrets));
+        }
+        for (name, p) in &self.profiles {
+            for s in &p.mcp {
+                if !self.mcp.servers.contains_key(s) {
+                    errors.push(format!("profile {name}: unknown mcp server {s}"));
+                }
+            }
+        }
         for name in self.profiles.keys() {
             if let Err(e) = self.resolve(name) {
                 errors.push(format!("profile {name}: {e:#}"));
@@ -866,6 +1072,7 @@ impl Config {
         let mut agent = Value::Object(Default::default());
         let mut mounts = Vec::new();
         let mut setup = Vec::new();
+        let mut mcp: Vec<String> = Vec::new();
         for (_, p) in chain.iter().rev() {
             if let Some(e) = &p.engine {
                 merge(&mut engine, e);
@@ -875,6 +1082,11 @@ impl Config {
             }
             mounts.extend(p.mounts.iter().cloned());
             setup.extend(p.setup.iter().cloned());
+            for s in &p.mcp {
+                if !mcp.contains(s) {
+                    mcp.push(s.clone());
+                }
+            }
         }
         let engine: Engine = serde_json::from_value(engine).context("engine")?;
         let agent: AgentSpec = serde_json::from_value(agent).context("agent")?;
@@ -895,6 +1107,7 @@ impl Config {
             agent,
             mounts,
             setup,
+            mcp,
             layers,
         })
     }

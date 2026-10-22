@@ -390,6 +390,15 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
         "projects": { agent.workdir.clone(): { "hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true } },
     });
     if let Some(m) = &agent.mcp_servers {
+        // Claude Code wants remote servers marked with their transport.
+        let mut m = m.clone();
+        if let Value::Object(servers) = &mut m {
+            for s in servers.values_mut() {
+                if s.get("url").is_some() && s.get("type").is_none() {
+                    s["type"] = json!("http");
+                }
+            }
+        }
         merge(&mut state, &json!({ "mcpServers": m }));
     }
     // Pre-approve the API key (placeholder or value) so Claude Code does not
@@ -747,6 +756,7 @@ mod tests {
             agent,
             mounts: vec![],
             setup: vec![],
+            mcp: vec![],
             layers: vec![],
         };
         let (mut env, mut files) = (BTreeMap::new(), Vec::new());
@@ -793,6 +803,7 @@ mod tests {
             },
             mounts: vec![],
             setup: vec![],
+            mcp: vec![],
             layers: vec![],
         };
         let (mut env, mut files) = (BTreeMap::new(), Vec::new());

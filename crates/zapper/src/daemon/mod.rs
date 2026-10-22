@@ -12,6 +12,7 @@ mod dns;
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
 pub mod harness;
 pub mod httplog;
+pub mod mcp;
 mod nic;
 #[cfg(feature = "office")]
 pub mod office;
@@ -97,6 +98,24 @@ pub enum EventBody {
         scope: Option<String>,
         /// Time the process waited for the decision.
         wait_ms: f64,
+    },
+    /// A tool call, resource read or prompt through the MCP gateway.
+    Mcp {
+        server: String,
+        kind: zapper_policy::McpKind,
+        name: String,
+        action: Action,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rule: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Time the request waited for the decision.
+        wait_ms: f64,
+        /// The arguments, cut short.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Ask {
         id: String,
@@ -544,6 +563,7 @@ impl Daemon {
                 AnyRule::Net(n) => n.action = action,
                 AnyRule::Exec(e) => e.action = action,
                 AnyRule::Fs(_) => {}
+                AnyRule::Mcp(m) => m.action = action,
             }
             match r {
                 Remember::Session => {

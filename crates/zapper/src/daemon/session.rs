@@ -38,6 +38,8 @@ pub struct Counters {
     pub net_denied: AtomicU64,
     pub exec_allowed: AtomicU64,
     pub exec_denied: AtomicU64,
+    pub mcp_allowed: AtomicU64,
+    pub mcp_denied: AtomicU64,
     pub exits: AtomicU64,
     pub shells: AtomicU64,
 }
@@ -72,6 +74,8 @@ pub struct Session {
     /// Bounds concurrent proxy connections from the guest.
     pub conns: Arc<Semaphore>,
     exec_checks: Arc<Semaphore>,
+    /// The session's MCP gateway, if its profile lists servers.
+    pub mcp: Option<Arc<super::mcp::Gateway>>,
     /// The firm the session works for, if any.
     pub firm: Option<FirmLink>,
     extra_files: Vec<GuestFile>,
@@ -125,6 +129,7 @@ impl Session {
             counters: serde_json::json!({
                 "net_allowed": get(&c.net_allowed), "net_denied": get(&c.net_denied),
                 "exec_allowed": get(&c.exec_allowed), "exec_denied": get(&c.exec_denied),
+                "mcp_allowed": get(&c.mcp_allowed), "mcp_denied": get(&c.mcp_denied),
                 "exits": get(&c.exits), "shells": get(&c.shells),
             }),
             usage: self.usage.lock().unwrap().clone(),
@@ -296,6 +301,7 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
     let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
     let created = now();
     let ttl = resolved.engine.ttl_secs;
+    let mcp = (!resolved.mcp.is_empty()).then(|| Arc::new(super::mcp::Gateway::default()));
     let session = Arc::new(Session {
         id: id.clone(),
         profile: new.profile.clone(),
@@ -320,6 +326,7 @@ pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>
         next_shell: AtomicU64::new(1),
         conns: Arc::new(Semaphore::new(256)),
         exec_checks: Arc::new(Semaphore::new(64)),
+        mcp,
         firm: new.firm.clone(),
         extra_files: new.files.clone(),
         forwards: new.forwards.clone(),
@@ -704,6 +711,9 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
         }
     }
     *session.guest.lock().unwrap() = None;
+    if let Some(gateway) = &session.mcp {
+        gateway.shutdown();
+    }
     if let Some(reason) = reason {
         daemon.emit(
             Some(session),
