@@ -344,3 +344,6 @@ impl Core {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
