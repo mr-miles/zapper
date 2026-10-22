@@ -330,3 +330,64 @@ async fn the_office_port_answers_for_the_vm_it_serves() {
     let r = office(&t, &old, r#"{"op":"directory"}"#).await;
     assert_eq!(r["error"], "the firm isn't running");
 }
+
+/// The names of the tools the office port lists for `s`.
+async fn tool_names(t: &TestCore, s: &Arc<Session>) -> Vec<String> {
+    let v = office(t, s, r#"{"op":"tools"}"#).await;
+    v["ok"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"))
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn each_workers_tools_are_their_roles() {
+    let (t, run) = run();
+    let ceo = tool_names(&t, &session_of(&run, "ceo")).await;
+    let pat = tool_names(&t, &session_of(&run, "pat")).await;
+    for both in ["desk", "mail_send", "directory"] {
+        assert!(
+            ceo.iter().any(|n| n == both) && pat.iter().any(|n| n == both),
+            "{both}"
+        );
+    }
+    // The CEO owns the firm's policy; an engineer doesn't.
+    assert!(ceo.iter().any(|n| n == "credentials_list"), "{ceo:?}");
+    assert!(!pat.iter().any(|n| n == "credentials_list"), "{pat:?}");
+}
+
+#[tokio::test]
+async fn mail_is_from_the_vm_it_came_from() {
+    let (t, run) = run();
+    let pat = session_of(&run, "pat");
+    let sent = office(
+        &t,
+        &pat,
+        r#"{"op":"mail_send","args":{"to":["ceo"],"subject":"Hi","body":"hello","kind":"fyi","from":"ceo"}}"#,
+    )
+    .await;
+    assert!(sent["ok"].is_object(), "{sent}");
+    let inbox = office(&t, &session_of(&run, "ceo"), r#"{"op":"mail_inbox"}"#).await;
+    let mail = &inbox["ok"]["messages"][0];
+    assert_eq!(mail["from"], "pat", "{inbox}");
+    assert_eq!(mail["subject"], "Hi", "{inbox}");
+}
+
+#[tokio::test]
+async fn the_stop_hook_asks_whether_mail_came() {
+    let (t, run) = run();
+    let r = office(&t, &session_of(&run, "pat"), r#"{"op":"stop_check"}"#).await;
+    assert_eq!(r["ok"]["block"], false, "{r}");
+}
+
+#[tokio::test]
+async fn an_overlong_request_is_refused() {
+    let (t, run) = run();
+    let body = "x".repeat(zapper_policy::proto::MAX_OFFICE_LINE + 10);
+    let request = format!(r#"{{"op":"mail_send","args":{{"body":"{body}"}}}}"#);
+    let r = office(&t, &session_of(&run, "pat"), &request).await;
+    let e = r["error"].as_str().unwrap_or_default();
+    assert!(e.starts_with("request longer than"), "{e}");
+}
