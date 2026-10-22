@@ -11,10 +11,11 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use zapper_core::{Core, Decider, Referral, Session};
 
+use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use zapper_policy::{parse_duration, Action, AnyRule, NetRequest, NetRule, Scope, BOARD};
+use zapper_policy::{Action, AnyRule, NetRequest, NetRule, Scope};
 
 use super::mail::{Draft, Kind};
 use super::{now, prompts, FirmRun, WorkerRt};

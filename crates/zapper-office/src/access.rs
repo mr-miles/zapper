@@ -10,10 +10,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use zapper_policy::{parse_duration, BOARD};
 
 use super::{now, FirmRun};
 use zapper_core::Core;
@@ -59,7 +59,7 @@ pub fn resource(run: &FirmRun, r: &str) -> Result<String> {
 
 /// A resource's canonical name in `firm`: `git:<repo>`, `cluster` or
 /// `drive:<space>`. Plain `git` names the repository of a firm that has one.
-pub fn resource_in(firm: &zapper_policy::Firm, r: &str) -> Result<String> {
+pub fn resource_in(firm: &crate::firm::Firm, r: &str) -> Result<String> {
     let r = r.trim();
     let repos = firm.git_repos();
     match r {
@@ -981,11 +981,11 @@ mod tests {
         assert_eq!(serde_json::to_value(Level::Admin).unwrap(), "admin");
     }
 
-    fn firm(git: &str) -> zapper_policy::Firm {
+    fn firm(git: &str) -> crate::firm::Firm {
         let yaml = format!(
             "profiles:\n  w: {{ agent: {{ kind: claude-code }} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, skills: {{ work: ceo }} }} }}\n    workers: [{{ name: ceo, role: ceo }}]\n{git}"
         );
-        zapper_policy::Config::from_yaml(&yaml).unwrap().firms["acme"].clone()
+        crate::firm::get(&zapper_policy::Config::from_yaml(&yaml).unwrap(), "acme").unwrap()
     }
 
     #[test]

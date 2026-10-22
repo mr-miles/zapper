@@ -9,9 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use crate::firm::{parse_duration, HireSlot, Scenario, Step, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use zapper_policy::{parse_duration, HireSlot, Scenario, Step, BOARD};
 
 use super::{facility, now, workforce, FirmRun, WorkerState};
 use zapper_core::Core;

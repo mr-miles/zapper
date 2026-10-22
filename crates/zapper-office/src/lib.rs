@@ -9,6 +9,7 @@ pub mod access;
 pub mod contracts;
 pub mod drive;
 pub mod facility;
+pub mod firm;
 pub mod foreman;
 pub mod git;
 pub mod http;
@@ -28,12 +29,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 use zapper_policy::proto::GuestFile;
-use zapper_policy::{Config, Firm, Policy, BOARD};
+use zapper_policy::{Config, Policy};
 
 use zapper_core::util::{now, random_id};
 use zapper_core::Core;
@@ -127,7 +129,7 @@ pub struct WorkerRt {
 }
 
 impl WorkerRt {
-    pub fn new(firm: &Firm, w: &zapper_policy::Worker) -> WorkerRt {
+    pub fn new(firm: &Firm, w: &crate::firm::Worker) -> WorkerRt {
         WorkerRt {
             name: w.name.clone(),
             role: w.role.clone(),
@@ -563,7 +565,7 @@ pub(crate) fn worker_json(
     firm: &Firm,
     models: &BTreeMap<String, Option<String>>,
     agents: &Agents,
-    w: &zapper_policy::Worker,
+    w: &crate::firm::Worker,
 ) -> Value {
     let role = firm.roles.get(&w.role);
     // On their own profile, its agent and model; else the role's.
@@ -595,7 +597,7 @@ fn role_models(firm: &Firm, config: &Config) -> BTreeMap<String, Option<String>>
 }
 
 /// The model a role's workers run: the role's, else its profile's.
-pub fn effective_model(role: &zapper_policy::Role, config: &Config) -> Option<String> {
+pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<String> {
     role.model.clone().or_else(|| {
         config
             .resolve(&role.profile)
@@ -674,8 +676,8 @@ pub struct StartOptions {
     /// A scenario of the firm's config to play.
     pub scenario: Option<String>,
     /// Hire slots and script steps instead of the scenario's own.
-    pub hires: Option<Vec<zapper_policy::HireSlot>>,
-    pub script: Option<Vec<zapper_policy::Step>>,
+    pub hires: Option<Vec<crate::firm::HireSlot>>,
+    pub script: Option<Vec<crate::firm::Step>>,
     /// The board's task for the CEO, sent as the run's first assignment
     /// once it is up: its first line is the subject, the rest the message.
     pub task: Option<String>,
@@ -711,7 +713,7 @@ struct Started {
     company: String,
     prompts: BTreeMap<String, String>,
     articles: String,
-    scenario: Option<(String, zapper_policy::Scenario)>,
+    scenario: Option<(String, crate::firm::Scenario)>,
 }
 
 /// Longest extra prompt the board gives a founder.
@@ -722,7 +724,7 @@ fn rename(firm: &mut Firm, old: &str, new: &str) -> Result<()> {
     if new == old {
         return Ok(());
     }
-    if !zapper_policy::valid_worker_name(new) || zapper_policy::reserved_name(new) {
+    if !zapper_policy::valid_worker_name(new) || crate::firm::reserved_name(new) {
         bail!(
             "{new:?} can't be a name: lowercase letters, digits and dashes, starting with a letter"
         );
@@ -752,7 +754,7 @@ pub fn default_company(name: &str, firm: &Firm) -> String {
     firm.landing
         .as_ref()
         .map(|l| l.display_name(name))
-        .unwrap_or_else(|| format!("{} Inc.", zapper_policy::title_case(name)))
+        .unwrap_or_else(|| format!("{} Inc.", crate::firm::title_case(name)))
 }
 
 /// The firm as this run starts it: the config's, with the board's
@@ -865,7 +867,7 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
             Value::Number(n) => n
                 .as_u64()
                 .ok_or_else(|| anyhow!("seed: a whole number of tokens"))?,
-            Value::String(s) => zapper_policy::parse_tokens(s)?,
+            Value::String(s) => crate::firm::parse_tokens(s)?,
             Value::Null => firm.budget.seed,
             _ => bail!("seed: tokens, like 500k"),
         };
@@ -996,7 +998,7 @@ fn create_run(
 #[cfg(test)]
 pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = config.firms[name].clone();
+    let firm = firm::get(&config, name).unwrap();
     let started = with_options(name, firm, &config, &StartOptions::default()).unwrap();
     let (run, _boots) = create_run(d, name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
@@ -1031,11 +1033,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         }
     }
     let config = d.config();
-    let firm = config
-        .firms
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow!("no firm {name}"))?;
+    let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
         company,
@@ -1168,7 +1166,7 @@ pub(crate) async fn boot_worker(
     run: &Arc<FirmRun>,
     config: &Config,
     w: &Arc<WorkerRt>,
-    role: &zapper_policy::Role,
+    role: &crate::firm::Role,
 ) -> Result<()> {
     // The worker's own profile (a founder's, a scenario slot's), or the
     // role's.
@@ -1375,6 +1373,7 @@ pub const PAGE: &str = include_str!("office.html");
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
 pub fn start(d: &Core) {
+    d.add_config_check(firm::check);
     close_orphans(d.state_dir());
     d.add_rule_keeper(Arc::new(Keeper(d.office())));
     d.on_shutdown(|d| {
@@ -1747,7 +1746,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [sec] }, sec: { profile: w, skills: { work: security-review }, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n",
         )
         .unwrap();
-        let firm = c.firms["acme"].clone();
+        let firm = crate::firm::get(&c, "acme").unwrap();
         let o = super::StartOptions {
             company: Some("Widgets Ltd".into()),
             ceo: Some("Alice".into()),
@@ -1803,7 +1802,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [eng] }, eng: { profile: w, skills: { work: software-engineer } } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n",
         )
         .unwrap();
-        let firm = c.firms["acme"].clone();
+        let firm = crate::firm::get(&c, "acme").unwrap();
         let with = |o: super::StartOptions| super::with_options("acme", firm.clone(), &c, &o);
         let opts = |scenario: &str| super::StartOptions {
             scenario: Some(scenario.into()),
@@ -1821,7 +1820,7 @@ mod tests {
         );
         // The board's slots replace the scenario's; bad ones are refused.
         let mut o = opts("rt");
-        o.hires = Some(vec![zapper_policy::HireSlot {
+        o.hires = Some(vec![crate::firm::HireSlot {
             role: "eng".into(),
             count: 3,
             prompt: "custom".into(),

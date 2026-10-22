@@ -89,7 +89,7 @@ Only its skills and who it is. A worker boots with its skills and a short genera
 
 ### Validation
 
-Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; skills follow from the role ([skills](#skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The config is validated as a whole like the rest of zapper's config.
+Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; skills follow from the role ([skills](#skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The `firms` section is the office's: zapper-office parses and checks it with the rest of each change, so a config is validated as a whole like the rest of zapper's config. `zapper config show` prints it as written, without the defaults filled in.
 
 The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network and exec rules still apply to running workers at once, as for any session.
 

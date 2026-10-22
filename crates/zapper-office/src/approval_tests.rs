@@ -88,7 +88,7 @@ async fn an_approval_for_once_is_used_up_by_the_next_request() {
     let id = requests(&run)[0]["id"].as_str().unwrap().to_string();
     security::decide(
         &run,
-        zapper_policy::BOARD,
+        crate::firm::BOARD,
         &id,
         DecideArgs {
             allow: true,

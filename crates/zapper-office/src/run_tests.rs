@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 
+use crate::firm::BOARD;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use zapper_policy::{AnyRule, Policy, BOARD};
+use zapper_policy::{AnyRule, Policy};
 
 use super::access::{self, Level};
 use super::facility;
@@ -555,9 +556,10 @@ fn a_firm_that_doesnt_add_up_is_refused_with_the_whole_change() {
         .core
         .change("a firm", |c| {
             c.profiles.insert("extra".into(), Default::default());
-            let mut bad = c.firms["acme"].clone();
+            let mut bad = crate::firm::get(c, "acme").unwrap();
             bad.workers[1].role = "nosuch".into();
-            c.firms.insert("broken".into(), bad);
+            c.firms
+                .insert("broken".into(), serde_yaml::to_value(bad).unwrap());
             Ok(())
         })
         .unwrap_err();

@@ -6,10 +6,11 @@
 
 use std::sync::Arc;
 
+use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use zapper_policy::{parse_duration, NetRequest, BOARD};
+use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun};

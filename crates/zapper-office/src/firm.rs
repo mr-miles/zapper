@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{Action, Config};
+use zapper_policy::{parse_size, valid_worker_name, Action, Config};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -674,16 +674,6 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(n * mult))
 }
 
-/// Whether `name` can name a worker: lowercase letters, digits and dashes.
-pub fn valid_worker_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    !b.is_empty()
-        && b.len() <= 32
-        && b[0].is_ascii_lowercase()
-        && b.iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
-}
-
 impl Firm {
     /// The firm's git repositories, in config order; none without `git`.
     pub fn git_repos(&self) -> Vec<String> {
@@ -777,7 +767,7 @@ impl Firm {
         if !valid_worker_name(name) {
             err("a firm name is lowercase letters, digits and dashes".into());
         }
-        if crate::names::hostname(&self.domain(name)).is_err() {
+        if zapper_policy::names::hostname(&self.domain(name)).is_err() {
             err(format!(
                 "domain {:?} is not a valid host name",
                 self.domain(name)
@@ -821,7 +811,7 @@ impl Firm {
             ("artifact_size", &self.limits.artifact_size),
             ("drive_size", &self.limits.drive_size),
         ] {
-            if crate::parse_size(v).is_err() {
+            if parse_size(v).is_err() {
                 err(format!("limits.{field} {v:?} is not a size like 50MiB"));
             }
         }
@@ -894,7 +884,8 @@ impl Firm {
                 Ok(p) => {
                     // Officers decide network access only; an exec can't wait
                     // minutes for them.
-                    let mut layers: Vec<&crate::Policy> = p.layers.iter().map(|(_, l)| l).collect();
+                    let mut layers: Vec<&zapper_policy::Policy> =
+                        p.layers.iter().map(|(_, l)| l).collect();
                     layers.push(&config.policy);
                     if layers.iter().any(|l| {
                         l.exec.iter().any(|r| r.action == Action::Ask)
@@ -1012,6 +1003,40 @@ pub fn title_case(s: &str) -> String {
         .join(" ")
 }
 
+/// The config's firms, parsed. Those of the running config always parse:
+/// `check` keeps the rest out of it.
+pub fn all(c: &Config) -> BTreeMap<String, Firm> {
+    c.firms
+        .iter()
+        .filter_map(|(name, v)| Some((name.clone(), serde_yaml::from_value(v.clone()).ok()?)))
+        .collect()
+}
+
+/// The config's firm `name`, parsed.
+pub fn get(c: &Config, name: &str) -> Option<Firm> {
+    serde_yaml::from_value(c.firms.get(name)?.clone()).ok()
+}
+
+/// The office's check of a config, with the rest of each change: its firms
+/// parse and add up with the profiles they name, and the driver is on.
+pub fn check(c: &Config) -> Result<()> {
+    let mut errors = Vec::new();
+    for (name, v) in &c.firms {
+        match serde_yaml::from_value::<Firm>(v.clone()) {
+            Ok(f) => errors.extend(f.validate(name, c)),
+            Err(e) => errors.push(format!("firm {name}: {e}")),
+        }
+    }
+    if !c.daemon.driver && !c.firms.is_empty() {
+        errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("invalid config:\n  {}", errors.join("\n  "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,17 +1060,20 @@ firms:
 ";
 
     fn firm(yaml: &str) -> Result<Config> {
-        Config::from_yaml(yaml)
+        Config::from_yaml(yaml).and_then(|c| check(&c).map(|_| c))
     }
 
     #[test]
     fn git_repos() {
         let c = firm(BASE).unwrap();
-        assert!(c.firms["acme"].git_repos().is_empty(), "no git, no repos");
+        assert!(
+            get(&c, "acme").unwrap().git_repos().is_empty(),
+            "no git, no repos"
+        );
         let c = firm(&format!("{BASE}    git: {{}}\n")).unwrap();
-        assert_eq!(c.firms["acme"].git_repos(), ["product"]);
+        assert_eq!(get(&c, "acme").unwrap().git_repos(), ["product"]);
         let c = firm(&format!("{BASE}    git: {{ repos: [api, web] }}\n")).unwrap();
-        assert_eq!(c.firms["acme"].git_repos(), ["api", "web"]);
+        assert_eq!(get(&c, "acme").unwrap().git_repos(), ["api", "web"]);
         let e = firm(&format!("{BASE}    git: {{ repos: [api, api] }}\n")).unwrap_err();
         assert!(format!("{e:#}").contains("git.repos"), "{e:#}");
         assert!(firm(&format!("{BASE}    git: {{ repos: [Api] }}\n")).is_err());
@@ -1055,12 +1083,14 @@ firms:
     fn scenarios() {
         let with = |sc: &str| firm(&format!("{BASE}    scenarios:\n{sc}"));
         let ok = with("      rt:\n        hires: [{ role: eng, count: 2, contract: true, board_line: true, prompt: be sneaky }]\n        script:\n          - { after: 30m, kill: { role: eng, reason: quit } }\n          - { spent: 0.5, mail: { to: ceo, subject: Pivot, body: Change it } }\n").unwrap();
-        let sc = &ok.firms["acme"].scenarios["rt"];
+        let sc = &get(&ok, "acme").unwrap().scenarios["rt"];
         assert_eq!(sc.hires[0].count, 2);
         // A slot may put its hires on another agent.
         let pi = with("      p:\n        hires: [{ role: eng, prompt: p, profile: p }]\n").unwrap();
         assert_eq!(
-            pi.firms["acme"].scenarios["p"].hires[0].profile.as_deref(),
+            get(&pi, "acme").unwrap().scenarios["p"].hires[0]
+                .profile
+                .as_deref(),
             Some("p")
         );
         // So may a role's contractors.
@@ -1143,7 +1173,7 @@ firms:
     #[test]
     fn chart() {
         let c = firm(BASE).unwrap();
-        let f = &c.firms["acme"];
+        let f = &get(&c, "acme").unwrap();
         assert_eq!(f.root(), Some("ceo"));
         assert_eq!(f.manager_of("ada"), Some("cto"));
         assert_eq!(f.reports_of("ceo"), vec!["cto"]);
@@ -1232,8 +1262,8 @@ firms:
         assert!(e.contains("need a run budget"), "{e}");
         let ok = with(", hires: [eng]").replace("    security: { officers: [] }", "    security: { officers: [] }\n    budget: { seed: 2000000 }\n    names: [grace, ken]");
         let c = firm(&ok).unwrap();
-        assert_eq!(c.firms["acme"].roles["eng"].hires, vec!["eng"]);
-        assert_eq!(c.firms["acme"].budget.security_share, 0.2);
+        assert_eq!(get(&c, "acme").unwrap().roles["eng"].hires, vec!["eng"]);
+        assert_eq!(get(&c, "acme").unwrap().budget.security_share, 0.2);
         let taken = ok.replace("names: [grace, ken]", "names: [grace, ada]");
         assert!(firm(&taken)
             .unwrap_err()

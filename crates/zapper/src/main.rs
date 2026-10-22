@@ -339,8 +339,11 @@ fn example() -> &'static str {
     head
 }
 
-/// A config with firms needs a zapper built with the office.
+/// A config with firms needs a zapper built with the office, which checks
+/// them.
 fn office_config(c: &Config) -> Result<()> {
+    #[cfg(feature = "office")]
+    zapper_office::firm::check(c)?;
     if !cfg!(feature = "office") && !c.firms.is_empty() {
         bail!(
             "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
@@ -1395,7 +1398,7 @@ async fn check(config_path: &Path) -> Result<i32> {
         }
     }
     #[cfg(feature = "office")]
-    for (name, firm) in &config.firms {
+    for (name, firm) in &zapper_office::firm::all(&config) {
         let dir = zapper_office::skills::dir(firm);
         let missing = zapper_office::skills::missing(firm);
         report(

@@ -21,9 +21,11 @@ pub struct Config {
     pub policy: Policy,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-    /// Org charts of workers run by the office layer.
+    /// Org charts of workers run by the office (`zapper-office`), as
+    /// written: the office parses and checks them, with the rest of each
+    /// change.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub firms: BTreeMap<String, crate::Firm>,
+    pub firms: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -887,12 +889,6 @@ impl Config {
                 ));
             }
         }
-        if !self.daemon.driver && !self.firms.is_empty() {
-            errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
-        }
-        for (name, firm) in &self.firms {
-            errors.extend(firm.validate(name, self));
-        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -997,10 +993,6 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("profile b: agent.driven"), "{e}");
-        let firm = "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n";
-        ok(firm).unwrap();
-        let e = ok(&format!("{off}{firm}")).unwrap_err();
-        assert!(e.contains("firms need the driver"), "{e}");
         assert!(DaemonConfig::default().driver, "on unless turned off");
     }
 

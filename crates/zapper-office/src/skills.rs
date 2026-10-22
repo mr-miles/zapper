@@ -5,8 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::firm::Firm;
 use anyhow::{Context, Result};
-use zapper_policy::{expand_home, Config, Firm};
+use zapper_policy::{expand_home, Config};
 
 use super::FirmRun;
 
