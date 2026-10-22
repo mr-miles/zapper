@@ -6,7 +6,8 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    # overlay is this fork's main line; main mirrors upstream.
+    branches: [main, overlay]
   workflow_dispatch:
 
 permissions:
