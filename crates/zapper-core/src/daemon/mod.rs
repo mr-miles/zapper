@@ -10,6 +10,7 @@ pub mod api_error;
 mod dns;
 pub mod driver;
 // Workers' conversations and the record's checks are the office's.
+pub mod clients;
 pub mod deciders;
 pub mod gateway;
 #[cfg_attr(not(feature = "office"), allow(dead_code))]
@@ -212,7 +213,7 @@ pub struct Daemon {
     seq: AtomicU64,
     approvals: Mutex<HashMap<String, Pending>>,
     pub ui_token: String,
-    pub office: office::Office,
+    pub clients: clients::Clients,
     pub services: services::Services,
     pub deciders: deciders::Deciders,
     pub gateway: gateway::Gateway,
@@ -306,7 +307,6 @@ impl Daemon {
             let text = std::fs::read_to_string(&startup_path)
                 .with_context(|| format!("reading {}", startup_path.display()))?;
             Config::from_yaml(&text)
-                .and_then(|c| office_config(&c).map(|_| c))
                 .with_context(|| format!("loading {}", startup_path.display()))?
         } else {
             tracing::warn!(
@@ -334,7 +334,6 @@ impl Daemon {
         }
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;
-        office::close_orphans(&state);
         let initrd = state.join("initrd.cpio");
         vm::build_initrd(&find_agent(&d.agent)?, &initrd)?;
         let paths = Paths {
@@ -360,7 +359,7 @@ impl Daemon {
             seq: AtomicU64::new(1),
             approvals: Mutex::new(HashMap::new()),
             ui_token: random_id(24),
-            office: office::Office::default(),
+            clients: clients::Clients::default(),
             services: services::Services::default(),
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
@@ -427,7 +426,7 @@ impl Daemon {
                 );
             }
         }
-        office_config(&next)?;
+        self.clients.check(&next)?;
         if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }

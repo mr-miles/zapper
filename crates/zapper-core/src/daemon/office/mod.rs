@@ -1345,6 +1345,49 @@ pub fn board_send(run: &FirmRun, v: &Value) -> Result<mail::Sent> {
 
 /// Ends the journals of runs a previous daemon left running: they can't be
 /// resumed, and a replay should say how they ended.
+/// The office in a starting daemon: runs a previous daemon left running are
+/// ended; the firms' role layers and their officers' standing approvals are
+/// rules the office keeps; the daemon stopping stops the firms.
+pub fn start(d: &Core) {
+    close_orphans(d.state_dir());
+    d.add_rule_keeper(Arc::new(Keeper(d.office())));
+    d.on_shutdown(|d| {
+        Box::pin(async move {
+            let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
+            for r in runs {
+                down(&d, &r, "daemon shutdown").await;
+            }
+        })
+    });
+}
+
+/// The firms' role layers, and their officers' standing approvals, which
+/// the operator removes through the officers' records.
+struct Keeper(Arc<Office>);
+
+impl crate::RuleKeeper for Keeper {
+    fn layers(&self) -> Vec<(zapper_policy::Scope, Policy)> {
+        let mut layers = Vec::new();
+        for run in self.0.runs.read().unwrap().values() {
+            for (role, p) in &run.roles {
+                layers.push((
+                    zapper_policy::Scope::Role(format!("{}/{role}", run.firm)),
+                    p.read().unwrap().clone(),
+                ));
+            }
+        }
+        layers
+    }
+
+    fn remove(&self, id: &str) -> Option<Result<()>> {
+        let runs: Vec<_> = self.0.runs.read().unwrap().values().cloned().collect();
+        let run = runs
+            .into_iter()
+            .find(|r| r.security.lock().unwrap().standing.contains_key(id))?;
+        Some(security::revoke(&run, BOARD, id, "removed by the operator").map(|_| ()))
+    }
+}
+
 pub fn close_orphans(state: &std::path::Path) {
     let Ok(firms) = std::fs::read_dir(state.join("firms")) else {
         return;
@@ -1618,8 +1661,8 @@ mod tests {
             )
             .unwrap();
         // No run of acme in the registry, and a session with no firm.
-        assert!(super::run_of(t.core.office(), &worker).is_none());
-        assert!(super::run_of(t.core.office(), &plain).is_none());
+        assert!(super::run_of(&t.core.office(), &worker).is_none());
+        assert!(super::run_of(&t.core.office(), &plain).is_none());
     }
 
     #[test]

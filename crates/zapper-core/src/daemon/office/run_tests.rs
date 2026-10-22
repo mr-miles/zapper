@@ -76,14 +76,14 @@ fn ids(rules: &[(String, String, Vec<u16>)]) -> Vec<&str> {
 #[test]
 fn a_session_finds_its_run_by_its_labels() {
     let (t, run) = run();
-    let found = run_of(t.core.office(), &session_of(&run, "pat")).unwrap();
+    let found = run_of(&t.core.office(), &session_of(&run, "pat")).unwrap();
     assert_eq!(found.id, run.id);
 
     // A session from an earlier run of the firm: not this run's.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
     old.labels = labels("acme", "an-earlier-run", "pat", true);
     let old = t.core.test_session(old, true).unwrap();
-    assert!(run_of(t.core.office(), &old).is_none());
+    assert!(run_of(&t.core.office(), &old).is_none());
 }
 
 #[test]

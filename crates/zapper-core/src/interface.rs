@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::Router;
+use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
@@ -15,6 +16,7 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon, EventBody};
 
+pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
 pub use crate::daemon::services::{
@@ -36,17 +38,17 @@ pub struct Core {
 pub enum RuleRemoval {
     /// The rule left its layer.
     Removed(Scope, Box<AnyRule>),
-    /// It was an officer's standing approval in a firm: revoked there, so
-    /// the firm's records agree.
+    /// It was a client's own rule (a firm officer's standing approval):
+    /// removed through the client, so its records agree.
     Revoked,
 }
 
 impl Core {
     /// The office's registry of firm runs, while the office lives in the
     /// core.
-    #[cfg_attr(not(feature = "office"), allow(dead_code))]
-    pub(crate) fn office(&self) -> &daemon::office::Office {
-        &self.d.office
+    #[cfg(feature = "office")]
+    pub(crate) fn office(&self) -> Arc<daemon::office::Office> {
+        self.client()
     }
 
     /// The daemon, for tests of its parts that take it.
@@ -57,9 +59,57 @@ impl Core {
 
     /// Loads the startup config and starts the daemon's state.
     pub fn start(startup_path: PathBuf) -> Result<Core> {
-        Ok(Core {
+        let core = Core {
             d: Daemon::new(startup_path)?,
-        })
+        };
+        core.add_config_check(daemon::office_config);
+        #[cfg(feature = "office")]
+        daemon::office::start(&core);
+        core.check_config()
+            .with_context(|| format!("loading {}", core.d.startup_path.display()))?;
+        Ok(core)
+    }
+
+    /// The state of type `T` a client keeps in the core, made on first use:
+    /// one per core, whatever else the process holds.
+    pub fn client<T: Default + Send + Sync + 'static>(&self) -> Arc<T> {
+        self.d.clients.state()
+    }
+
+    /// Adds a check every config change must pass (a client's section of
+    /// it, say), besides the config's own validation.
+    pub fn add_config_check(&self, check: impl Fn(&Config) -> Result<()> + Send + Sync + 'static) {
+        self.d
+            .clients
+            .config_checks
+            .write()
+            .unwrap()
+            .push(Arc::new(check));
+    }
+
+    /// Checks the running config against the checks added since it was
+    /// loaded: for a client's checks of the startup config.
+    pub fn check_config(&self) -> Result<()> {
+        self.d.clients.check(&self.d.config.read().unwrap())
+    }
+
+    /// Adds a client's own rules to the layers listed, and lets it remove
+    /// them itself.
+    pub fn add_rule_keeper(&self, keeper: Arc<dyn RuleKeeper>) {
+        self.d.clients.rule_keepers.write().unwrap().push(keeper);
+    }
+
+    /// Runs `hook` when the daemon stops, before sessions are stopped.
+    pub fn on_shutdown(
+        &self,
+        hook: impl Fn(Core) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) {
+        self.d
+            .clients
+            .shutdown
+            .write()
+            .unwrap()
+            .push(Arc::new(hook));
     }
 
     // The config.
@@ -335,37 +385,20 @@ impl Core {
         for (id, s) in self.d.sessions.read().unwrap().iter() {
             layers.push((Scope::Session(id.clone()), s.policy.read().unwrap().clone()));
         }
-        for run in self.d.office.runs.read().unwrap().values() {
-            for (role, p) in &run.roles {
-                layers.push((
-                    Scope::Role(format!("{}/{role}", run.firm)),
-                    p.read().unwrap().clone(),
-                ));
-            }
+        for k in self.d.clients.rule_keepers.read().unwrap().iter() {
+            layers.extend(k.layers());
         }
         layers
     }
 
     /// Removes a rule from whichever layer has it.
     pub fn remove_rule(&self, id: &str) -> Result<RuleRemoval> {
-        // An officer's standing approval: revoked, so the firm's records agree.
-        let runs: Vec<_> = self
-            .d
-            .office
-            .runs
-            .read()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        for run in runs {
-            if run.security.lock().unwrap().standing.contains_key(id) {
-                daemon::office::security::revoke(
-                    &run,
-                    zapper_policy::BOARD,
-                    id,
-                    "removed by the operator",
-                )?;
+        // A client's own rule (a firm officer's standing approval): removed
+        // through it, so its records agree.
+        let keepers = self.d.clients.rule_keepers.read().unwrap().clone();
+        for k in keepers {
+            if let Some(r) = k.remove(id) {
+                r?;
                 return Ok(RuleRemoval::Revoked);
             }
         }
@@ -459,19 +492,12 @@ impl Core {
         None
     }
 
-    /// Stops firms, then sessions: the daemon is going away.
+    /// Runs the clients' shutdown hooks (the office stops its firms), then
+    /// stops sessions: the daemon is going away.
     pub async fn shutdown(&self) {
-        let runs: Vec<_> = self
-            .d
-            .office
-            .runs
-            .read()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        for r in runs {
-            daemon::office::down(self, &r, "daemon shutdown").await;
+        let hooks = self.d.clients.shutdown.read().unwrap().clone();
+        for hook in hooks {
+            hook(self.clone()).await;
         }
         for s in self.sessions() {
             session::stop(&self.d, &s, "daemon shutdown").await;

@@ -41,7 +41,7 @@ impl McpServer for Tools {
         args: Value,
     ) -> BoxFuture<'a, Result<Value>> {
         Box::pin(async move {
-            let run = super::run_of(self.d.office(), s)
+            let run = super::run_of(&self.d.office(), s)
                 .ok_or_else(|| anyhow!("the firm isn't running"))?;
             let member = s.label("member").unwrap_or_default();
             dispatch(&self.d, &run, s, member, op, &args)
