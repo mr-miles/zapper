@@ -888,6 +888,25 @@ impl PostOffice {
 
     /// Whether this draft would close the board's objective: its sender
     /// owes it in the thread it answers, and it closes.
+    /// A task: `thread` and the threads delegated from it, however deep
+    /// (each new thread's `context` is the one its sender was working in).
+    pub fn task_threads(&self, thread: &str) -> BTreeSet<String> {
+        let mut task = BTreeSet::from([thread.to_string()]);
+        loop {
+            let more: Vec<String> = self
+                .threads
+                .values()
+                .filter(|t| !task.contains(&t.id))
+                .filter(|t| t.context.as_ref().is_some_and(|c| task.contains(c)))
+                .map(|t| t.id.clone())
+                .collect();
+            if more.is_empty() {
+                return task;
+            }
+            task.extend(more);
+        }
+    }
+
     pub fn would_close_objective(&self, d: &Draft) -> bool {
         d.close
             && d.in_reply_to

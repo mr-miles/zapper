@@ -839,3 +839,94 @@ async fn work_is_published_from_one_vm_and_fetched_into_another() {
     );
     std::fs::remove_dir_all(&out).unwrap();
 }
+
+/// `who` publishes `title` for `thread`, the VM's tar played by the test.
+async fn publish(
+    t: &TestCore,
+    run: &FirmRun,
+    vm: &mut tokio::sync::mpsc::UnboundedReceiver<zapper_core::testing::Shell>,
+    who: &str,
+    thread: &str,
+    title: &str,
+) {
+    let (done, _) = tokio::join!(
+        ok(
+            t,
+            run,
+            who,
+            "drive_publish",
+            json!({ "paths": ["/work/x.md"], "title": title, "kind": "document", "summary": title, "thread": thread })
+        ),
+        async {
+            let mut tar = vm.recv().await.unwrap();
+            tar.output(&tar_of(&[("x.md", title)])).await;
+            tar.exit(0).await;
+        }
+    );
+    assert!(done.get("error").is_none(), "{done}");
+}
+
+#[tokio::test]
+async fn a_tasks_work_is_found_by_its_thread_delegated_work_included() {
+    let (t, run) = run();
+    let mut vm = zapper_core::testing::shell_vm(&session_of(&run, "ceo"));
+    // Task A: the CEO assigns pat, who delegates part of it to sec while
+    // working on it (the new thread's context is task A's).
+    let a = ok(
+        &t,
+        &run,
+        "ceo",
+        "mail_send",
+        json!({ "to": ["pat"], "subject": "Task A", "body": "Do A.", "kind": "assignment" }),
+    )
+    .await;
+    let a = a["thread"].as_str().unwrap().to_string();
+    *run.rt("pat").unwrap().context.lock().unwrap() = Some(a.clone());
+    let part = ok(
+        &t,
+        &run,
+        "pat",
+        "mail_send",
+        json!({ "to": ["sec"], "subject": "Part of A", "body": "Check this.", "kind": "question" }),
+    )
+    .await;
+    let part = part["thread"].as_str().unwrap().to_string();
+    *run.rt("pat").unwrap().context.lock().unwrap() = None;
+    let b = ok(
+        &t,
+        &run,
+        "ceo",
+        "mail_send",
+        json!({ "to": ["sec"], "subject": "Task B", "body": "Do B.", "kind": "assignment" }),
+    )
+    .await;
+    let b = b["thread"].as_str().unwrap().to_string();
+
+    publish(&t, &run, &mut vm, "ceo", &a, "A's plan").await;
+    publish(&t, &run, &mut vm, "ceo", &part, "A's check").await;
+    publish(&t, &run, &mut vm, "ceo", &b, "B's notes").await;
+
+    let titles = |thread: Option<&str>| {
+        let (t, run) = (&t, &run);
+        let args = match thread {
+            Some(th) => json!({ "thread": th }),
+            None => json!({}),
+        };
+        async move {
+            let mut v: Vec<String> = ok(t, run, "ceo", "drive_list", args)
+                .await
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["title"].as_str().unwrap().to_string())
+                .collect();
+            v.sort();
+            v
+        }
+    };
+    assert_eq!(titles(Some(&a)).await, ["A's check", "A's plan"]);
+    assert_eq!(titles(Some(&part)).await, ["A's check"]);
+    assert_eq!(titles(Some(&b)).await, ["B's notes"]);
+    assert_eq!(titles(Some("t-999")).await, Vec::<String>::new());
+    assert_eq!(titles(None).await.len(), 3);
+}

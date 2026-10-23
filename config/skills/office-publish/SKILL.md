@@ -26,7 +26,7 @@ The drive holds the firm's finished work: documents, reports, datasets, decks. W
 
 ## Using others' work
 
-- `drive_list(kind?, author?, query?)` finds artifacts in spaces you can read; check before producing something again.
+- `drive_list(kind?, author?, query?, thread?)` finds artifacts in spaces you can read; check before producing something again. With `thread` (your assignment's thread) it lists what was published for that task, the work delegated from it included.
 - `drive_fetch(artifact: "a-3@v2", dest: "/work/in/a-3")` copies a version into your machine. Read it before building on it; fetch exactly the version you were sent.
 - Attach and cite by version: `drive:a-3@v2`.
 

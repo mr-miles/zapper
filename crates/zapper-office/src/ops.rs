@@ -407,16 +407,21 @@ static TOOLS: &[Tool] = &[
         name: "drive_list",
         shown: |_| true,
         description: "Find artifacts on the shared drive.",
-        props: || json!({ "kind": s("Kind"), "author": s("Author"), "query": s("Words in the title or summary") }),
+        props: || json!({ "kind": s("Kind"), "author": s("Author"), "query": s("Words in the title or summary"), "thread": s("A task's thread, e.g. t-12: what was published for it, the work delegated from it included") }),
         required: &[],
         run: Run::Sync(|c| {
+            let task = c
+                .args
+                .opt("thread")
+                .map(|t| c.run.post.with(|po| po.task_threads(&t)));
             let d = c.run.drive.lock().unwrap();
             Ok(json!(d.list(
                 c.me,
                 &|sp| access::can_read_space(c.run, c.me, sp),
                 c.args.opt("kind").as_deref(),
                 c.args.opt("author").as_deref(),
-                c.args.opt("query").as_deref()
+                c.args.opt("query").as_deref(),
+                task.as_ref()
             )))
         }),
     },

@@ -339,7 +339,7 @@ thread    t-01J…             the assignment it answers, if any
 | Tool | Does |
 |---|---|
 | `drive_publish(paths, title, kind, summary, space?, artifact?, thread?, changes?)` | Copy files from the VM into a drive space (default `general`; needs write on it); with `artifact`, add a new version, which needs `changes`: what changed from the previous one |
-| `drive_list(kind?, author?, query?)` | Find artifacts |
+| `drive_list(kind?, author?, query?, thread?)` | Find artifacts; with `thread`, those published for that task: its thread and the threads delegated from it |
 | `drive_fetch(artifact[@version], dest)` | Copy an artifact into the VM |
 
 Publishing copies the named files out of the VM (see [the office protocol](#the-office-protocol)): Firecracker can't share folders, and copies mean a worker can't change something after publishing it. Limits: 50 MiB per artifact and 2 GiB per run, both configurable.

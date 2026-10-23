@@ -10,8 +10,9 @@ function mountDrive() {
   const fk = selectOf([['', 'any kind'], 'document', 'report', 'dataset', 'deck', 'board-pack'], '', { id: 'df-kind', onchange: () => { DRV.sig = null; updateDrive(); } });
   const fa = el('select', { id: 'df-author', onchange: () => { DRV.sig = null; updateDrive(); } });
   const fq = el('input', { type: 'search', id: 'df-q', placeholder: 'Search titles', oninput: () => { DRV.sig = null; updateDrive(); } });
+  const ft = el('select', { id: 'df-task', onchange: () => { DRV.sig = null; updateDrive(); } });
   root.replaceChildren(el('div', { class: 'split' },
-    el('div', {}, el('div', { class: 'bar' }, fk, fa, fq), el('div', { class: 'list', id: 'drv-list' })),
+    el('div', {}, el('div', { class: 'bar' }, ft, fk, fa, fq), el('div', { class: 'list', id: 'drv-list' })),
     el('div', { id: 'drv-main' })));
   DRV.sig = null; DRV.mainSig = null; DRV.viewKey = null;
 }
@@ -27,16 +28,37 @@ function updateDrive() {
   const authors = [...new Set(arts.map((a) => a.author))].sort();
   const fa = $('df-author');
   if (fa.dataset.sig !== authors.join(',')) { const cur = fa.value; fa.dataset.sig = authors.join(','); fa.replaceChildren(opt('', 'any author'), ...authors.map((x) => opt(x, x, x === cur))); }
+  // A task is a thread and the threads delegated from it: an artifact's
+  // task is the thread its thread was delegated from, at the top.
+  const taskOf = (a) => { const t = a.thread && M.threads.get(a.thread); return t ? rootOf(M, t) : null; };
+  const tasks = new Map();
+  for (const a of arts) { const r = taskOf(a); if (r) tasks.set(r.id, r.subject || r.id); }
+  const ft = $('df-task');
+  const tsig = [...tasks.keys()].join(',');
+  if (ft.dataset.sig !== tsig) { const cur = ft.value; ft.dataset.sig = tsig; ft.replaceChildren(opt('', 'any task'), ...[...tasks].map(([id, s]) => opt(id, clip(s, 40), id === cur))); }
   const sig = M.published.length + '|' + (DRV.sel && DRV.sel.artifact) + '|' + Math.floor(T() / 60);
   if (sig !== DRV.sig) {
     DRV.sig = sig;
-    const k = $('df-kind').value, au = fa.value, q = $('df-q').value.trim().toLowerCase();
-    const list = arts.filter((a) => (!k || a.kind === k) && (!au || a.author === au) && (!q || (a.title + ' ' + a.id).toLowerCase().includes(q))).sort((a, b) => b.last - a.last);
-    $('drv-list').replaceChildren(...(list.length ? list.map((a) => {
-      const it = artifactItem(a);
-      if (DRV.sel && DRV.sel.artifact === a.id) it.classList.add('sel');
-      return it;
-    }) : [el('div', { class: 'empty' }, arts.length ? 'Nothing matches.' : 'Nothing published yet.')]));
+    const tk = ft.value, k = $('df-kind').value, au = fa.value, q = $('df-q').value.trim().toLowerCase();
+    const list = arts.filter((a) => (!tk || (taskOf(a) || {}).id === tk) && (!k || a.kind === k) && (!au || a.author === au) && (!q || (a.title + ' ' + a.id).toLowerCase().includes(q)));
+    // Grouped by task, the most recently active first; work for no task last.
+    const groups = new Map();
+    for (const a of list) {
+      const r = taskOf(a), key = r ? r.id : '';
+      if (!groups.has(key)) groups.set(key, { title: r ? (r.subject || r.id) : 'Not for a task', items: [], last: 0, none: !r });
+      const g = groups.get(key);
+      g.items.push(a);
+      g.last = Math.max(g.last, a.last || 0);
+    }
+    const ordered = [...groups.values()].sort((x, y) => (x.none - y.none) || (y.last - x.last));
+    $('drv-list').replaceChildren(...(list.length ? ordered.flatMap((g) => [
+      el('div', { class: 'muted small', style: 'margin:10px 4px 4px;font-weight:600' }, g.title),
+      ...g.items.sort((a, b) => b.last - a.last).map((a) => {
+        const it = artifactItem(a);
+        if (DRV.sel && DRV.sel.artifact === a.id) it.classList.add('sel');
+        return it;
+      }),
+    ]) : [el('div', { class: 'empty' }, arts.length ? 'Nothing matches.' : 'Nothing published yet.')]));
   }
   renderDriveMain(M);
 }
