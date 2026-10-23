@@ -81,7 +81,8 @@ function renderGit() {
   const sel = $('git-branch');
   if (!sel) return;
   if ($('git-repo')) gitRepoSelect($('git-repo'));
-  if (GIT.err) { gitShowEmpty(null); $('git-main').replaceChildren(el('div', { class: 'empty card' }, 'No repository: ' + GIT.err)); return; }
+  // No repository: the message alone, across the tab, not beside empty panes.
+  if (GIT.err) { gitShowEmpty(gitErrView(GIT.err)); return; }
   // Nothing pushed yet: one calm page instead of empty panes.
   if (!GIT.branches.length) { gitShowEmpty(gitEmptyView()); return; }
   gitShowEmpty(null);
@@ -168,6 +169,11 @@ function gitOffView() {
       } catch (e) { toast(e.message); }
     } }, 'Open the last run'));
   v.dataset.v = 'off:' + S.firm;
+  return v;
+}
+function gitErrView(err) {
+  const v = el('div', { class: 'empty card' }, 'No repository: ' + err);
+  v.dataset.v = 'err:' + err;
   return v;
 }
 function gitEmptyView() {
