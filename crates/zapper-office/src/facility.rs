@@ -704,7 +704,7 @@ async fn serve_product(run: &Arc<FirmRun>, addr: &str) -> Result<JoinHandle<()>>
             let Ok((conn, peer)) = listener.accept().await else {
                 break;
             };
-            tracing::info!(firm = %run.firm, "product port: connection from {peer}");
+            tracing::debug!(firm = %run.firm, "product port: connection from {peer}");
             tokio::spawn(super::product::serve(run.clone(), conn, HTTP_PORT));
         }
     }))
@@ -731,7 +731,7 @@ async fn forward_port(
                 let Some(c) = run.facility.cluster.lock().unwrap().clone() else {
                     return;
                 };
-                tracing::info!(firm = %run.firm, "{what} port: connection from {peer}");
+                tracing::debug!(firm = %run.firm, "{what} port: connection from {peer}");
                 if let Ok(mut up) = vsock_connect(&c, port).await {
                     let _ = tokio::io::copy_bidirectional(&mut conn, &mut up).await;
                 }
