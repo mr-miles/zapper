@@ -829,60 +829,59 @@ pub fn fund(run: &FirmRun, by: &str, worker: &str, tokens: i64, reason: &str) ->
     Ok(json!({ "worker": worker, "their_balance": theirs, "your_balance": mine }))
 }
 
-/// What a role may reach, for the officers' background check: its
-/// profile's network and exec rules, and the firm's credentials it gets.
+/// What a role may reach, for the officers' background check, in words:
+/// its machine and its profile's network and program rules. Anything more
+/// is an access request, decided then.
 pub(super) fn access_summary(run: &FirmRun, config: &zapper_policy::Config, role: &str) -> String {
+    use zapper_policy::Action;
     let Some(r) = run.config.roles.get(role) else {
         return String::new();
     };
-    let mut lines = vec![format!("profile {}", r.profile)];
+    let said = |a: Action| match a {
+        Action::Allow => "allowed",
+        Action::Deny => "blocked",
+        Action::Ask => "needs approval",
+    };
+    let mut lines = vec![format!("Machine: profile {}", r.profile)];
     if let Ok(p) = config.resolve(&r.profile) {
         let mut net = Vec::new();
         let mut exec = Vec::new();
         for (_, layer) in &p.layers {
             for n in &layer.net {
-                let ports = if n.ports.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        ":{}",
-                        n.ports
-                            .iter()
+                let ports = match n.ports.as_slice() {
+                    [] => String::new(),
+                    [one] => format!(" port {one}"),
+                    more => format!(
+                        " ports {}",
+                        more.iter()
                             .map(|x| x.to_string())
                             .collect::<Vec<_>>()
-                            .join(",")
-                    )
+                            .join(", ")
+                    ),
                 };
-                net.push(
-                    format!(
-                        "{:?} {}{}{}",
-                        n.action,
-                        n.host,
-                        ports,
-                        if n.secrets.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" (with secrets {})", n.secrets.join(", "))
-                        }
-                    )
-                    .to_lowercase(),
-                );
+                let secrets = if n.secrets.is_empty() {
+                    String::new()
+                } else {
+                    format!(", the host adding the {} secret", n.secrets.join(", "))
+                };
+                net.push(format!("{}{ports}: {}{secrets}", n.host, said(n.action)));
             }
             for e in &layer.exec {
-                exec.push(format!("{:?} {}", e.action, e.path).to_lowercase());
+                exec.push(format!("{}: {}", e.path, said(e.action)));
             }
-            if let Some(dn) = layer.defaults.net {
-                net.push(format!("otherwise {:?}", dn).to_lowercase());
-            }
+        }
+        // The nearest layer's default is the one that applies.
+        if let Some(dn) = p.layers.iter().find_map(|(_, l)| l.defaults.net) {
+            net.push(format!("anything else: {}", said(dn)));
         }
         if !net.is_empty() {
-            lines.push(format!("network: {}", net.join("; ")));
+            lines.push(format!("Network: {}", net.join("; ")));
         }
         if !exec.is_empty() {
-            lines.push(format!("exec: {}", exec.join("; ")));
+            lines.push(format!("Programs: {}", exec.join("; ")));
         }
     }
-    lines.push("credentials: none at the start; git, the cluster and drive spaces come only with grants the policy owners decide".into());
+    lines.push("Additional access requests will require approval".into());
     lines.join("\n")
 }
 

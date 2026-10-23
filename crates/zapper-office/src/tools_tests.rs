@@ -461,6 +461,17 @@ async fn a_budgeted_firm_hires_funds_and_pays_for_a_contract() {
         [json!(contractor), hired["worker"].clone()]
     );
     let check = checks[1]["screening"].as_str().unwrap().to_string();
+    // What the hire can reach, in words, and that anything more is asked for.
+    let access = checks[1].to_string();
+    assert!(access.contains("Machine: profile w"), "{access}");
+    assert!(
+        access.contains("Network: *.example: needs approval"),
+        "{access}"
+    );
+    assert!(
+        access.contains("Additional access requests will require approval"),
+        "{access}"
+    );
     ok(
         &t,
         &run,

@@ -297,7 +297,7 @@ pub fn screening_text(s: &Screening) -> String {
     );
     let _ = writeln!(
         t,
-        "Their role can reach:\n{}",
+        "What they can reach:\n{}",
         s.access
             .lines()
             .map(|l| format!("  {l}\n"))
