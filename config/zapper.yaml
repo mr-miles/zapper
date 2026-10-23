@@ -166,6 +166,7 @@ profiles:
         vcpus: 4,
         memory_mib: 8192,
         disk: 30GiB,
+        ports: [6443],
       }
     agent:
       kind: generic

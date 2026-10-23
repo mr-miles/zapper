@@ -8,14 +8,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::firm::{Firm, Worker, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use zapper_policy::{valid_worker_name, Firm, Worker, BOARD};
+use zapper_policy::valid_worker_name;
 
 use super::mail::{Draft, Expects, Kind};
 use super::{now, FirmRun, WorkerRt, WorkerState};
-use crate::Core;
+use zapper_core::Core;
 
 /// Longest budget plan or reason, in bytes.
 const MAX_PLAN: usize = 20_000;
@@ -202,7 +203,7 @@ pub fn tokens_arg(v: &Value, name: &str) -> Result<i64> {
             .ok_or_else(|| anyhow!("{name}: a whole number of tokens")),
         Value::String(s) => {
             let neg = s.trim().starts_with('-');
-            let n = zapper_policy::parse_tokens(s.trim().trim_start_matches('-'))? as i64;
+            let n = crate::firm::parse_tokens(s.trim().trim_start_matches('-'))? as i64;
             Ok(if neg { -n } else { n })
         }
         Value::Null => bail!("{name} is required: tokens, like 2M or 500k"),
@@ -439,7 +440,7 @@ pub fn allows(run: &FirmRun, w: &str) -> bool {
 /// the run's ticker.
 pub fn tick(run: &FirmRun) {
     let t = super::now();
-    let remind = zapper_policy::parse_duration(&run.config.budget.stall_after)
+    let remind = crate::firm::parse_duration(&run.config.budget.stall_after)
         .map(|d| d.as_secs_f64())
         .unwrap_or(600.0);
     // Out of tokens, even with nothing waiting yet: their manager and the
@@ -825,7 +826,7 @@ fn pick_name(run: &FirmRun, chart: &Firm, role: &str, wanted: Option<&str>) -> R
     };
     if let Some(n) = wanted {
         let n = n.trim().to_ascii_lowercase();
-        if !valid_worker_name(&n) || zapper_policy::reserved_name(&n) {
+        if !valid_worker_name(&n) || crate::firm::reserved_name(&n) {
             bail!("{n:?} can't be a name: lowercase letters, digits and dashes, starting with a letter");
         }
         if taken(&n) {
@@ -1020,7 +1021,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
 pub(super) fn room(
     d: &Core,
     role_name: &str,
-    role: &zapper_policy::Role,
+    role: &crate::firm::Role,
 ) -> Result<zapper_policy::Config> {
     let config = d.config();
     let profile = config.resolve(&role.profile)?;
@@ -1122,7 +1123,7 @@ pub(super) fn join(
             .git_passwords
             .lock()
             .unwrap()
-            .insert(name.clone(), crate::util::random_id(24));
+            .insert(name.clone(), zapper_core::util::random_id(24));
     }
     Ok((name, firm, rt))
 }
@@ -1295,7 +1296,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { boss: { profile: w, skills: { work: ceo } }, eng: { profile: w, skills: { work: x } } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: ada, role: eng, reports_to: ceo }\n      - { name: bo, role: eng, reports_to: ceo }\n",
         )
         .unwrap();
-        let f = &c.firms["acme"];
+        let f = &crate::firm::get(&c, "acme").unwrap();
         let mut l = Ledger::new(f);
         l.spend("ceo", 800);
         l.spend("ada", 3000);

@@ -13,7 +13,6 @@ use hyper_util::rt::TokioIo;
 
 use super::super::access::{self, Level};
 use super::super::{test_run, FirmRun};
-use crate::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -77,7 +76,7 @@ fn allowed((status, text): &(u16, String)) -> bool {
 
 #[tokio::test]
 async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
-    let t = TestCore::new(FIRM);
+    let t = crate::test_core(FIRM);
     let run = test_run(&t.core, "acme");
     // The repositories as the firm's git server keeps them.
     for r in ["api", "web"] {

@@ -7,21 +7,17 @@
 
 pub mod addr;
 pub mod api_error;
+pub mod clients;
+pub mod deciders;
 mod dns;
 pub mod driver;
-// Workers' conversations and the record's checks are the office's.
-#[cfg_attr(not(feature = "office"), allow(dead_code))]
+pub mod gateway;
 pub mod harness;
 pub mod httplog;
-mod nic;
-#[cfg(feature = "office")]
-pub mod office;
-#[cfg(not(feature = "office"))]
-#[path = "office_off.rs"]
-pub mod office;
-mod proxy;
-#[cfg_attr(not(feature = "office"), allow(dead_code))]
+pub(crate) mod nic;
+pub(crate) mod proxy;
 pub mod record;
+pub mod services;
 pub mod session;
 mod spec;
 pub mod tls;
@@ -137,11 +133,26 @@ pub enum EventBody {
     Config {
         change: String,
     },
+    /// A service or zone added or removed (`services`).
+    Service {
+        change: String,
+        #[serde(flatten)]
+        service: services::Info,
+    },
     /// What a driven session's agent did: `started`, `turn_start`,
     /// `activity`, `steered`, `turn_end`, `exited`, `error`.
     Driver {
         event: String,
         detail: serde_json::Value,
+    },
+    /// A tool called through the MCP gateway (`gateway`).
+    Mcp {
+        server: String,
+        tool: String,
+        ok: bool,
+        ms: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -194,7 +205,10 @@ pub struct Daemon {
     seq: AtomicU64,
     approvals: Mutex<HashMap<String, Pending>>,
     pub ui_token: String,
-    pub office: office::Office,
+    pub clients: clients::Clients,
+    pub services: services::Services,
+    pub deciders: deciders::Deciders,
+    pub gateway: gateway::Gateway,
 }
 
 pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
@@ -269,23 +283,12 @@ pub fn exposed_warning(what: &str) -> String {
     )
 }
 
-/// A config with firms needs a zapper built with the office.
-pub fn office_config(c: &Config) -> Result<()> {
-    if !cfg!(feature = "office") && !c.firms.is_empty() {
-        anyhow::bail!(
-            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
-        );
-    }
-    Ok(())
-}
-
 impl Daemon {
     pub fn new(startup_path: PathBuf) -> Result<Arc<Self>> {
         let config = if startup_path.exists() {
             let text = std::fs::read_to_string(&startup_path)
                 .with_context(|| format!("reading {}", startup_path.display()))?;
             Config::from_yaml(&text)
-                .and_then(|c| office_config(&c).map(|_| c))
                 .with_context(|| format!("loading {}", startup_path.display()))?
         } else {
             tracing::warn!(
@@ -313,7 +316,6 @@ impl Daemon {
         }
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;
-        office::close_orphans(&state);
         let initrd = state.join("initrd.cpio");
         vm::build_initrd(&find_agent(&d.agent)?, &initrd)?;
         let paths = Paths {
@@ -339,7 +341,10 @@ impl Daemon {
             seq: AtomicU64::new(1),
             approvals: Mutex::new(HashMap::new()),
             ui_token: random_id(24),
-            office: office::Office::default(),
+            clients: clients::Clients::default(),
+            services: services::Services::default(),
+            deciders: deciders::Deciders::default(),
+            gateway: gateway::Gateway::default(),
         }))
     }
 
@@ -403,7 +408,7 @@ impl Daemon {
                 );
             }
         }
-        office_config(&next)?;
+        self.clients.check(&next)?;
         if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
@@ -619,14 +624,6 @@ pub fn redact(mut c: Config) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn firms_need_the_office() {
-        let mut c = Config::default();
-        assert!(office_config(&c).is_ok());
-        c.firms.insert("acme".into(), Default::default());
-        assert_eq!(office_config(&c).is_ok(), cfg!(feature = "office"));
-    }
 
     #[test]
     fn redacted_config_hides_inline_secret_values() {

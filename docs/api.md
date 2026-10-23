@@ -72,7 +72,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/profiles` | ✓ | Summaries |
 | `GET\|PUT\|DELETE /v1/profiles/{name}` | | Profile and its resolved form / set / remove |
 | `GET /v1/sessions` | ✓ | Sessions, each with its `labels` (a firm's: `firm`, `run`, `member` and `office`, `worker` or `facility`) |
-| `POST /v1/sessions` | | `{profile, workdir, rules?}`; returns once the guest is ready |
+| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's |
 | `GET /v1/sessions/{id}` | ✓ | One session |
 | `POST /v1/sessions/{id}/stop` | | Stop, keep listed |
 | `POST /v1/sessions/{id}/prompt` | | `{text}`: a task for a driven session's agent, queued for its next turn → `202` `{queued, driver}`. `409` if the driver is off or the session isn't driven or running, `403` for a firm's worker (mail them instead) |
@@ -85,6 +85,9 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool` | | Upgrade (`Upgrade: zapper-shell`) to a terminal; frames below |
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
 | `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line |
+| `GET /v1/services` | ✓ | Services and zones: `id`, `kind` (`service` or `zone`), `name`, `port`, `sessions` (labels; every session when empty), `to`, `owner` ([network: services](network.md#services)) |
+| `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port}}` → the service with its `id` |
+| `DELETE /v1/services/{id}` | | Remove a service added through the API; `409` for another owner's (a firm's) |
 | `GET /v1/approvals` | ✓ | Pending approvals with suggested rules |
 | `POST /v1/approvals/{id}` | ✓ | `{allow, remember?: session}`; through the UI, also needs `X-Zapper-UI: 1` and an `Origin` naming the UI |
 
@@ -104,4 +107,4 @@ After the upgrade, both directions carry frames: a 1-byte type, a 4-byte big-end
 
 ## References
 
-- Sources: `crates/zapper/src/daemon/api.rs`, `crates/zapper/src/client.rs`, `crates/zapper-policy/src/proto.rs`
+- Sources: `crates/zapper-api/src/lib.rs`, `crates/zapper/src/client.rs`, `crates/zapper-policy/src/proto.rs`

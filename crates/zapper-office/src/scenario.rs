@@ -9,12 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use crate::firm::{parse_duration, HireSlot, Scenario, Step, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use zapper_policy::{parse_duration, HireSlot, Scenario, Step, BOARD};
 
 use super::{facility, now, workforce, FirmRun, WorkerState};
-use crate::Core;
+use zapper_core::Core;
 
 /// A step of the script: whether it has fired (or is being played), and
 /// what it waits for when its trigger is met but its target isn't there.

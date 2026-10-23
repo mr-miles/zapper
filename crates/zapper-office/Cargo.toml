@@ -1,0 +1,33 @@
+[package]
+name = "zapper-office"
+description = "The Office: firms of AI workers on zapper, a client of zapper-core's interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zapper-core = { path = "../zapper-core" }
+zapper-policy = { path = "../zapper-policy" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+rand = "0.8"
+ring = "0.17"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+zapper-core = { path = "../zapper-core", features = ["test-util"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

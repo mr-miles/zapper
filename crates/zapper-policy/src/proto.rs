@@ -27,13 +27,14 @@ pub const CONTROL_PORT: u32 = 1000;
 pub const PROXY_PORT: u32 = 3128;
 /// Host → guest terminals.
 pub const SHELL_PORT: u32 = 1024;
-/// Guest → host office requests of a firm's worker: one JSON request and one
-/// JSON response per connection.
-pub const OFFICE_PORT: u32 = 1100;
+/// Guest → host MCP: the daemon's gateway to the servers registered for the
+/// session. A connection names a server on its first line, then carries MCP
+/// as on stdio: one JSON-RPC message per line, each way.
+pub const MCP_PORT: u32 = 1100;
 /// The guest's address on its NIC (`crate::netns` on the host sets it).
 pub const GUEST_NIC_ADDR: &str = "10.0.2.2";
-/// Longest office request.
-pub const MAX_OFFICE_LINE: usize = 128 * 1024;
+/// Longest MCP message from the guest.
+pub const MAX_MCP_LINE: usize = 128 * 1024;
 
 /// Longest JSON line either side accepts.
 pub const MAX_LINE: usize = 256 * 1024;

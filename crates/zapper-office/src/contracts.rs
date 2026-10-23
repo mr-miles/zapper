@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use super::mail::{Draft, Expects, Kind};
 use super::workforce::{fmt_tokens, join, let_go, room};
 use super::{now, prompts, FirmRun, WorkerState};
-use crate::Core;
-use zapper_policy::BOARD;
+use crate::firm::BOARD;
+use zapper_core::Core;
 
 /// Counter-offers before the hirer must accept or walk away.
 const MAX_ROUNDS: u32 = 3;

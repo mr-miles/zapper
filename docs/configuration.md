@@ -66,6 +66,8 @@ profiles:
 
 `engine.network` is `nic` (the default) or `vsock`; [network](network.md) describes both.
 
+`engine.ports` lists guest TCP ports the host may connect to over vsock, such as `[6443]` for a test cluster's API, so a [service](network.md#services) can send other sessions there (`zapper service add k3s.internal:6443 --to-session ID:6443`). Nothing reaches them otherwise.
+
 `mounts` are copied in at boot. `{workdir}` is the directory `zapper run` was started in, or the one given with `-C`. A `rw` disk gets `extra` free space, 1 GiB by default. Changes stay in the session's disk until you copy them out with `zapper cp ID:/work ./out`.
 
 ### agent
@@ -100,7 +102,7 @@ For `claude-code`, zapper also sets `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DIS
 
 ### Agent harnesses
 
-The agent keys above are neutral: each harness (`crates/zapper/src/daemon/harness.rs`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to run office workers, `Driver`, which starts a `Conversation`: the command line, a handshake if the protocol has one, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure, a reply to write back), and handing over a message while the agent works if it can.
+The agent keys above are neutral: each harness (`crates/zapper-core/src/daemon/harness.rs`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to run office workers, `Driver`, which starts a `Conversation`: the command line, a handshake if the protocol has one, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure, a reply to write back), and handing over a message while the agent works if it can.
 
 `claude-code` and `pi` are implemented; opencode isn't yet. [HARNESS.md](../HARNESS.md) describes the interfaces in full and how each implements them; in short:
 
@@ -186,4 +188,4 @@ zapper profile show office-engineer   # the profile and its resolved form
 
 ## References
 
-- Sources: `crates/zapper-policy/src/config.rs`, `crates/zapper/src/daemon/{mod,spec}.rs`
+- Sources: `crates/zapper-policy/src/config.rs`, `crates/zapper-core/src/daemon/{mod,spec}.rs`

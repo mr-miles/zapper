@@ -1607,6 +1607,7 @@ dependencies = [
  "zapper-api",
  "zapper-core",
  "zapper-keeper",
+ "zapper-office",
  "zapper-policy",
 ]
 
@@ -1703,6 +1704,33 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "zapper-office"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "bytes",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "zapper-core",
+ "zapper-policy",
 ]
 
 [[package]]

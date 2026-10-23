@@ -1,84 +1,85 @@
-//! The office protocol: a worker's VM connects to the host's office port and
-//! sends one JSON request, `{"op": "...", "args": {...}}`, and gets one JSON
-//! response, `{"ok": ...}` or `{"error": "..."}`. The daemon knows which
-//! worker it is from the VM the connection came from; it checks the role on
-//! every request. `zapper-agent office` turns the ops into MCP tools.
+//! The office's tools: an MCP server in the daemon's gateway, served to the
+//! run's workers over their VM's MCP port (`zapper-agent office mcp` bridges
+//! the harness's stdio to it). Each tool is an op; the daemon knows which
+//! worker calls from the VM the connection came from, and checks the role on
+//! every call.
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
+use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
-use zapper_policy::proto::MAX_OFFICE_LINE;
-use zapper_policy::{parse_duration, NetRequest, BOARD};
+use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun};
-use crate::Core;
-use crate::Session;
+use crate::OfficeOf;
+use zapper_core::{Core, McpServer, Session};
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 
-pub async fn serve(d: Core, s: Arc<Session>, listener: UnixListener) {
-    let limit = Arc::new(Semaphore::new(8));
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
-        };
-        let Ok(permit) = limit.clone().try_acquire_owned() else {
-            continue;
-        };
-        let (d, s) = (d.clone(), s.clone());
-        tokio::spawn(async move {
-            let _ = handle(d, s, stream).await;
-            drop(permit);
-        });
+/// The office's tools, an MCP server in the gateway for the run's workers.
+/// Who calls is the session's member label; the role is checked on every
+/// call.
+struct Tools {
+    d: Core,
+}
+
+impl McpServer for Tools {
+    fn instructions(&self) -> Option<String> {
+        Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
+    }
+
+    fn tools<'a>(&'a self, s: &'a Arc<Session>) -> BoxFuture<'a, Result<Value>> {
+        self.call(s, "tools", json!({}))
+    }
+
+    fn call<'a>(
+        &'a self,
+        s: &'a Arc<Session>,
+        op: &'a str,
+        args: Value,
+    ) -> BoxFuture<'a, Result<Value>> {
+        Box::pin(async move {
+            let run = super::run_of(&self.d.office(), s)
+                .ok_or_else(|| anyhow!("the firm isn't running"))?;
+            let member = s.label("member").unwrap_or_default();
+            dispatch(&self.d, &run, s, member, op, &args)
+                .await
+                .inspect_err(|e| {
+                    run.journal.append(
+                        "op_error",
+                        json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+                    );
+                })
+        })
     }
 }
 
-pub(super) async fn handle(d: Core, s: Arc<Session>, stream: UnixStream) -> Result<()> {
-    let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
-    let mut line = Vec::new();
-    let n = tokio::time::timeout(
-        Duration::from_secs(30),
-        (&mut reader)
-            .take(MAX_OFFICE_LINE as u64 + 1)
-            .read_until(b'\n', &mut line),
-    )
-    .await??;
-    let reply = if n > MAX_OFFICE_LINE {
-        json!({ "error": format!("request longer than {MAX_OFFICE_LINE} bytes") })
-    } else {
-        let run = super::run_of(d.office(), &s);
-        let member = s.label("member").unwrap_or_default();
-        match (run, serde_json::from_slice::<Value>(&line)) {
-            (None, _) => json!({ "error": "the firm isn't running" }),
-            (_, Err(e)) => json!({ "error": format!("bad request: {e}") }),
-            (Some(run), Ok(req)) => {
-                let op = req["op"].as_str().unwrap_or("").to_string();
-                let args = req.get("args").cloned().unwrap_or(json!({}));
-                match dispatch(&d, &run, &s, member, &op, &args).await {
-                    Ok(v) => json!({ "ok": v }),
-                    Err(e) => {
-                        run.journal.append(
-                            "op_error",
-                            json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-                        );
-                        json!({ "error": format!("{e:#}") })
-                    }
-                }
-            }
-        }
-    };
-    let mut out = serde_json::to_vec(&reply)?;
-    out.push(b'\n');
-    w.write_all(&out).await?;
+/// The MCP server's name, as the workers' harnesses know it.
+pub const SERVER: &str = "office";
+
+/// Serves the office's tools to the firm's workers. A worker of another
+/// run of the firm gets the tools too, and is told on each call that its
+/// firm isn't running.
+pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
+    let sessions = [("firm", run.firm.as_str()), ("office", "worker")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let id = d.add_mcp_server(SERVER, sessions, Arc::new(Tools { d: d.clone() }))?;
+    *run.tools.lock().unwrap() = Some(id);
     Ok(())
+}
+
+/// Stops serving them, when the firm stops.
+pub fn unregister(d: &Core, run: &FirmRun) {
+    let id = run.tools.lock().unwrap().take();
+    if let Some(id) = id {
+        d.remove_mcp_server(id);
+    }
 }
 
 fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {

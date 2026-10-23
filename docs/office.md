@@ -89,7 +89,7 @@ Only its skills and who it is. A worker boots with its skills and a short genera
 
 ### Validation
 
-Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; skills follow from the role ([skills](#skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The config is validated as a whole like the rest of zapper's config.
+Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; skills follow from the role ([skills](#skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The `firms` section is the office's: zapper-office parses and checks it with the rest of each change, so a config is validated as a whole like the rest of zapper's config. `zapper config show` prints it as written, without the defaults filled in.
 
 The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network and exec rules still apply to running workers at once, as for any session.
 
@@ -187,7 +187,7 @@ In the guest, `zapper-agent office` is two things:
 - An **MCP server** (stdio) that Claude Code loads through `mcpServers`. Its tools are what the communication and publishing skills teach.
 - A **CLI** (`office desk`, `office mail_send --to … --body …`, `office drive_publish …`: each tool by name) for scripts and for humans attaching to a worker.
 
-The MCP server offers only the tools of the worker's role: officers get the traffic and decision tools, other workers don't. Workers run with `bypassPermissions` and can open the office port themselves, so the daemon also checks the caller's role on every request; the MCP scoping is what the worker sees, the daemon's check is what holds.
+The MCP server offers only the tools of the worker's role: officers get the traffic and decision tools, other workers don't. Workers run with `bypassPermissions` and can reach the daemon's MCP gateway themselves, so the daemon also checks the caller's role on every request; the MCP scoping is what the worker sees, the daemon's check is what holds.
 
 ### The office protocol
 
@@ -431,7 +431,7 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 ### Names and who reaches what
 
-Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The guest's resolver answers these names only when a rule could allow them, as for any host; they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly.
+Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a [service](network.md#services) the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
 
 | Name | Port | What | Who reaches it |
 |---|---|---|---|
@@ -680,7 +680,7 @@ The wake prompts, the follow-up and escalation texts, the officers' prompts, the
 
 ## Testing
 
-Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-agent fake-claude`, which speaks Claude Code's stream-json on stdin and stdout and plays a script, calling tools through the real MCP server and office port. A role uses it with `fake: <script path>`:
+Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-agent fake-claude`, which speaks Claude Code's stream-json on stdin and stdout and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. A role uses it with `fake: <script path>`:
 
 ```yaml
 rules:                                        # the first rule that matches a wake runs
@@ -695,7 +695,7 @@ rules:                                        # the first rule that matches a wa
 
 Actions are tool calls, `shell: CMD`, `say: TEXT` and `sleep: SECS`; `$message`, `$thread`, `$from`, `$subject` come from the wake's first message, `$request` from its first access request, `$artifact` from the last publish.
 
-`make test-e2e-office` (part of `make test-e2e`) boots firms of real VMs and checks: skills, preamble and read-only mounts; delegation and reports; authority (a report can't assign its manager), identity (the sender is the VM) and mail privacy; officer-only tools; an `ask` refused at once, decided by an officer, and retried; the shared drive, including that symlinks aren't published; follow-ups; the office port outside a firm; runs, journals, transcripts and fresh restarts. With the k3s image and kernel built it also boots a cluster: kubeconfig and git with a grant, neither without one, revocation, the ingress for everyone, the product port, and cleanup at `firm down`.
+`make test-e2e-office` (part of `make test-e2e`) boots firms of real VMs and checks: skills, preamble and read-only mounts; delegation and reports; authority (a report can't assign its manager), identity (the sender is the VM) and mail privacy; officer-only tools; an `ask` refused at once, decided by an officer, and retried; the shared drive, including that symlinks aren't published; follow-ups; the office's tools outside a firm; runs, journals, transcripts and fresh restarts. With the k3s image and kernel built it also boots a cluster: kubeconfig and git with a grant, neither without one, revocation, the ingress for everyone, the product port, and cleanup at `firm down`.
 
 A run with real Claude Code is a manual check: a two-worker firm on a small model (see [testing](testing.md)).
 

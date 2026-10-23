@@ -16,10 +16,10 @@ use zapper_policy::proto::ShellRequest;
 
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use crate::driver::{self, Observer, Out, Proc};
-use crate::harness::{self, Driver, Outcome};
-use crate::Core;
-use crate::Session;
+use zapper_core::driver::{self, Observer, Out, Proc};
+use zapper_core::harness::{self, Driver, Outcome};
+use zapper_core::Core;
+use zapper_core::Session;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;
@@ -148,7 +148,7 @@ fn blocked(
         return Some((st, detail, 5));
     }
     // No turns while the record can't be written: work isn't done unrecorded.
-    if !crate::record::healthy() {
+    if !zapper_core::record::healthy() {
         return Some((
             WorkerState::Error,
             Some("the record can't be written (is zapper-keeper running?)".into()),
@@ -182,7 +182,7 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
     let mut restarts: VecDeque<f64> = VecDeque::new();
     let mut backoff_until = 0.0;
     let mut timeouts = 0;
-    let turn_timeout = zapper_policy::parse_duration(&run.config.budget.turn_timeout)
+    let turn_timeout = crate::firm::parse_duration(&run.config.budget.turn_timeout)
         .unwrap_or(Duration::from_secs(1800));
     run.set_state(&w, idle_state(&run, &w), None);
     loop {
@@ -411,7 +411,7 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                     let manager = run
                         .chart()
                         .manager_of(&w.name)
-                        .unwrap_or(zapper_policy::BOARD)
+                        .unwrap_or(crate::firm::BOARD)
                         .to_string();
                     run.notice(&manager, &format!("{} is stuck", w.name), &format!("[Automatic notice] {}: {why}, each stopped and charged. They rest for {} minutes. Narrow what you ask of them (smaller assignments, one deliverable each), or take the work back.\n", w.name, (rest / 60.0).ceil()));
                     backoff_until = now() + rest;

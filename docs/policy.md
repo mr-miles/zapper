@@ -93,6 +93,8 @@ Values are read each time they're used, so a rotated file or variable takes effe
 
 Outside a firm, `ask` holds the connection, request or exec and emits an `ask` event, for the operator to answer. In a firm, a network `ask` is refused at once and decided by the security officers or the board ([office: deciding requests](office.md#deciding-requests)), and firm profiles can't have `exec` rules with `ask`.
 
+Who decides a session's network `ask`s is the operator, unless a decider is registered for the session. A decider is registered in the daemon (`Core::add_decider`) for the sessions its labels pick; the office registers its security officers for a run's sessions while the firm runs. A request to such a session is refused at once, saying where it went ("access to HOST:PORT requested from security (request r-3); …"), and the decider is told of it, to answer later with rules on the session; it also hears which rule allowed each allowed request, so an approval for once goes with its use. A decider only sees what the rules leave as `ask`: `final` rules and every `allow` or `deny` come first. `exec` asks are always the operator's.
+
 ```
 zapper approvals                                # pending
 zapper approve 3sicfmqu                         # allow this request
@@ -129,4 +131,4 @@ A rule gets its id when it's added, such as `net-4`, or `s-net-1` for a session 
 
 ## References
 
-- Sources: `crates/zapper-policy/src/{config,eval,template}.rs`, `crates/zapper/src/daemon/{proxy,dns}.rs`
+- Sources: `crates/zapper-policy/src/{config,eval,template}.rs`, `crates/zapper-core/src/daemon/{proxy,dns}.rs`

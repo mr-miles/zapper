@@ -26,7 +26,7 @@ pub fn repos(run_dir: &Path) -> Vec<String> {
         })
         .filter(|n| zapper_policy::valid_worker_name(n))
         .collect();
-    v.sort_by_key(|n| (n != zapper_policy::DEFAULT_REPO, n.clone()));
+    v.sort_by_key(|n| (n != crate::firm::DEFAULT_REPO, n.clone()));
     v
 }
 

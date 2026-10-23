@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -15,7 +15,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 use zapper_policy::proto::{Forward, GuestFile};
@@ -23,9 +23,9 @@ use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::{drive, FirmRun};
-use crate::util::random_id;
-use crate::Core;
-use crate::{NewSession, Session};
+use zapper_core::util::random_id;
+use zapper_core::Core;
+use zapper_core::{NewSession, ServiceHandler, ServiceIo, ServiceSpec, ServiceTarget, Session};
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -49,6 +49,8 @@ pub struct Facilities {
     dashboard: Mutex<Option<JoinHandle<()>>>,
     /// The token the board signs in to the dashboard with.
     pub dashboard_token: Mutex<Option<String>>,
+    /// The run's services and zone, removed when it stops.
+    pub services: Mutex<Vec<u64>>,
 }
 
 impl Facilities {
@@ -68,123 +70,105 @@ impl Facilities {
     }
 }
 
-/// Where a name under the firm's domain goes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Internal {
-    Git,
-    /// A port of the cluster VM.
-    Cluster(u32),
-}
-
-/// Routes `host:port` if it names one of the firm's services. `Err` for a
-/// name under the domain that nothing serves.
-pub fn route(run: &FirmRun, host: &str, port: u16) -> Option<Result<Internal>> {
-    let d = &run.domain;
-    if host != *d && !host.ends_with(&format!(".{d}")) {
-        return None;
-    }
-    let cluster = run.facility.cluster.lock().unwrap().is_some();
-    let apps = format!("apps.{d}");
-    let r = if host == format!("git.{d}") && run.config.git.is_some() && port == 443 {
-        Ok(Internal::Git)
-    } else if host == format!("{CLUSTER}.{d}") && cluster && port == API_PORT as u16 {
-        Ok(Internal::Cluster(API_PORT))
-    } else if (host == apps || host.ends_with(&format!(".{apps}")))
-        && cluster
-        && (port == 80 || port == 443)
-    {
-        Ok(Internal::Cluster(if port == 80 {
-            HTTP_PORT
-        } else {
-            HTTPS_PORT
-        }))
-    } else {
-        Err(anyhow!("nothing serves {host}:{port} in the firm"))
-    };
-    Some(r)
-}
-
-/// Whether the firm's DNS should answer `name`, without asking the host.
-pub fn serves_name(run: &FirmRun, name: &str) -> Option<bool> {
-    let d = &run.domain;
-    if name != *d && !name.ends_with(&format!(".{d}")) {
-        return None;
-    }
-    Some(
-        route(run, name, 443).is_some_and(|r| r.is_ok())
-            || route(run, name, API_PORT as u16).is_some_and(|r| r.is_ok()),
-    )
-}
-
-pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
-
 /// Opens a host-initiated vsock connection to a port of a session's VM.
 pub async fn vsock_connect(s: &Session, port: u32) -> Result<UnixStream> {
-    let mut stream = UnixStream::connect(s.vsock_path()).await?;
-    stream
-        .write_all(format!("CONNECT {port}\n").as_bytes())
-        .await?;
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 64 {
-        stream.read_exact(&mut byte).await?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
-    if !line.starts_with(b"OK ") {
-        bail!("the VM refused port {port}");
-    }
-    Ok(stream)
+    s.connect_port(port).await
 }
 
-/// Connects to a firm service on behalf of `s`.
-pub async fn connect(
-    run: &Arc<FirmRun>,
-    s: &Arc<Session>,
-    target: Internal,
-) -> Result<Box<dyn Io>> {
-    match target {
-        Internal::Cluster(port) => {
-            let c = run
-                .facility
-                .cluster
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| anyhow!("the cluster isn't running"))?;
-            Ok(Box::new(
-                vsock_connect(&c, port).await.context("the cluster")?,
-            ))
-        }
-        Internal::Git => {
-            let (a, b) = tokio::io::duplex(256 * 1024);
-            let host = format!("git.{}", run.domain);
-            let config = s.ca.server_config(&host)?;
-            let member = s.label("member").unwrap_or_default().to_string();
-            let run = run.clone();
-            tokio::spawn(async move {
-                let Ok(Ok(tls)) = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    tokio_rustls::TlsAcceptor::from(config).accept(b),
-                )
-                .await
-                else {
-                    return;
-                };
-                let svc = hyper::service::service_fn(move |req| {
-                    let (run, member) = (run.clone(), member.clone());
-                    async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(tls), svc)
-                    .await;
+/// The firm's git server, a service of its domain: TLS is terminated by
+/// the daemon, and who asks is the session's member label.
+struct GitServer {
+    run: Weak<FirmRun>,
+}
+
+impl ServiceHandler for GitServer {
+    fn serve(&self, s: Arc<Session>, io: Box<dyn ServiceIo>) {
+        let Some(run) = self.run.upgrade() else {
+            return;
+        };
+        let member = s.label("member").unwrap_or_default().to_string();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req| {
+                let (run, member) = (run.clone(), member.clone());
+                async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
             });
-            Ok(Box::new(a))
-        }
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(io), svc)
+                .await;
+        });
     }
+}
+
+fn add_service(
+    d: &Core,
+    run: &FirmRun,
+    name: String,
+    port: u16,
+    target: ServiceTarget,
+) -> Result<()> {
+    let id = d.add_service(ServiceSpec {
+        name,
+        port,
+        sessions: super::run_sessions(run),
+        target,
+        owner: format!("firm {}", run.firm),
+    })?;
+    run.facility.services.lock().unwrap().push(id);
+    Ok(())
+}
+
+/// The firm's domain, a zone of the run's sessions (its names are the
+/// firm's services, never looked up on the host), and its git server.
+pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
+    let id = d.add_zone(
+        &run.domain,
+        super::run_sessions(run),
+        &format!("firm {}", run.firm),
+    )?;
+    run.facility.services.lock().unwrap().push(id);
+    if run.config.git.is_some() {
+        let handler = Arc::new(GitServer {
+            run: Arc::downgrade(run),
+        });
+        add_service(
+            d,
+            run,
+            format!("git.{}", run.domain),
+            443,
+            ServiceTarget::Handler { tls: true, handler },
+        )?;
+    }
+    Ok(())
+}
+
+/// For tests: `cluster` as the run's cluster, as `start` makes it once it
+/// has booted.
+#[cfg(test)]
+pub(crate) fn test_cluster(d: &Core, run: &FirmRun, cluster: &Arc<Session>) {
+    *run.facility.cluster.lock().unwrap() = Some(cluster.clone());
+    register_cluster(d, run, cluster).unwrap();
+}
+
+/// The cluster's API and the apps it serves, as services of the firm's
+/// domain on the cluster VM's ports.
+fn register_cluster(d: &Core, run: &FirmRun, cluster: &Session) -> Result<()> {
+    let dom = &run.domain;
+    let to = |port: u32| ServiceTarget::Session {
+        id: cluster.id.clone(),
+        port,
+    };
+    add_service(
+        d,
+        run,
+        format!("{CLUSTER}.{dom}"),
+        API_PORT as u16,
+        to(API_PORT),
+    )?;
+    for name in [format!("apps.{dom}"), format!("*.apps.{dom}")] {
+        add_service(d, run, name.clone(), 80, to(HTTP_PORT))?;
+        add_service(d, run, name, 443, to(HTTPS_PORT))?;
+    }
+    Ok(())
 }
 
 fn plain(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
@@ -631,6 +615,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     let _ = config;
     let s = d.create_session(new).await.context("booting the cluster")?;
     *run.facility.cluster.lock().unwrap() = Some(s.clone());
+    register_cluster(d, run, &s)?;
     run.journal.append(
         "facility",
         json!({ "name": name, "state": "starting", "session": s.id }),
@@ -698,7 +683,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         {
             eprintln!(
                 "{}",
-                crate::util::exposed_warning(&format!(
+                zapper_core::util::exposed_warning(&format!(
                     "firm {}'s Kubernetes dashboard (dashboard_port) listens on {addr}",
                     run.firm
                 ))
@@ -924,6 +909,10 @@ pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
     .flatten()
     {
         t.abort();
+    }
+    let services: Vec<u64> = run.facility.services.lock().unwrap().drain(..).collect();
+    for id in services {
+        d.remove_service(id);
     }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {

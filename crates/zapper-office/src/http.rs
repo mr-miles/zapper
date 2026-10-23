@@ -6,6 +6,7 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::firm::BOARD;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -15,11 +16,12 @@ use axum::{Json, Router};
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use zapper_policy::{AnyRule, BOARD};
+use zapper_policy::AnyRule;
 
 use super::{drive, security};
-use crate::ApiError;
-use crate::Core;
+use crate::OfficeOf;
+use zapper_core::ApiError;
+use zapper_core::Core;
 
 type D = State<Core>;
 type R<T> = Result<T, ApiError>;
@@ -107,8 +109,7 @@ pub fn board_routes() -> Router<Core> {
 
 async fn list(State(d): D) -> Json<Value> {
     let config = d.config();
-    let out: Vec<Value> = config
-        .firms
+    let out: Vec<Value> = crate::firm::all(&config)
         .iter()
         .map(|(name, f)| {
             let run = d.office().run(name).ok();
@@ -127,12 +128,11 @@ async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
     // A running firm's chart is its live one (the founders it booted with,
     // and its hires), whatever the config says now.
     let booted = run.as_ref().filter(|r| !r.ended()).map(|r| r.chart());
-    let firm = match &booted {
-        Some(b) => b,
-        None => config
-            .firms
-            .get(&f)
-            .ok_or_else(|| anyhow::anyhow!("no firm {f}"))?,
+    let configured = crate::firm::get(&config, &f);
+    let firm = match (&booted, &configured) {
+        (Some(b), _) => b,
+        (None, Some(c)) => c,
+        (None, None) => return Err(anyhow::anyhow!("no firm {f}").into()),
     };
     let live = run.as_ref().filter(|r| !r.ended());
     Ok(Json(json!({
@@ -141,8 +141,8 @@ async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
         "ceo": firm.root(),
         "officer": firm.security.officers.iter().find(|o| Some(o.as_str()) != firm.root()),
         "officers": firm.security.officers,
-        "seed": config.firms.get(&f).map(|x| x.budget.seed).unwrap_or(firm.budget.seed),
-        "start": config.firms.get(&f).map(|x| start_terms(x, &config)),
+        "seed": configured.as_ref().map(|x| x.budget.seed).unwrap_or(firm.budget.seed),
+        "start": configured.as_ref().map(|x| start_terms(x, &config)),
         "articles": live.map(|r| r.articles.clone()),
         "description": firm.description,
         "board": firm.board.name,
@@ -160,22 +160,19 @@ async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
 /// The firm's scenarios as configured.
 async fn scenarios(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
     let config = d.config();
-    let firm = config
-        .firms
-        .get(&f)
-        .ok_or_else(|| anyhow::anyhow!("no firm {f}"))?;
+    let firm = crate::firm::get(&config, &f).ok_or_else(|| anyhow::anyhow!("no firm {f}"))?;
     Ok(Json(json!(firm.scenarios)))
 }
 
 /// What the board's start form offers: the config's founders and terms,
 /// and the charter.
-fn start_terms(firm: &zapper_policy::Firm, config: &zapper_policy::Config) -> Value {
+fn start_terms(firm: &crate::firm::Firm, config: &zapper_policy::Config) -> Value {
     // Profiles a scenario's hire slot may put hires on: those an office
     // worker can run on, with their agent and model.
     let profiles: Vec<Value> = config
         .profiles
         .keys()
-        .filter(|n| zapper_policy::office_profile_problem(config, n).is_none())
+        .filter(|n| crate::firm::office_profile_problem(config, n).is_none())
         .filter_map(|n| {
             let p = config.resolve(n).ok()?;
             Some(json!({ "name": n, "agent": p.agent.kind, "model": p.agent.model, "description": config.profiles[n].description }))
@@ -199,9 +196,9 @@ fn start_terms(firm: &zapper_policy::Firm, config: &zapper_policy::Config) -> Va
 /// Checks a run's record against the keeper's chains and signatures.
 async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     let dir = super::run_dir(&d, &f, &run)?;
-    let rel = crate::record::rel(&dir).ok_or_else(|| bad("not in the record"))?;
+    let rel = zapper_core::record::rel(&dir).ok_or_else(|| bad("not in the record"))?;
     Ok(Json(
-        tokio::task::spawn_blocking(move || crate::record::verify_dir(&rel))
+        tokio::task::spawn_blocking(move || zapper_core::record::verify_dir(&rel))
             .await
             .map_err(|e| bad(e.to_string()))??,
     ))
@@ -295,7 +292,7 @@ async fn journal(
     Query(q): Query<Follow>,
 ) -> R<Response> {
     let dir = super::run_dir(&d, &f, &run)?;
-    lines(crate::record::view(&dir.join("journal.jsonl")), q).await
+    lines(zapper_core::record::view(&dir.join("journal.jsonl")), q).await
 }
 
 async fn transcript(
@@ -308,7 +305,7 @@ async fn transcript(
         return Err(bad(format!("{worker:?} is not a worker name")));
     }
     lines(
-        crate::record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
+        zapper_core::record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
         q,
     )
     .await

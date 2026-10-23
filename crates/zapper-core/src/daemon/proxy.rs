@@ -32,8 +32,9 @@ use zapper_policy::{
     NetEffects, NetRequest, NetRule,
 };
 
+use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, spec, tls, Daemon, EventBody};
+use super::{httplog, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -109,16 +110,22 @@ struct Verdict {
     decision: Decision,
     effects: NetEffects,
     allowed: bool,
-    /// In a firm: the access request an `ask` became.
-    pending: Option<String>,
+    /// Where an `ask` went, for a session whose asks a decider decides.
+    pending: Option<Referral>,
 }
 
 impl Verdict {
     /// Why a request was refused, for the guest.
     fn denial(&self, what: &str) -> String {
         match &self.pending {
-            Some(id) => format!("access to {what} requested from security (request {id}); you'll get mail with the decision, then retry"),
-            None => format!("{what} denied by {}", self.decision.rule.as_deref().unwrap_or("default")),
+            Some(r) => format!(
+                "access to {what} requested from {} (request {}); {}",
+                r.to, r.id, r.then
+            ),
+            None => format!(
+                "{what} denied by {}",
+                self.decision.rule.as_deref().unwrap_or("default")
+            ),
         }
     }
 }
@@ -130,22 +137,20 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
         evaluate_net(&spec::layers_of(&layers), req)
     };
     let mut pending = None;
-    let firm = super::office::run_of(&d.office, s)
-        .map(|r| (r, s.label("member").unwrap_or_default().to_string()));
+    let decider = d.deciders.of(s);
     let allowed = match decision.action {
         Action::Allow => {
-            if let (Some((run, _)), Some(rule)) = (&firm, &decision.rule) {
-                super::office::security::used(run, rule);
+            if let (Some(dc), Some(rule)) = (&decider, &decision.rule) {
+                dc.allowed(s, rule);
             }
             true
         }
         Action::Deny => false,
-        // In a firm an `ask` doesn't hold the request: officers take minutes.
-        Action::Ask if firm.is_some() => {
-            let (run, member) = firm.unwrap();
-            match super::office::security::ask(&run, &member, req, None, None, "") {
-                Ok(id) => pending = Some(id),
-                Err(e) => tracing::warn!(session = %s.id, "access request: {e:#}"),
+        // A decider's `ask` doesn't hold the request: it may take minutes.
+        Action::Ask if decider.is_some() => {
+            match decider.unwrap().ask(s, req) {
+                Ok(r) => pending = Some(r),
+                Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
             }
             false
         }
@@ -201,7 +206,7 @@ fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict
     let why = v
         .pending
         .as_ref()
-        .map(|id| format!("access requested from security ({id})"));
+        .map(|r| format!("access requested from {} ({})", r.to, r.id));
     note_failure(s, &rec, 403, why);
 }
 
@@ -275,37 +280,32 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
     );
 }
 
-/// Where a connection goes: an address on the network, or one of the firm's
-/// own services, which the daemon routes itself.
+/// Where a connection goes: an address on the network, or a service the
+/// daemon connects itself, by the name asked for.
 #[derive(Clone)]
 enum Target {
     Addr(SocketAddr),
-    Firm(
-        Arc<super::office::FirmRun>,
-        super::office::facility::Internal,
-    ),
+    Service(String, services::Target),
 }
 
-/// The target for `host:port`: the firm's services by name, anything else
-/// resolved on the host and checked against the address policy.
+/// The target for `host:port`: a service by name, anything else resolved on
+/// the host and checked against the address policy.
 async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
-    if let Some(run) = super::office::run_of(&d.office, s) {
-        if let Some(r) = super::office::facility::route(&run, host, port) {
-            return r
-                .map(|i| Target::Firm(run.clone(), i))
-                .map_err(|e| e.to_string());
-        }
+    match d.services.route(s, host, port) {
+        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), t)),
+        Some(services::Route::Unserved) => Err(format!("nothing serves {host}:{port}")),
+        None => resolve(d, host, port).await.map(Target::Addr),
     }
-    resolve(d, host, port).await.map(Target::Addr)
 }
 
 async fn dial_target(
+    d: &Daemon,
     s: &Arc<Session>,
     t: &Target,
-) -> std::io::Result<Box<dyn super::office::facility::Io>> {
+) -> std::io::Result<Box<dyn services::Io>> {
     match t {
         Target::Addr(a) => Ok(Box::new(dial(*a).await?)),
-        Target::Firm(run, i) => super::office::facility::connect(run, s, *i)
+        Target::Service(host, t) => services::connect(d, s, host, t)
             .await
             .map_err(|e| std::io::Error::other(format!("{e:#}"))),
     }
@@ -599,7 +599,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
             return;
         }
     }
-    let mut upstream = match dial_target(s, addr).await {
+    let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
         Err(e) => {
             log(
@@ -1028,7 +1028,9 @@ async fn inspected(
 
 async fn open_tls(host: &str, addr: &Target) -> Result<SendRequest<Body>, String> {
     let Target::Addr(addr) = addr else {
-        return Err(format!("{host} is one of the firm's services; rules with methods, paths or secrets don't apply to it"));
+        return Err(format!(
+            "{host} is a service; rules with methods, paths or secrets don't apply to it"
+        ));
     };
     let tcp = dial(*addr)
         .await
@@ -1172,7 +1174,9 @@ async fn forward_plain(
     );
     let out = Request::from_parts(parts, body);
     let result = async {
-        let tcp = dial_target(&s, &addr).await.map_err(|e| e.to_string())?;
+        let tcp = dial_target(&d, &s, &addr)
+            .await
+            .map_err(|e| e.to_string())?;
         let (mut sender, conn) =
             hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
                 .await
@@ -1215,6 +1219,9 @@ async fn forward_plain(
         }
     }
 }
+
+#[cfg(test)]
+mod approval_tests;
 
 #[cfg(test)]
 mod tests {

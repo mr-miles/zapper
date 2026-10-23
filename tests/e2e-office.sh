@@ -485,9 +485,9 @@ page=$(curl -s -b "zapper_token=$token" "$base/")
 expect "the UI serves the office page" "$page" "<title>"
 expect "the sessions page moved" "$(curl -s -b "zapper_token=$token" "$base/sessions")" "zapper"
 
-echo "== the office port"
+echo "== the office's tools outside a firm"
 out=$("$Z" run -p plain -C "$T/work" -- sh -c '/usr/local/bin/office desk 2>&1; true' 2>&1)
-expect "a session outside a firm has no post office" "$out" "connecting to the post office"
+expect "a session outside a firm has no office tools" "$out" "no MCP server office for this session"
 
 echo "== firm down and runs"
 "$Z" firm down acme > /dev/null

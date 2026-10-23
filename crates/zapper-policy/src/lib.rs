@@ -9,12 +9,11 @@
 
 mod config;
 mod eval;
-mod firm;
 pub mod names;
 pub mod proto;
 mod template;
 
 pub use config::*;
 pub use eval::*;
-pub use firm::*;
+pub use names::valid_worker_name;
 pub use template::*;

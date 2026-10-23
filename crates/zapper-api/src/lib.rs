@@ -1,7 +1,7 @@
 //! REST API on the daemon's unix socket, and the web UI over TCP, over
 //! zapper's core (`zapper_core::Core`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::path::PathBuf;
 
@@ -19,7 +19,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use zapper_core::{
-    ApiError, Core, NewSession, Remember, RuleRemoval, SessionInfo, TermChunk, TerminalInfo,
+    ApiError, Core, NewSession, Remember, RuleRemoval, ServiceSpec, ServiceTarget, SessionInfo,
+    TermChunk, TerminalInfo,
 };
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{
@@ -73,10 +74,20 @@ fn read_routes() -> Router<Core> {
         .route("/events", get(events))
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
+        .route("/services", get(list_services))
 }
 
-/// The API, with the office's routes when there is an office.
-pub fn api(core: Core) -> Router {
+/// What a client of the core (the office) adds to the API and the UI: its
+/// routes, under `/v1` and `/api` behind the same guard as the rest, and its
+/// page, the UI's front page instead of the sessions page.
+#[derive(Clone, Default)]
+pub struct Mount {
+    pub routes: Router,
+    pub page: Option<&'static str>,
+}
+
+/// The API, with what is mounted on it.
+pub fn api(core: Core, mount: &Mount) -> Router {
     let write = Router::new()
         .route("/config", axum::routing::put(put_config))
         .route("/config/save", post(save))
@@ -88,6 +99,8 @@ pub fn api(core: Core) -> Router {
             get(get_profile).put(put_profile).delete(delete_profile),
         )
         .route("/sessions", post(create_session))
+        .route("/services", post(add_service))
+        .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
         .route("/sessions/{id}/prompt", post(prompt))
@@ -99,16 +112,17 @@ pub fn api(core: Core) -> Router {
         read_routes()
             .merge(write)
             .with_state(core.clone())
-            .merge(core.office_routes()),
+            .merge(mount.routes.clone()),
     )
 }
 
 /// The UI: the read routes, plus answering approvals. `remote`: it listens
 /// on an address other than loopback (`daemon.ui`), for a remote host.
-pub fn ui(core: Core, port: u16, remote: bool) -> Router {
+pub fn ui(core: Core, port: u16, remote: bool, mount: &Mount) -> Router {
+    let page = mount.page;
     Router::new()
-        .route("/", get(ui::index))
-        .route("/sessions", get(ui::sessions))
+        .route("/", get(move || ui::index(page)))
+        .route("/sessions", get(move || ui::sessions(page.is_some())))
         .route("/favicon.ico", get(ui::favicon))
         .route("/terminal", get(ui::terminal))
         .route("/assets/xterm.js", get(ui::xterm_js))
@@ -120,7 +134,7 @@ pub fn ui(core: Core, port: u16, remote: bool) -> Router {
                 .route("/approvals/{id}", post(answer))
                 .route("/sessions/{id}/prompt", post(prompt))
                 .with_state(core.clone())
-                .merge(core.office_routes()),
+                .merge(mount.routes.clone()),
         )
         .layer(middleware::from_fn_with_state(
             (core, port, remote),
@@ -589,6 +603,35 @@ struct CreateSession {
     workdir: PathBuf,
     #[serde(default)]
     rules: Vec<AnyRule>,
+    /// Labels for the session, which service selectors pick.
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+/// Labels the operator may give a session: short words, and none of the
+/// office's own.
+fn check_labels(labels: &BTreeMap<String, String>) -> R<()> {
+    let word = |s: &str, extra: &[u8]| {
+        !s.is_empty()
+            && s.len() <= 63
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || extra.contains(&b))
+    };
+    for (k, v) in labels {
+        if !word(k, b"") || !word(v, b".") {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("label {k}={v}: letters, digits, - and _ (and . in values), at most 63"),
+            ));
+        }
+        if ["firm", "run", "member", "office"].contains(&k.as_str()) {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("label {k} is the office's"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
@@ -599,13 +642,14 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
             "workdir must be absolute".into(),
         ));
     }
+    check_labels(&req.labels)?;
     let mut policy = Policy::default();
     for r in req.rules {
         policy.insert(r, None);
     }
-    let s = d
-        .create_session(NewSession::plain(req.profile, req.workdir, policy))
-        .await?;
+    let mut new = NewSession::plain(req.profile, req.workdir, policy);
+    new.labels = req.labels;
+    let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }
 
@@ -737,6 +781,65 @@ async fn events(
 
 async fn list_approvals(State(d): D) -> Json<Value> {
     Json(json!(d.approvals()))
+}
+
+async fn list_services(State(d): D) -> Json<Value> {
+    Json(json!(d.services()))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ServiceTo {
+    Addr { addr: std::net::SocketAddr },
+    Session { session: String, port: u32 },
+}
+
+#[derive(Deserialize)]
+struct NewService {
+    name: String,
+    port: u16,
+    /// The sessions that may use it, by label; every session when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+    to: ServiceTo,
+}
+
+/// The operator's services: to an address on the host's network, or a port
+/// of a session's VM.
+async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
+    let n: NewService = parse_body(&body)?;
+    let target = match n.to {
+        ServiceTo::Addr { addr } => ServiceTarget::Addr(addr),
+        ServiceTo::Session { session, port } => {
+            d.session(&session)?;
+            ServiceTarget::Session { id: session, port }
+        }
+    };
+    let id = d.add_service(ServiceSpec {
+        name: n.name,
+        port: n.port,
+        sessions: n.sessions,
+        target,
+        owner: OPERATOR.into(),
+    })?;
+    Ok(Json(json!(d.services().into_iter().find(|s| s.id == id))))
+}
+
+/// Who registers services through the API.
+const OPERATOR: &str = "operator";
+
+/// Removes a service the operator added; others are their owners'.
+async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
+    let Some(s) = d.services().into_iter().find(|s| s.id == id) else {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no service {id}")));
+    };
+    if s.owner != OPERATOR {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("service {id} is {}'s", s.owner),
+        ));
+    }
+    Ok(Json(json!(d.remove_service(id))))
 }
 
 #[derive(Deserialize)]

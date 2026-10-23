@@ -1,25 +1,24 @@
 //! The web UI: the office page and the sessions page, over the read routes,
 //! answering approvals, and the board's writes.
 
-use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
-use zapper_core::Core;
 
-/// The office: firms, mail, security, the shared drive, statistics. Without
-/// the office, the front page is the sessions page.
-pub async fn index(State(core): State<Core>) -> impl IntoResponse {
+/// The mounted page (the office: firms, mail, security, the shared drive,
+/// statistics); without one, the sessions page.
+pub async fn index(page: Option<&'static str>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        core.office_page().unwrap_or_else(|| sessions_page(false)),
+        page.unwrap_or_else(|| sessions_page(false)),
     )
 }
 
-/// Sessions, network, terminals and approvals.
-pub async fn sessions(State(core): State<Core>) -> impl IntoResponse {
+/// Sessions, network, terminals and approvals; `office` when the office's
+/// page is mounted, to link back to it.
+pub async fn sessions(office: bool) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        sessions_page(core.office_page().is_some()),
+        sessions_page(office),
     )
 }
 

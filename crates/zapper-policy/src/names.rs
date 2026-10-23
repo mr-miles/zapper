@@ -54,6 +54,16 @@ pub fn host(raw: &str) -> Result<String, Invalid> {
     hostname(raw)
 }
 
+/// Whether `name` can name a worker: lowercase letters, digits and dashes.
+pub fn valid_worker_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

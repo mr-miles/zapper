@@ -1,0 +1,329 @@
+//! Services: names sessions use that the daemon connects itself, never
+//! looked up on the host. A service maps a name and port to an in-process
+//! handler, an address on the host, or a port of another session's VM, for
+//! the sessions its label selector picks. A zone is a domain whose names
+//! resolve only to services, for the sessions it is for: a name in it that
+//! nothing serves doesn't exist. Reaching a service still needs a net rule.
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+use super::session::Session;
+
+/// A stream to or from a service.
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// An in-process service: serves each connection a session opens to it.
+pub trait Handler: Send + Sync {
+    /// Serves one connection from `session`: the plain stream when the
+    /// service terminates TLS, else as the guest sent it.
+    fn serve(&self, session: Arc<Session>, io: Box<dyn Io>);
+}
+
+/// Where a service's connections go.
+#[derive(Clone)]
+pub enum Target {
+    /// Served in the daemon. With `tls`, the daemon terminates TLS with the
+    /// session's CA for the name asked for.
+    Handler {
+        tls: bool,
+        handler: Arc<dyn Handler>,
+    },
+    /// An address on the host's network, still subject to the address
+    /// policy.
+    Addr(SocketAddr),
+    /// A port of another session's VM, over vsock.
+    Session { id: String, port: u32 },
+}
+
+/// A service to register.
+#[derive(Clone)]
+pub struct Spec {
+    /// The name sessions use; `*.` in front stands for any name under it.
+    pub name: String,
+    pub port: u16,
+    /// The sessions that may use it: those with all these labels; every
+    /// session when empty.
+    pub sessions: BTreeMap<String, String>,
+    pub target: Target,
+    /// Who registered it (`operator` through the API), shown in the list.
+    pub owner: String,
+}
+
+/// A registered service or zone, for the list.
+#[derive(Debug, Clone, Serialize)]
+pub struct Info {
+    pub id: u64,
+    pub kind: &'static str,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub sessions: BTreeMap<String, String>,
+    pub to: String,
+    pub owner: String,
+}
+
+enum Entry {
+    Service(Spec),
+    Zone {
+        domain: String,
+        sessions: BTreeMap<String, String>,
+        owner: String,
+    },
+}
+
+/// The daemon's services and zones.
+#[derive(Default)]
+pub struct Services {
+    next: AtomicU64,
+    entries: RwLock<BTreeMap<u64, Entry>>,
+}
+
+/// Where `host:port` goes for a session.
+pub enum Route {
+    /// To this service.
+    Service(Target),
+    /// Nowhere: the name is a service's or in a zone, but nothing serves
+    /// this port of it.
+    Unserved,
+}
+
+/// `name` as a service name: a host name, or `*.` and one.
+pub fn check_name(name: &str) -> Result<String> {
+    let (wild, rest) = match name.strip_prefix("*.") {
+        Some(r) => (true, r),
+        None => (false, name),
+    };
+    let host = zapper_policy::names::hostname(rest)
+        .map_err(|e| anyhow!("{name:?} is not a service name: {e}"))?;
+    Ok(if wild { format!("*.{host}") } else { host })
+}
+
+fn picks(selector: &BTreeMap<String, String>, s: &Session) -> bool {
+    selector.iter().all(|(k, v)| s.label(k) == Some(v.as_str()))
+}
+
+fn matches(pattern: &str, host: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(base) => host.len() > base.len() + 1 && host.ends_with(&format!(".{base}")),
+        None => pattern == host,
+    }
+}
+
+fn in_zone(domain: &str, host: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+fn describe(t: &Target) -> String {
+    match t {
+        Target::Handler { tls: true, .. } => "in the daemon (TLS terminated)".into(),
+        Target::Handler { tls: false, .. } => "in the daemon".into(),
+        Target::Addr(a) => a.to_string(),
+        Target::Session { id, port } => format!("session {id} port {port}"),
+    }
+}
+
+impl Services {
+    pub fn add(&self, mut spec: Spec) -> Result<u64> {
+        spec.name = check_name(&spec.name)?;
+        if spec.port == 0 {
+            bail!("a service needs a port");
+        }
+        let mut entries = self.entries.write().unwrap();
+        let taken = entries.values().any(|e| {
+            matches!(e, Entry::Service(o) if o.name == spec.name && o.port == spec.port && o.sessions == spec.sessions)
+        });
+        if taken {
+            bail!(
+                "{}:{} is already a service for these sessions",
+                spec.name,
+                spec.port
+            );
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        entries.insert(id, Entry::Service(spec));
+        Ok(id)
+    }
+
+    pub fn add_zone(
+        &self,
+        domain: &str,
+        sessions: BTreeMap<String, String>,
+        owner: &str,
+    ) -> Result<u64> {
+        let domain = zapper_policy::names::hostname(domain)
+            .map_err(|e| anyhow!("{domain:?} is not a domain: {e}"))?;
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.entries.write().unwrap().insert(
+            id,
+            Entry::Zone {
+                domain,
+                sessions,
+                owner: owner.to_string(),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Removes a service or zone; what it was, if it was there.
+    pub fn remove(&self, id: u64) -> Option<Info> {
+        let info = self.info(id)?;
+        self.entries.write().unwrap().remove(&id);
+        Some(info)
+    }
+
+    pub fn info(&self, id: u64) -> Option<Info> {
+        self.list().into_iter().find(|i| i.id == id)
+    }
+
+    pub fn list(&self) -> Vec<Info> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, e)| match e {
+                Entry::Service(s) => Info {
+                    id: *id,
+                    kind: "service",
+                    name: s.name.clone(),
+                    port: Some(s.port),
+                    sessions: s.sessions.clone(),
+                    to: describe(&s.target),
+                    owner: s.owner.clone(),
+                },
+                Entry::Zone {
+                    domain,
+                    sessions,
+                    owner,
+                } => Info {
+                    id: *id,
+                    kind: "zone",
+                    name: domain.clone(),
+                    port: None,
+                    sessions: sessions.clone(),
+                    to: "nothing but its services".into(),
+                    owner: owner.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// Where `host:port` goes for `s`: `None` for a name that is no
+    /// service's and in no zone, which the host resolves. An exact name
+    /// wins over `*.`, then the earliest registered.
+    pub fn route(&self, s: &Session, host: &str, port: u16) -> Option<Route> {
+        let entries = self.entries.read().unwrap();
+        let mut known = false;
+        let mut best: Option<(bool, &Spec)> = None;
+        for e in entries.values() {
+            match e {
+                Entry::Service(spec) if picks(&spec.sessions, s) && matches(&spec.name, host) => {
+                    known = true;
+                    let exact = !spec.name.starts_with("*.");
+                    if spec.port == port && best.is_none_or(|(e, _)| exact && !e) {
+                        best = Some((exact, spec));
+                    }
+                }
+                Entry::Zone {
+                    domain, sessions, ..
+                } if picks(sessions, s) && in_zone(domain, host) => known = true,
+                _ => {}
+            }
+        }
+        match best {
+            Some((_, spec)) => Some(Route::Service(spec.target.clone())),
+            None => known.then_some(Route::Unserved),
+        }
+    }
+
+    /// Whether `name` exists for `s` without asking the host: `None` when
+    /// the host should say.
+    pub fn resolves(&self, s: &Session, name: &str) -> Option<bool> {
+        let entries = self.entries.read().unwrap();
+        let mut zoned = false;
+        for e in entries.values() {
+            match e {
+                Entry::Service(spec) if picks(&spec.sessions, s) && matches(&spec.name, name) => {
+                    return Some(true)
+                }
+                Entry::Zone {
+                    domain, sessions, ..
+                } if picks(sessions, s) && in_zone(domain, name) => zoned = true,
+                _ => {}
+            }
+        }
+        zoned.then_some(false)
+    }
+}
+
+/// Opens a connection from `s` to a service's target. `host` is the name it
+/// asked for, which a TLS-terminating handler presents a certificate for.
+pub async fn connect(
+    d: &super::Daemon,
+    s: &Arc<Session>,
+    host: &str,
+    target: &Target,
+) -> Result<Box<dyn Io>> {
+    match target {
+        Target::Handler {
+            tls: false,
+            handler,
+        } => {
+            let (a, b) = tokio::io::duplex(256 * 1024);
+            handler.serve(s.clone(), Box::new(b));
+            Ok(Box::new(a))
+        }
+        Target::Handler { tls: true, handler } => {
+            let (a, b) = tokio::io::duplex(256 * 1024);
+            let config = s.ca.server_config(host)?;
+            let (s, handler) = (s.clone(), handler.clone());
+            tokio::spawn(async move {
+                let Ok(Ok(tls)) = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    tokio_rustls::TlsAcceptor::from(config).accept(b),
+                )
+                .await
+                else {
+                    return;
+                };
+                handler.serve(s, Box::new(tls));
+            });
+            Ok(Box::new(a))
+        }
+        Target::Addr(addr) => {
+            d.addrs
+                .read()
+                .unwrap()
+                .check(addr.ip())
+                .map_err(|e| anyhow!("{addr}: {e}"))?;
+            let tcp = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            .map_err(|_| anyhow!("connecting to {addr}: timed out"))??;
+            Ok(Box::new(tcp))
+        }
+        Target::Session { id, port } => {
+            let other = d
+                .session(id)
+                .map_err(|_| anyhow!("session {id}, which serves {host}, is gone"))?;
+            let stream = other
+                .connect_port(*port)
+                .await
+                .with_context(|| format!("session {id}, which serves {host}"))?;
+            Ok(Box::new(stream))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

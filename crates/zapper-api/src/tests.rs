@@ -8,6 +8,8 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use zapper_core::testing::TestCore;
+
+use super::Mount;
 use zapper_core::NewSession;
 use zapper_policy::Policy;
 
@@ -84,7 +86,7 @@ fn session(t: &TestCore, profile: &str, labels: &[(&str, &str)], running: bool) 
 #[tokio::test]
 async fn status() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let r = get(&app, "/v1/status").await;
     assert_eq!(r.status, StatusCode::OK);
     let v = r.json();
@@ -96,7 +98,7 @@ async fn status() {
 #[tokio::test]
 async fn the_config_read_replaced_diffed_saved_and_reloaded() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let yaml = get(&app, "/v1/config").await;
     assert_eq!(yaml.status, StatusCode::OK);
     assert_eq!(yaml.headers[header::CONTENT_TYPE], "application/yaml");
@@ -148,7 +150,7 @@ async fn the_config_read_replaced_diffed_saved_and_reloaded() {
 #[tokio::test]
 async fn rules_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let r = post(
         &app,
         "/v1/rules",
@@ -186,7 +188,7 @@ async fn rules_added_listed_and_removed() {
 #[tokio::test]
 async fn profiles_set_read_and_removed() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let r = send(&app, Method::PUT, "/v1/profiles/p", &[], "{ extends: web }").await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(get(&app, "/v1/profiles/p").await.status, StatusCode::OK);
@@ -209,7 +211,7 @@ async fn profiles_set_read_and_removed() {
 #[tokio::test]
 async fn evaluating_a_request() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let denied = post(
         &app,
         "/v1/evaluate",
@@ -249,7 +251,7 @@ async fn evaluating_a_request() {
 #[tokio::test]
 async fn audit_logs_by_session_id_only() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     assert_eq!(
         get(&app, "/v1/sessions/not-an-id/audit").await.status,
         StatusCode::BAD_REQUEST
@@ -259,7 +261,7 @@ async fn audit_logs_by_session_id_only() {
 #[tokio::test]
 async fn sessions_with_their_labels() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let id = session(&t, "web", &[("firm", "acme"), ("member", "pat")], true);
     let all = get(&app, "/v1/sessions").await.json();
     assert_eq!(all[0]["id"], id);
@@ -276,7 +278,7 @@ async fn sessions_with_their_labels() {
 #[tokio::test]
 async fn deleting_a_session_stops_and_forgets_it() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let id = session(&t, "web", &[], true);
     let r = send(&app, Method::DELETE, &format!("/v1/sessions/{id}"), &[], "").await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
@@ -286,7 +288,7 @@ async fn deleting_a_session_stops_and_forgets_it() {
 #[tokio::test]
 async fn prompts_go_to_driven_sessions_of_no_firm() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let task = r#"{"text":"write hello.txt"}"#;
 
     let r = post(&app, "/v1/sessions/nosuch/prompt", task).await;
@@ -321,7 +323,7 @@ async fn prompts_go_to_driven_sessions_of_no_firm() {
 #[tokio::test]
 async fn with_the_driver_off_prompts_are_refused() {
     let t = TestCore::with_daemon("driver: false", "profiles:\n  web: {}\n");
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let id = session(&t, "web", &[], true);
     let r = post(
         &app,
@@ -340,7 +342,7 @@ async fn with_the_driver_off_prompts_are_refused() {
 #[tokio::test]
 async fn answering_an_unknown_approval() {
     let t = TestCore::new(CONFIG);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     assert_eq!(get(&app, "/v1/approvals").await.json(), json!([]));
     let r = post(&app, "/v1/approvals/nosuch", r#"{"allow":true}"#).await;
     assert!(r.status.is_client_error(), "{}: {}", r.status, r.body);
@@ -363,7 +365,7 @@ profiles:
 #[tokio::test]
 async fn rule_layers_and_removing_rules() {
     let t = TestCore::new(RULES);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let all = get(&app, "/v1/rules").await.json();
     let scopes: Vec<&str> = all
         .as_array()
@@ -394,7 +396,7 @@ async fn rule_layers_and_removing_rules() {
 #[tokio::test]
 async fn the_layers_a_request_is_decided_by() {
     let t = TestCore::new(RULES);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let rule = |body: &'static str| {
         let app = app.clone();
         async move { post(&app, "/v1/evaluate", body).await.json()["decision"]["rule"].clone() }
@@ -430,7 +432,7 @@ async fn the_layers_a_request_is_decided_by() {
 #[tokio::test]
 async fn audit_logs_of_sessions_listed_or_ended() {
     let t = TestCore::new(RULES);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     for bad in ["..%2Fetc", "a%2Fb"] {
         let r = get(&app, &format!("/v1/sessions/{bad}/audit")).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
@@ -447,7 +449,7 @@ async fn audit_logs_of_sessions_listed_or_ended() {
 #[tokio::test]
 async fn rules_added_to_a_session_are_its_own_and_an_event() {
     let t = TestCore::new(RULES);
-    let app = super::api(t.core.clone());
+    let app = super::api(t.core.clone(), &Mount::default());
     let s = session(&t, "web", &[], true);
     let body = format!(
         r#"{{"scope":"session:{s}","rule":{{"kind":"net","action":"allow","host":"api.example.com"}}}}"#
@@ -460,6 +462,92 @@ async fn rules_added_to_a_session_are_its_own_and_an_event() {
     assert_eq!(last["type"], "config", "{last}");
     let gone = send(&app, Method::DELETE, &format!("/v1/rules/{id}"), &[], "").await;
     assert_eq!(gone.json()["scope"], format!("session:{s}"));
+}
+
+#[tokio::test]
+async fn new_sessions_labels_are_checked() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let body = |labels: &str| {
+        format!(
+            r#"{{"profile":"web","workdir":"{}","labels":{labels}}}"#,
+            t.workdir().display()
+        )
+    };
+    let r = post(&app, "/v1/sessions", &body(r#"{"firm":"acme"}"#)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("label firm is the office's"), "{}", r.body);
+    let r = post(&app, "/v1/sessions", &body(r#"{"a b":"c"}"#)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("label a b=c"), "{}", r.body);
+    // Good labels pass; with no VM to boot, the session fails later.
+    let r = post(&app, "/v1/sessions", &body(r#"{"team":"a.1"}"#)).await;
+    assert!(!r.body.contains("label"), "{}", r.body);
+}
+
+#[tokio::test]
+async fn services_added_listed_and_removed() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    assert_eq!(get(&app, "/v1/services").await.json(), json!([]));
+    let id = session(&t, "web", &[], true);
+    let add = |body: String| {
+        let app = app.clone();
+        async move { post(&app, "/v1/services", &body).await }
+    };
+    let r = add(format!(
+        r#"{{"name":"db.internal","port":5432,"sessions":{{"team":"a"}},"to":{{"session":"{id}","port":5432}}}}"#
+    ))
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let svc = r.json();
+    assert_eq!(svc["to"], format!("session {id} port 5432"));
+    assert_eq!(svc["owner"], "operator");
+    let r = add(r#"{"name":"lan.internal","port":80,"to":{"addr":"10.0.0.5:80"}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(
+        get(&app, "/v1/services")
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let r =
+        add(r#"{"name":"x.internal","port":1,"to":{"session":"nosuch","port":1}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    let r = add(r#"{"name":"not a name","port":1,"to":{"addr":"10.0.0.5:80"}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    let r = add(r#"{"name":"x.internal","port":1,"to":{"nowhere":1}}"#.into()).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    // Another client's service is theirs to remove.
+    let firms = t
+        .core
+        .add_service(zapper_core::ServiceSpec {
+            name: "git.acme.internal".into(),
+            port: 443,
+            sessions: Default::default(),
+            target: zapper_core::ServiceTarget::Addr("10.0.0.6:443".parse().unwrap()),
+            owner: "firm acme".into(),
+        })
+        .unwrap();
+    let del = |id: String| {
+        let app = app.clone();
+        async move { send(&app, Method::DELETE, &format!("/v1/services/{id}"), &[], "").await }
+    };
+    let r = del(firms.to_string()).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert!(r.body.contains("is firm acme's"), "{}", r.body);
+    let r = del(svc["id"].to_string()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["name"], "db.internal");
+    assert_eq!(
+        del(svc["id"].to_string()).await.status,
+        StatusCode::NOT_FOUND
+    );
 }
 
 // The UI.
@@ -486,7 +574,7 @@ async fn signed_in(app: &Router, token: &str) -> String {
 #[tokio::test]
 async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     let t = TestCore::new(CONFIG);
-    let app = super::ui(t.core.clone(), PORT, false);
+    let app = super::ui(t.core.clone(), PORT, false, &Mount::default());
     let token = t.core.ui_token().to_string();
 
     let r = send(&app, Method::GET, "/api/status", &[("host", HOST)], "").await;
@@ -561,44 +649,50 @@ async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     );
 }
 
-#[tokio::test]
-async fn the_ui_front_page_is_the_office_or_the_sessions() {
-    let t = TestCore::new(CONFIG);
-    let app = super::ui(t.core.clone(), PORT, false);
+/// The front page and `/sessions` of a UI with `mount`, and `GET /api/x`.
+async fn pages(t: &TestCore, mount: &Mount) -> (Reply, Reply, Reply) {
+    let app = super::ui(t.core.clone(), PORT, false, mount);
     let cookie = signed_in(&app, t.core.ui_token()).await;
-    let front = send(
-        &app,
-        Method::GET,
-        "/",
-        &[("host", HOST), ("cookie", &cookie)],
-        "",
-    )
-    .await;
+    let get = |path: &'static str| {
+        let (app, cookie) = (app.clone(), cookie.clone());
+        async move {
+            send(
+                &app,
+                Method::GET,
+                path,
+                &[("host", HOST), ("cookie", &cookie)],
+                "",
+            )
+            .await
+        }
+    };
+    (get("/").await, get("/sessions").await, get("/api/x").await)
+}
+
+#[tokio::test]
+async fn the_ui_front_page_is_the_mounted_one_or_the_sessions() {
+    let t = TestCore::new(CONFIG);
+    let (front, flagged, x) = pages(&t, &Mount::default()).await;
     assert_eq!(front.status, StatusCode::OK);
-    let sessions = send(
-        &app,
-        Method::GET,
-        "/sessions",
-        &[("host", HOST), ("cookie", &cookie)],
-        "",
-    )
-    .await;
-    let firms = send(
-        &app,
-        Method::GET,
-        "/api/firms",
-        &[("host", HOST), ("cookie", &cookie)],
-        "",
-    )
-    .await;
-    if t.core.office_page().is_some() {
-        assert_ne!(front.body, sessions.body, "the office's page");
-        assert_eq!(firms.status, StatusCode::OK);
-    } else {
-        assert!(
-            front.body.contains("office-disabled"),
-            "the sessions page, flagged"
-        );
-        assert_eq!(firms.status, StatusCode::NOT_FOUND);
-    }
+    assert!(
+        front.body.contains("office-disabled"),
+        "the sessions page, flagged"
+    );
+    assert_eq!(front.body, flagged.body);
+    assert_eq!(x.status, StatusCode::NOT_FOUND);
+
+    // A client's page and routes, behind the same guard.
+    let mount = Mount {
+        routes: Router::new().route("/x", axum::routing::get(|| async { "mounted" })),
+        page: Some("<title>The Office</title>"),
+    };
+    let (front, sessions, x) = pages(&t, &mount).await;
+    assert_eq!(front.body, "<title>The Office</title>");
+    assert_ne!(sessions.body, flagged.body, "unflagged: it links back");
+    assert_eq!(x.body, "mounted");
+    let app = super::ui(t.core.clone(), PORT, false, &mount);
+    let r = send(&app, Method::GET, "/api/x", &[("host", HOST)], "").await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "guarded");
+    let api = super::api(t.core.clone(), &mount);
+    assert_eq!(get(&api, "/v1/x").await.body, "mounted");
 }

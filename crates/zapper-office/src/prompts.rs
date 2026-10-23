@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 
+use crate::firm::{Firm, BOARD};
 use serde_json::Value;
-use zapper_policy::{Firm, BOARD};
 
 use super::mail::{Desk, Expects, Kind, Meta, PostOffice, OFFICE};
 
@@ -273,7 +273,7 @@ by team, progress against the plan), not line by line.\n",
                             firm.roles
                                 .get(h)
                                 .and_then(|x| x.title.clone())
-                                .unwrap_or_else(|| zapper_policy::title_case(h))
+                                .unwrap_or_else(|| crate::firm::title_case(h))
                         )
                     })
                     .collect()

@@ -77,7 +77,7 @@ fn rcode_name(rcode: u8) -> &'static str {
 }
 
 /// Answers one DNS query from the guest; `None` if it's too short to answer.
-async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
+pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
     let event =
         |name: &str, qtype: u16, rcode: u8, answer: Option<Ipv4Addr>, reason: Option<&str>| {
             d.emit(
@@ -119,10 +119,9 @@ async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Ve
         );
         return Some(dns::respond(query, Some(&q), dns::REFUSED, None));
     }
-    // The firm's own services are answered here, never looked up on the host.
-    let firm = super::office::run_of(&d.office, s)
-        .and_then(|r| super::office::facility::serves_name(&r, &q.name));
-    if let Some(exists) = firm {
+    // Services and their zones are answered here, never looked up on the
+    // host.
+    if let Some(exists) = d.services.resolves(s, &q.name) {
         s.dns.lock().unwrap().remember(&q.name, exists);
     }
     // Allowed: say whether the name exists, from a real lookup on the host.
@@ -183,3 +182,6 @@ async fn look_up(s: &Session, name: &str) -> Result<bool, String> {
         Err(_) => Err("lookup timed out".into()),
     }
 }
+
+#[cfg(test)]
+mod tests;

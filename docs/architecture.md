@@ -108,8 +108,8 @@ A firm's workers are sessions with a link to their firm's run ([office](office.m
 |---|---|---|
 | Post office | daemon (`office/mail.rs`) | Mail, threads, who owes whom an answer, follow-ups; bodies in the run's journal |
 | Foreman | daemon (`office/foreman.rs`), one per worker | Runs the agent headless in the worker's VM over a terminal channel (`claude -p --input-format stream-json`, or `pi --mode rpc`), writes wake prompts, ends a turn when the agent reports it, records the transcript |
-| Office port | vsock port 1100 of each worker VM | One JSON request and response per connection; the sender is the VM it comes from |
-| `office` | in the guest: `zapper-agent office mcp` | The MCP server the agent loads, offering the role's tools; also a command line |
+| MCP gateway | vsock port 1100 of every VM | The MCP servers registered in the daemon for the session (the office's tools for a firm's workers): a connection names a server on its first line, then carries MCP as on stdio, one JSON-RPC message per line; the caller is the VM it comes from, and each tool call is an `mcp` event ([instrumentation](instrumentation.md#events)) |
+| `office` | in the guest: `zapper-agent office mcp` | The MCP server the agent loads: its stdio bridged line by line to the office's server in the gateway; also a command line and Claude Code's stop hook |
 | Shared drive | daemon (`office/drive.rs`) | Copies published files out of the VM over a system terminal, by content hash |
 | Security | daemon (`office/security.rs`) | Access requests from `ask` rules, officers' decisions as rules at the worker's or role's layer, digests |
 | Facilities | daemon (`office/facility.rs`, `product.rs`) | The firm's git repository (`git http-backend`), its cluster VM (k3s), the product port; the proxy routes the firm's names to them |
@@ -132,4 +132,4 @@ See [configuration](configuration.md) and [policy](policy.md).
 ## References
 
 - Firecracker vsock: https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md
-- Sources: `crates/zapper/src/daemon/`, `crates/zapper/src/vmm.rs`, `crates/zapper/src/netns.rs`, `crates/zapper-agent/src/`, `crates/zapper-policy/src/proto.rs`
+- Sources: `crates/zapper-core/src/daemon/`, `crates/zapper-core/src/vmm.rs`, `crates/zapper-core/src/netns.rs`, `crates/zapper-agent/src/`, `crates/zapper-policy/src/proto.rs`

@@ -9,6 +9,7 @@ pub mod access;
 pub mod contracts;
 pub mod drive;
 pub mod facility;
+pub mod firm;
 pub mod foreman;
 pub mod git;
 pub mod http;
@@ -28,18 +29,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 use zapper_policy::proto::GuestFile;
-use zapper_policy::{Config, Firm, Policy, BOARD};
+use zapper_policy::{Config, Policy};
 
-use crate::util::{now, random_id};
-use crate::Core;
-use crate::{NewSession, Session, Status};
+use zapper_core::util::{now, random_id};
+use zapper_core::Core;
+
+/// The office's state in the core: its registry of runs.
+pub trait OfficeOf {
+    fn office(&self) -> Arc<Office>;
+}
+
+impl OfficeOf for Core {
+    fn office(&self) -> Arc<Office> {
+        self.client()
+    }
+}
 use journal::Journal;
 use mail::{Draft, Kind, PostOffice};
+use zapper_core::{NewSession, Session, Status};
 
 /// Every firm's current or last run.
 #[derive(Default)]
@@ -116,7 +129,7 @@ pub struct WorkerRt {
 }
 
 impl WorkerRt {
-    pub fn new(firm: &Firm, w: &zapper_policy::Worker) -> WorkerRt {
+    pub fn new(firm: &Firm, w: &crate::firm::Worker) -> WorkerRt {
         WorkerRt {
             name: w.name.clone(),
             role: w.role.clone(),
@@ -207,6 +220,8 @@ pub struct FirmRun {
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
+    /// The office's tools' registration in the gateway.
+    pub tools: Mutex<Option<u64>>,
     pub stopping: Notify,
 }
 
@@ -253,7 +268,18 @@ pub fn is_run_id(s: &str) -> bool {
         && b[8] == b'-'
         && b[15] == b'-'
         && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
-        && b[16..].iter().all(|c| super::ID_CHARS.contains(c))
+        && b[16..]
+            .iter()
+            .all(|c| zapper_core::util::ID_CHARS.contains(c))
+}
+
+/// A run's sessions, by their labels: what the run registers services, its
+/// zone and its decider for.
+pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
+    [("firm", &run.firm), ("run", &run.id)]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 pub fn firm_dir(d: &Core, firm: &str) -> PathBuf {
@@ -535,11 +561,11 @@ fn chart(
 }
 
 /// One worker of the chart, as the UI draws it.
-pub(super) fn worker_json(
+pub(crate) fn worker_json(
     firm: &Firm,
     models: &BTreeMap<String, Option<String>>,
     agents: &Agents,
-    w: &zapper_policy::Worker,
+    w: &crate::firm::Worker,
 ) -> Value {
     let role = firm.roles.get(&w.role);
     // On their own profile, its agent and model; else the role's.
@@ -571,7 +597,7 @@ fn role_models(firm: &Firm, config: &Config) -> BTreeMap<String, Option<String>>
 }
 
 /// The model a role's workers run: the role's, else its profile's.
-pub fn effective_model(role: &zapper_policy::Role, config: &Config) -> Option<String> {
+pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<String> {
     role.model.clone().or_else(|| {
         config
             .resolve(&role.profile)
@@ -581,7 +607,7 @@ pub fn effective_model(role: &zapper_policy::Role, config: &Config) -> Option<St
 }
 
 /// Memory still available on the host, in MiB.
-pub(super) fn mem_available_mib() -> Option<u64> {
+pub(crate) fn mem_available_mib() -> Option<u64> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
     info.lines()
         .find_map(|l| {
@@ -650,8 +676,8 @@ pub struct StartOptions {
     /// A scenario of the firm's config to play.
     pub scenario: Option<String>,
     /// Hire slots and script steps instead of the scenario's own.
-    pub hires: Option<Vec<zapper_policy::HireSlot>>,
-    pub script: Option<Vec<zapper_policy::Step>>,
+    pub hires: Option<Vec<crate::firm::HireSlot>>,
+    pub script: Option<Vec<crate::firm::Step>>,
     /// The board's task for the CEO, sent as the run's first assignment
     /// once it is up: its first line is the subject, the rest the message.
     pub task: Option<String>,
@@ -687,7 +713,7 @@ struct Started {
     company: String,
     prompts: BTreeMap<String, String>,
     articles: String,
-    scenario: Option<(String, zapper_policy::Scenario)>,
+    scenario: Option<(String, crate::firm::Scenario)>,
 }
 
 /// Longest extra prompt the board gives a founder.
@@ -698,7 +724,7 @@ fn rename(firm: &mut Firm, old: &str, new: &str) -> Result<()> {
     if new == old {
         return Ok(());
     }
-    if !zapper_policy::valid_worker_name(new) || zapper_policy::reserved_name(new) {
+    if !zapper_policy::valid_worker_name(new) || crate::firm::reserved_name(new) {
         bail!(
             "{new:?} can't be a name: lowercase letters, digits and dashes, starting with a letter"
         );
@@ -728,7 +754,7 @@ pub fn default_company(name: &str, firm: &Firm) -> String {
     firm.landing
         .as_ref()
         .map(|l| l.display_name(name))
-        .unwrap_or_else(|| format!("{} Inc.", zapper_policy::title_case(name)))
+        .unwrap_or_else(|| format!("{} Inc.", crate::firm::title_case(name)))
 }
 
 /// The firm as this run starts it: the config's, with the board's
@@ -841,7 +867,7 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
             Value::Number(n) => n
                 .as_u64()
                 .ok_or_else(|| anyhow!("seed: a whole number of tokens"))?,
-            Value::String(s) => zapper_policy::parse_tokens(s)?,
+            Value::String(s) => crate::firm::parse_tokens(s)?,
             Value::Null => firm.budget.seed,
             _ => bail!("seed: tokens, like 500k"),
         };
@@ -932,18 +958,21 @@ fn create_run(
         state: Mutex::new(RunState::Starting),
         journal,
         workers: RwLock::new(workers),
+        tools: Mutex::new(None),
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
-    super::write_private(
+    zapper_core::util::write_private(
         &dir.join("run.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
     )?;
     // The whole config the run started with, for replay: profiles, rules,
     // firms. Inline secret values are hidden, as in `zapper config startup`.
-    super::write_private(
+    zapper_core::util::write_private(
         &dir.join(RUN_CONFIG),
-        super::redact(config.clone()).to_yaml().as_bytes(),
+        zapper_core::util::redact(config.clone())
+            .to_yaml()
+            .as_bytes(),
     )?;
     run.journal.append("run", json!({ "state": "starting", "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "chart": chart(name, &firm, &models, &agents), "budget": firm.budget }));
     workforce::seed(&run);
@@ -952,6 +981,9 @@ fn create_run(
     for o in access::owners(&run) {
         access::owner_access(d, &run, &o, BOARD);
     }
+    facility::register(d, &run)?;
+    security::register(d, &run);
+    ops::register(d, &run)?;
     d.office()
         .runs
         .write()
@@ -966,7 +998,7 @@ fn create_run(
 #[cfg(test)]
 pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = config.firms[name].clone();
+    let firm = firm::get(&config, name).unwrap();
     let started = with_options(name, firm, &config, &StartOptions::default()).unwrap();
     let (run, _boots) = create_run(d, name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
@@ -1001,11 +1033,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         }
     }
     let config = d.config();
-    let firm = config
-        .firms
-        .get(name)
-        .cloned()
-        .ok_or_else(|| anyhow!("no firm {name}"))?;
+    let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
         company,
@@ -1133,12 +1161,12 @@ async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     }
 }
 
-pub(super) async fn boot_worker(
+pub(crate) async fn boot_worker(
     d: &Core,
     run: &Arc<FirmRun>,
     config: &Config,
     w: &Arc<WorkerRt>,
-    role: &zapper_policy::Role,
+    role: &crate::firm::Role,
 ) -> Result<()> {
     // The worker's own profile (a founder's, a scenario slot's), or the
     // role's.
@@ -1232,9 +1260,9 @@ pub(super) async fn boot_worker(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn crate::harness::Driver> {
+) -> Result<&'static dyn zapper_core::harness::Driver> {
     let kind = &profile.agent.kind;
-    crate::harness::get(kind)
+    zapper_core::harness::get(kind)
         .and_then(|h| h.driver())
         .ok_or_else(|| anyhow!("profile {}: agent kind {kind} can't run an office worker (those that can: claude-code, pi)", profile.name))
 }
@@ -1291,6 +1319,8 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
         let _ = t.await;
     }
     facility::stop(d, run).await;
+    security::unregister(d, run);
+    ops::unregister(d, run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));
@@ -1328,6 +1358,61 @@ pub fn board_send(run: &FirmRun, v: &Value) -> Result<mail::Sent> {
 
 /// Ends the journals of runs a previous daemon left running: they can't be
 /// resumed, and a replay should say how they ended.
+/// The office's API routes (firms, mail, security, the drive), for the API
+/// and the UI to serve.
+pub fn routes(d: &Core) -> axum::Router {
+    http::read_routes()
+        .merge(http::board_routes())
+        .with_state(d.clone())
+}
+
+/// The office's page: the UI's front page.
+pub const PAGE: &str = include_str!("office.html");
+
+/// The office in a starting daemon: runs a previous daemon left running are
+/// ended; the firms' role layers and their officers' standing approvals are
+/// rules the office keeps; the daemon stopping stops the firms.
+pub fn start(d: &Core) {
+    d.add_config_check(firm::check);
+    close_orphans(d.state_dir());
+    d.add_rule_keeper(Arc::new(Keeper(d.office())));
+    d.on_shutdown(|d| {
+        Box::pin(async move {
+            let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
+            for r in runs {
+                down(&d, &r, "daemon shutdown").await;
+            }
+        })
+    });
+}
+
+/// The firms' role layers, and their officers' standing approvals, which
+/// the operator removes through the officers' records.
+struct Keeper(Arc<Office>);
+
+impl zapper_core::RuleKeeper for Keeper {
+    fn layers(&self) -> Vec<(zapper_policy::Scope, Policy)> {
+        let mut layers = Vec::new();
+        for run in self.0.runs.read().unwrap().values() {
+            for (role, p) in &run.roles {
+                layers.push((
+                    zapper_policy::Scope::Role(format!("{}/{role}", run.firm)),
+                    p.read().unwrap().clone(),
+                ));
+            }
+        }
+        layers
+    }
+
+    fn remove(&self, id: &str) -> Option<Result<()>> {
+        let runs: Vec<_> = self.0.runs.read().unwrap().values().cloned().collect();
+        let run = runs
+            .into_iter()
+            .find(|r| r.security.lock().unwrap().standing.contains_key(id))?;
+        Some(security::revoke(&run, BOARD, id, "removed by the operator").map(|_| ()))
+    }
+}
+
 pub fn close_orphans(state: &std::path::Path) {
     let Ok(firms) = std::fs::read_dir(state.join("firms")) else {
         return;
@@ -1338,7 +1423,7 @@ pub fn close_orphans(state: &std::path::Path) {
         };
         for run in runs.flatten() {
             let path = run.path().join("journal.jsonl");
-            let Ok(text) = std::fs::read(super::record::view(&path)) else {
+            let Ok(text) = std::fs::read(zapper_core::record::view(&path)) else {
                 continue;
             };
             let tail = &text[text.len().saturating_sub(64 * 1024)..];
@@ -1373,7 +1458,7 @@ pub fn list_runs(d: &Core, firm: &str) -> Vec<Value> {
                 return None;
             }
             let info: Value = std::fs::read(e.path().join("run.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-            let journal = super::record::view(&e.path().join("journal.jsonl"));
+            let journal = zapper_core::record::view(&e.path().join("journal.jsonl"));
             let size = std::fs::metadata(&journal).map(|m| m.len()).unwrap_or(0);
             let sum = run_summary(&journal);
             let note = std::fs::read_to_string(e.path().join(RUN_NOTE)).ok();
@@ -1418,7 +1503,7 @@ pub fn set_note(d: &Core, firm: &str, run: &str, note: &str) -> Result<()> {
         }
     }
     let tmp = dir.join(format!("{RUN_NOTE}.tmp"));
-    super::write_private(&tmp, note.as_bytes())?;
+    zapper_core::util::write_private(&tmp, note.as_bytes())?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -1579,6 +1664,20 @@ pub fn prune(d: &Core, firm: &str, run: &str) -> Result<()> {
     Ok(())
 }
 
+/// A core without VMs with the office started on it, for tests.
+#[cfg(test)]
+pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
+    let t = zapper_core::testing::TestCore::new(yaml);
+    start(&t.core);
+    t
+}
+
+#[cfg(test)]
+mod approval_tests;
+
+#[cfg(test)]
+mod names_tests;
+
 #[cfg(test)]
 mod run_tests;
 
@@ -1587,22 +1686,24 @@ mod http_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::OfficeOf;
+
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {
-        let t = crate::testing::TestCore::new("profiles:\n  w: {}\n");
-        let mut new = crate::NewSession::plain("w".into(), t.workdir(), Default::default());
+        let t = super::test_core("profiles:\n  w: {}\n");
+        let mut new = zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default());
         new.labels = super::labels("acme", "r1", "pat", true);
         let worker = t.core.test_session(new, true).unwrap();
         let plain = t
             .core
             .test_session(
-                crate::NewSession::plain("w".into(), t.workdir(), Default::default()),
+                zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default()),
                 true,
             )
             .unwrap();
         // No run of acme in the registry, and a session with no firm.
-        assert!(super::run_of(t.core.office(), &worker).is_none());
-        assert!(super::run_of(t.core.office(), &plain).is_none());
+        assert!(super::run_of(&t.core.office(), &worker).is_none());
+        assert!(super::run_of(&t.core.office(), &plain).is_none());
     }
 
     #[test]
@@ -1645,7 +1746,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [sec] }, sec: { profile: w, skills: { work: security-review }, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n",
         )
         .unwrap();
-        let firm = c.firms["acme"].clone();
+        let firm = crate::firm::get(&c, "acme").unwrap();
         let o = super::StartOptions {
             company: Some("Widgets Ltd".into()),
             ceo: Some("Alice".into()),
@@ -1701,7 +1802,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [eng] }, eng: { profile: w, skills: { work: software-engineer } } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n",
         )
         .unwrap();
-        let firm = c.firms["acme"].clone();
+        let firm = crate::firm::get(&c, "acme").unwrap();
         let with = |o: super::StartOptions| super::with_options("acme", firm.clone(), &c, &o);
         let opts = |scenario: &str| super::StartOptions {
             scenario: Some(scenario.into()),
@@ -1719,7 +1820,7 @@ mod tests {
         );
         // The board's slots replace the scenario's; bad ones are refused.
         let mut o = opts("rt");
-        o.hires = Some(vec![zapper_policy::HireSlot {
+        o.hires = Some(vec![crate::firm::HireSlot {
             role: "eng".into(),
             count: 3,
             prompt: "custom".into(),
@@ -1740,7 +1841,8 @@ mod tests {
 
     #[test]
     fn run_summaries() {
-        let dir = std::env::temp_dir().join(format!("zapper-runsum-{}", crate::util::random_id(6)));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-runsum-{}", zapper_core::util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = dir.join("journal.jsonl");
         std::fs::write(&j, concat!(

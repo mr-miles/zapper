@@ -64,7 +64,7 @@ In a firm ([office](office.md)), each worker is a session, so everything above h
 
 | Control | Enforced by | Holds with root in the guest |
 |---|---|---|
-| A worker's office requests come on its VM's own office port; the daemon takes the sender from the VM, never from the request | Host | Yes |
+| A worker's calls of the office's tools come on its VM's own MCP port; the daemon's gateway takes the caller from the VM, never from the message, and serves a session only the servers registered for it | Host | Yes |
 | Every office request is checked against the worker's role (officer tools) and the chart (assignments only down it); mail is readable only by the thread's participants | Host | Yes |
 | Every hire waits for a security officer's (or the board's) background check before taking a turn; an objection cancels the hire | Host | Yes |
 | An `ask` in a firm is refused at once and becomes an access request; officers' decisions add rules only at a worker's or role's layer, under `final` rules; the firm's own services, secrets, private networks and global rules stay with the board; an officer can't decide its own request | Host | Yes |
@@ -117,7 +117,7 @@ From there, the VMM sees none of the daemon user's other files: the config, secr
 make test-e2e      # ends with "all e2e checks passed"
 ```
 
-`tests/e2e.sh` checks the host-side controls from a guest, with unit tests for the parsers and address checks, and `tests/e2e-office.sh` the office's: from inside a worker it tries to give its manager an assignment, send as another worker, read another worker's mail, use officer tools, publish a symlink to a host file, and reach the post office from outside a firm; a worker without a grant tries the cluster API and git. As root in the guest, it tries to get around the NIC capture by using another DNS server, connecting to a real address, and connecting to other ports on the gateway. With `tests/attack.c` as the workload, it tries to:
+`tests/e2e.sh` checks the host-side controls from a guest, with unit tests for the parsers and address checks, and `tests/e2e-office.sh` the office's: from inside a worker it tries to give its manager an assignment, send as another worker, read another worker's mail, use officer tools, publish a symlink to a host file, and reach the office's tools from outside a firm; a worker without a grant tries the cluster API and git. As root in the guest, it tries to get around the NIC capture by using another DNS server, connecting to a real address, and connecting to other ports on the gateway. With `tests/attack.c` as the workload, it tries to:
 
 - impersonate the agent on the control port
 - open a root shell over vsock loopback and through the guest's own CID
@@ -139,4 +139,4 @@ Network-specific limitations are on the [network](network.md#limitations) page.
 
 - Firecracker design and threat model: https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md
 - seccomp user notification and its TOCTOU caveat: `man 2 seccomp_unotify`
-- Sources: `crates/zapper/src/vmm.rs`, `crates/zapper/src/netns.rs`, `crates/zapper/src/daemon/{proxy,dns,nic,addr,session,tls}.rs`, `crates/zapper/src/daemon/office/`, `crates/zapper-agent/src/{shell,sys,init,office,forward}.rs`
+- Sources: `crates/zapper-core/src/vmm.rs`, `crates/zapper-core/src/netns.rs`, `crates/zapper-core/src/daemon/{proxy,dns,nic,addr,session,tls}.rs`, `crates/zapper-office/src/`, `crates/zapper-agent/src/{shell,sys,init,office,forward}.rs`

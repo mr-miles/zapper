@@ -1,38 +1,60 @@
-//! `office`: a firm worker's way to the post office, over the host's office
-//! port. As `office mcp` it is the MCP server Claude Code loads; otherwise a
-//! command line for scripts and people.
+//! `office`: a firm worker's way to the office's tools, the MCP server
+//! `office` in the daemon's gateway, over the VM's MCP port. As `office mcp`
+//! it bridges the harness's stdio to it line by line; otherwise it is a
+//! command line for scripts and people, and Claude Code's stop hook.
 //!
 //! The host knows which worker is asking from the VM the connection comes
-//! from, and checks the role on every request; this side only translates.
+//! from, and checks the role on every call; this side only carries lines.
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use zapper_policy::proto::{HOST_CID, MAX_OFFICE_LINE, OFFICE_PORT};
+use zapper_policy::proto::{HOST_CID, MAX_MCP_LINE, MCP_PORT};
 
 use crate::sys;
 
-/// Sends one request to the post office and returns its answer.
+/// The office's server in the gateway.
+const SERVER: &str = "office";
+
+/// A connection to the office's tools: the server named, ready for MCP.
+fn connect() -> Result<File> {
+    let mut conn = sys::vsock_connect(HOST_CID, MCP_PORT)
+        .context("connecting to the daemon's MCP gateway (is this a firm worker?)")?;
+    conn.write_all(format!("{SERVER}\n").as_bytes())?;
+    Ok(conn)
+}
+
+/// Calls one of the office's tools and returns its answer.
 pub fn call(op: &str, args: &Value) -> Result<Value> {
-    let mut conn = sys::vsock_connect(HOST_CID, OFFICE_PORT)
-        .context("connecting to the post office (is this a firm worker?)")?;
-    let mut line = serde_json::to_vec(&json!({ "op": op, "args": args }))?;
+    let mut conn = connect()?;
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": op, "arguments": args } });
+    let mut line = serde_json::to_vec(&request)?;
     line.push(b'\n');
-    if line.len() > MAX_OFFICE_LINE {
-        bail!("request longer than {MAX_OFFICE_LINE} bytes");
+    if line.len() > MAX_MCP_LINE {
+        bail!("request longer than {MAX_MCP_LINE} bytes");
     }
     conn.write_all(&line)?;
     let mut reply = Vec::new();
     BufReader::new(conn)
         .take(16 << 20)
         .read_until(b'\n', &mut reply)?;
-    let v: Value = serde_json::from_slice(&reply).context("reading the post office's answer")?;
-    match (v.get("ok"), v.get("error")) {
-        (Some(ok), _) => Ok(ok.clone()),
-        (_, Some(e)) => bail!("{}", e.as_str().unwrap_or("error")),
-        _ => bail!("unexpected answer: {v}"),
+    answer(&reply)
+}
+
+/// A tool call's answer: the tool's result, or why it failed.
+fn answer(reply: &[u8]) -> Result<Value> {
+    let v: Value = serde_json::from_slice(reply).context("reading the office's answer")?;
+    if let Some(e) = v.get("error") {
+        bail!("{}", e["message"].as_str().unwrap_or("error"));
     }
+    let r = &v["result"];
+    let text = r["content"][0]["text"].as_str().unwrap_or("");
+    if r["isError"] == json!(true) {
+        bail!("{text}");
+    }
+    Ok(serde_json::from_str(text).unwrap_or_else(|_| json!(text)))
 }
 
 const USAGE: &str = "usage: office tools | office OP [JSON] | office OP --key value ...
@@ -123,64 +145,62 @@ fn stop_hook() {
     }
 }
 
-/// The MCP server: JSON-RPC 2.0, one message per line on stdin and stdout.
+/// The MCP server the harness runs: stdin and stdout bridged to the office's
+/// server in the gateway, line by line; MCP's stdio framing is the
+/// gateway's too.
 fn mcp() -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
-    let mut tools: Option<Value> = None;
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let conn = connect()?;
+    let mut up = conn.try_clone()?;
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut up);
+        // The harness hung up: so does the bridge.
+        std::process::exit(0);
+    });
+    let mut down = conn;
+    let mut out = std::io::stdout().lock();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = down.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
         }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = msg.get("id").cloned() else {
-            continue;
-        };
-        let method = msg["method"].as_str().unwrap_or("");
-        let result: std::result::Result<Value, (i64, String)> = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "office", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.",
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => {
-                if tools.is_none() {
-                    tools = call("tools", &json!({})).ok();
-                }
-                match &tools {
-                    Some(t) => Ok(json!({ "tools": t })),
-                    None => Err((-32603, "the post office is unreachable".into())),
-                }
-            }
-            "tools/call" => {
-                let name = msg["params"]["name"].as_str().unwrap_or("");
-                let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-                Ok(match call(name, &args) {
-                    Ok(v) => {
-                        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }], "isError": false })
-                    }
-                    Err(e) => {
-                        json!({ "content": [{ "type": "text", "text": format!("{e:#}") }], "isError": true })
-                    }
-                })
-            }
-            _ => Err((-32601, format!("method {method} not found"))),
-        };
-        let reply = match result {
-            Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
-            Err((code, message)) => {
-                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-            }
-        };
-        let mut b = serde_json::to_vec(&reply)?;
-        b.push(b'\n');
-        out.write_all(&b)?;
+        out.write_all(&buf[..n])?;
         out.flush()?;
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    fn reply(v: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    #[test]
+    fn a_calls_answer_is_its_result_or_why_not() {
+        let ok = reply(
+            json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text", "text": "{\"unread\": 2}" }], "isError": false } }),
+        );
+        assert_eq!(super::answer(&ok).unwrap(), json!({ "unread": 2 }));
+        let text = reply(
+            json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text", "text": "plain" }], "isError": false } }),
+        );
+        assert_eq!(super::answer(&text).unwrap(), json!("plain"));
+        let failed = reply(
+            json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text", "text": "the firm isn't running" }], "isError": true } }),
+        );
+        assert_eq!(
+            super::answer(&failed).unwrap_err().to_string(),
+            "the firm isn't running"
+        );
+        let refused = reply(
+            json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "no MCP server office for this session" } }),
+        );
+        assert_eq!(
+            super::answer(&refused).unwrap_err().to_string(),
+            "no MCP server office for this session"
+        );
+        assert!(super::answer(b"").is_err());
+    }
 }

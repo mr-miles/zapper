@@ -58,6 +58,10 @@ enum Cmd {
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
+        /// A label for the session, `key=value`, which services pick
+        /// sessions by (repeatable).
+        #[arg(short, long = "label")]
+        labels: Vec<String>,
         /// Command instead of the profile's.
         #[arg(last = true)]
         command: Vec<String>,
@@ -178,6 +182,51 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RecordCmd,
     },
+    /// Services: names sessions use that the daemon connects itself.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// List services and zones.
+    Ls,
+    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`
+    Add {
+        /// The name and port sessions use; `*.` in front for any name
+        /// under it.
+        name: String,
+        /// An address on the host's network, `ip:port`.
+        #[arg(
+            long,
+            conflicts_with = "to_session",
+            required_unless_present = "to_session"
+        )]
+        to: Option<String>,
+        /// A port of a session's VM, `ID:port`.
+        #[arg(long)]
+        to_session: Option<String>,
+        /// Only for sessions with this label, `key=value` (repeatable);
+        /// every session without.
+        #[arg(long = "for")]
+        sessions: Vec<String>,
+    },
+    /// Remove a service added with `add`.
+    Rm { id: u64 },
+}
+
+/// `key=value` pairs, as JSON.
+fn label_pairs(pairs: &[String]) -> Result<Value> {
+    let mut m = serde_json::Map::new();
+    for p in pairs {
+        let (k, v) = p
+            .split_once('=')
+            .with_context(|| format!("{p:?}: key=value"))?;
+        m.insert(k.to_string(), json!(v));
+    }
+    Ok(Value::Object(m))
 }
 
 #[derive(Subcommand)]
@@ -290,13 +339,40 @@ fn example() -> &'static str {
     head
 }
 
+/// A config with firms needs a zapper built with the office, which checks
+/// them.
+fn office_config(c: &Config) -> Result<()> {
+    #[cfg(feature = "office")]
+    zapper_office::firm::check(c)?;
+    if !cfg!(feature = "office") && !c.firms.is_empty() {
+        bail!(
+            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
+        );
+    }
+    Ok(())
+}
+
 fn load_config(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| util::office_config(&c).map(|_| c))
+        .and_then(|c| office_config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
+}
+
+/// What the office adds to the API and the UI; nothing without it.
+fn mount(d: &zapper_core::Core) -> zapper_api::Mount {
+    #[cfg(feature = "office")]
+    return zapper_api::Mount {
+        routes: zapper_office::routes(d),
+        page: Some(zapper_office::PAGE),
+    };
+    #[cfg(not(feature = "office"))]
+    {
+        let _ = d;
+        zapper_api::Mount::default()
+    }
 }
 
 fn main() {
@@ -420,8 +496,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 let dir = config_path
                     .parent()
                     .unwrap()
-                    .join(zapper_core::skills::DEFAULT_DIR);
-                let written = zapper_core::skills::install(&dir)?;
+                    .join(zapper_office::skills::DEFAULT_DIR);
+                let written = zapper_office::skills::install(&dir)?;
                 if written.is_empty() {
                     println!("{}: the default skills are all there", dir.display());
                 } else {
@@ -435,6 +511,7 @@ async fn run(cli: Cli) -> Result<i32> {
             profile,
             keep,
             workdir,
+            labels,
             command,
         } => {
             let workdir = match workdir {
@@ -442,7 +519,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 None => std::env::current_dir()?,
             };
             eprintln!("zapper: starting a {profile} session…");
-            let body = serde_json::to_string(&json!({ "profile": profile, "workdir": workdir }))?;
+            let body = serde_json::to_string(
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)? }),
+            )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
             eprintln!("zapper: session {id} is ready");
@@ -781,6 +860,7 @@ async fn run(cli: Cli) -> Result<i32> {
         },
         #[cfg(feature = "office")]
         Cmd::Firm { cmd } => return firm_cli::firm(&c, cmd, cli.json).await,
+        Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
                 RecordCmd::Status => ("/v1/record".to_string(), false),
@@ -877,6 +957,85 @@ async fn attach(c: &Client, id: &str, command: &[String], system: bool) -> Resul
     };
     let io = c.attach(id, size, command, system).await?;
     term::run(io, tty).await
+}
+
+async fn service(c: &Client, cmd: ServiceCmd, json_out: bool) -> Result<()> {
+    match cmd {
+        ServiceCmd::Ls => {
+            let v = c.json(Method::GET, "/v1/services", None).await?;
+            if json_out {
+                print_json(&v);
+                return Ok(());
+            }
+            let rows = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| {
+                    let sessions = x["sessions"]
+                        .as_object()
+                        .map(|m| {
+                            m.iter()
+                                .map(|(k, v)| format!("{k}={}", s(v)))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "all".into());
+                    vec![
+                        s(&x["id"]),
+                        s(&x["kind"]),
+                        s(&x["name"]),
+                        s(&x["port"]),
+                        sessions,
+                        s(&x["to"]),
+                        s(&x["owner"]),
+                    ]
+                })
+                .collect();
+            table(
+                &["id", "kind", "name", "port", "sessions", "to", "owner"],
+                rows,
+            );
+        }
+        ServiceCmd::Add {
+            name,
+            to,
+            to_session,
+            sessions,
+        } => {
+            let (name, port) = name
+                .rsplit_once(':')
+                .context("name:port, e.g. db.internal:5432")?;
+            let port: u16 = port.parse().context("the port")?;
+            let to = match (to, to_session) {
+                (Some(addr), _) => json!({ "addr": addr }),
+                (None, Some(t)) => {
+                    let (id, port) = t.rsplit_once(':').context("--to-session ID:port")?;
+                    json!({ "session": id, "port": port.parse::<u32>().context("the port")? })
+                }
+                (None, None) => bail!("give --to or --to-session"),
+            };
+            let body = json!({ "name": name, "port": port, "sessions": label_pairs(&sessions)?, "to": to });
+            let v = c
+                .json(Method::POST, "/v1/services", Some(body.to_string()))
+                .await?;
+            println!(
+                "service {}: {}:{} to {}; sessions also need a net rule for it",
+                s(&v["id"]),
+                s(&v["name"]),
+                s(&v["port"]),
+                s(&v["to"])
+            );
+        }
+        ServiceCmd::Rm { id } => {
+            let v = c
+                .json(Method::DELETE, &format!("/v1/services/{id}"), None)
+                .await?;
+            println!("removed service {id} ({}:{})", s(&v["name"]), s(&v["port"]));
+        }
+    }
+    Ok(())
 }
 
 async fn answer(c: &Client, id: &str, allow: bool, remember: Option<String>) -> Result<()> {
@@ -1033,6 +1192,20 @@ fn event_line(e: &Value) -> String {
         ),
         "shell" => format!("shell {} {}", e["id"], s(&e["state"])),
         "config" => format!("config {}", s(&e["change"])),
+        "mcp" => format!(
+            "{} {}.{}{}",
+            if e["ok"] == json!(true) {
+                "ok"
+            } else {
+                "FAILED"
+            },
+            s(&e["server"]),
+            s(&e["tool"]),
+            e["error"]
+                .as_str()
+                .map(|x| format!(" ({x})"))
+                .unwrap_or_default()
+        ),
         other => format!("{other} {e}"),
     };
     let rule = e["rule"]
@@ -1043,7 +1216,13 @@ fn event_line(e: &Value) -> String {
 }
 
 async fn serve(config_path: PathBuf) -> Result<()> {
-    let d = zapper_core::Core::start(config_path)?;
+    let d = zapper_core::Core::start(config_path.clone())?;
+    #[cfg(feature = "office")]
+    zapper_office::start(&d);
+    d.add_config_check(office_config);
+    d.check_config()
+        .with_context(|| format!("loading {}", config_path.display()))?;
+    let mount = mount(&d);
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1089,7 +1268,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
             );
         }
         eprintln!("zapper: UI at {url}");
-        let app = zapper_api::ui(d.clone(), port, remote);
+        let app = zapper_api::ui(d.clone(), port, remote, &mount);
         tokio::spawn(async move {
             if let Err(e) = axum::serve(tcp, app).await {
                 tracing::error!("UI: {e}");
@@ -1097,7 +1276,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         });
     }
     eprintln!("zapper: API on {}", socket.display());
-    let app = zapper_api::api(d.clone());
+    let app = zapper_api::api(d.clone(), &mount);
     let shutdown = {
         let d = d.clone();
         async move {
@@ -1219,9 +1398,9 @@ async fn check(config_path: &Path) -> Result<i32> {
         }
     }
     #[cfg(feature = "office")]
-    for (name, firm) in &config.firms {
-        let dir = zapper_core::skills::dir(firm);
-        let missing = zapper_core::skills::missing(firm);
+    for (name, firm) in &zapper_office::firm::all(&config) {
+        let dir = zapper_office::skills::dir(firm);
+        let missing = zapper_office::skills::missing(firm);
         report(
             missing.is_empty(),
             &format!("firm {name}: skills in {}", dir.display()),
@@ -1350,6 +1529,23 @@ async fn check(config_path: &Path) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    /// `zapper events`: a tool call through the gateway, and a refused one.
+    #[test]
+    fn mcp_events_read_as_the_tool_called() {
+        let e = json!({ "ts": 3661.0, "session": "abc234", "type": "mcp", "server": "office", "tool": "mail_send", "ok": true, "ms": 2.5 });
+        assert_eq!(
+            super::event_line(&e),
+            "01:01:01 abc234 mcp     ok office.mail_send"
+        );
+        let e = json!({ "ts": 0.0, "session": "abc234", "type": "mcp", "server": "x", "tool": "y", "ok": false, "ms": 0.1, "error": "no MCP server x for this session" });
+        assert_eq!(
+            super::event_line(&e),
+            "00:00:00 abc234 mcp     FAILED x.y (no MCP server x for this session)"
+        );
+    }
+
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
     fn example_config_is_valid() {
@@ -1397,11 +1593,28 @@ mod tests {
         assert_eq!(p.agent.env["CLAUDE_CODE_OAUTH_TOKEN"], "{{secret:claude}}");
     }
 
+    /// Firms need the office; the office is mounted on the API and UI only
+    /// when it is in the build.
+    #[test]
+    fn firms_and_the_office_go_together() {
+        let firms = zapper_policy::Config::from_yaml(
+            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+        )
+        .unwrap();
+        let e = super::office_config(&firms).err().map(|e| e.to_string());
+        assert_eq!(e.is_none(), cfg!(feature = "office"), "{e:?}");
+        assert!(super::office_config(&zapper_policy::Config::default()).is_ok());
+
+        let t = zapper_core::testing::TestCore::new("");
+        let m = super::mount(&t.core);
+        assert_eq!(m.page.is_some(), cfg!(feature = "office"));
+    }
+
     /// What `zapper init` writes loads in this build, office or not.
     #[test]
     fn init_writes_a_config_this_build_loads() {
         let c = zapper_policy::Config::from_yaml(super::example()).unwrap();
-        super::util::office_config(&c).unwrap();
+        super::office_config(&c).unwrap();
         assert!(c.profiles.contains_key("claude"));
         if !cfg!(feature = "office") {
             assert!(!super::example().contains("Firms (docs/office.md)"));

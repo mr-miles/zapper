@@ -22,8 +22,9 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
+| `mcp` | `server`, `tool`, `ok`, `ms`, `error` (the first 512 characters) | A tool called through the [MCP gateway](architecture.md), an office tool included; a call to a server the session hasn't is one too, refused. Names are kept to 128 characters; arguments and results aren't recorded |
 
-The host writes `net`, `dns` and `exec` events from its own decisions, so the guest can't alter them. `exit` events come from the guest kernel, and are as reliable as the guest ([security](security.md#what-is-enforced-where)).
+The host writes `net`, `dns`, `exec` and `mcp` events from its own decisions, so the guest can't alter them. `exit` events come from the guest kernel, and are as reliable as the guest ([security](security.md#what-is-enforced-where)).
 
 ## The driver
 
@@ -82,4 +83,4 @@ zapper audit tusn49 | jq -r 'select(.type=="net" and .action=="deny") | .host' |
 ## References
 
 - `man 5 acct`; asciicast v2: https://docs.asciinema.org/manual/asciicast/v2/
-- Sources: `crates/zapper/src/daemon/{mod,session,nic}.rs`, `crates/zapper-agent/src/acct.rs`
+- Sources: `crates/zapper-core/src/daemon/{mod,session,nic}.rs`, `crates/zapper-agent/src/acct.rs`
