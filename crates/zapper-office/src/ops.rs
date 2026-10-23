@@ -481,37 +481,29 @@ pub async fn dispatch(
 ) -> Result<Value> {
     let w = run.worker(me)?;
     let p = powers(run, &w);
-    let officer_only = [
-        "traffic",
-        "traffic_digest",
-        "access_requests",
-        "access_rules",
-        "access_decide",
-        "access_revoke",
-        "escalate",
-        "background_check",
-        "background_checks",
-    ];
-    if officer_only.contains(&op) && !w.officer() {
-        bail!("{op} is for security officers");
-    }
-    let allowed = match op {
-        "budget" => p.budget,
-        "budget_request" => p.budget && p.root,
-        "hire" => p.budget && p.hires,
-        "fund" | "release" => p.budget && (p.hires || p.manages),
-        "contract_offer" | "contract_accept" | "contract_counter" | "contract_withdraw"
-        | "contract_add" => p.budget && p.hires,
-        "contract_quote" | "contract_decline" | "contract_complete" => p.contractor,
-        "contracts" => p.contractor || (p.budget && p.hires),
-        "credentials_list"
-        | "credentials_decide"
-        | "credentials_escalate"
-        | "credentials_revoke" => p.owner,
-        _ => true,
-    };
-    if !allowed {
-        bail!("{op} isn't one of your tools");
+    // A worker may call the tools they are shown, and `tools` and the stop
+    // hook's `stop_check`.
+    let named = |p: Powers| tools(p).iter().any(|t| t["name"] == op);
+    if !matches!(op, "tools" | "stop_check") && !named(p) {
+        if !w.officer()
+            && named(Powers {
+                officer: true,
+                ..Default::default()
+            })
+        {
+            bail!("{op} is for security officers");
+        }
+        if named(Powers {
+            officer: true,
+            budget: true,
+            root: true,
+            hires: true,
+            manages: true,
+            contractor: true,
+            owner: true,
+        }) {
+            bail!("{op} isn't one of your tools");
+        }
     }
     if run.ended() {
         bail!("the firm is stopping");
