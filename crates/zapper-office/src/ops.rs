@@ -817,11 +817,7 @@ pub async fn dispatch(
                 || "No new traffic since the last digest.".into()
             )))
         }
-        "access_requests" if w.officer() => Ok(json!(security::requests(run, true))),
-        "access_requests" => Ok(json!(security::requests(run, true)
-            .into_iter()
-            .filter(|r| r["officer"] == json!(me))
-            .collect::<Vec<_>>())),
+        "access_requests" => Ok(json!(security::requests(run, true))),
         "background_checks" => Ok(json!(security::screenings_pending(run, me))),
         "access_rules" => Ok(json!(security::standing(run))),
         "access_decide" => {
