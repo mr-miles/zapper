@@ -904,10 +904,7 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 sec.rule_counter += 1;
                 let mut rl = rule.clone();
                 rl.id = Some(format!("a-net-{}", sec.rule_counter));
-                s.policy
-                    .write()
-                    .unwrap()
-                    .insert(AnyRule::Net(rl.clone()), Some(0));
+                s.put_rule(AnyRule::Net(rl.clone()));
                 rule_id = rl.id.clone();
                 let expires = if scope == "once" {
                     Some(now() + ONCE_SECS)
@@ -1051,7 +1048,7 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
                 .and_then(|w| w.session())
                 .or_else(|| run.facility.session_of(worker))
             {
-                s.policy.write().unwrap().remove(id);
+                s.remove_rule(id);
             }
         }
         None => {}

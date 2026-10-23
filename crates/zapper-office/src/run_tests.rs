@@ -51,9 +51,6 @@ fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
 /// The ids of a worker's credential rules, and where the first allows.
 fn credential_rules(run: &FirmRun, worker: &str) -> Vec<(String, String, Vec<u16>)> {
     let mut v: Vec<(String, String, Vec<u16>)> = session_of(run, worker)
-        .policy
-        .read()
-        .unwrap()
         .rules()
         .into_iter()
         .filter_map(|r| match r {

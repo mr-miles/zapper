@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -50,7 +50,7 @@ pub struct Session {
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
     /// The session's own policy layer, above its profile. Not saved.
-    pub policy: RwLock<Policy>,
+    pub(crate) policy: RwLock<Policy>,
     pub status: watch::Sender<Status>,
     pub dir: PathBuf,
     pub ca: tls::SessionCa,
@@ -81,6 +81,8 @@ pub struct Session {
     pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// The driver, for a driven agent (`agent.driven`) outside a firm.
     pub driver: Option<Arc<super::driver::Driver>>,
+    /// Its daemon, for the events of what clients change in it.
+    daemon: Weak<Daemon>,
     extra_files: Vec<GuestFile>,
     forwards: Vec<Forward>,
 }
@@ -234,6 +236,44 @@ impl Session {
         rule.set_id(id);
         policy.insert(rule.clone(), position);
         rule
+    }
+
+    /// The rules of the session's own layer.
+    pub fn rules(&self) -> Vec<AnyRule> {
+        self.policy.read().unwrap().rules()
+    }
+
+    /// Puts a client's rule first in the session's own layer under the id
+    /// it has, replacing a rule with that id (an officer's approval, the
+    /// network a credential grant needs). It is in the session's events.
+    pub fn put_rule(&self, rule: AnyRule) {
+        let id = rule.id().unwrap_or("?").to_string();
+        {
+            let mut p = self.policy.write().unwrap();
+            p.remove(&id);
+            p.insert(rule, Some(0));
+        }
+        self.config_event(format!(
+            "rule {id} added to {}",
+            Scope::Session(self.id.clone())
+        ));
+    }
+
+    /// Removes a rule from the session's own layer: it, if it was there,
+    /// and an event of the session's.
+    pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
+        let rule = self.policy.write().unwrap().remove(id)?;
+        self.config_event(format!(
+            "rule {id} removed from {}",
+            Scope::Session(self.id.clone())
+        ));
+        Some(rule)
+    }
+
+    fn config_event(&self, change: String) {
+        if let Some(d) = self.daemon.upgrade() {
+            d.emit(Some(self), EventBody::Config { change });
+        }
     }
 
     fn send(&self, msg: HostMsg) {
@@ -393,6 +433,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         labels: new.labels.clone(),
         shared_layers: new.shared_layers.clone(),
         driver: driven.then(super::driver::Driver::new),
+        daemon: Arc::downgrade(daemon),
         extra_files: new.files.clone(),
         forwards: new.forwards.clone(),
     });

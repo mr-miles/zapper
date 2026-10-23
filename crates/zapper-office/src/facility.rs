@@ -413,9 +413,8 @@ pub fn network_follows_grant(
     // One rule per grant (`git:api` → `credentials-git-api`): a revoked
     // repository leaves the others' rules, and so the host, in place.
     let id = format!("credentials-{}", resource.replace(':', "-"));
-    let mut p = s.policy.write().unwrap();
-    p.remove(&id);
     if level == super::access::Level::None {
+        s.remove_rule(&id);
         return;
     }
     let (host, port) = if resource.starts_with("git:") {
@@ -423,21 +422,18 @@ pub fn network_follows_grant(
     } else {
         (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
     };
-    p.insert(
-        zapper_policy::AnyRule::Net(zapper_policy::NetRule {
-            id: Some(id),
-            action: zapper_policy::Action::Allow,
-            host,
-            ports: vec![port],
-            methods: vec![],
-            path: None,
-            secrets: vec![],
-            set_headers: Default::default(),
-            final_: false,
-            comment: Some(format!("credentials: {resource} {}", level.name())),
-        }),
-        Some(0),
-    );
+    s.put_rule(zapper_policy::AnyRule::Net(zapper_policy::NetRule {
+        id: Some(id),
+        action: zapper_policy::Action::Allow,
+        host,
+        ports: vec![port],
+        methods: vec![],
+        path: None,
+        secrets: vec![],
+        set_headers: Default::default(),
+        final_: false,
+        comment: Some(format!("credentials: {resource} {}", level.name())),
+    }));
 }
 
 /// A worker's access to the cluster, as their grant says: their own

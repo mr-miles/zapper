@@ -390,7 +390,7 @@ impl Core {
         }
         if id.starts_with("s-") {
             for s in self.d.sessions.read().unwrap().values() {
-                if let Some(r) = s.policy.write().unwrap().remove(id) {
+                if let Some(r) = s.remove_rule(id) {
                     return Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),
