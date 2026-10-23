@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use zapper_core::testing::TestCore;
 use zapper_core::{NewSession, Session};
-use zapper_policy::Policy;
+use zapper_policy::{NetRequest, Policy};
 
 use crate::{labels, security, test_run, FirmRun};
 
@@ -406,6 +406,171 @@ async fn access_already_allowed_is_not_asked_for() {
     )
     .await;
     assert!(r["request"].is_string(), "{r}");
+}
+
+/// Nobody decides their own access request: an officer's own network or
+/// credential request goes to someone else, and deciding it themselves is
+/// refused.
+#[tokio::test]
+async fn nobody_decides_their_own_access_request() {
+    let (t, run) = run();
+    let asked = ok(
+        &t,
+        &run,
+        "sec",
+        "request_access",
+        json!({ "host": "notes.example", "reason": "research" }),
+    )
+    .await;
+    let id = asked["request"].as_str().unwrap().to_string();
+    let r = crate::security::requests(&run, true)
+        .into_iter()
+        .find(|r| r["id"] == id.as_str())
+        .unwrap();
+    assert_ne!(r["officer"], "sec", "not given to the requester: {r}");
+    let e = refused(
+        &t,
+        &run,
+        "sec",
+        "access_decide",
+        json!({ "request": id, "allow": true, "scope": "once", "reason": "mine" }),
+    )
+    .await;
+    assert!(e.contains("your own"), "{e}");
+    assert!(crate::security::standing(&run).is_empty());
+
+    // Credentials: policy owners hold admin on everything while they hold
+    // the role, so their own requests can't arise; anyone else's own is
+    // refused before who may decide is even looked at.
+    let e = refused(
+        &t,
+        &run,
+        "sec",
+        "credentials_request",
+        json!({ "resource": "drive", "level": "write", "spaces": "general", "reason": "to publish" }),
+    )
+    .await;
+    assert!(e.contains("already have"), "{e}");
+    let asked = ok(
+        &t,
+        &run,
+        "pat",
+        "credentials_request",
+        json!({ "resource": "drive", "level": "write", "spaces": "general", "reason": "to publish" }),
+    )
+    .await;
+    let id = asked["requests"][0].as_str().unwrap().to_string();
+    let e = crate::access::decide(&t.core, &run, "pat", &id, true, None, None, "mine")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("your own"), "{e}");
+}
+
+/// An officer's approval never gets past a `final` rule: the standing
+/// rule is made, at the worker's layer, and the request is still denied,
+/// while the same approval for another host lets it through.
+#[tokio::test]
+async fn an_approval_never_gets_past_a_final_rule() {
+    let t = crate::test_core(&format!(
+        "policy:\n  net:\n    - {{ action: deny, host: vault.example, final: true }}\n{FIRM}"
+    ));
+    let run = test_run(&t.core, "acme");
+    let decide = |host: &'static str| {
+        let (t, run) = (&t, &run);
+        async move {
+            let asked = ok(
+                t,
+                run,
+                "pat",
+                "request_access",
+                json!({ "host": host, "reason": "x" }),
+            )
+            .await;
+            ok(
+                t,
+                run,
+                "sec",
+                "access_decide",
+                json!({ "request": asked["request"], "allow": true, "scope": "worker", "reason": "fine" }),
+            )
+            .await;
+        }
+    };
+    decide("vault.example").await;
+    decide("docs.example").await;
+    assert_eq!(crate::security::standing(&run).len(), 2);
+    let s = session_of(&run, "pat");
+    let layers = t.core.layers_for(Some(&s.id), None).unwrap();
+    let layers: Vec<_> = layers.iter().map(|(sc, p)| (sc.clone(), p)).collect();
+    let action = |host: &str| {
+        let req = NetRequest {
+            host: host.into(),
+            port: 443,
+            method: None,
+            path: None,
+        };
+        zapper_policy::evaluate_net(&layers, &req).0.action
+    };
+    assert_eq!(action("vault.example"), zapper_policy::Action::Deny);
+    assert_eq!(action("docs.example"), zapper_policy::Action::Allow);
+}
+
+/// A hired officer decides nothing before their background check clears
+/// them: no requests, no checks, no decisions; once cleared, they do.
+#[tokio::test]
+async fn a_hired_officer_decides_nothing_before_clearance() {
+    let t = crate::test_core(&FIRM.replace("hires: [eng]", "hires: [eng, sec]"));
+    let run = test_run(&t.core, "acme");
+    approved(&t, &run).await;
+    let hired = ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "sec", "budget": "200k", "subject": "Security", "brief": "Watch the traffic.", "reason": "A second officer.", "name": "kim" }),
+    )
+    .await;
+    assert_eq!(hired["worker"], "kim", "{hired}");
+    give_vm(&t, &run, "kim");
+    let asked = ok(
+        &t,
+        &run,
+        "pat",
+        "request_access",
+        json!({ "host": "docs.example", "reason": "the docs" }),
+    )
+    .await;
+    let request = asked["request"].as_str().unwrap().to_string();
+    for (tool, args) in [
+        ("access_requests", json!({})),
+        ("background_checks", json!({})),
+        (
+            "access_decide",
+            json!({ "request": request, "allow": true, "scope": "once", "reason": "x" }),
+        ),
+    ] {
+        let v = call(&t, &run, "kim", tool, args).await;
+        assert!(v.get("error").is_some(), "kim {tool} before clearance: {v}");
+    }
+    let check = ok(&t, &run, "sec", "background_checks", json!({})).await;
+    let check = check
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["worker"] == "kim")
+        .unwrap()["screening"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(
+        &t,
+        &run,
+        "sec",
+        "background_check",
+        json!({ "screening": check, "clear": true, "note": "fine" }),
+    )
+    .await;
+    ok(&t, &run, "kim", "access_requests", json!({})).await;
 }
 
 #[tokio::test]
