@@ -175,4 +175,34 @@ mod tests {
                 .user_owned
         );
     }
+
+    /// A `guest` secret's value reaches only the sessions whose profile
+    /// uses it, in a private file there; a `proxy` secret's never does.
+    #[test]
+    fn guest_secrets_reach_only_profiles_that_use_them() {
+        let config = Config::from_yaml(
+            "secrets:\n  g: { value: guest-value-1, mode: guest }\n  p: { value: proxy-value-2, hosts: [api.example] }\nprofiles:\n  uses:\n    agent: { kind: generic, env: { G: \"{{secret:g}}\", P: \"{{secret:p}}\" }, files: { \"~/key\": \"{{secret:g}}\" } }\n  other:\n    agent: { kind: generic, env: { X: plain } }\n",
+        )
+        .unwrap();
+        let spec = |p: &str| {
+            let profile = config.resolve(p).unwrap();
+            build(&config, &profile, "s", "", vec![], vec![], vec![]).unwrap()
+        };
+        let uses = spec("uses");
+        assert_eq!(uses.env["G"], "guest-value-1");
+        assert_eq!(uses.env["P"], placeholder("p"));
+        let key = uses
+            .files
+            .iter()
+            .find(|f| f.path == "/home/agent/key")
+            .unwrap();
+        assert_eq!((key.content.as_str(), key.mode), ("guest-value-1", 0o600));
+        let all = serde_json::to_string(&uses).unwrap();
+        assert!(!all.contains("proxy-value-2"), "{all}");
+        let other = serde_json::to_string(&spec("other")).unwrap();
+        assert!(
+            !other.contains("guest-value-1") && !other.contains("proxy-value-2"),
+            "{other}"
+        );
+    }
 }

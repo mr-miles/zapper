@@ -1225,7 +1225,71 @@ mod approval_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::split_authority;
+    use super::{clean_headers, inject, split_authority};
+    use crate::testing::TestCore;
+    use zapper_policy::{placeholder, NetEffects};
+
+    /// What goes upstream names the host that was checked, whatever Host
+    /// the client sent, and carries no hop-by-hop headers.
+    #[test]
+    fn the_host_header_is_the_checked_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "evil.example".parse().unwrap());
+        headers.insert("proxy-authorization", "x".parse().unwrap());
+        headers.insert("connection", "keep-alive".parse().unwrap());
+        clean_headers(&mut headers, "api.example", 443, 443);
+        assert_eq!(headers["host"], "api.example");
+        assert!(headers.get("proxy-authorization").is_none());
+        assert!(headers.get("connection").is_none());
+        assert_eq!(headers.get_all("host").iter().count(), 1);
+        // Another port is named.
+        clean_headers(&mut headers, "api.example", 8443, 443);
+        assert_eq!(headers["host"], "api.example:8443");
+    }
+
+    /// A secret goes only to its own `hosts`, and over plain HTTP only with
+    /// `plaintext: true`, whichever rule asked for it.
+    #[test]
+    fn a_secret_goes_only_where_it_may() {
+        let t = TestCore::new(
+            "secrets:\n  s: { value: the-value, hosts: [api.example] }\n  lab: { value: lab-value, hosts: [lab.example], plaintext: true }\n",
+        );
+        let d = t.core.daemon();
+        let add = |name: &str, host: &str, plaintext: bool| {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", placeholder(name)).parse().unwrap(),
+            );
+            let effects = NetEffects {
+                secrets: vec![name.to_string()],
+                set_headers: vec![],
+            };
+            inject(d, host, plaintext, &effects, &mut headers).map(|i| (i.names, headers))
+        };
+        let (names, headers) = add("s", "api.example", false).unwrap();
+        assert_eq!(names, ["s"]);
+        assert_eq!(headers["authorization"], "Bearer the-value");
+        // A rule matching another host asks for it in vain.
+        let e = add("s", "evil.example", false).unwrap_err();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        // Plain HTTP, to its own host: refused without plaintext.
+        let e = add("s", "api.example", true).unwrap_err();
+        assert!(e.contains("plain HTTP"), "{e}");
+        let (_, headers) = add("lab", "lab.example", true).unwrap();
+        assert_eq!(headers["authorization"], "Bearer lab-value");
+        // set_headers is held to the same.
+        let mut headers = hyper::HeaderMap::new();
+        let effects = NetEffects {
+            secrets: vec![],
+            set_headers: vec![("x-key".into(), "{{secret:s}}".into())],
+        };
+        let e = inject(d, "evil.example", false, &effects, &mut headers)
+            .err()
+            .unwrap();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        assert!(headers.get("x-key").is_none());
+    }
 
     #[test]
     fn authorities() {
