@@ -137,7 +137,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
         evaluate_net(&spec::layers_of(&layers), req)
     };
     let mut pending = None;
-    let decider = d.deciders.of(s);
+    let decider = d.deciders.first(s, |_| true);
     let allowed = match decision.action {
         Action::Allow => {
             if let (Some(dc), Some(rule)) = (&decider, &decision.rule) {

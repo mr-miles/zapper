@@ -262,12 +262,12 @@ impl Core {
 
     /// Stops serving a registered MCP server.
     pub fn remove_mcp_server(&self, id: u64) -> bool {
-        self.d.gateway.remove(id)
+        self.d.gateway.remove(id).is_some()
     }
 
     /// Hands a decider's sessions' `ask`s back to the operator.
     pub fn remove_decider(&self, id: u64) -> bool {
-        self.d.deciders.remove(id)
+        self.d.deciders.remove(id).is_some()
     }
 
     /// Services and zones.

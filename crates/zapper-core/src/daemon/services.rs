@@ -7,14 +7,14 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use super::registry::{Entry, Registry};
 use super::session::Session;
 
 /// A stream to or from a service.
@@ -71,21 +71,22 @@ pub struct Info {
     pub owner: String,
 }
 
-enum Entry {
-    Service(Spec),
+enum Item {
+    Service {
+        name: String,
+        port: u16,
+        target: Target,
+        owner: String,
+    },
     Zone {
         domain: String,
-        sessions: BTreeMap<String, String>,
         owner: String,
     },
 }
 
 /// The daemon's services and zones.
 #[derive(Default)]
-pub struct Services {
-    next: AtomicU64,
-    entries: RwLock<BTreeMap<u64, Entry>>,
-}
+pub struct Services(Registry<Item>);
 
 /// Where `host:port` goes for a session.
 pub enum Route {
@@ -105,10 +106,6 @@ pub fn check_name(name: &str) -> Result<String> {
     let host = zapper_policy::names::hostname(rest)
         .map_err(|e| anyhow!("{name:?} is not a service name: {e}"))?;
     Ok(if wild { format!("*.{host}") } else { host })
-}
-
-fn picks(selector: &BTreeMap<String, String>, s: &Session) -> bool {
-    selector.iter().all(|(k, v)| s.label(k) == Some(v.as_str()))
 }
 
 fn matches(pattern: &str, host: &str) -> bool {
@@ -132,25 +129,30 @@ fn describe(t: &Target) -> String {
 }
 
 impl Services {
-    pub fn add(&self, mut spec: Spec) -> Result<u64> {
-        spec.name = check_name(&spec.name)?;
-        if spec.port == 0 {
+    pub fn add(&self, spec: Spec) -> Result<u64> {
+        let Spec {
+            name,
+            port,
+            sessions,
+            target,
+            owner,
+        } = spec;
+        let name = check_name(&name)?;
+        if port == 0 {
             bail!("a service needs a port");
         }
-        let mut entries = self.entries.write().unwrap();
-        let taken = entries.values().any(|e| {
-            matches!(e, Entry::Service(o) if o.name == spec.name && o.port == spec.port && o.sessions == spec.sessions)
-        });
-        if taken {
-            bail!(
-                "{}:{} is already a service for these sessions",
-                spec.name,
-                spec.port
-            );
-        }
-        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        entries.insert(id, Entry::Service(spec));
-        Ok(id)
+        let item = Item::Service {
+            name: name.clone(),
+            port,
+            target,
+            owner,
+        };
+        self.0
+            .add_unless(sessions.clone(), item, |e| {
+                e.sessions == sessions
+                    && matches!(&e.item, Item::Service { name: n, port: p, .. } if *n == name && *p == port)
+            })
+            .ok_or_else(|| anyhow!("{name}:{port} is already a service for these sessions"))
     }
 
     pub fn add_zone(
@@ -161,23 +163,13 @@ impl Services {
     ) -> Result<u64> {
         let domain = zapper_policy::names::hostname(domain)
             .map_err(|e| anyhow!("{domain:?} is not a domain: {e}"))?;
-        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        self.entries.write().unwrap().insert(
-            id,
-            Entry::Zone {
-                domain,
-                sessions,
-                owner: owner.to_string(),
-            },
-        );
-        Ok(id)
+        let owner = owner.to_string();
+        Ok(self.0.add(sessions, Item::Zone { domain, owner }))
     }
 
     /// Removes a service or zone; what it was, if it was there.
     pub fn remove(&self, id: u64) -> Option<Info> {
-        let info = self.info(id)?;
-        self.entries.write().unwrap().remove(&id);
-        Some(info)
+        self.0.remove(id).map(|e| info(id, &e))
     }
 
     pub fn info(&self, id: u64) -> Option<Info> {
@@ -185,82 +177,85 @@ impl Services {
     }
 
     pub fn list(&self) -> Vec<Info> {
-        self.entries
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(id, e)| match e {
-                Entry::Service(s) => Info {
-                    id: *id,
-                    kind: "service",
-                    name: s.name.clone(),
-                    port: Some(s.port),
-                    sessions: s.sessions.clone(),
-                    to: describe(&s.target),
-                    owner: s.owner.clone(),
-                },
-                Entry::Zone {
-                    domain,
-                    sessions,
-                    owner,
-                } => Info {
-                    id: *id,
-                    kind: "zone",
-                    name: domain.clone(),
-                    port: None,
-                    sessions: sessions.clone(),
-                    to: "nothing but its services".into(),
-                    owner: owner.clone(),
-                },
-            })
-            .collect()
+        self.0
+            .with(|entries| entries.iter().map(|(id, e)| info(*id, e)).collect())
     }
 
     /// Where `host:port` goes for `s`: `None` for a name that is no
     /// service's and in no zone, which the host resolves. An exact name
     /// wins over `*.`, then the earliest registered.
     pub fn route(&self, s: &Session, host: &str, port: u16) -> Option<Route> {
-        let entries = self.entries.read().unwrap();
-        let mut known = false;
-        let mut best: Option<(bool, &Spec)> = None;
-        for e in entries.values() {
-            match e {
-                Entry::Service(spec) if picks(&spec.sessions, s) && matches(&spec.name, host) => {
-                    known = true;
-                    let exact = !spec.name.starts_with("*.");
-                    if spec.port == port && best.is_none_or(|(e, _)| exact && !e) {
-                        best = Some((exact, spec));
+        self.0.with(|entries| {
+            let mut known = false;
+            let mut best: Option<(bool, &Target)> = None;
+            for e in entries.values().filter(|e| e.picks(s)) {
+                match &e.item {
+                    Item::Service {
+                        name,
+                        port: p,
+                        target,
+                        ..
+                    } if matches(name, host) => {
+                        known = true;
+                        let exact = !name.starts_with("*.");
+                        if *p == port && best.is_none_or(|(e, _)| exact && !e) {
+                            best = Some((exact, target));
+                        }
                     }
+                    Item::Zone { domain, .. } if in_zone(domain, host) => known = true,
+                    _ => {}
                 }
-                Entry::Zone {
-                    domain, sessions, ..
-                } if picks(sessions, s) && in_zone(domain, host) => known = true,
-                _ => {}
             }
-        }
-        match best {
-            Some((_, spec)) => Some(Route::Service(spec.target.clone())),
-            None => known.then_some(Route::Unserved),
-        }
+            match best {
+                Some((_, target)) => Some(Route::Service(target.clone())),
+                None => known.then_some(Route::Unserved),
+            }
+        })
     }
 
     /// Whether `name` exists for `s` without asking the host: `None` when
     /// the host should say.
     pub fn resolves(&self, s: &Session, name: &str) -> Option<bool> {
-        let entries = self.entries.read().unwrap();
-        let mut zoned = false;
-        for e in entries.values() {
-            match e {
-                Entry::Service(spec) if picks(&spec.sessions, s) && matches(&spec.name, name) => {
-                    return Some(true)
+        self.0.with(|entries| {
+            let mut zoned = false;
+            for e in entries.values().filter(|e| e.picks(s)) {
+                match &e.item {
+                    Item::Service { name: n, .. } if matches(n, name) => return Some(true),
+                    Item::Zone { domain, .. } if in_zone(domain, name) => zoned = true,
+                    _ => {}
                 }
-                Entry::Zone {
-                    domain, sessions, ..
-                } if picks(sessions, s) && in_zone(domain, name) => zoned = true,
-                _ => {}
             }
-        }
-        zoned.then_some(false)
+            zoned.then_some(false)
+        })
+    }
+}
+
+fn info(id: u64, e: &Entry<Item>) -> Info {
+    let sessions = e.sessions.clone();
+    match &e.item {
+        Item::Service {
+            name,
+            port,
+            target,
+            owner,
+        } => Info {
+            id,
+            kind: "service",
+            name: name.clone(),
+            port: Some(*port),
+            sessions,
+            to: describe(target),
+            owner: owner.clone(),
+        },
+        Item::Zone { domain, owner } => Info {
+            id,
+            kind: "zone",
+            name: domain.clone(),
+            port: None,
+            sessions,
+            to: "nothing but its services".into(),
+            owner: owner.clone(),
+        },
     }
 }
 
