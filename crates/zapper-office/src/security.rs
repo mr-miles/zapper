@@ -32,6 +32,8 @@ pub enum State {
     Escalated,
     Allowed,
     Denied,
+    /// Asked again for more while waiting: replaced by `merged_into`.
+    Merged,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +61,8 @@ pub struct Request {
     pub board_asked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
 }
 
 /// An approval or denial that stays: a rule at a worker's or role's layer.
@@ -174,18 +178,38 @@ pub fn ask(
     }
     let mut sec = run.security.lock().unwrap();
     let method = req.method.clone();
+    let mut methods = methods.filter(|m| !m.is_empty());
+    // The same host and port asked for again while a request waits. What
+    // it already covers joins it. More (another method, or the whole
+    // connection) replaces it with a new request for both, and the old one
+    // is closed as merged: a request never grows after a decider may have
+    // seen it, so a decision covers only what its decider was shown.
+    let mut merged = None;
     if let Some(r) = sec.requests.values_mut().find(|r| {
         r.worker == worker
             && r.host == req.host
             && r.port == req.port
             && matches!(r.state, State::Pending | State::Escalated)
-            && (r.method == method || r.method.is_none())
     }) {
-        r.attempts += 1;
-        if !reason.is_empty() && r.reason.is_empty() {
-            r.reason = reason.chars().take(2000).collect();
+        let covered = match (&r.methods, &methods) {
+            (None, _) => true,
+            (Some(have), Some(more)) => more.iter().all(|m| have.contains(m)),
+            (Some(_), None) => false,
+        };
+        if covered {
+            r.attempts += 1;
+            if !reason.is_empty() && r.reason.is_empty() {
+                r.reason = reason.chars().take(2000).collect();
+            }
+            return Ok(r.id.clone());
         }
-        return Ok(r.id.clone());
+        if let (Some(have), Some(more)) = (&r.methods, &mut methods) {
+            let mut all = have.clone();
+            all.extend(more.iter().filter(|m| !have.contains(m)).cloned());
+            *more = all;
+        }
+        r.state = State::Merged;
+        merged = Some(r.clone());
     }
     let pending = sec
         .requests
@@ -199,6 +223,16 @@ pub fn ask(
     let id = format!("r-{}", sec.counter);
     let officer = pick_officer(run, &mut sec, worker);
     let board = officer.is_none();
+    // A merge keeps what the old request said, and counts its attempts.
+    let reason = match &merged {
+        Some(old) if reason.trim().is_empty() => old.reason.clone(),
+        _ => reason.chars().take(2000).collect(),
+    };
+    let method = if merged.is_some() && methods.is_none() {
+        None
+    } else {
+        method
+    };
     let r = Request {
         id: id.clone(),
         worker: worker.to_string(),
@@ -208,9 +242,9 @@ pub fn ask(
         method,
         path: path.or_else(|| req.path.clone()),
         methods,
-        reason: reason.chars().take(2000).collect(),
+        reason,
         created: now(),
-        attempts: 1,
+        attempts: 1 + merged.as_ref().map_or(0, |o| o.attempts),
         state: if board {
             State::Escalated
         } else {
@@ -220,7 +254,14 @@ pub fn ask(
         assignment,
         board_asked: board,
         decision: None,
+        merged_into: None,
     };
+    if let Some(old) = merged {
+        let old = sec.requests.get_mut(&old.id).unwrap();
+        old.merged_into = Some(id.clone());
+        run.journal
+            .append("access", json!({ "event": "merged", "request": old }));
+    }
     run.journal
         .append("access", json!({ "event": "requested", "request": r }));
     let text = request_text(&r);
@@ -663,14 +704,27 @@ pub fn officer_left(run: &FirmRun, worker: &str, by: &str) {
     );
 }
 
-fn request_text(r: &Request) -> String {
-    let mut s = format!(
-        "Request {}: {} {}:{}{}\nFrom: {} ({})\n",
-        r.id,
-        r.method.as_deref().unwrap_or("CONNECT"),
+/// What a request asks for: its methods (or the whole connection), host,
+/// port and path.
+fn asked(r: &Request) -> String {
+    let methods = match (&r.methods, &r.method) {
+        (Some(m), _) => m.join(", "),
+        (None, Some(m)) => m.clone(),
+        (None, None) => "CONNECT".into(),
+    };
+    format!(
+        "{methods} {}:{}{}",
         r.host,
         r.port,
-        r.path.as_deref().unwrap_or(""),
+        r.path.as_deref().unwrap_or("")
+    )
+}
+
+fn request_text(r: &Request) -> String {
+    let mut s = format!(
+        "Request {}: {}\nFrom: {} ({})\n",
+        r.id,
+        asked(r),
         r.worker,
         r.title
     );
@@ -821,6 +875,22 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
         .get(id)
         .cloned()
         .ok_or_else(|| anyhow!("no request {id}"))?;
+    // A merged request's replacement, followed to the one that waits.
+    let mut replaced = None;
+    let mut next = r.merged_into.clone();
+    while let Some(n) = next.and_then(|n| sec.requests.get(&n)) {
+        next = n.merged_into.clone();
+        replaced = Some(n);
+    }
+    if let Some(new) = replaced {
+        bail!(
+            "request {id} was replaced: {} asked again for more, so it is now {}: {}. Nothing was decided; decide {} if it should be",
+            r.worker,
+            new.id,
+            asked(new),
+            new.id
+        );
+    }
     if !matches!(r.state, State::Pending | State::Escalated) {
         bail!("request {id} is already {:?}", r.state);
     }

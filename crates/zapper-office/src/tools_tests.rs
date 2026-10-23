@@ -12,7 +12,7 @@ use zapper_core::testing::TestCore;
 use zapper_core::{NewSession, Session};
 use zapper_policy::Policy;
 
-use crate::{labels, test_run, FirmRun};
+use crate::{labels, security, test_run, FirmRun};
 
 const FIRM: &str = "
 profiles:
@@ -267,6 +267,106 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
         .into_iter()
         .any(|e| e["type"] == "access" && e["event"] == "escalated");
     assert!(escalated, "{:?}", journal(&run));
+}
+
+/// Asking again for what a waiting request covers joins it. Asking for
+/// more replaces it with one request for both, closing the old one as
+/// merged: one request waits at a time, and a request never grows after a
+/// decider may have seen it.
+#[tokio::test]
+async fn asking_again_joins_or_replaces_the_request_waiting() {
+    let (t, run) = run();
+    let ask = |methods: Value| {
+        let (t, run) = (&t, &run);
+        async move {
+            let r = ok(
+                t,
+                run,
+                "pat",
+                "request_access",
+                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
+            )
+            .await;
+            let pending = ok(t, run, "sec", "access_requests", json!({})).await;
+            assert_eq!(pending.as_array().unwrap().len(), 1, "one waits: {pending}");
+            (
+                r["request"].as_str().unwrap().to_string(),
+                pending[0].clone(),
+            )
+        }
+    };
+    let (first, _) = ask(json!(["GET"])).await;
+    let (again, _) = ask(json!(["get"])).await;
+    assert_eq!(again, first, "the same again joins it");
+    let (both, waiting) = ask(json!(["POST", "GET"])).await;
+    assert_ne!(both, first, "more replaces it");
+    assert_eq!(waiting["methods"], json!(["GET", "POST"]), "{waiting}");
+    assert_eq!(waiting["attempts"], 3, "{waiting}");
+    let (whole, waiting) = ask(json!(null)).await;
+    assert_ne!(whole, both, "the whole connection is more again");
+    assert!(waiting.get("methods").is_none(), "{waiting}");
+    assert_eq!(
+        ask(json!(["DELETE"])).await.0,
+        whole,
+        "the whole connection covers it"
+    );
+    let count = |event: &str| {
+        journal(&run)
+            .into_iter()
+            .filter(|e| e["type"] == "access" && e["event"] == event)
+            .count()
+    };
+    assert_eq!((count("requested"), count("merged")), (3, 2));
+    // Another port is another request.
+    let other = ok(
+        &t,
+        &run,
+        "pat",
+        "request_access",
+        json!({ "host": "api.example", "port": 8443, "reason": "the admin API" }),
+    )
+    .await;
+    assert_ne!(other["request"], json!(whole));
+}
+
+/// A decider who saw the GET decides it just as the worker asks for POST
+/// too: nothing is decided, and they are told what waits now.
+#[tokio::test]
+async fn deciding_a_request_that_was_replaced_decides_nothing() {
+    let (t, run) = run();
+    let asked = |methods: Value| {
+        let (t, run) = (&t, &run);
+        async move {
+            ok(
+                t,
+                run,
+                "pat",
+                "request_access",
+                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
+            )
+            .await["request"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let seen = asked(json!(["GET"])).await;
+    let now = asked(json!(["POST"])).await;
+    let e = refused(
+        &t,
+        &run,
+        "sec",
+        "access_decide",
+        json!({ "request": seen, "allow": true, "scope": "worker", "reason": "the docs" }),
+    )
+    .await;
+    assert!(
+        e.contains(&format!("now {now}: GET, POST api.example:443")),
+        "{e}"
+    );
+    assert!(security::standing(&run).is_empty(), "nothing allowed");
+    let pending = ok(&t, &run, "sec", "access_requests", json!({})).await;
+    assert_eq!(pending[0]["id"], json!(now), "{pending}");
 }
 
 /// What the worker's rules already allow isn't asked about: the answer
