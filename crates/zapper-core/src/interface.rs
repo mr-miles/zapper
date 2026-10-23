@@ -13,7 +13,7 @@ use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use zapper_policy::{AnyRule, Config, Policy, Scope};
 
-use crate::daemon::{self, session, Daemon, EventBody};
+use crate::daemon::{self, session, Daemon};
 
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
@@ -25,7 +25,7 @@ pub use crate::daemon::services::{
 pub use crate::daemon::session::{
     NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
 };
-pub use crate::daemon::{Event, Pending, Remember};
+pub use crate::daemon::{Event, EventBody, Pending, Remember};
 
 /// A handle on a running daemon. Cheap to clone.
 #[derive(Clone)]

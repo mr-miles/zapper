@@ -389,6 +389,80 @@ async fn each_workers_tools_are_their_roles() {
     assert!(!pat.iter().any(|n| n == "credentials_list"), "{pat:?}");
 }
 
+/// Every tool any worker could have: what each worker may call is exactly
+/// what their list shows, and an officer's tool says it is one.
+#[tokio::test]
+async fn a_worker_may_call_exactly_the_tools_they_are_shown() {
+    use crate::ops::{tools, Powers};
+    let (t, run) = run();
+    let every = Powers {
+        officer: true,
+        budget: true,
+        root: true,
+        hires: true,
+        manages: true,
+        contractor: true,
+        owner: true,
+    };
+    let officers: Vec<Value> = tools(Powers {
+        officer: true,
+        ..Default::default()
+    });
+    let mut all: Vec<String> = tools(every)
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    all.sort();
+    all.dedup();
+    for who in ["ceo", "pat"] {
+        let s = session_of(&run, who);
+        let mine = tool_names(&t, &s).await;
+        let officer = run.worker(who).unwrap().officer();
+        for name in &all {
+            let r = office(&t, &s, &json!({ "op": name, "args": {} }).to_string()).await;
+            let e = r["error"].as_str().unwrap_or("");
+            let gated =
+                e.ends_with("isn't one of your tools") || e.ends_with("is for security officers");
+            assert_eq!(gated, !mine.contains(name), "{who} {name}: {r}");
+            if gated && !officer && officers.iter().any(|t| t["name"] == name.as_str()) {
+                assert_eq!(e, format!("{name} is for security officers"));
+            }
+        }
+    }
+}
+
+/// The tool definitions every combination of powers is shown, names,
+/// descriptions and schemas, as a digest: what the agents see doesn't
+/// change unless this does.
+#[test]
+fn the_tool_lists_are_as_they_were() {
+    use crate::ops::{tools, Powers};
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for bits in 0u8..128 {
+        let b = |i: u8| bits & (1 << i) != 0;
+        let p = Powers {
+            officer: b(0),
+            budget: b(1),
+            root: b(2),
+            hires: b(3),
+            manages: b(4),
+            contractor: b(5),
+            owner: b(6),
+        };
+        ctx.update(serde_json::to_string(&tools(p)).unwrap().as_bytes());
+    }
+    let digest: String = ctx
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest,
+        "3b055d9293d53439a7669602909a45cf1cd603c08bb674559251c91220e79e89"
+    );
+}
+
 #[tokio::test]
 async fn mail_is_from_the_vm_it_came_from() {
     let (t, run) = run();

@@ -1531,19 +1531,207 @@ async fn check(config_path: &Path) -> Result<i32> {
 mod tests {
     use serde_json::json;
 
-    /// `zapper events`: a tool call through the gateway, and a refused one.
+    /// An event as `zapper events` prints it: the core's, at 01:01:01, of
+    /// session abc234 (none for a service).
+    fn line(body: zapper_core::EventBody) -> String {
+        let session =
+            (!matches!(body, zapper_core::EventBody::Service { .. })).then(|| "abc234".to_string());
+        let e = zapper_core::Event {
+            seq: 1,
+            ts: 3661.0,
+            session,
+            body,
+        };
+        super::event_line(&serde_json::to_value(e).unwrap())
+    }
+
+    /// `zapper events`: one line for each type of event.
     #[test]
-    fn mcp_events_read_as_the_tool_called() {
-        let e = json!({ "ts": 3661.0, "session": "abc234", "type": "mcp", "server": "office", "tool": "mail_send", "ok": true, "ms": 2.5 });
-        assert_eq!(
-            super::event_line(&e),
-            "01:01:01 abc234 mcp     ok office.mail_send"
-        );
-        let e = json!({ "ts": 0.0, "session": "abc234", "type": "mcp", "server": "x", "tool": "y", "ok": false, "ms": 0.1, "error": "no MCP server x for this session" });
-        assert_eq!(
-            super::event_line(&e),
-            "00:00:00 abc234 mcp     FAILED x.y (no MCP server x for this session)"
-        );
+    fn events_read_as_a_line_each() {
+        use zapper_core::EventBody as B;
+        use zapper_policy::proto::GuestEvent;
+        use zapper_policy::{Action, Kind};
+        let net = |method: Option<&str>, status, error: Option<&str>| B::Net {
+            host: "api.example.com".into(),
+            port: 443,
+            method: method.map(Into::into),
+            path: method.map(|_| "/v1/x".into()),
+            action: Action::Allow,
+            rule: Some("g-1".into()),
+            scope: Some("global".into()),
+            inspected: method.is_some(),
+            status,
+            secrets: vec!["gh".into()],
+            error: error.map(Into::into),
+        };
+        let cases = [
+            (net(Some("GET"), Some(200), None), "01:01:01 abc234 net     allow GET api.example.com:443/v1/x → 200  [g-1]"),
+            (net(None, None, Some("refused")), "01:01:01 abc234 net     allow CONNECT api.example.com:443 (refused)  [g-1]"),
+            (
+                B::Exec {
+                    pid: 7,
+                    uid: 0,
+                    path: "/usr/bin/git".into(),
+                    argv: vec!["git".into(), "push".into()],
+                    cwd: None,
+                    action: Action::Deny,
+                    rule: None,
+                    scope: None,
+                    wait_ms: 1.25,
+                },
+                "01:01:01 abc234 exec    deny git push",
+            ),
+            (
+                B::Ask {
+                    id: "a-1".into(),
+                    kind: Kind::Net,
+                    subject: "example.org:443".into(),
+                },
+                "01:01:01 abc234 ask     ASK a-1: example.org:443  (zapper approve a-1 | zapper deny a-1)",
+            ),
+            (
+                B::Answer {
+                    id: "a-1".into(),
+                    allow: true,
+                    remember: Some("session".into()),
+                },
+                "01:01:01 abc234 answer  allowed a-1",
+            ),
+            (
+                B::Answer {
+                    id: "a-2".into(),
+                    allow: false,
+                    remember: None,
+                },
+                "01:01:01 abc234 answer  denied a-2",
+            ),
+            (
+                B::Dns {
+                    name: "example.org".into(),
+                    qtype: 1,
+                    allowed: true,
+                    rcode: "noerror".into(),
+                    answer: Some("100.64.0.9".into()),
+                    reason: None,
+                },
+                "01:01:01 abc234 dns     noerror example.org → 100.64.0.9",
+            ),
+            (
+                B::Dns {
+                    name: "".into(),
+                    qtype: 1,
+                    allowed: false,
+                    rcode: "formerr".into(),
+                    answer: None,
+                    reason: Some("truncated name".into()),
+                },
+                "01:01:01 abc234 dns     formerr (invalid query) (truncated name)",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Exit {
+                        pid: 9,
+                        ppid: 1,
+                        uid: 0,
+                        comm: "make".into(),
+                        exit_code: 2,
+                        signal: None,
+                        elapsed_ms: 40,
+                        user_ms: 1,
+                        sys_ms: 1,
+                        mem_kib: 1,
+                        io_bytes: 1,
+                    },
+                },
+                "01:01:01 abc234 guest   exit make pid 9 code 2 40ms",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Setup {
+                        step: "apt install".into(),
+                        ok: false,
+                        output: "".into(),
+                    },
+                },
+                "01:01:01 abc234 guest   setup FAILED: apt install",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::ShellExit {
+                        id: 3,
+                        exit_code: 0,
+                    },
+                },
+                "01:01:01 abc234 guest   shell 3 exited with 0",
+            ),
+            (
+                B::Shell {
+                    id: 3,
+                    state: "open".into(),
+                    argv: Some(vec!["bash".into()]),
+                    exit_code: None,
+                },
+                "01:01:01 abc234 shell   shell 3 open",
+            ),
+            (
+                B::Session {
+                    state: "failed".into(),
+                    detail: Some("no image".into()),
+                },
+                "01:01:01 abc234 session session failed no image",
+            ),
+            (
+                B::Config {
+                    change: "rule g-2 added".into(),
+                },
+                "01:01:01 abc234 config  config rule g-2 added",
+            ),
+            (
+                B::Service {
+                    change: "added".into(),
+                    service: zapper_core::ServiceInfo {
+                        id: 4,
+                        kind: "service",
+                        name: "git.acme.internal".into(),
+                        port: Some(443),
+                        sessions: [("firm".to_string(), "acme".to_string())].into(),
+                        to: "in the daemon".into(),
+                        owner: "office".into(),
+                    },
+                },
+                "01:01:01        service service {\"change\":\"added\",\"id\":4,\"kind\":\"service\",\"name\":\"git.acme.internal\",\"owner\":\"office\",\"port\":443,\"seq\":1,\"sessions\":{\"firm\":\"acme\"},\"to\":\"in the daemon\",\"ts\":3661.0,\"type\":\"service\"}",
+            ),
+            (
+                B::Driver {
+                    event: "turn_end".into(),
+                    detail: json!({ "outcome": "done", "tokens": 1200 }),
+                },
+                "01:01:01 abc234 driver  driver {\"detail\":{\"outcome\":\"done\",\"tokens\":1200},\"event\":\"turn_end\",\"seq\":1,\"session\":\"abc234\",\"ts\":3661.0,\"type\":\"driver\"}",
+            ),
+            (
+                B::Mcp {
+                    server: "office".into(),
+                    tool: "mail_send".into(),
+                    ok: true,
+                    ms: 2.5,
+                    error: None,
+                },
+                "01:01:01 abc234 mcp     ok office.mail_send",
+            ),
+            (
+                B::Mcp {
+                    server: "x".into(),
+                    tool: "y".into(),
+                    ok: false,
+                    ms: 0.1,
+                    error: Some("no MCP server x for this session".into()),
+                },
+                "01:01:01 abc234 mcp     FAILED x.y (no MCP server x for this session)",
+            ),
+        ];
+        for (body, want) in cases {
+            assert_eq!(line(body), want);
+        }
     }
 
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.

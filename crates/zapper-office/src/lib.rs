@@ -1685,6 +1685,18 @@ mod run_tests;
 mod http_tests;
 
 #[cfg(test)]
+mod foreman_tests;
+
+#[cfg(test)]
+mod tools_tests;
+
+#[cfg(test)]
+mod start_tests;
+
+#[cfg(test)]
+mod board_tests;
+
+#[cfg(test)]
 mod tests {
     use super::OfficeOf;
 

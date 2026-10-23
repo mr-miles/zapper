@@ -222,12 +222,24 @@ async fn serve_listens_on_its_socket() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    for _ in 0..200 {
+    // Up within a minute, however loaded the machine (an instrumented
+    // build under coverage starts slowly); a serve that exits says so.
+    let mut up = false;
+    for _ in 0..1200 {
         if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            up = true;
             break;
+        }
+        if let Some(status) = serve.try_wait().unwrap() {
+            panic!("zapper serve exited: {status}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    assert!(
+        up,
+        "zapper serve didn't listen on {} within a minute",
+        socket.display()
+    );
     let text = ok(run(&t.startup(), Some(&socket), &["rules"]).await);
     assert!(text.contains("global-deny"), "{text}");
     let text = ok(run(&t.startup(), Some(&socket), &["ps"]).await);

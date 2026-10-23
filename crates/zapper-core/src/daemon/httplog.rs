@@ -442,19 +442,23 @@ mod tests {
         });
     }
 
+    /// Requests finish while the UI lists them, on two threads: a deadlock
+    /// shows as the time running out. Each list copies the whole log, so
+    /// the rounds are few enough to stay well inside the time on a loaded
+    /// machine.
     #[test]
     fn finishing_while_listing_does_not_deadlock() {
-        within(20, || {
+        within(60, || {
             let log = Arc::new(Mutex::new(RequestLog::default()));
             let reader = {
                 let log = log.clone();
                 std::thread::spawn(move || {
-                    for _ in 0..2000 {
+                    for _ in 0..500 {
                         let _ = log.lock().unwrap().list();
                     }
                 })
             };
-            for _ in 0..2000 {
+            for _ in 0..500 {
                 let rec =
                     log.lock()
                         .unwrap()

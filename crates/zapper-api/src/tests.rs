@@ -553,6 +553,52 @@ async fn services_added_listed_and_removed() {
 // The UI.
 
 /// The UI's cookie, from the token in the URL `zapper serve` prints.
+/// A session's request log and terminals, as the UI's session view reads
+/// them: each connection through the proxy is a request with its decision.
+#[tokio::test]
+async fn a_sessions_requests_and_terminals() {
+    let t = TestCore::new(CONFIG);
+    let id = session(&t, "web", &[], true);
+    let s = t.core.session(&id).unwrap();
+    let app = super::api(t.core.clone(), &Mount::default());
+    let path = format!("/v1/sessions/{id}/requests");
+    assert_eq!(get(&app, &path).await.json(), json!([]));
+
+    // A connection to a host the global layer denies.
+    drop(zapper_core::testing::dial(&t, &s, "x.bad.example", 443));
+    let mut list = Value::Null;
+    for _ in 0..200 {
+        list = get(&app, &path).await.json();
+        if list.as_array().is_some_and(|l| !l.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let first = &list[0];
+    assert_eq!(first["url"], "x.bad.example:443", "{list}");
+    assert_eq!(
+        (&first["action"], &first["rule"]),
+        (&json!("deny"), &json!("global-deny")),
+        "{list}"
+    );
+    let n = first["id"].as_u64().unwrap();
+    let one = get(&app, &format!("{path}/{n}")).await;
+    assert_eq!(one.status, StatusCode::OK);
+    assert_eq!(one.json()["url"], "x.bad.example:443");
+    let none = get(&app, &format!("{path}/999")).await;
+    assert_eq!(none.status, StatusCode::NOT_FOUND, "{}", none.body);
+    assert_eq!(
+        get(&app, "/v1/sessions/zzzzzz/requests").await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // No terminal is open; a terminal that isn't there has no stream.
+    let terms = get(&app, &format!("/v1/sessions/{id}/terminals")).await;
+    assert_eq!(terms.json(), json!([]));
+    let stream = get(&app, &format!("/v1/sessions/{id}/terminals/1/stream")).await;
+    assert_eq!(stream.status, StatusCode::NOT_FOUND, "{}", stream.body);
+}
+
 async fn signed_in(app: &Router, token: &str) -> String {
     let r = send(
         app,

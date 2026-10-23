@@ -160,6 +160,108 @@ pub fn echoing_vm(s: &Session) {
     });
 }
 
+/// A command the host started in a VM (`shell_vm`): its request, its stdin
+/// as lines, and its stdout.
+pub struct Shell {
+    pub request: zapper_policy::proto::ShellRequest,
+    read: tokio::net::unix::OwnedReadHalf,
+    write: tokio::net::unix::OwnedWriteHalf,
+    buf: Vec<u8>,
+}
+
+impl Shell {
+    /// The next line of its stdin, without the newline; none once the host
+    /// closed it.
+    pub async fn line(&mut self) -> Option<String> {
+        use zapper_policy::proto::Frame;
+        loop {
+            if let Some(i) = self.buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.buf.drain(..=i).collect();
+                return Some(String::from_utf8_lossy(&line[..i]).into_owned());
+            }
+            match crate::util::read_frame(&mut self.read).await {
+                Ok(Some(Frame::Data(d))) => self.buf.extend(d),
+                Ok(Some(Frame::Resize(..))) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    /// Writes `line` and a newline to its stdout.
+    pub async fn say(&mut self, line: &str) {
+        self.frame(zapper_policy::proto::Frame::Data(
+            format!("{line}\n").into_bytes(),
+        ))
+        .await;
+    }
+
+    /// All of its stdin, up to the host's end of it.
+    pub async fn input(&mut self) -> Vec<u8> {
+        use zapper_policy::proto::Frame;
+        let mut all = std::mem::take(&mut self.buf);
+        while let Ok(Some(Frame::Data(d))) = crate::util::read_frame(&mut self.read).await {
+            all.extend(d);
+        }
+        all
+    }
+
+    /// Writes `bytes` to its stdout as they are.
+    pub async fn output(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(60 * 1024) {
+            self.frame(zapper_policy::proto::Frame::Data(chunk.to_vec()))
+                .await;
+        }
+    }
+
+    /// The command exits with `code`.
+    pub async fn exit(mut self, code: i32) {
+        self.frame(zapper_policy::proto::Frame::Exit(code)).await;
+    }
+
+    async fn frame(&mut self, f: zapper_policy::proto::Frame) {
+        let mut b = Vec::new();
+        f.write_to(&mut b).unwrap();
+        let _ = self.write.write_all(&b).await;
+    }
+}
+
+/// Plays a VM's side of the commands the host starts in `s`
+/// (`Session::open_shell`: an agent the foreman drives, `zapper exec`):
+/// each, as it is started.
+pub fn shell_vm(s: &Session) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
+    let path = s.vsock_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = listener.accept().await {
+            let mut line = Vec::new();
+            let mut b = [0u8; 1];
+            while c.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
+                line.push(b[0]);
+            }
+            assert!(line.starts_with(b"CONNECT "), "{line:?}");
+            c.write_all(b"OK 1\n").await.unwrap();
+            line.clear();
+            while c.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
+                line.push(b[0]);
+            }
+            let request = serde_json::from_slice(&line).unwrap();
+            let (read, write) = c.into_split();
+            let shell = Shell {
+                request,
+                read,
+                write,
+                buf: Vec::new(),
+            };
+            if tx.send(shell).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 /// The DNS server's answer to `query` from `s`.
 pub async fn query_dns(core: &Core, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
     crate::daemon::nic::query_dns(core.daemon(), s, query).await
