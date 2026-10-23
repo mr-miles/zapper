@@ -422,7 +422,7 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
-        post: Mutex::new(PostOffice::new(&firm, live.clone())),
+        post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
         models: models.clone(),
@@ -770,7 +770,7 @@ async fn ticker(d: Core, run: Arc<FirmRun>) {
         if run.ended() {
             return;
         }
-        let sent = run.post.lock().unwrap().tick(&run.journal, now());
+        let sent = run.post.tick(&run.journal, now());
         for s in &sent {
             run.deliver(s);
         }
@@ -844,7 +844,7 @@ pub(crate) fn pause_for(run: &FirmRun, paused: bool, reason: Option<&str>) -> Re
 
 /// The board sends mail.
 pub fn board_send(run: &FirmRun, v: &Value) -> Result<mail::Sent> {
-    let d = ops::draft_from(BOARD, v, None, &run.post.lock().unwrap())?;
+    let d = run.post.with(|po| ops::draft_from(BOARD, v, None, po))?;
     run.send(d)
 }
 

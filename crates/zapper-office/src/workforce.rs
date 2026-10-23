@@ -581,9 +581,7 @@ fn open_work(run: &FirmRun, w: &str) -> (usize, usize) {
     let mail = run.rt(w).map_or(0, |r| r.queue.lock().unwrap().len());
     let owed = run
         .post
-        .lock()
-        .unwrap()
-        .desk(w)
+        .with(|po| po.desk(w))
         .owed
         .iter()
         .filter(|o| o.kind == super::mail::Kind::Assignment)
@@ -1270,7 +1268,7 @@ pub fn let_go(
         .lock()
         .unwrap()
         .insert(worker.to_string(), manager.clone());
-    let (moved, to_read) = run.post.lock().unwrap().leave(worker, &manager);
+    let (moved, to_read) = run.post.leave(worker, &manager);
     // What they hadn't read or answered reaches their manager's desk.
     for id in to_read {
         run.deliver(&super::mail::Sent {

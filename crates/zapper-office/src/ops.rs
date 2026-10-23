@@ -690,7 +690,7 @@ pub async fn dispatch(
         "contracts" => Ok(json!(super::contracts::mine(run, me))),
         "mail_send" => {
             let context = w.context.lock().unwrap().clone();
-            let d = draft_from(me, args, context, &run.post.lock().unwrap())?;
+            let d = run.post.with(|po| draft_from(me, args, context, po))?;
             if d.in_reply_to.is_some() {
                 bail!("to answer a message use mail_reply");
             }
@@ -699,13 +699,13 @@ pub async fn dispatch(
             Ok(json!(sent))
         }
         "mail_reply" => {
-            let d = reply_from(me, args, &run.post.lock().unwrap())?;
+            let d = run.post.with(|po| reply_from(me, args, po))?;
             check_attachments(run, me, &d.attachments)?;
             Ok(json!(run.send(d)?))
         }
         "mail_inbox" => {
             let unread = args["unread"].as_bool().unwrap_or(false);
-            let list = run.post.lock().unwrap().inbox(me, unread, 50);
+            let list = run.post.with(|po| po.inbox(me, unread, 50));
             let fresh = list.iter().filter(|m| m["unread"] == json!(true)).count();
             let mut v = json!({ "messages": list, "unread": fresh });
             if fresh == 0 {
@@ -715,26 +715,14 @@ pub async fn dispatch(
         }
         "mail_thread" => {
             let id = req_str(args, "thread")?;
-            let mut po = run.post.lock().unwrap();
-            let v = po.thread(&run.journal, &id, me)?;
-            let ids: Vec<String> = v["messages"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| m["id"].as_str().map(str::to_string))
-                .collect();
-            po.mark_read(me, &ids);
-            Ok(v)
+            run.post.read_thread(&run.journal, &id, me)
         }
         "mail_read" => {
             let id = req_str(args, "message")?;
-            let mut po = run.post.lock().unwrap();
-            let v = po.message(&run.journal, &id, me)?;
-            po.mark_read(me, &[id]);
-            Ok(v)
+            run.post.read_message(&run.journal, &id, me)
         }
         "desk" => {
-            let desk = run.post.lock().unwrap().desk(me);
+            let desk = run.post.with(|po| po.desk(me));
             let pending = security::pending_for(run, me);
             let mut v =
                 json!({ "owed": desk.owed, "waiting": desk.waiting, "access_requests": pending });
@@ -744,7 +732,7 @@ pub async fn dispatch(
             Ok(v)
         }
         "directory" => {
-            let mut v = run.post.lock().unwrap().directory();
+            let mut v = run.post.with(|po| po.directory());
             for x in v["workers"].as_array_mut().into_iter().flatten() {
                 if let Some(rt) = x["name"].as_str().and_then(|n| run.rt(n)) {
                     x["state"] = json!(rt.state());

@@ -500,9 +500,7 @@ pub fn request(
     let decider = first_decider(run, worker, &resource, level);
     let assignments: Vec<String> = run
         .post
-        .lock()
-        .unwrap()
-        .desk(worker)
+        .with(|po| po.desk(worker))
         .owed
         .iter()
         .filter(|o| o.kind == super::mail::Kind::Assignment)

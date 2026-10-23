@@ -60,7 +60,7 @@ impl OfficeOf for Core {
     }
 }
 use journal::Journal;
-use mail::{Draft, Kind, PostOffice};
+use mail::{Draft, Kind};
 use zapper_core::Session;
 
 /// Every firm's current or last run.
@@ -193,7 +193,7 @@ pub(crate) struct FirmRun {
     pub started: f64,
     pub state: Mutex<RunState>,
     pub journal: Journal,
-    pub post: Mutex<PostOffice>,
+    pub post: mail::Post,
     workers: RwLock<BTreeMap<String, Arc<WorkerRt>>>,
     /// The run's budget: the board's grants, balances, budget requests.
     pub ledger: workforce::Books,
@@ -404,7 +404,7 @@ impl FirmRun {
         )?;
         // Closing the board's objective pauses the firm: only once everyone
         // below the closer is idle, not mid-turn or with mail to read.
-        if !d.automatic && self.post.lock().unwrap().would_close_objective(&d) {
+        if !d.automatic && self.post.with(|po| po.would_close_objective(&d)) {
             let busy = self.team_busy(&d.from);
             if !busy.is_empty() {
                 let fresh = self
@@ -422,7 +422,7 @@ impl FirmRun {
                 anyhow::bail!("the board's objective can't close while your team is still busy: {}. The firm pauses when it closes and their work would stop half done. End your turn: the post office tells you as soon as they are all idle, and then you close", busy.join(", "));
             }
         }
-        let sent = self.post.lock().unwrap().send(&self.journal, d, now())?;
+        let sent = self.post.send(&self.journal, d, now())?;
         self.deliver(&sent);
         if sent.objective_done {
             // The board's task is delivered: the simulation holds until the
@@ -447,11 +447,7 @@ impl FirmRun {
         let d = Draft::new(mail::OFFICE, vec![to.to_string()], subject, body, Kind::Fyi);
         // The post office's lock ends with this statement, before the
         // workers' queues are touched.
-        let sent = self
-            .post
-            .lock()
-            .unwrap()
-            .send_notice(&self.journal, d, now());
+        let sent = self.post.send_notice(&self.journal, d, now());
         match sent {
             Ok(sent) => self.deliver(&sent),
             Err(e) => tracing::warn!(firm = %self.firm, "notice to {to}: {e:#}"),
@@ -518,13 +514,14 @@ impl FirmRun {
             .iter()
             .map(|w| {
                 let (state, detail) = w.state.lock().unwrap().clone();
-                let po = self.post.lock().unwrap();
-                let desk = po.desk(&w.name);
+                let (desk, unread) = self
+                    .post
+                    .with(|po| (po.desk(&w.name), po.unread(&w.name).len()));
                 json!({
                     "name": w.name, "role": w.role, "title": w.title, "officer": w.officer(),
                     "state": state, "detail": detail,
                     "session": w.session().map(|s| s.id.clone()),
-                    "unread": po.unread(&w.name).len(),
+                    "unread": unread,
                     "owed": desk.owed.len(), "waiting": desk.waiting.len(),
                     "queued": w.queue.lock().unwrap().len(),
                 })
@@ -537,7 +534,7 @@ impl FirmRun {
             "domain": self.domain, "repos": self.config.git_repos(), "workers": workers, "chart": chart, "funds": ledger,
             "usage": { "day": u.day, "turns": u.turns, "tokens": u.tokens, "worker_turns": u.worker_turns },
             "budget": self.config.budget,
-            "board_unread": self.post.lock().unwrap().unread(BOARD).len(),
+            "board_unread": self.post.with(|po| po.unread(BOARD).len()),
             "facilities": self.facility.status(),
             "contracts": contracts::list(self),
             "scenario": self.scenario.as_ref().map(|p| p.status()),

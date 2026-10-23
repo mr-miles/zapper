@@ -355,12 +355,11 @@ pub fn quote(
 }
 
 fn last_in_thread(run: &FirmRun, thread: &str) -> Option<String> {
-    run.post
-        .lock()
-        .unwrap()
-        .threads
-        .get(thread)
-        .and_then(|t| t.messages.last().cloned())
+    run.post.with(|po| {
+        po.threads
+            .get(thread)
+            .and_then(|t| t.messages.last().cloned())
+    })
 }
 
 /// The hirer counters: other terms, within a few rounds.
@@ -441,8 +440,6 @@ pub fn accept(run: &FirmRun, by: &str, id: &str) -> Result<Value> {
     // The job answers the quote: the hirer owes nothing more in the
     // negotiation's thread.
     run.post
-        .lock()
-        .unwrap()
         .settle_thread(&run.journal, &c.thread, by, &sent.id);
     update(run, id, |c| c.job = Some(sent.id.clone()));
     run.journal.append(

@@ -111,7 +111,7 @@ fn driver_of(s: &Session) -> Result<&'static dyn Driver> {
 }
 
 fn idle_state(run: &FirmRun, w: &WorkerRt) -> WorkerState {
-    if run.post.lock().unwrap().desk(&w.name).waiting.is_empty() {
+    if run.post.with(|po| po.desk(&w.name).waiting.is_empty()) {
         WorkerState::Idle
     } else {
         WorkerState::Waiting
@@ -256,34 +256,31 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
         let pending = security::pending_for(&run, &w.name);
         let chart = run.chart();
         let prompt = {
-            let mut po = run.post.lock().unwrap();
-            po.mark_read(&w.name, &ids);
+            run.post.mark_read(&w.name, &ids);
             let mut p = String::new();
             if let Some(o) = &officer_part {
                 p.push_str(o);
                 p.push('\n');
             }
             if !ids.is_empty() || !notes.is_empty() || officer_part.is_none() {
-                p.push_str(&prompts::wake(
-                    &chart,
-                    &po,
-                    &run.journal,
-                    &w.name,
-                    &ids,
-                    &notes,
-                    &pending,
-                    now(),
-                ));
+                p.push_str(&run.post.with(|po| {
+                    prompts::wake(
+                        &chart,
+                        po,
+                        &run.journal,
+                        &w.name,
+                        &ids,
+                        &notes,
+                        &pending,
+                        now(),
+                    )
+                }));
             }
             p
         };
         let first_thread = ids.first().and_then(|id| {
             run.post
-                .lock()
-                .unwrap()
-                .messages
-                .get(id)
-                .map(|m| m.thread.clone())
+                .with(|po| po.messages.get(id).map(|m| m.thread.clone()))
         });
         *w.context.lock().unwrap() = first_thread;
         w.extended.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -382,11 +379,12 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 let price = run.ledger.turn_price(&w.name, run.config.budget.turn_price);
                 run.count_turn(&w.name, price);
                 let subjects: Vec<String> = {
-                    let po = run.post.lock().unwrap();
-                    ids.iter()
-                        .filter_map(|id| po.messages.get(id))
-                        .map(|m| format!("{} from {}", m.subject, m.from))
-                        .collect()
+                    run.post.with(|po| {
+                        ids.iter()
+                            .filter_map(|id| po.messages.get(id))
+                            .map(|m| format!("{} from {}", m.subject, m.from))
+                            .collect()
+                    })
                 };
                 let limit = run.config.budget.turn_timeout.clone();
                 w.notes
@@ -496,18 +494,19 @@ fn hand_over(run: &FirmRun, w: &WorkerRt, how: &str) -> Option<String> {
     let pending = security::pending_for(run, &w.name);
     let chart = run.chart();
     let text = {
-        let mut po = run.post.lock().unwrap();
-        po.mark_read(&w.name, &ids);
-        prompts::wake(
-            &chart,
-            &po,
-            &run.journal,
-            &w.name,
-            &ids,
-            &[],
-            &pending,
-            now(),
-        )
+        run.post.mark_read(&w.name, &ids);
+        run.post.with(|po| {
+            prompts::wake(
+                &chart,
+                po,
+                &run.journal,
+                &w.name,
+                &ids,
+                &[],
+                &pending,
+                now(),
+            )
+        })
     };
     run.journal.append(
         "turn",

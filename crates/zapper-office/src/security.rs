@@ -163,9 +163,7 @@ pub fn ask(
     // The post office's lock is never taken while this one is held.
     let assignment = run
         .post
-        .lock()
-        .unwrap()
-        .desk(worker)
+        .with(|po| po.desk(worker))
         .owed
         .first()
         .map(|o| o.subject.clone());
