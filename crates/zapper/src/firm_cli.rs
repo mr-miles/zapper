@@ -1162,7 +1162,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Replay { firm, run } => {
             c.json(Method::GET, &format!("/v1/firms/{firm}/runs"), None)
                 .await?;
-            let state = crate::daemon_state_dir()?;
+            let state = super::daemon_state_dir()?;
             let url = std::fs::read_to_string(state.join("ui-url"))
                 .context("the daemon's UI address (is the UI enabled?)")?;
             println!("{}#firm={firm}&replay={run}", url.trim());

@@ -4,9 +4,8 @@
 
 mod client;
 use zapper_core::{util, vmm};
-#[cfg(feature = "office")]
-mod firm_cli;
 mod image;
+mod office;
 mod term;
 
 use std::path::{Path, PathBuf};
@@ -159,24 +158,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ImageCmd,
     },
-    /// Firms of workers: start, stop, watch, replay.
-    #[cfg(feature = "office")]
-    Firm {
-        #[command(subcommand)]
-        cmd: firm_cli::FirmCmd,
-    },
-    /// Mail as the board.
-    #[cfg(feature = "office")]
-    Mail {
-        #[command(subcommand)]
-        cmd: firm_cli::MailCmd,
-    },
-    /// A firm's shared drive.
-    #[cfg(feature = "office")]
-    Drive {
-        #[command(subcommand)]
-        cmd: firm_cli::DriveCmd,
-    },
+    #[command(flatten)]
+    Office(office::Cmd),
     /// The record: who keeps it, and checking it against the keeper's chains.
     Record {
         #[command(subcommand)]
@@ -316,63 +299,16 @@ enum ImageCmd {
     Ls,
 }
 
+/// The config in the repository, which `zapper init` writes.
 const EXAMPLE: &str = include_str!("../../../config/zapper.yaml");
-
-/// The example config `zapper init` writes: without the office, less its
-/// `firms` section (the file's last, with the comment above it).
-fn example() -> &'static str {
-    if cfg!(feature = "office") {
-        return EXAMPLE;
-    }
-    let Some(at) = EXAMPLE.find("\nfirms:") else {
-        return EXAMPLE;
-    };
-    // Up to and including the newline before `firms:`, then without the
-    // comment lines right above it.
-    let mut head = &EXAMPLE[..at + 1];
-    while let Some(nl) = head[..head.len() - 1].rfind('\n') {
-        if !head[nl + 1..].starts_with('#') {
-            break;
-        }
-        head = &head[..nl + 1];
-    }
-    head
-}
-
-/// A config with firms needs a zapper built with the office, which checks
-/// them.
-fn office_config(c: &Config) -> Result<()> {
-    #[cfg(feature = "office")]
-    zapper_office::firm::check(c)?;
-    if !cfg!(feature = "office") && !c.firms.is_empty() {
-        bail!(
-            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
-        );
-    }
-    Ok(())
-}
 
 fn load_config(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| office_config(&c).map(|_| c))
+        .and_then(|c| office::config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
-}
-
-/// What the office adds to the API and the UI; nothing without it.
-fn mount(d: &zapper_core::Core) -> zapper_api::Mount {
-    #[cfg(feature = "office")]
-    return zapper_api::Mount {
-        routes: zapper_office::routes(d),
-        page: Some(zapper_office::PAGE),
-    };
-    #[cfg(not(feature = "office"))]
-    {
-        let _ = d;
-        zapper_api::Mount::default()
-    }
 }
 
 fn main() {
@@ -435,15 +371,6 @@ fn config_path(given: Option<&str>) -> PathBuf {
     path
 }
 
-/// The daemon's state directory, from the config.
-#[cfg(feature = "office")]
-fn daemon_state_dir() -> Result<PathBuf> {
-    let path = config_path(std::env::var("ZAPPER_CONFIG").ok().as_deref());
-    Ok(PathBuf::from(expand_home(
-        &load_config(&path)?.daemon.state,
-    )))
-}
-
 fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
@@ -487,23 +414,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("{} exists; not touching it", config_path.display());
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
-                util::write_private(&config_path, example().as_bytes())?;
+                util::write_private(&config_path, office::example().as_bytes())?;
                 println!("wrote {}", config_path.display());
             }
             // Skills are the office's workers'.
-            #[cfg(feature = "office")]
-            {
-                let dir = config_path
-                    .parent()
-                    .unwrap()
-                    .join(zapper_office::skills::DEFAULT_DIR);
-                let written = zapper_office::skills::install(&dir)?;
-                if written.is_empty() {
-                    println!("{}: the default skills are all there", dir.display());
-                } else {
-                    println!("wrote skills to {}: {}", dir.display(), written.join(", "));
-                }
-            }
+            office::init(config_path.parent().unwrap())?;
         }
         Cmd::Check => return check(&config_path).await,
         Cmd::Serve => serve(config_path).await?,
@@ -858,8 +773,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("profile {name} removed");
             }
         },
-        #[cfg(feature = "office")]
-        Cmd::Firm { cmd } => return firm_cli::firm(&c, cmd, cli.json).await,
+        Cmd::Office(cmd) => return office::run(&c, cmd, cli.json).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
@@ -901,10 +815,6 @@ async fn run(cli: Cli) -> Result<i32> {
             );
             return Ok(if ok { 0 } else { 1 });
         }
-        #[cfg(feature = "office")]
-        Cmd::Mail { cmd } => return firm_cli::mail(&c, cmd, cli.json).await,
-        #[cfg(feature = "office")]
-        Cmd::Drive { cmd } => return firm_cli::drive(&c, cmd, cli.json).await,
         Cmd::Image { cmd } => {
             let config = load_config(&config_path)?;
             let dir = PathBuf::from(expand_home(&config.daemon.images));
@@ -1136,12 +1046,10 @@ fn event_line(e: &Value) -> String {
 
 async fn serve(config_path: PathBuf) -> Result<()> {
     let d = zapper_core::Core::start(config_path.clone())?;
-    #[cfg(feature = "office")]
-    zapper_office::start(&d);
-    d.add_config_check(office_config);
+    office::start(&d);
     d.check_config()
         .with_context(|| format!("loading {}", config_path.display()))?;
-    let mount = mount(&d);
+    let mount = office::mount(&d);
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1316,19 +1224,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             );
         }
     }
-    #[cfg(feature = "office")]
-    for (name, firm) in &zapper_office::firm::all(&config) {
-        let dir = zapper_office::skills::dir(firm);
-        let missing = zapper_office::skills::missing(firm);
-        report(
-            missing.is_empty(),
-            &format!("firm {name}: skills in {}", dir.display()),
-            &format!(
-                "zapper init (writes the default skills), or add <name>/SKILL.md there for: {}",
-                missing.join(", ")
-            ),
-        );
-    }
+    office::check(&config, &mut report);
     let probe = |nic: bool| {
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.args(["__vmm", "--probe"]);
@@ -1789,23 +1685,23 @@ mod tests {
             "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
         )
         .unwrap();
-        let e = super::office_config(&firms).err().map(|e| e.to_string());
+        let e = super::office::config(&firms).err().map(|e| e.to_string());
         assert_eq!(e.is_none(), cfg!(feature = "office"), "{e:?}");
-        assert!(super::office_config(&zapper_policy::Config::default()).is_ok());
+        assert!(super::office::config(&zapper_policy::Config::default()).is_ok());
 
         let t = zapper_core::testing::TestCore::new("");
-        let m = super::mount(&t.core);
+        let m = super::office::mount(&t.core);
         assert_eq!(m.page.is_some(), cfg!(feature = "office"));
     }
 
     /// What `zapper init` writes loads in this build, office or not.
     #[test]
     fn init_writes_a_config_this_build_loads() {
-        let c = zapper_policy::Config::from_yaml(super::example()).unwrap();
-        super::office_config(&c).unwrap();
+        let c = zapper_policy::Config::from_yaml(super::office::example()).unwrap();
+        super::office::config(&c).unwrap();
         assert!(c.profiles.contains_key("claude"));
         if !cfg!(feature = "office") {
-            assert!(!super::example().contains("Firms (docs/office.md)"));
+            assert!(!super::office::example().contains("Firms (docs/office.md)"));
         }
     }
 }
