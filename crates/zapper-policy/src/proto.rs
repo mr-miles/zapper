@@ -36,6 +36,14 @@ pub const GUEST_NIC_ADDR: &str = "10.0.2.2";
 /// Longest MCP message from the guest.
 pub const MAX_MCP_LINE: usize = 128 * 1024;
 
+/// A tool's own name from the name an agent calls it by: Claude Code and pi
+/// call a tool of MCP server `office` `mcp__office__mail_send`.
+pub fn mcp_tool_name(name: &str) -> &str {
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or(name, |(_, tool)| tool)
+}
+
 /// Longest JSON line either side accepts.
 pub const MAX_LINE: usize = 256 * 1024;
 /// Largest frame payload.
@@ -251,6 +259,14 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_is_named_without_its_server() {
+        assert_eq!(mcp_tool_name("mcp__office__mail_send"), "mail_send");
+        assert_eq!(mcp_tool_name("mcp__github__create_issue"), "create_issue");
+        assert_eq!(mcp_tool_name("Edit"), "Edit");
+        assert_eq!(mcp_tool_name("mcp__broken"), "mcp__broken");
+    }
 
     #[test]
     fn frames_roundtrip() {

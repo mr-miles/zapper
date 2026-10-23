@@ -288,7 +288,7 @@ fn claude_activity(event: &Value) -> Option<String> {
     let content = event["message"]["content"].as_array()?;
     let tool = content.iter().rev().find(|c| c["type"] == "tool_use")?;
     let name = tool["name"].as_str().unwrap_or("tool");
-    let name = name.strip_prefix("mcp__office__").unwrap_or(name);
+    let name = zapper_policy::proto::mcp_tool_name(name);
     let input = &tool["input"];
     let arg = [
         "file_path",
@@ -609,7 +609,7 @@ impl Conversation for PiConversation {
                     Some("text_start") => out.push(Event::Activity("writing".into())),
                     Some("toolcall_start") => {
                         let name = ev["toolName"].as_str().unwrap_or("a tool");
-                        let name = name.strip_prefix("mcp__office__").unwrap_or(name);
+                        let name = zapper_policy::proto::mcp_tool_name(name);
                         out.push(Event::Activity(format!("preparing {name}")));
                     }
                     _ => {}
