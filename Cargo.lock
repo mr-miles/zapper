@@ -1693,6 +1693,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "zapper-policy",
+ "zapper-runs",
 ]
 
 [[package]]
@@ -1731,6 +1732,7 @@ dependencies = [
  "tracing",
  "zapper-core",
  "zapper-policy",
+ "zapper-runs",
 ]
 
 [[package]]
@@ -1742,6 +1744,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "zapper-runs"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

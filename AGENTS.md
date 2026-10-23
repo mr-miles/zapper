@@ -105,6 +105,7 @@ crates/zapper-office/    The Office, a client of `Core`: post office, foreman (h
   src/office.html          the office UI (org chart, messages, security, drive, statistics, replay)
 crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
+crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI) and the fake Claude and pi
 config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it);

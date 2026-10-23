@@ -34,7 +34,7 @@ ifeq ($(OFFICE),0)
 FEATURES := --no-default-features
 HOST     := -p zapper -p zapper-keeper
 BINS     := zapper zapper-agent
-EXCLUDE  := --exclude zapper-office --exclude zapper-inspect
+EXCLUDE  := --exclude zapper-office --exclude zapper-inspect --exclude zapper-runs
 else
 FEATURES :=
 HOST     := -p zapper -p zapper-keeper -p zapper-inspect

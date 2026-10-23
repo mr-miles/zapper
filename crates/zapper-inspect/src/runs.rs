@@ -5,7 +5,6 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// Where the files are: the daemon's state directory, and the keeper's
@@ -36,7 +35,7 @@ impl Store {
                 continue;
             };
             for run in runs.flatten() {
-                if run.path().join("run.json").is_file() {
+                if run.path().join(zapper_runs::INFO).is_file() {
                     let firm = firm.file_name().to_string_lossy().into_owned();
                     match self.load(&firm, &run.path()) {
                         Ok(r) => out.push(r),
@@ -64,7 +63,7 @@ impl Store {
     }
 
     fn load(&self, firm: &str, dir: &Path) -> Result<Run> {
-        let info: Value = serde_json::from_slice(&std::fs::read(dir.join("run.json"))?)
+        let info: Value = serde_json::from_slice(&std::fs::read(dir.join(zapper_runs::INFO))?)
             .context("parsing run.json")?;
         let started = info["started"].as_f64().unwrap_or(0.0);
         let mut run = Run {
@@ -84,18 +83,16 @@ impl Store {
             task: String::new(),
             messages: 0,
             people: Vec::new(),
-            transcripts: self.view(&dir.join("transcripts")),
+            transcripts: self.view(&dir.join(zapper_runs::TRANSCRIPTS)),
+            journal: Default::default(),
             slots: Vec::new(),
         };
         for w in info["chart"]["workers"].as_array().into_iter().flatten() {
             run.people.push(Person::from_chart(w, None, started));
         }
-        let journal = self.view(&dir.join("journal.jsonl"));
-        if let Ok(f) = std::fs::File::open(&journal) {
-            for line in BufReader::new(f).split(b'\n').map_while(Result::ok) {
-                if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                    run.apply(&v);
-                }
+        for line in zapper_runs::lines(&self.view(&dir.join(zapper_runs::JOURNAL))) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                run.apply(&v);
             }
         }
         Ok(run)
@@ -119,6 +116,8 @@ pub struct Run {
     pub messages: usize,
     pub people: Vec<Person>,
     transcripts: PathBuf,
+    /// What the journal says of the run: its state, mail and task.
+    journal: zapper_runs::Summary,
     /// Slots filled before the hire is journaled (the scenario names the
     /// worker first), by worker.
     slots: Vec<(String, Operative)>,
@@ -131,16 +130,16 @@ impl Run {
             self.last = self.last.max(ts);
         }
         match v["type"].as_str().unwrap_or("") {
-            "run" => {
-                if let Some(s) = v["state"].as_str() {
-                    self.state = s.to_string();
-                }
-            }
-            "mail" => {
-                self.messages += 1;
-                if self.task.is_empty() && v["from"] == "board" {
-                    self.task = str_of(&v["subject"]).unwrap_or_default();
-                }
+            "run" | "mail" => {
+                self.journal.apply(v);
+                self.state = self.journal.state.clone().unwrap_or_default();
+                self.messages = self.journal.messages as usize;
+                self.task = self
+                    .journal
+                    .kickoff
+                    .as_ref()
+                    .and_then(|m| str_of(&m["subject"]))
+                    .unwrap_or_default();
             }
             "hired" => {
                 let mut p = Person::from_chart(&v["worker"], str_of(&v["by"]), ts.unwrap_or(0.0));
@@ -356,6 +355,7 @@ mod tests {
                 100.0,
             )],
             transcripts: PathBuf::new(),
+            journal: Default::default(),
             slots: Vec::new(),
         };
         for v in [

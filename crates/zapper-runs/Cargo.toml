@@ -1,0 +1,9 @@
+[package]
+name = "zapper-runs"
+description = "The files a firm's run of The Office leaves on disk, and what its journal says, read-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
