@@ -133,6 +133,9 @@ pub fn init(config_dir: &Path) -> Result<()> {
 pub fn check(config: &Config, report: &mut impl FnMut(bool, &str, &str)) {
     #[cfg(feature = "office")]
     for (name, firm) in &zapper_office::firm::all(config) {
+        for w in firm.warnings() {
+            println!("note   firm {name}: {w}");
+        }
         let dir = zapper_office::skills::dir(firm);
         let missing = zapper_office::skills::missing(firm);
         report(

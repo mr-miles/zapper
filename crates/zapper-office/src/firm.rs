@@ -742,6 +742,21 @@ impl Firm {
         false
     }
 
+    /// What in the firm's config is valid but likely not what was meant:
+    /// `zapper check` notes it, and the board is told when a run starts.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let officers = !self.security.officers.is_empty() || self.roles.values().any(|r| r.officer);
+        if self.budget.seed > 0 && self.budget.security_share == 0.0 && officers {
+            out.push(
+                "budget.security_share is 0, so the security officers get none of the budget: \
+until someone funds them, every access request and background check goes to the board"
+                    .into(),
+            );
+        }
+        out
+    }
+
     pub fn is_officer(&self, name: &str) -> bool {
         self.security.officers.iter().any(|o| o == name)
     }
@@ -1040,6 +1055,31 @@ pub fn check(c: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfunded_officers_are_a_warning() {
+        let firm = |budget: &str, security: &str| -> Firm {
+            serde_yaml::from_str(&format!(
+                "roles:\n  ceo: {{ profile: w, skills: {{ work: ceo }} }}\n  sec: {{ profile: w, skills: {{ work: security-review }}, officer: true }}\nworkers:\n  - {{ name: ceo, role: ceo }}\n  - {{ name: sec, role: sec, reports_to: ceo }}\nbudget: {{ {budget} }}\nsecurity: {{ officers: [{security}] }}\n"
+            ))
+            .unwrap()
+        };
+        let w = firm("seed: 1000, security_share: 0", "sec").warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].starts_with("budget.security_share is 0"), "{w:?}");
+        // An officer role to hire is enough.
+        assert_eq!(
+            firm("seed: 1000, security_share: 0", "").warnings().len(),
+            1
+        );
+        // A share, or no run budget at all, is fine.
+        assert!(firm("seed: 1000, security_share: 0.1", "sec")
+            .warnings()
+            .is_empty());
+        assert!(firm("seed: 0, security_share: 0", "sec")
+            .warnings()
+            .is_empty());
+    }
 
     const BASE: &str = "
 profiles:

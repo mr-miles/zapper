@@ -469,6 +469,13 @@ fn create_run(
     for o in access::owners(&run) {
         access::owner_access(d, &run, &o, BOARD);
     }
+    for w in run.config.warnings() {
+        run.notice(
+            BOARD,
+            "A warning about the firm's config",
+            &format!("[Automatic notice] firm {name}: {w}.\n"),
+        );
+    }
     facility::register(d, &run)?;
     security::register(d, &run);
     ops::register(d, &run)?;

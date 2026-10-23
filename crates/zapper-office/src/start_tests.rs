@@ -47,3 +47,36 @@ fn the_live_run_is_listed_with_its_state() {
     let live = runs.iter().find(|r| r["run"] == run.id.as_str()).unwrap();
     assert_eq!(live["state"], "running", "{live}");
 }
+
+/// A config that is valid but likely not meant: the board is told when the
+/// run starts.
+#[test]
+fn the_board_is_warned_of_officers_without_a_budget() {
+    let firm = "
+profiles:
+  w: { agent: { kind: claude-code } }
+firms:
+  acme:
+    budget: { seed: 100000, security_share: 0 }
+    security: { officers: [sec] }
+    roles:
+      ceo: { profile: w, skills: { work: ceo } }
+      sec: { profile: w, skills: { work: security-review }, officer: true }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: sec, role: sec, reports_to: ceo }
+";
+    let t = crate::test_core(firm);
+    let run = crate::test_run(&t.core, "acme");
+    let inbox = run.post.with(|po| po.inbox(crate::firm::BOARD, true, 10));
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert_eq!(inbox[0]["subject"], "A warning about the firm's config");
+
+    // With a share, nothing to say.
+    let t = crate::test_core(&firm.replace("security_share: 0", "security_share: 0.2"));
+    let run = crate::test_run(&t.core, "acme");
+    assert!(run
+        .post
+        .with(|po| po.inbox(crate::firm::BOARD, true, 10))
+        .is_empty());
+}
