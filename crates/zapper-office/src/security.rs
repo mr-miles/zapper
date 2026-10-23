@@ -775,7 +775,7 @@ fn recent_traffic(run: &FirmRun, worker: &str) -> String {
     let Some(s) = run.rt(worker).and_then(|w| w.session()) else {
         return "none".into();
     };
-    let list = s.requests.lock().unwrap().list();
+    let list = s.requests();
     let allowed = list.iter().filter(|r| r["action"] == "allow").count();
     let denied = list.len() - allowed;
     let mut hosts: Vec<String> = list
@@ -1124,7 +1124,7 @@ pub fn standing(run: &FirmRun) -> Vec<Value> {
     let mut uses: HashMap<String, u64> = HashMap::new();
     for w in run.rts() {
         if let Some(s) = w.session() {
-            for r in s.requests.lock().unwrap().list() {
+            for r in s.requests() {
                 if let Some(id) = r["rule"].as_str() {
                     *uses.entry(id.to_string()).or_default() += 1;
                 }
@@ -1165,7 +1165,7 @@ pub fn traffic(
             continue;
         }
         let Some(s) = w.session() else { continue };
-        for mut r in s.requests.lock().unwrap().list() {
+        for mut r in s.requests() {
             if since.is_some_and(|t| r["ts"].as_f64().unwrap_or(0.0) < t) {
                 continue;
             }
@@ -1205,7 +1205,7 @@ fn digest_text(run: &FirmRun) -> Option<String> {
         let Some(s) = w.session() else { continue };
         let last = sec.digested.get(&s.id).copied().unwrap_or(0);
         let mut max_id = last;
-        for r in s.requests.lock().unwrap().list() {
+        for r in s.requests() {
             let rid = r["id"].as_u64().unwrap_or(0);
             if rid <= last {
                 continue;
@@ -1359,10 +1359,7 @@ pub fn tick(run: &FirmRun, last_digest: &mut f64) {
             .filter_map(|w| w.session())
             .map(|s| {
                 let last = sec.digested.get(&s.id).copied().unwrap_or(0);
-                s.requests
-                    .lock()
-                    .unwrap()
-                    .list()
+                s.requests()
                     .iter()
                     .filter(|r| r["id"].as_u64().unwrap_or(0) > last)
                     .count()

@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 use zapper_core::util::now;
-use zapper_core::{Core, NewSession, Status};
+use zapper_core::{Core, NewSession};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 
@@ -126,11 +126,7 @@ fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
         mib += config.resolve(&f.profile)?.engine.memory_mib as u64;
         count += 1;
     }
-    let running = d
-        .sessions()
-        .iter()
-        .filter(|s| !matches!(*s.status.borrow(), Status::Stopped(_) | Status::Failed(_)))
-        .count();
+    let running = d.sessions().iter().filter(|s| !s.ended()).count();
     if running + count > config.daemon.max_sessions {
         bail!(
             "the firm needs {count} sessions and {running} are running; daemon.max_sessions is {}",

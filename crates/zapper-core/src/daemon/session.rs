@@ -51,26 +51,26 @@ pub struct Session {
     pub workdir: PathBuf,
     /// The session's own policy layer, above its profile. Not saved.
     pub(crate) policy: RwLock<Policy>,
-    pub status: watch::Sender<Status>,
+    pub(crate) status: watch::Sender<Status>,
     pub dir: PathBuf,
-    pub ca: tls::SessionCa,
-    pub counters: Counters,
-    pub usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
+    pub(crate) ca: tls::SessionCa,
+    pub(crate) counters: Counters,
+    pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
     /// Names given out by the session's DNS, by synthetic address.
-    pub dns: Mutex<super::dns::FakeDns>,
-    pub dns_rate: Mutex<super::dns::RateLimit>,
+    pub(crate) dns: Mutex<super::dns::FakeDns>,
+    pub(crate) dns_rate: Mutex<super::dns::RateLimit>,
     /// Bounds the session's concurrent lookups on the host.
-    pub dns_lookups: Arc<Semaphore>,
+    pub(crate) dns_lookups: Arc<Semaphore>,
     /// The session's HTTP traffic, for inspecting it from the UI.
-    pub requests: Arc<Mutex<super::httplog::RequestLog>>,
+    pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
-    pub terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
+    pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
     guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
     vm: tokio::sync::Mutex<Option<Child>>,
     audit: Mutex<Option<super::record::Writer>>,
     next_shell: AtomicU64,
     /// Bounds concurrent proxy connections from the guest.
-    pub conns: Arc<Semaphore>,
+    pub(crate) conns: Arc<Semaphore>,
     exec_checks: Arc<Semaphore>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
@@ -78,7 +78,7 @@ pub struct Session {
     pub labels: BTreeMap<String, String>,
     /// Policy layers a client keeps for several sessions (a firm's role),
     /// between the session's own layer and its profile's.
-    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
+    pub(crate) shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// The driver, for a driven agent (`agent.driven`) outside a firm.
     pub driver: Option<Arc<super::driver::Driver>>,
     /// Its daemon, for the events of what clients change in it.
@@ -186,6 +186,37 @@ impl Session {
 
     pub fn is_running(&self) -> bool {
         matches!(*self.status.borrow(), Status::Running)
+    }
+
+    /// Whether the session has ended, stopped or failed.
+    pub fn ended(&self) -> bool {
+        matches!(
+            *self.status.borrow(),
+            Status::Stopped(_) | Status::Failed(_)
+        )
+    }
+
+    /// The session's HTTP requests and connections, oldest first.
+    pub fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().list()
+    }
+
+    /// One request with its headers and bodies.
+    pub fn request(&self, id: u64) -> Option<serde_json::Value> {
+        self.requests.lock().unwrap().get(id)
+    }
+
+    pub fn terminals(&self) -> Vec<TerminalInfo> {
+        self.terminals
+            .lock()
+            .unwrap()
+            .values()
+            .map(|t| t.info())
+            .collect()
+    }
+
+    pub fn terminal(&self, id: u64) -> Option<Arc<Terminal>> {
+        self.terminals.lock().unwrap().get(&id).cloned()
     }
 
     pub fn record(&self, event: &Event) {

@@ -61,7 +61,7 @@ async fn a_workers_ask_is_refused_at_once_and_goes_to_security() {
     assert_eq!(r[0]["port"], 443);
     let id = r[0]["id"].as_str().unwrap().to_string();
     // What the request log says of it.
-    let log = pat.requests.lock().unwrap().list();
+    let log = pat.requests();
     let why = log[0]["error"].as_str().unwrap_or_default().to_string();
     assert_eq!(why, format!("access requested from security ({id})"));
 

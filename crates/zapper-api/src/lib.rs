@@ -538,7 +538,7 @@ async fn get_audit(State(d): D, Path(id): Path<String>) -> R<Response> {
 /// The session's HTTP requests and connections, oldest first.
 async fn list_requests(State(d): D, Path(id): Path<String>) -> R<Json<Vec<Value>>> {
     let s = d.session(&id)?;
-    let list = s.requests.lock().unwrap().list();
+    let list = s.requests();
     Ok(Json(list))
 }
 
@@ -546,23 +546,14 @@ async fn list_requests(State(d): D, Path(id): Path<String>) -> R<Json<Vec<Value>
 async fn get_request(State(d): D, Path((id, n)): Path<(String, u64)>) -> R<Json<Value>> {
     let s = d.session(&id)?;
     let r = s
-        .requests
-        .lock()
-        .unwrap()
-        .get(n)
+        .request(n)
         .ok_or_else(|| anyhow::anyhow!("no request {n}"))?;
     Ok(Json(r))
 }
 
 async fn list_terminals(State(d): D, Path(id): Path<String>) -> R<Json<Vec<TerminalInfo>>> {
     let s = d.session(&id)?;
-    let terms = s
-        .terminals
-        .lock()
-        .unwrap()
-        .values()
-        .map(|t| t.info())
-        .collect();
+    let terms = s.terminals();
     Ok(Json(terms))
 }
 
@@ -576,11 +567,7 @@ async fn terminal_stream(
     use base64::Engine as _;
     let s = d.session(&id)?;
     let term = s
-        .terminals
-        .lock()
-        .unwrap()
-        .get(&n)
-        .cloned()
+        .terminal(n)
         .ok_or_else(|| anyhow::anyhow!("no terminal {n}"))?;
     let (snapshot, rx) = term.watch();
     let live = BroadcastStream::new(rx).filter_map(|r| async move { r.ok() });
