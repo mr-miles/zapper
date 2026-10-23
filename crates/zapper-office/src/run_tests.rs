@@ -560,6 +560,63 @@ fn a_restart_ends_the_runs_the_daemon_left_running() {
     assert_eq!(last["reason"], "the daemon stopped", "{last}");
 }
 
+/// The `config` events of `worker`'s session: what changed in its rules.
+fn rule_changes(t: &TestCore, run: &FirmRun, worker: &str) -> Vec<String> {
+    let s = session_of(run, worker);
+    t.core
+        .recent_events(Some(&s.id))
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .filter(|e| e["type"] == "config")
+        .map(|e| e["change"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// What the office puts in a worker's own rules (an officer's approval for
+/// them, the network a credential grant needs) is in their session's audit
+/// log, added and removed, like any session rule.
+#[test]
+fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
+    use super::access::Level;
+    use super::security::{self, DecideArgs};
+    let (t, run) = run();
+    let session = format!("session:{}", session_of(&run, "pat").id);
+    let req = zapper_policy::NetRequest {
+        host: "api.example".into(),
+        port: 443,
+        method: None,
+        path: None,
+    };
+    let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
+    let decide = DecideArgs {
+        allow: true,
+        scope: "worker".into(),
+        reason: "pat's work".into(),
+        methods: None,
+        path: None,
+        expires_in: None,
+    };
+    security::decide(&run, BOARD, &id, decide).unwrap();
+    let rule = security::standing(&run)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    security::revoke(&run, BOARD, &rule, "done").unwrap();
+
+    facility::network_follows_grant(&run, "pat", "git:api", Level::Write);
+    facility::network_follows_grant(&run, "pat", "git:api", Level::None);
+
+    assert_eq!(
+        rule_changes(&t, &run, "pat"),
+        [
+            format!("rule {rule} added to {session}"),
+            format!("rule {rule} removed from {session}"),
+            format!("rule credentials-git-api added to {session}"),
+            format!("rule credentials-git-api removed from {session}"),
+        ]
+    );
+}
+
 #[test]
 fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
     use super::security::{self, DecideArgs};
