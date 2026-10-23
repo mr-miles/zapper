@@ -599,6 +599,49 @@ async fn a_sessions_requests_and_terminals() {
     assert_eq!(stream.status, StatusCode::NOT_FOUND, "{}", stream.body);
 }
 
+/// The live event stream, with history: each event as JSON with the core's
+/// one-line summary and, when it decided something, its verdict.
+#[tokio::test]
+async fn events_stream_with_their_summary_and_verdict() {
+    let t = TestCore::new(CONFIG);
+    let id = session(&t, "web", &[], true);
+    let s = t.core.session(&id).unwrap();
+    drop(zapper_core::testing::dial(&t, &s, "x.bad.example", 443));
+    let app = super::api(t.core.clone(), &Mount::default());
+    let req = Request::builder()
+        .uri(format!("/v1/events?history=true&session={id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut text = String::new();
+    let net = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+            let found = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|e| e["type"] == "net");
+            if let Some(e) = found {
+                return e;
+            }
+        }
+    })
+    .await
+    .expect("the net event streams");
+    assert_eq!(net["session"], id.as_str());
+    assert_eq!(net["verdict"], "deny", "{net}");
+    assert_eq!(
+        net["summary"], "connect x.bad.example:443  (tunnel)",
+        "{net}"
+    );
+}
+
 async fn signed_in(app: &Router, token: &str) -> String {
     let r = send(
         app,

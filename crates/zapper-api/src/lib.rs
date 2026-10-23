@@ -775,7 +775,7 @@ async fn events(
     });
     let stream = stream::iter(history)
         .chain(live)
-        .map(|e| Ok(SseEvent::default().json_data(&e).unwrap_or_default()));
+        .map(|e| Ok(SseEvent::default().json_data(e.view()).unwrap_or_default()));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

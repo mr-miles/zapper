@@ -1099,6 +1099,8 @@ fn rule_row(r: &Value) -> Vec<String> {
     ]
 }
 
+/// An event of the live stream as a line: its time, session and type, then
+/// the core's verdict and summary; an `ask` with how to answer it.
 fn event_line(e: &Value) -> String {
     let ts = e["ts"].as_f64().unwrap_or(0.0) as i64;
     let t = format!(
@@ -1108,111 +1110,28 @@ fn event_line(e: &Value) -> String {
         ts % 60
     );
     let sess = s(&e["session"]);
-    let detail = match e["type"].as_str().unwrap_or("") {
-        "net" => format!(
-            "{} {} {}:{}{}{}{}",
-            s(&e["action"]),
-            e["method"].as_str().unwrap_or("CONNECT"),
-            s(&e["host"]),
-            e["port"],
-            s(&e["path"]),
-            e["status"]
-                .as_u64()
-                .map(|c| format!(" → {c}"))
-                .unwrap_or_default(),
-            e["error"]
-                .as_str()
-                .map(|x| format!(" ({x})"))
-                .unwrap_or_default()
-        ),
-        "exec" => format!(
-            "{} {}",
-            s(&e["action"]),
-            e["argv"]
-                .as_array()
-                .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
-                .unwrap_or_default()
-        ),
-        "ask" => format!(
-            "ASK {}: {}  (zapper approve {} | zapper deny {})",
-            s(&e["id"]),
-            s(&e["subject"]),
+    let verdict = e["verdict"]
+        .as_str()
+        .map(|v| format!("{v} "))
+        .unwrap_or_default();
+    let hint = if e["type"] == "ask" {
+        format!(
+            "  (zapper approve {} | zapper deny {})",
             s(&e["id"]),
             s(&e["id"])
-        ),
-        "answer" => format!(
-            "{} {}",
-            if e["allow"] == json!(true) {
-                "allowed"
-            } else {
-                "denied"
-            },
-            s(&e["id"])
-        ),
-        "guest" => {
-            let g = &e["event"];
-            match g["event"].as_str() {
-                Some("exit") => format!(
-                    "exit {} pid {} code {} {}ms",
-                    s(&g["comm"]),
-                    g["pid"],
-                    g["exit_code"],
-                    g["elapsed_ms"]
-                ),
-                Some("setup") => format!(
-                    "setup {}: {}",
-                    if g["ok"] == json!(true) {
-                        "ok"
-                    } else {
-                        "FAILED"
-                    },
-                    s(&g["step"])
-                ),
-                Some("shell_exit") => format!("shell {} exited with {}", g["id"], g["exit_code"]),
-                _ => g.to_string(),
-            }
-        }
-        "session" => format!("session {} {}", s(&e["state"]), s(&e["detail"])),
-        "dns" => format!(
-            "{} {}{}{}",
-            s(&e["rcode"]),
-            if e["name"] == json!("") {
-                "(invalid query)".to_string()
-            } else {
-                s(&e["name"])
-            },
-            e["answer"]
-                .as_str()
-                .map(|a| format!(" → {a}"))
-                .unwrap_or_default(),
-            e["reason"]
-                .as_str()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default()
-        ),
-        "shell" => format!("shell {} {}", e["id"], s(&e["state"])),
-        "config" => format!("config {}", s(&e["change"])),
-        "mcp" => format!(
-            "{} {}.{}{}",
-            if e["ok"] == json!(true) {
-                "ok"
-            } else {
-                "FAILED"
-            },
-            s(&e["server"]),
-            s(&e["tool"]),
-            e["error"]
-                .as_str()
-                .map(|x| format!(" ({x})"))
-                .unwrap_or_default()
-        ),
-        other => format!("{other} {e}"),
+        )
+    } else {
+        String::new()
     };
     let rule = e["rule"]
         .as_str()
         .map(|r| format!("  [{r}]"))
         .unwrap_or_default();
-    format!("{t} {sess:<6} {:<7} {detail}{rule}", s(&e["type"]))
+    format!(
+        "{t} {sess:<6} {:<7} {verdict}{}{hint}{rule}",
+        s(&e["type"]),
+        s(&e["summary"])
+    )
 }
 
 async fn serve(config_path: PathBuf) -> Result<()> {
@@ -1542,7 +1461,7 @@ mod tests {
             session,
             body,
         };
-        super::event_line(&serde_json::to_value(e).unwrap())
+        super::event_line(&e.view())
     }
 
     /// `zapper events`: one line for each type of event.
@@ -1565,8 +1484,8 @@ mod tests {
             error: error.map(Into::into),
         };
         let cases = [
-            (net(Some("GET"), Some(200), None), "01:01:01 abc234 net     allow GET api.example.com:443/v1/x → 200  [g-1]"),
-            (net(None, None, Some("refused")), "01:01:01 abc234 net     allow CONNECT api.example.com:443 (refused)  [g-1]"),
+            (net(Some("GET"), Some(200), None), "01:01:01 abc234 net     allow GET api.example.com:443/v1/x → 200  [secrets: gh]  [g-1]"),
+            (net(None, None, Some("refused")), "01:01:01 abc234 net     allow connect api.example.com:443  [secrets: gh]  refused  (tunnel)  [g-1]"),
             (
                 B::Exec {
                     pid: 7,
@@ -1579,7 +1498,7 @@ mod tests {
                     scope: None,
                     wait_ms: 1.25,
                 },
-                "01:01:01 abc234 exec    deny git push",
+                "01:01:01 abc234 exec    deny git push  (1.2 ms)",
             ),
             (
                 B::Ask {
@@ -1587,7 +1506,7 @@ mod tests {
                     kind: Kind::Net,
                     subject: "example.org:443".into(),
                 },
-                "01:01:01 abc234 ask     ASK a-1: example.org:443  (zapper approve a-1 | zapper deny a-1)",
+                "01:01:01 abc234 ask     ask a-1: example.org:443  (zapper approve a-1 | zapper deny a-1)",
             ),
             (
                 B::Answer {
@@ -1595,7 +1514,7 @@ mod tests {
                     allow: true,
                     remember: Some("session".into()),
                 },
-                "01:01:01 abc234 answer  allowed a-1",
+                "01:01:01 abc234 answer  allow a-1 · session",
             ),
             (
                 B::Answer {
@@ -1603,7 +1522,7 @@ mod tests {
                     allow: false,
                     remember: None,
                 },
-                "01:01:01 abc234 answer  denied a-2",
+                "01:01:01 abc234 answer  deny a-2",
             ),
             (
                 B::Dns {
@@ -1614,7 +1533,7 @@ mod tests {
                     answer: Some("100.64.0.9".into()),
                     reason: None,
                 },
-                "01:01:01 abc234 dns     noerror example.org → 100.64.0.9",
+                "01:01:01 abc234 dns     allow noerror example.org → 100.64.0.9",
             ),
             (
                 B::Dns {
@@ -1625,7 +1544,7 @@ mod tests {
                     answer: None,
                     reason: Some("truncated name".into()),
                 },
-                "01:01:01 abc234 dns     formerr (invalid query) (truncated name)",
+                "01:01:01 abc234 dns     deny formerr (invalid query)  (truncated name)",
             ),
             (
                 B::Guest {
@@ -1643,7 +1562,7 @@ mod tests {
                         io_bytes: 1,
                     },
                 },
-                "01:01:01 abc234 guest   exit make pid 9 code 2 40ms",
+                "01:01:01 abc234 guest   make pid 9 exit 2 · 40 ms",
             ),
             (
                 B::Guest {
@@ -1671,20 +1590,20 @@ mod tests {
                     argv: Some(vec!["bash".into()]),
                     exit_code: None,
                 },
-                "01:01:01 abc234 shell   shell 3 open",
+                "01:01:01 abc234 shell   shell 3 open: bash",
             ),
             (
                 B::Session {
                     state: "failed".into(),
                     detail: Some("no image".into()),
                 },
-                "01:01:01 abc234 session session failed no image",
+                "01:01:01 abc234 session failed: no image",
             ),
             (
                 B::Config {
                     change: "rule g-2 added".into(),
                 },
-                "01:01:01 abc234 config  config rule g-2 added",
+                "01:01:01 abc234 config  rule g-2 added",
             ),
             (
                 B::Service {
@@ -1699,14 +1618,14 @@ mod tests {
                         owner: "office".into(),
                     },
                 },
-                "01:01:01        service service {\"change\":\"added\",\"id\":4,\"kind\":\"service\",\"name\":\"git.acme.internal\",\"owner\":\"office\",\"port\":443,\"seq\":1,\"sessions\":{\"firm\":\"acme\"},\"to\":\"in the daemon\",\"ts\":3661.0,\"type\":\"service\"}",
+                "01:01:01        service added service git.acme.internal:443 → in the daemon for firm=acme (office)",
             ),
             (
                 B::Driver {
                     event: "turn_end".into(),
                     detail: json!({ "outcome": "done", "tokens": 1200 }),
                 },
-                "01:01:01 abc234 driver  driver {\"detail\":{\"outcome\":\"done\",\"tokens\":1200},\"event\":\"turn_end\",\"seq\":1,\"session\":\"abc234\",\"ts\":3661.0,\"type\":\"driver\"}",
+                "01:01:01 abc234 driver  turn_end done · 1200 tokens",
             ),
             (
                 B::Mcp {
@@ -1716,7 +1635,7 @@ mod tests {
                     ms: 2.5,
                     error: None,
                 },
-                "01:01:01 abc234 mcp     ok office.mail_send",
+                "01:01:01 abc234 mcp     office.mail_send · 2.5 ms",
             ),
             (
                 B::Mcp {
@@ -1726,7 +1645,88 @@ mod tests {
                     ms: 0.1,
                     error: Some("no MCP server x for this session".into()),
                 },
-                "01:01:01 abc234 mcp     FAILED x.y (no MCP server x for this session)",
+                "01:01:01 abc234 mcp     deny x.y · 0.1 ms  no MCP server x for this session",
+            ),
+            (
+                B::Exec {
+                    pid: 8,
+                    uid: 1000,
+                    path: "/usr/bin/curl".into(),
+                    argv: vec!["curl".into()],
+                    cwd: None,
+                    action: Action::Ask,
+                    rule: None,
+                    scope: None,
+                    wait_ms: 2000.0,
+                },
+                "01:01:01 abc234 exec    ask curl  (2000.0 ms)",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Exit {
+                        pid: 10,
+                        ppid: 1,
+                        uid: 0,
+                        comm: "sleep".into(),
+                        exit_code: 0,
+                        signal: Some(9),
+                        elapsed_ms: 5,
+                        user_ms: 0,
+                        sys_ms: 0,
+                        mem_kib: 1,
+                        io_bytes: 0,
+                    },
+                },
+                "01:01:01 abc234 guest   sleep pid 10 exit signal 9 · 5 ms",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Usage {
+                        load1: 0.5,
+                        mem_used_kib: 1024,
+                        procs: 12,
+                        disk_used_kib: 2048,
+                    },
+                },
+                "01:01:01 abc234 guest   {\"event\":\"usage\",\"load1\":0.5,\"mem_used_kib\":1024,\"procs\":12,\"disk_used_kib\":2048}",
+            ),
+            (
+                B::Shell {
+                    id: 4,
+                    state: "closed".into(),
+                    argv: None,
+                    exit_code: Some(130),
+                },
+                "01:01:01 abc234 shell   shell 4 closed exit 130",
+            ),
+            (
+                B::Service {
+                    change: "removed".into(),
+                    service: zapper_core::ServiceInfo {
+                        id: 5,
+                        kind: "zone",
+                        name: "acme.internal".into(),
+                        port: None,
+                        sessions: Default::default(),
+                        to: "nothing but its services".into(),
+                        owner: "operator".into(),
+                    },
+                },
+                "01:01:01        service removed zone acme.internal → nothing but its services (operator)",
+            ),
+            (
+                B::Driver {
+                    event: "error".into(),
+                    detail: json!({ "error": "claude not found" }),
+                },
+                "01:01:01 abc234 driver  deny error  claude not found",
+            ),
+            (
+                B::Driver {
+                    event: "turn_end".into(),
+                    detail: json!({ "outcome": "failed", "activity": "Edit a.md", "prompts": 2 }),
+                },
+                "01:01:01 abc234 driver  deny turn_end Edit a.md failed · 2 prompts",
             ),
         ];
         for (body, want) in cases {

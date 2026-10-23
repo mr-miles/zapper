@@ -21,6 +21,7 @@ pub mod registry;
 pub mod services;
 pub mod session;
 mod spec;
+mod summary;
 pub mod tls;
 pub mod vm;
 

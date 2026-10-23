@@ -84,7 +84,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/sessions/{id}/terminals/{n}/stream` | ✓ | Server-sent events, read-only: the terminal's kept output, then live output. Each `data:` is `{"r": [rows, cols]}`, `{"o": "<base64 bytes>"}`, or `{"end": exit_code}` |
 | `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool` | | Upgrade (`Upgrade: zapper-shell`) to a terminal; frames below |
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
-| `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line |
+| `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)) |
 | `GET /v1/services` | ✓ | Services and zones: `id`, `kind` (`service` or `zone`), `name`, `port`, `sessions` (labels; every session when empty), `to`, `owner` ([network: services](network.md#services)) |
 | `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port}}` → the service with its `id` |
 | `DELETE /v1/services/{id}` | | Remove a service added through the API; `409` for another owner's (a firm's) |
