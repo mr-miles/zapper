@@ -38,6 +38,16 @@ fn sessions_page(office: bool) -> &'static str {
     &PAGE
 }
 
+/// A file the mounted page loads: a stylesheet or a script.
+pub async fn asset(name: &'static str, body: &'static str) -> impl IntoResponse {
+    let kind = if name.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else {
+        "text/javascript; charset=utf-8"
+    };
+    ([(header::CONTENT_TYPE, kind)], body)
+}
+
 /// xterm.js 6.0.0 (MIT), bundled; see `assets/README`.
 /// A single terminal, read-only, for its own browser window.
 /// The terminal viewer: in its own window, or framed in the session's page;

@@ -553,6 +553,29 @@ pub fn routes(d: &Core) -> axum::Router {
 /// The office's page: the UI's front page.
 pub const PAGE: &str = include_str!("office.html");
 
+/// The page's stylesheet and scripts, in the order it loads them: served
+/// beside it under `/mount/`. The scripts share one scope, as one script.
+pub const ASSETS: &[(&str, &str)] = &[
+    ("office.css", include_str!("ui/office.css")),
+    ("common.js", include_str!("ui/common.js")),
+    ("model.js", include_str!("ui/model.js")),
+    ("org.js", include_str!("ui/org.js")),
+    ("compose.js", include_str!("ui/compose.js")),
+    ("transcripts.js", include_str!("ui/transcripts.js")),
+    ("markdown.js", include_str!("ui/markdown.js")),
+    ("messages.js", include_str!("ui/messages.js")),
+    ("security.js", include_str!("ui/security.js")),
+    ("vms.js", include_str!("ui/vms.js")),
+    ("drive.js", include_str!("ui/drive.js")),
+    ("git.js", include_str!("ui/git.js")),
+    ("kickoff.js", include_str!("ui/kickoff.js")),
+    ("runs.js", include_str!("ui/runs.js")),
+    ("work.js", include_str!("ui/work.js")),
+    ("stats.js", include_str!("ui/stats.js")),
+    ("header.js", include_str!("ui/header.js")),
+    ("main.js", include_str!("ui/main.js")),
+];
+
 /// The office in a starting daemon: runs a previous daemon left running are
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
@@ -674,5 +697,22 @@ mod tests {
         assert!(super::is_run_id(&id), "{id}");
         assert!(!super::is_run_id("../../etc"));
         assert!(!super::is_run_id("20261016-140501-K3Z"));
+    }
+
+    /// The page loads exactly the assets there are, in their order.
+    #[test]
+    fn the_page_loads_its_assets() {
+        let refs: Vec<&str> = super::PAGE
+            .split("\"/mount/")
+            .skip(1)
+            .map(|s| s.split('"').next().unwrap())
+            .collect();
+        let names: Vec<&str> = super::ASSETS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(refs, names);
+        for (name, body) in super::ASSETS {
+            if name.ends_with(".js") {
+                assert!(body.starts_with("'use strict';"), "{name}");
+            }
+        }
     }
 }

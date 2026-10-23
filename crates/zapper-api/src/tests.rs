@@ -774,6 +774,7 @@ async fn the_ui_front_page_is_the_mounted_one_or_the_sessions() {
     let mount = Mount {
         routes: Router::new().route("/x", axum::routing::get(|| async { "mounted" })),
         page: Some("<title>The Office</title>"),
+        assets: &[("page.css", "p {}"), ("page.js", "go();")],
     };
     let (front, sessions, x) = pages(&t, &mount).await;
     assert_eq!(front.body, "<title>The Office</title>");
@@ -784,4 +785,37 @@ async fn the_ui_front_page_is_the_mounted_one_or_the_sessions() {
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "guarded");
     let api = super::api(t.core.clone(), &mount);
     assert_eq!(get(&api, "/v1/x").await.body, "mounted");
+
+    // The files the page loads, by their type, behind the guard too.
+    let cookie = signed_in(&app, t.core.ui_token()).await;
+    for (path, body, kind) in [
+        ("/mount/page.css", "p {}", "text/css; charset=utf-8"),
+        ("/mount/page.js", "go();", "text/javascript; charset=utf-8"),
+    ] {
+        let r = send(
+            &app,
+            Method::GET,
+            path,
+            &[("host", HOST), ("cookie", &cookie)],
+            "",
+        )
+        .await;
+        assert_eq!(
+            (r.status, r.body.as_str()),
+            (StatusCode::OK, body),
+            "{path}"
+        );
+        assert_eq!(r.headers[header::CONTENT_TYPE], kind, "{path}");
+        let r = send(&app, Method::GET, path, &[("host", HOST)], "").await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path} guarded");
+    }
+    let r = send(
+        &app,
+        Method::GET,
+        "/mount/other.js",
+        &[("host", HOST), ("cookie", &cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
 }

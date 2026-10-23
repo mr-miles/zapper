@@ -79,11 +79,14 @@ fn read_routes() -> Router<Core> {
 
 /// What a client of the core (the office) adds to the API and the UI: its
 /// routes, under `/v1` and `/api` behind the same guard as the rest, and its
-/// page, the UI's front page instead of the sessions page.
+/// page, the UI's front page instead of the sessions page, with the files
+/// the page loads, served under `/mount/` (stylesheets and scripts, by
+/// their extension).
 #[derive(Clone, Default)]
 pub struct Mount {
     pub routes: Router,
     pub page: Option<&'static str>,
+    pub assets: &'static [(&'static str, &'static str)],
 }
 
 /// The API, with what is mounted on it.
@@ -120,7 +123,14 @@ pub fn api(core: Core, mount: &Mount) -> Router {
 /// on an address other than loopback (`daemon.ui`), for a remote host.
 pub fn ui(core: Core, port: u16, remote: bool, mount: &Mount) -> Router {
     let page = mount.page;
-    Router::new()
+    let mut router = Router::new();
+    for &(name, body) in mount.assets {
+        router = router.route(
+            &format!("/mount/{name}"),
+            get(move || ui::asset(name, body)),
+        );
+    }
+    router
         .route("/", get(move || ui::index(page)))
         .route("/sessions", get(move || ui::sessions(page.is_some())))
         .route("/favicon.ico", get(ui::favicon))
