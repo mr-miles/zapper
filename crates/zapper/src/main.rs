@@ -1654,6 +1654,12 @@ mod tests {
         assert_eq!(images, ["office"]);
         let mini = &zapper_office::firm::all(&c)["mini"];
         assert_eq!(zapper_office::skills::missing(mini), Vec::<String>::new());
+        // Ada alone, who may contract a writer, named Ben from the pool.
+        let founders: Vec<&str> = mini.workers.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(founders, ["ada"]);
+        assert_eq!(mini.roles["ceo"].hires, ["writer"]);
+        assert!(mini.budget.seed > 0);
+        assert_eq!(mini.names, ["ben"]);
         let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
         assert!(!task.lines().next().unwrap().trim().is_empty());
     }

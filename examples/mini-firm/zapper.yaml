@@ -1,8 +1,9 @@
-# The smallest company that shows its people at work: Ada, the CEO, and
-# Ben, a writer, both Claude Code, each in a VM of their own. No budget (so
-# no hiring), no git repository, no cluster: only mail and the shared drive.
-# The board (you) gives Ada a task; she briefs Ben, reviews his draft,
-# publishes the result and reports back. See README.md beside this file.
+# The smallest company that shows its people at work: Ada, the CEO, alone
+# at first, contracts Ben, a writer; both Claude Code, each in a VM of their
+# own. No git repository, no cluster: only mail, a budget and the shared
+# drive. The board (you) gives Ada a task and approves her budget; she
+# contracts Ben, agrees his quote, reviews his draft, publishes the result
+# and reports back. See README.md beside this file.
 #
 # A complete config, to run instead of config/zapper.yaml:
 #   zapper --config examples/mini-firm/zapper.yaml serve
@@ -57,20 +58,30 @@ profiles:
 
 firms:
   mini:
-    description: Two people and a writing task
+    description: A CEO who contracts a writer
     # The repository's skills: the playbooks workers read.
     skills_dir: ../../config/skills
+    # A run budget, in tokens: contracting needs one. The seed is what Ada
+    # has before the board approves her request; a quote's 30k fee comes
+    # out of it.
+    budget: { seed: 1000000 }
+    # The name of the first hire whose hirer doesn't pick one: the writer.
+    names: [ben]
     roles:
       ceo:
         profile: claude
         title: CEO
         model: claude-sonnet-5-5
         skills: { work: ceo }
+        # Ada may hire or contract writers (and gets the manager skill).
+        # No officer role here: with one, she would have to hire a security
+        # officer before anyone else.
+        hires: [writer]
       writer:
         profile: claude
         title: Writer
         model: claude-sonnet-5-5
         skills: { work: researcher }
+    # The founder; Ben joins as a contractor during the run.
     workers:
       - { name: ada, role: ceo }
-      - { name: ben, role: writer, reports_to: ada }
