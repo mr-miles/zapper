@@ -5,31 +5,31 @@
 //! A run starts fresh with every `firm up` and is written to
 //! `state/firms/<firm>/runs/<id>/` as it happens; the daemon keeps indexes.
 
-pub mod access;
-pub mod contracts;
-pub mod drive;
-pub mod facility;
+pub(crate) mod access;
+pub(crate) mod contracts;
+pub(crate) mod drive;
+pub(crate) mod facility;
 pub mod firm;
-pub mod foreman;
-pub mod git;
-pub mod http;
-pub mod journal;
-pub mod mail;
-pub mod ops;
-pub mod product;
-pub mod prompts;
-pub mod scenario;
-pub mod security;
+pub(crate) mod foreman;
+pub(crate) mod git;
+pub(crate) mod http;
+pub(crate) mod journal;
+pub(crate) mod mail;
+pub(crate) mod ops;
+pub(crate) mod product;
+pub(crate) mod prompts;
+pub(crate) mod scenario;
+pub(crate) mod security;
 pub mod skills;
-pub mod workforce;
+pub(crate) mod workforce;
 
 mod history;
 mod run;
 
-pub use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
+pub(crate) use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
 #[cfg(test)]
 pub(crate) use run::test_run;
-pub use run::{
+pub(crate) use run::{
     board_send, default_company, down, effective_model, pause, up_with, Agents, StartOptions,
 };
 pub(crate) use run::{chart, mem_available_mib, pause_for, worker_json};
@@ -50,7 +50,7 @@ use zapper_core::util::{now, random_id};
 use zapper_core::Core;
 
 /// The office's state in the core: its registry of runs.
-pub trait OfficeOf {
+pub(crate) trait OfficeOf {
     fn office(&self) -> Arc<Office>;
 }
 
@@ -65,7 +65,7 @@ use zapper_core::Session;
 
 /// Every firm's current or last run.
 #[derive(Default)]
-pub struct Office {
+pub(crate) struct Office {
     pub runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
 }
 
@@ -90,7 +90,7 @@ impl Office {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RunState {
+pub(crate) enum RunState {
     Starting,
     Running,
     Paused,
@@ -100,7 +100,7 @@ pub enum RunState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum WorkerState {
+pub(crate) enum WorkerState {
     Off,
     Booting,
     Idle,
@@ -113,7 +113,7 @@ pub enum WorkerState {
 }
 
 /// A worker of a running firm.
-pub struct WorkerRt {
+pub(crate) struct WorkerRt {
     pub name: String,
     pub role: String,
     pub title: String,
@@ -171,7 +171,7 @@ impl WorkerRt {
 
 /// Turn and token use, reset at midnight UTC.
 #[derive(Debug, Default, Serialize)]
-pub struct Usage {
+pub(crate) struct Usage {
     pub day: i64,
     pub turns: u32,
     pub tokens: u64,
@@ -179,7 +179,7 @@ pub struct Usage {
     pub notified: bool,
 }
 
-pub struct FirmRun {
+pub(crate) struct FirmRun {
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
@@ -236,7 +236,12 @@ pub struct FirmRun {
 
 /// The labels of a session that belongs to a firm: the firm, its run, the
 /// member (a worker's or facility's name) and which of the two it is.
-pub fn labels(firm: &str, run: &str, member: &str, worker: bool) -> BTreeMap<String, String> {
+pub(crate) fn labels(
+    firm: &str,
+    run: &str,
+    member: &str,
+    worker: bool,
+) -> BTreeMap<String, String> {
     [
         ("firm", firm),
         ("run", run),
@@ -250,7 +255,7 @@ pub fn labels(firm: &str, run: &str, member: &str, worker: bool) -> BTreeMap<Str
 
 /// The run a session belongs to, from its labels: the firm's run, if it is
 /// the one that started the session.
-pub fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
+pub(crate) fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
     let run = office.runs.read().unwrap().get(s.label("firm")?)?.clone();
     (Some(run.id.as_str()) == s.label("run")).then_some(run)
 }
@@ -271,7 +276,7 @@ fn run_id() -> String {
 }
 
 /// Whether `s` has the form `run_id` makes, so it can go into a path.
-pub fn is_run_id(s: &str) -> bool {
+pub(crate) fn is_run_id(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 19
         && b[8] == b'-'
@@ -291,7 +296,7 @@ pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub fn firm_dir(d: &Core, firm: &str) -> PathBuf {
+pub(crate) fn firm_dir(d: &Core, firm: &str) -> PathBuf {
     d.state_dir().join("firms").join(firm)
 }
 
