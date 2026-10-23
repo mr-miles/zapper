@@ -1,0 +1,107 @@
+# A company that builds software: Ada, the CEO, starts alone, hires a
+# product manager to write the specification of a shopping list app, then
+# engineers to build it in the firm's git repository (a Node backend and a
+# React frontend, kept in memory). Everyone is Claude Code in a VM of their
+# own. No cluster: the engineers run and test the app in their VMs, and you
+# read the code in the UI's Git tab or clone it. See README.md beside this
+# file.
+#
+# A complete config, to run instead of config/zapper.yaml:
+#   zapper --config examples/shopping-list/zapper.yaml serve
+# Relative paths resolve against this file's directory. Downloads, images,
+# state and the Claude token are the main config's, under your home.
+
+daemon:
+  firecracker: ~/.local/share/zapper/bin/firecracker
+  images: ~/.local/share/zapper/images
+  kernels: ~/.local/share/zapper/kernels
+  state: ~/.local/state/zapper
+  ui: 127.0.0.1:7878
+  ask_timeout_secs: 60
+  max_sessions: 16
+
+# Your Claude subscription's token, as config/zapper.yaml sets it up: from
+# `claude setup-token`, in a 0600 file. The VMs never see it.
+secrets:
+  claude:
+    file: ~/.config/zapper/claude-token
+    hosts: [api.anthropic.com]
+
+policy:
+  defaults: { net: deny, exec: allow }
+
+profiles:
+  # Claude Code (image: make image IMAGE=office, which has Node.js, git and
+  # a headless Chromium). The Claude API is allowed with the token the host
+  # adds; any other host is asked about, and in a firm the CEO (who holds
+  # security here) or the board decides.
+  claude:
+    engine:
+      image: office
+      kernel: vmlinux-6.1
+      vcpus: 2
+      memory_mib: 4096
+      disk: 16GiB
+      network: nic
+    agent:
+      kind: claude-code
+      command: [claude]
+      user: agent
+      workdir: /work
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+        PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+        NODE_PATH: /usr/local/lib/node_modules
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw }
+    policy:
+      net:
+        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+        # The firm's repository comes with a grant (credentials_request),
+        # which allows it in the worker's own layer; never a network ask.
+        - { action: deny, host: git.shop.internal, comment: with a git grant only }
+      defaults: { net: ask }
+
+  # Engineers also install packages from npm.
+  claude-engineer:
+    extends: claude
+    policy:
+      net:
+        - { action: allow, host: registry.npmjs.org, ports: [443], comment: npm packages }
+
+firms:
+  shop:
+    description: A CEO, a product manager and engineers building a shopping list app
+    # The repository's skills: the playbooks workers read.
+    skills_dir: ../../config/skills
+    # A run budget, in tokens: hiring needs one. The seed is what Ada has to
+    # scope the task; she asks the board for the rest.
+    budget: { seed: 1000000, max_concurrent: 3 }
+    # The firm's git repository, `product`, at git.shop.internal.
+    git: {}
+    credentials:
+      spaces: [general, product, engineering]
+    # Names for hires, in order, when the hirer doesn't pick one.
+    names: [priya, sam, leo, mia]
+    roles:
+      ceo:
+        profile: claude
+        title: CEO
+        model: claude-sonnet-5-5
+        skills: { work: ceo }
+        # No officer role: with one, Ada would have to hire a security
+        # officer before anyone else. She holds security herself.
+        hires: [product-manager, engineer]
+      product-manager:
+        profile: claude
+        title: Product Manager
+        model: claude-sonnet-5-5
+        skills: { work: product-manager }
+      engineer:
+        profile: claude-engineer
+        title: Software Engineer
+        model: claude-sonnet-5-5
+        skills: { work: software-engineer }
+    # The founder; everyone else is hired during the run.
+    workers:
+      - { name: ada, role: ceo }
