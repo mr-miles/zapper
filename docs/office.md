@@ -480,6 +480,7 @@ Each worker's skills follow from what their role does:
 
 ```
 Everyone             office-mail, office-publish, office-resources
++ a firm with git    office-git   (everyone: branches, review, who merges to main)
 + roles that hire    manager      (splitting work, review, budget and people, staff vs contractor, contractors)
 + security duty      security-review   (officers; the CEO until an officer is hired)
 + the role itself    its work skill: ceo, cto, product-manager, software-engineer, designer, researcher, analyst
@@ -492,6 +493,7 @@ So the CEO has the shared skills, `manager`, `security-review` and `ceo`; the CT
 | `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, delegating, replying and finishing, follow-ups, mail as colleague text |
 | `office-publish` | everyone | The shared drive: spaces, kinds, titles and summaries, versions, using others' work, Markdown, decks |
 | `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser; deciding access for the CEO and officers |
+| `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges (whoever holds admin: the CEO unless they grant it), reporting in the assignment's thread, telling those who wait once it's merged |
 | `manager` | roles that hire | Splitting and assigning work, unblocking, review, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
 | `security-review` | officers, the CEO while holding security | Network requests and TLS, credential requests, background checks, watching traffic, escalation |
 | work skill | each role | The role's core function: `ceo`, `cto`, `product-manager`, `software-engineer`, `designer`, `researcher`, `analyst` |

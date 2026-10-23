@@ -43,7 +43,7 @@ Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, 
 
 - `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
 - Work on your own branches, `<your name>/<topic>`: commit small, say what and why, `git push -u origin <branch>`, and push often. Share work by mailing the branch and commit.
-- `main` is what was released; only admin updates it or pushes tags.
+- `main` is what the firm has accepted; only admin updates it or pushes tags. Ask for write, not admin: how work is reviewed and who merges it is the office-git skill.
 - Code lives in git, never on the drive. Never commit secrets.
 
 ## The cluster

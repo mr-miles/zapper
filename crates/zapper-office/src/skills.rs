@@ -22,6 +22,7 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "office-mail",
     "office-publish",
     "office-resources",
+    "office-git",
     "ceo",
     "product-manager",
     "manager",
@@ -42,6 +43,9 @@ const SECURITY: &str = "security-review";
 const MANAGER: &str = "manager";
 /// Every worker's training: the firm's resources and how to get access.
 const RESOURCES: &str = "office-resources";
+/// Every worker's, in a firm with a repository: branches, review, who
+/// merges to main.
+const GIT: &str = "office-git";
 
 /// Where a firm's skills are.
 pub fn dir(firm: &Firm) -> PathBuf {
@@ -50,14 +54,16 @@ pub fn dir(firm: &Firm) -> PathBuf {
     ))
 }
 
-/// Each role's skills: everyone's shared skills, the role's own work skill,
-/// the manager skill for roles that hire, and the security skill for
-/// officers and the CEO (who holds security until an officer is hired).
+/// Each role's skills: everyone's shared skills (the git skill in a firm
+/// with a repository), the role's own work skill, the manager skill for
+/// roles that hire, and the security skill for officers and the CEO (who
+/// holds security until an officer is hired).
 pub(crate) fn needed(firm: &Firm) -> Vec<(String, String)> {
     let root_role = firm
         .root()
         .and_then(|r| firm.worker(r))
         .map(|w| w.role.clone());
+    let has_git = !firm.git_repos().is_empty();
     let mut out = Vec::new();
     for (role_name, role) in &firm.roles {
         let mut names = role.skills.names();
@@ -67,6 +73,9 @@ pub(crate) fn needed(firm: &Firm) -> Vec<(String, String)> {
                 names.push(n);
             }
         };
+        if has_git {
+            add(GIT);
+        }
         if !role.hires.is_empty() {
             add(MANAGER);
         }
@@ -147,6 +156,27 @@ mod tests {
             assert!(text.starts_with("---\n"), "{name}");
             assert!(text.contains(&format!("name: {name}\n")), "{name}");
         }
+    }
+
+    /// Every role learns the branch policy in a firm with a repository, and
+    /// none in a firm without one.
+    #[test]
+    fn every_role_gets_the_git_skill_when_the_firm_has_git() {
+        let firm = |git: &str| -> Firm {
+            serde_yaml::from_str(&format!(
+                "roles:\n  ceo: {{ skills: {{ work: ceo }}, hires: [eng] }}\n  eng: {{ skills: {{ work: software-engineer }} }}\nworkers: [{{ name: ada, role: ceo }}]\n{git}"
+            ))
+            .unwrap()
+        };
+        let with_git = |f: &Firm, role: &str| {
+            needed(f)
+                .iter()
+                .any(|(r, n)| r == role && n == "office-git")
+        };
+        let f = firm("git: {}\n");
+        assert!(with_git(&f, "ceo") && with_git(&f, "eng"));
+        let f = firm("");
+        assert!(!with_git(&f, "ceo") && !with_git(&f, "eng"));
     }
 
     #[test]
