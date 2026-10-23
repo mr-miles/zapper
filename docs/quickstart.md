@@ -124,7 +124,7 @@ zapper firm budget acme                 # the request: total, plan, reason
 zapper firm budget acme approve b-1     # or: decline b-1 --note "…"
 ```
 
-Then the CEO hires the team; each hire waits for a background check (by an officer, or by you in the Security tab or with `zapper firm screen acme c-1 --clear`).
+Then the CEO hires the team; each hire waits for a background check (by an officer, or by you in the Security tab or with `zapper firm screen acme c-1 --approve`).
 
 ## 10. Watch it work
 

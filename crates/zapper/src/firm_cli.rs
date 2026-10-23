@@ -133,12 +133,12 @@ pub enum FirmCmd {
         firm: String,
         rule: String,
     },
-    /// Clear a new hire's background check as the board, or object.
+    /// Approve a new hire's background check as the board, or object.
     Screen {
         firm: String,
         screening: String,
-        #[arg(long, conflicts_with = "object")]
-        clear: bool,
+        #[arg(long, alias = "clear", conflicts_with = "object")]
+        approve: bool,
         #[arg(long)]
         object: bool,
         #[arg(long, default_value = "")]
@@ -1277,18 +1277,18 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Screen {
             firm,
             screening,
-            clear,
+            approve,
             object,
             note,
         } => {
-            if clear == object {
-                bail!("give --clear or --object");
+            if approve == object {
+                bail!("give --approve or --object");
             }
             print_json(
                 &c.json(
                     Method::POST,
                     &format!("/v1/firms/{firm}/security/screenings/{screening}"),
-                    Some(json!({ "clear": clear, "note": note }).to_string()),
+                    Some(json!({ "clear": approve, "note": note }).to_string()),
                 )
                 .await?,
             );

@@ -102,7 +102,7 @@ zapper firm fund acme guido 200k --reason "…"     # the board gives tokens to 
 zapper firm release acme guido --reason "…"        # the board lets a worker go (officers answer only to the board)
 zapper firm budget acme                            # the run's budget, balances, the CEO's budget requests
 zapper firm budget acme approve b-1                # the board's answer to a budget request (or: decline b-1 --note "…")
-zapper firm screen acme c-1 --clear                 # a new hire's background check, when no officer answered (or --object --note "…")
+zapper firm screen acme c-1 --approve               # a new hire's background check, when no officer answered (or --object --note "…")
 zapper firm decide acme r-3 --allow --scope worker --reason "…"
 zapper firm revoke acme RULE                       # remove a standing approval
 zapper drive ls acme ; zapper drive get acme a-2 ./out

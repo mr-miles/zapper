@@ -102,7 +102,7 @@ function updatePeople() {
     el('div', { class: 'muted small', style: 'margin:6px 0' }, `${everyone.length} people in this run · ${hired} hired · ${left} let go · ${everyone.length - left} in the firm now`),
     el('h2', { class: 'sec' }, 'Hiring and firing'),
     log.length ? el('div', { class: 'card' }, log.map((l) => el('div', { class: 'row', style: 'padding:4px 0;border-bottom:1px solid var(--line)' },
-      el('span', { class: 'muted small', style: 'display:inline-block;width:110px' }, fmtDate(l.ts)), pill(l.kind === 'hired' || l.kind === 'cleared' ? 'open' : l.kind === 'left' || l.kind === 'objected' ? 'error' : '', l.kind), ' ', l.text,
+      el('span', { class: 'muted small', style: 'display:inline-block;width:110px' }, fmtDate(l.ts)), pill(l.kind === 'hired' || l.kind === 'cleared' ? 'open' : l.kind === 'left' || l.kind === 'objected' ? 'error' : '', l.kind === 'cleared' ? 'approved' : l.kind), ' ', l.text,
       l.note ? el('div', { class: 'small muted', style: 'margin-left:120px' }, clip(l.note, 400)) : ''))) : el('div', { class: 'empty card' }, 'Nobody has been hired or let go yet.'),
     el('h2', { class: 'sec' }, 'People'),
     ...everyone.map((w) => personCard(M, w, now)));

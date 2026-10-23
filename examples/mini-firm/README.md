@@ -43,10 +43,10 @@ Every line should be `ok` (or a `note`). The run uses your Claude subscription: 
      zapper firm budget mini approve b-1
      ```
 
-   - **Ben's background check.** Ada's offer boots Ben's VM, and like every hire he takes no turn until he is cleared. Ada holds security in a firm without officers, and nobody checks their own hire, so the check comes to you. Clear it in the Security tab, or:
+   - **Ben's background check.** Ada's offer boots Ben's VM, and like every hire he takes no turn until he is cleared. Ada holds security in a firm without officers, and nobody checks their own hire, so the check comes to you. Approve it in the Security tab, or:
 
      ```
-     zapper firm screen mini c-1 --clear --note "ok"
+     zapper firm screen mini c-1 --approve --note "ok"
      ```
 
    Then Ben quotes, Ada accepts (or counters), and the job starts. `zapper firm contracts mini` shows where it stands.

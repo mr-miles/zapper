@@ -250,6 +250,27 @@ async fn serve_listens_on_its_socket() {
     serve.start_kill().unwrap();
 }
 
+/// The board approves a background check or objects: one of the two, and
+/// `--clear`, the old name, still approves.
+#[cfg(feature = "office")]
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_needs_approve_or_object() {
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let e = failed(zapper(&d, &["firm", "screen", "acme", "c-1"]).await);
+    assert!(e.contains("give --approve or --object"), "{e}");
+    let e = err(&zapper(
+        &d,
+        &["firm", "screen", "acme", "c-1", "--approve", "--object"],
+    )
+    .await);
+    assert!(e.contains("cannot be used with"), "{e}");
+    // Past parsing to the daemon, which has no such firm.
+    for flag in ["--approve", "--clear"] {
+        let e = failed(zapper(&d, &["firm", "screen", "acme", "c-1", flag]).await);
+        assert!(e.starts_with("zapper: "), "{e}");
+    }
+}
+
 /// Without the office, `zapper serve` refuses a config with firms.
 #[cfg(not(feature = "office"))]
 #[tokio::test]

@@ -280,7 +280,7 @@ pub fn screen(
             o.access_queue.lock().unwrap().push(id.clone());
             o.wake.notify_one();
         }
-        None => run.notice(BOARD, &format!("Background check {id}: {worker}"), &format!("[Automatic notice] A new hire needs a background check, and there is no security officer to do it.\n\n{text}\nClear or object in the UI's Security tab.\n")),
+        None => run.notice(BOARD, &format!("Background check {id}: {worker}"), &format!("[Automatic notice] A new hire needs a background check, and there is no security officer to do it.\n\n{text}\nApprove or object in the UI's Security tab.\n")),
     }
     id
 }
@@ -1342,7 +1342,7 @@ pub fn tick(run: &FirmRun, last_digest: &mut f64) {
     for s in late_checks {
         run.journal
             .append("screening", json!({ "event": "board_asked", "id": s.id }));
-        run.notice(BOARD, &format!("Unanswered background check: {}", s.worker), &format!("[Automatic notice] No security officer checked this new hire within {}; the board can clear them or object.\n\n{}\nDecide it in the UI's Security tab.\n", run.config.security.answer_within, screening_text(&s)));
+        run.notice(BOARD, &format!("Unanswered background check: {}", s.worker), &format!("[Automatic notice] No security officer checked this new hire within {}; the board can approve them or object.\n\n{}\nDecide it in the UI's Security tab.\n", run.config.security.answer_within, screening_text(&s)));
     }
     for r in late {
         run.journal
