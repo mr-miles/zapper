@@ -1637,6 +1637,14 @@ mod tests {
     fn the_mini_firm_example_loads() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mini-firm");
         let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
+        // One profile, on the one image the firm needs: `zapper check`
+        // asks for every profile's image.
+        let images: Vec<String> = c
+            .profiles
+            .keys()
+            .map(|p| c.resolve(p).unwrap().engine.image)
+            .collect();
+        assert_eq!(images, ["office"]);
         let mini = &zapper_office::firm::all(&c)["mini"];
         assert_eq!(zapper_office::skills::missing(mini), Vec::<String>::new());
         let task = std::fs::read_to_string(dir.join("task.md")).unwrap();

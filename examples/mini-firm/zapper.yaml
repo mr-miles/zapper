@@ -29,35 +29,27 @@ policy:
   defaults: { net: deny, exec: allow }
 
 profiles:
-  base:
+  # Claude Code, the one profile the firm needs (image: make image
+  # IMAGE=office). The Claude API is allowed with the token the host adds;
+  # any other host is asked about, and in a firm the CEO (who holds
+  # security here) or the board decides.
+  claude:
     engine:
-      image: ubuntu-26.04
+      image: office
       kernel: vmlinux-6.1
       vcpus: 2
-      memory_mib: 2048
-      disk: 4GiB
+      memory_mib: 4096
+      disk: 8GiB
       network: nic
-    agent:
-      kind: generic
-      command: [bash, -l]
-      user: user
-      workdir: /work
-  default:
-    extends: base
-    mounts:
-      - { host: "{workdir}", guest: /work, mode: rw }
-  # Claude Code (image: make image IMAGE=office). The Claude API is allowed
-  # with the token the host adds; any other host is asked about, and in a
-  # firm the CEO (who holds security here) or the board decides.
-  claude:
-    extends: default
-    engine: { image: office, memory_mib: 4096, disk: 8GiB }
     agent:
       kind: claude-code
       command: [claude]
       user: agent
+      workdir: /work
       env:
         CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw }
     policy:
       net:
         - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
