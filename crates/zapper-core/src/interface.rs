@@ -13,7 +13,7 @@ use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use zapper_policy::{AnyRule, Config, Policy, Scope};
 
-use crate::daemon::{self, session, Daemon, EventBody};
+use crate::daemon::{self, session, Daemon};
 
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
@@ -25,7 +25,7 @@ pub use crate::daemon::services::{
 pub use crate::daemon::session::{
     NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
 };
-pub use crate::daemon::{Event, Pending, Remember};
+pub use crate::daemon::{Event, EventBody, Pending, Remember};
 
 /// A handle on a running daemon. Cheap to clone.
 #[derive(Clone)]
@@ -262,12 +262,12 @@ impl Core {
 
     /// Stops serving a registered MCP server.
     pub fn remove_mcp_server(&self, id: u64) -> bool {
-        self.d.gateway.remove(id)
+        self.d.gateway.remove(id).is_some()
     }
 
     /// Hands a decider's sessions' `ask`s back to the operator.
     pub fn remove_decider(&self, id: u64) -> bool {
-        self.d.deciders.remove(id)
+        self.d.deciders.remove(id).is_some()
     }
 
     /// Services and zones.
@@ -390,7 +390,7 @@ impl Core {
         }
         if id.starts_with("s-") {
             for s in self.d.sessions.read().unwrap().values() {
-                if let Some(r) = s.policy.write().unwrap().remove(id) {
+                if let Some(r) = s.remove_rule(id) {
                     return Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),

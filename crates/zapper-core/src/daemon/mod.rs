@@ -17,9 +17,11 @@ pub mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;
 pub mod record;
+pub mod registry;
 pub mod services;
 pub mod session;
 mod spec;
+mod summary;
 pub mod tls;
 pub mod vm;
 

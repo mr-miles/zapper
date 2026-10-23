@@ -5,7 +5,7 @@
 //! desks and follow-ups need.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -257,6 +257,71 @@ fn preview(body: &str) -> String {
             .unwrap_or(""),
         120,
     )
+}
+
+/// The run's post office behind its lock. Mail changes only through
+/// these methods; other modules read it inside `with`, which holds the lock
+/// for the closure alone, so no caller keeps it while taking another.
+pub(crate) struct Post(Mutex<PostOffice>);
+
+impl Post {
+    pub(crate) fn new(po: PostOffice) -> Post {
+        Post(Mutex::new(po))
+    }
+
+    /// Reads the post office.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&PostOffice) -> R) -> R {
+        f(&self.0.lock().unwrap())
+    }
+
+    pub(crate) fn send(&self, journal: &Journal, d: Draft, now: f64) -> Result<Sent> {
+        self.0.lock().unwrap().send(journal, d, now)
+    }
+
+    pub(crate) fn send_notice(&self, journal: &Journal, d: Draft, now: f64) -> Result<Sent> {
+        self.0.lock().unwrap().send_notice(journal, d, now)
+    }
+
+    pub(crate) fn mark_read(&self, who: &str, ids: &[String]) {
+        self.0.lock().unwrap().mark_read(who, ids)
+    }
+
+    /// A message for `viewer`, now read by them.
+    pub(crate) fn read_message(&self, journal: &Journal, id: &str, viewer: &str) -> Result<Value> {
+        let mut po = self.0.lock().unwrap();
+        let v = po.message(journal, id, viewer)?;
+        po.mark_read(viewer, &[id.to_string()]);
+        Ok(v)
+    }
+
+    /// A thread for `viewer`, its messages now read by them.
+    pub(crate) fn read_thread(&self, journal: &Journal, id: &str, viewer: &str) -> Result<Value> {
+        let mut po = self.0.lock().unwrap();
+        let v = po.thread(journal, id, viewer)?;
+        let ids: Vec<String> = v["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["id"].as_str().map(str::to_string))
+            .collect();
+        po.mark_read(viewer, &ids);
+        Ok(v)
+    }
+
+    pub(crate) fn tick(&self, journal: &Journal, now: f64) -> Vec<Sent> {
+        self.0.lock().unwrap().tick(journal, now)
+    }
+
+    pub(crate) fn leave(&self, worker: &str, to: &str) -> (Vec<Obligation>, Vec<String>) {
+        self.0.lock().unwrap().leave(worker, to)
+    }
+
+    pub(crate) fn settle_thread(&self, journal: &Journal, thread: &str, who: &str, by: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .settle_thread(journal, thread, who, by)
+    }
 }
 
 impl PostOffice {
@@ -823,6 +888,25 @@ impl PostOffice {
 
     /// Whether this draft would close the board's objective: its sender
     /// owes it in the thread it answers, and it closes.
+    /// A task: `thread` and the threads delegated from it, however deep
+    /// (each new thread's `context` is the one its sender was working in).
+    pub fn task_threads(&self, thread: &str) -> BTreeSet<String> {
+        let mut task = BTreeSet::from([thread.to_string()]);
+        loop {
+            let more: Vec<String> = self
+                .threads
+                .values()
+                .filter(|t| !task.contains(&t.id))
+                .filter(|t| t.context.as_ref().is_some_and(|c| task.contains(c)))
+                .map(|t| t.id.clone())
+                .collect();
+            if more.is_empty() {
+                return task;
+            }
+            task.extend(more);
+        }
+    }
+
     pub fn would_close_objective(&self, d: &Draft) -> bool {
         d.close
             && d.in_reply_to

@@ -2,7 +2,7 @@
 //! copied out of the worker's VM and stored by content hash in the run's
 //! `drive/` directory; the journal records each version.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -254,6 +254,7 @@ impl Drive {
         kind: Option<&str>,
         author: Option<&str>,
         query: Option<&str>,
+        threads: Option<&BTreeSet<String>>,
     ) -> Vec<Value> {
         let q = query.map(str::to_ascii_lowercase);
         self.artifacts
@@ -262,6 +263,7 @@ impl Drive {
             .filter(|a| a.visible_to(who, can_read))
             .filter(|a| kind.is_none_or(|k| a.kind == k))
             .filter(|a| author.is_none_or(|x| a.author == x))
+            .filter(|a| threads.is_none_or(|ts| a.thread.as_ref().is_some_and(|t| ts.contains(t))))
             .filter(|a| {
                 q.as_ref().is_none_or(|q| {
                     a.title.to_ascii_lowercase().contains(q)

@@ -51,9 +51,6 @@ fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
 /// The ids of a worker's credential rules, and where the first allows.
 fn credential_rules(run: &FirmRun, worker: &str) -> Vec<(String, String, Vec<u16>)> {
     let mut v: Vec<(String, String, Vec<u16>)> = session_of(run, worker)
-        .policy
-        .read()
-        .unwrap()
         .rules()
         .into_iter()
         .filter_map(|r| match r {
@@ -389,6 +386,80 @@ async fn each_workers_tools_are_their_roles() {
     assert!(!pat.iter().any(|n| n == "credentials_list"), "{pat:?}");
 }
 
+/// Every tool any worker could have: what each worker may call is exactly
+/// what their list shows, and an officer's tool says it is one.
+#[tokio::test]
+async fn a_worker_may_call_exactly_the_tools_they_are_shown() {
+    use crate::ops::{tools, Powers};
+    let (t, run) = run();
+    let every = Powers {
+        officer: true,
+        budget: true,
+        root: true,
+        hires: true,
+        manages: true,
+        contractor: true,
+        owner: true,
+    };
+    let officers: Vec<Value> = tools(Powers {
+        officer: true,
+        ..Default::default()
+    });
+    let mut all: Vec<String> = tools(every)
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    all.sort();
+    all.dedup();
+    for who in ["ceo", "pat"] {
+        let s = session_of(&run, who);
+        let mine = tool_names(&t, &s).await;
+        let officer = run.worker(who).unwrap().officer();
+        for name in &all {
+            let r = office(&t, &s, &json!({ "op": name, "args": {} }).to_string()).await;
+            let e = r["error"].as_str().unwrap_or("");
+            let gated =
+                e.ends_with("isn't one of your tools") || e.ends_with("is for security officers");
+            assert_eq!(gated, !mine.contains(name), "{who} {name}: {r}");
+            if gated && !officer && officers.iter().any(|t| t["name"] == name.as_str()) {
+                assert_eq!(e, format!("{name} is for security officers"));
+            }
+        }
+    }
+}
+
+/// The tool definitions every combination of powers is shown, names,
+/// descriptions and schemas, as a digest: what the agents see doesn't
+/// change unless this does.
+#[test]
+fn the_tool_lists_are_as_they_were() {
+    use crate::ops::{tools, Powers};
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for bits in 0u8..128 {
+        let b = |i: u8| bits & (1 << i) != 0;
+        let p = Powers {
+            officer: b(0),
+            budget: b(1),
+            root: b(2),
+            hires: b(3),
+            manages: b(4),
+            contractor: b(5),
+            owner: b(6),
+        };
+        ctx.update(serde_json::to_string(&tools(p)).unwrap().as_bytes());
+    }
+    let digest: String = ctx
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        digest,
+        "16a67e8926d72a8467d2342b75026ea2c0fe964680cebb3354c91d5d63f7ef20"
+    );
+}
+
 #[tokio::test]
 async fn mail_is_from_the_vm_it_came_from() {
     let (t, run) = run();
@@ -484,6 +555,63 @@ fn a_restart_ends_the_runs_the_daemon_left_running() {
     assert_eq!(last["type"], "run", "{last}");
     assert_eq!(last["state"], "ended", "{last}");
     assert_eq!(last["reason"], "the daemon stopped", "{last}");
+}
+
+/// The `config` events of `worker`'s session: what changed in its rules.
+fn rule_changes(t: &TestCore, run: &FirmRun, worker: &str) -> Vec<String> {
+    let s = session_of(run, worker);
+    t.core
+        .recent_events(Some(&s.id))
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .filter(|e| e["type"] == "config")
+        .map(|e| e["change"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// What the office puts in a worker's own rules (an officer's approval for
+/// them, the network a credential grant needs) is in their session's audit
+/// log, added and removed, like any session rule.
+#[test]
+fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
+    use super::access::Level;
+    use super::security::{self, DecideArgs};
+    let (t, run) = run();
+    let session = format!("session:{}", session_of(&run, "pat").id);
+    let req = zapper_policy::NetRequest {
+        host: "api.example".into(),
+        port: 443,
+        method: None,
+        path: None,
+    };
+    let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
+    let decide = DecideArgs {
+        allow: true,
+        scope: "worker".into(),
+        reason: "pat's work".into(),
+        methods: None,
+        path: None,
+        expires_in: None,
+    };
+    security::decide(&run, BOARD, &id, decide).unwrap();
+    let rule = security::standing(&run)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    security::revoke(&run, BOARD, &rule, "done").unwrap();
+
+    facility::network_follows_grant(&run, "pat", "git:api", Level::Write);
+    facility::network_follows_grant(&run, "pat", "git:api", Level::None);
+
+    assert_eq!(
+        rule_changes(&t, &run, "pat"),
+        [
+            format!("rule {rule} added to {session}"),
+            format!("rule {rule} removed from {session}"),
+            format!("rule credentials-git-api added to {session}"),
+            format!("rule credentials-git-api removed from {session}"),
+        ]
+    );
 }
 
 #[test]

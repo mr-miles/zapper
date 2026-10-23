@@ -4,9 +4,8 @@
 
 mod client;
 use zapper_core::{util, vmm};
-#[cfg(feature = "office")]
-mod firm_cli;
 mod image;
+mod office;
 mod term;
 
 use std::path::{Path, PathBuf};
@@ -159,24 +158,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ImageCmd,
     },
-    /// Firms of workers: start, stop, watch, replay.
-    #[cfg(feature = "office")]
-    Firm {
-        #[command(subcommand)]
-        cmd: firm_cli::FirmCmd,
-    },
-    /// Mail as the board.
-    #[cfg(feature = "office")]
-    Mail {
-        #[command(subcommand)]
-        cmd: firm_cli::MailCmd,
-    },
-    /// A firm's shared drive.
-    #[cfg(feature = "office")]
-    Drive {
-        #[command(subcommand)]
-        cmd: firm_cli::DriveCmd,
-    },
+    #[command(flatten)]
+    Office(office::Cmd),
     /// The record: who keeps it, and checking it against the keeper's chains.
     Record {
         #[command(subcommand)]
@@ -316,63 +299,16 @@ enum ImageCmd {
     Ls,
 }
 
+/// The config in the repository, which `zapper init` writes.
 const EXAMPLE: &str = include_str!("../../../config/zapper.yaml");
-
-/// The example config `zapper init` writes: without the office, less its
-/// `firms` section (the file's last, with the comment above it).
-fn example() -> &'static str {
-    if cfg!(feature = "office") {
-        return EXAMPLE;
-    }
-    let Some(at) = EXAMPLE.find("\nfirms:") else {
-        return EXAMPLE;
-    };
-    // Up to and including the newline before `firms:`, then without the
-    // comment lines right above it.
-    let mut head = &EXAMPLE[..at + 1];
-    while let Some(nl) = head[..head.len() - 1].rfind('\n') {
-        if !head[nl + 1..].starts_with('#') {
-            break;
-        }
-        head = &head[..nl + 1];
-    }
-    head
-}
-
-/// A config with firms needs a zapper built with the office, which checks
-/// them.
-fn office_config(c: &Config) -> Result<()> {
-    #[cfg(feature = "office")]
-    zapper_office::firm::check(c)?;
-    if !cfg!(feature = "office") && !c.firms.is_empty() {
-        bail!(
-            "firms: this zapper is built without the office (`--no-default-features`); remove the `firms` section"
-        );
-    }
-    Ok(())
-}
 
 fn load_config(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| office_config(&c).map(|_| c))
+        .and_then(|c| office::config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
-}
-
-/// What the office adds to the API and the UI; nothing without it.
-fn mount(d: &zapper_core::Core) -> zapper_api::Mount {
-    #[cfg(feature = "office")]
-    return zapper_api::Mount {
-        routes: zapper_office::routes(d),
-        page: Some(zapper_office::PAGE),
-    };
-    #[cfg(not(feature = "office"))]
-    {
-        let _ = d;
-        zapper_api::Mount::default()
-    }
 }
 
 fn main() {
@@ -435,15 +371,6 @@ fn config_path(given: Option<&str>) -> PathBuf {
     path
 }
 
-/// The daemon's state directory, from the config.
-#[cfg(feature = "office")]
-fn daemon_state_dir() -> Result<PathBuf> {
-    let path = config_path(std::env::var("ZAPPER_CONFIG").ok().as_deref());
-    Ok(PathBuf::from(expand_home(
-        &load_config(&path)?.daemon.state,
-    )))
-}
-
 fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
@@ -487,23 +414,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("{} exists; not touching it", config_path.display());
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
-                util::write_private(&config_path, example().as_bytes())?;
+                util::write_private(&config_path, office::example().as_bytes())?;
                 println!("wrote {}", config_path.display());
             }
             // Skills are the office's workers'.
-            #[cfg(feature = "office")]
-            {
-                let dir = config_path
-                    .parent()
-                    .unwrap()
-                    .join(zapper_office::skills::DEFAULT_DIR);
-                let written = zapper_office::skills::install(&dir)?;
-                if written.is_empty() {
-                    println!("{}: the default skills are all there", dir.display());
-                } else {
-                    println!("wrote skills to {}: {}", dir.display(), written.join(", "));
-                }
-            }
+            office::init(config_path.parent().unwrap())?;
         }
         Cmd::Check => return check(&config_path).await,
         Cmd::Serve => serve(config_path).await?,
@@ -858,8 +773,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 println!("profile {name} removed");
             }
         },
-        #[cfg(feature = "office")]
-        Cmd::Firm { cmd } => return firm_cli::firm(&c, cmd, cli.json).await,
+        Cmd::Office(cmd) => return office::run(&c, cmd, cli.json).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
@@ -901,10 +815,6 @@ async fn run(cli: Cli) -> Result<i32> {
             );
             return Ok(if ok { 0 } else { 1 });
         }
-        #[cfg(feature = "office")]
-        Cmd::Mail { cmd } => return firm_cli::mail(&c, cmd, cli.json).await,
-        #[cfg(feature = "office")]
-        Cmd::Drive { cmd } => return firm_cli::drive(&c, cmd, cli.json).await,
         Cmd::Image { cmd } => {
             let config = load_config(&config_path)?;
             let dir = PathBuf::from(expand_home(&config.daemon.images));
@@ -1099,6 +1009,8 @@ fn rule_row(r: &Value) -> Vec<String> {
     ]
 }
 
+/// An event of the live stream as a line: its time, session and type, then
+/// the core's verdict and summary; an `ask` with how to answer it.
 fn event_line(e: &Value) -> String {
     let ts = e["ts"].as_f64().unwrap_or(0.0) as i64;
     let t = format!(
@@ -1108,121 +1020,36 @@ fn event_line(e: &Value) -> String {
         ts % 60
     );
     let sess = s(&e["session"]);
-    let detail = match e["type"].as_str().unwrap_or("") {
-        "net" => format!(
-            "{} {} {}:{}{}{}{}",
-            s(&e["action"]),
-            e["method"].as_str().unwrap_or("CONNECT"),
-            s(&e["host"]),
-            e["port"],
-            s(&e["path"]),
-            e["status"]
-                .as_u64()
-                .map(|c| format!(" → {c}"))
-                .unwrap_or_default(),
-            e["error"]
-                .as_str()
-                .map(|x| format!(" ({x})"))
-                .unwrap_or_default()
-        ),
-        "exec" => format!(
-            "{} {}",
-            s(&e["action"]),
-            e["argv"]
-                .as_array()
-                .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
-                .unwrap_or_default()
-        ),
-        "ask" => format!(
-            "ASK {}: {}  (zapper approve {} | zapper deny {})",
-            s(&e["id"]),
-            s(&e["subject"]),
+    let verdict = e["verdict"]
+        .as_str()
+        .map(|v| format!("{v} "))
+        .unwrap_or_default();
+    let hint = if e["type"] == "ask" {
+        format!(
+            "  (zapper approve {} | zapper deny {})",
             s(&e["id"]),
             s(&e["id"])
-        ),
-        "answer" => format!(
-            "{} {}",
-            if e["allow"] == json!(true) {
-                "allowed"
-            } else {
-                "denied"
-            },
-            s(&e["id"])
-        ),
-        "guest" => {
-            let g = &e["event"];
-            match g["event"].as_str() {
-                Some("exit") => format!(
-                    "exit {} pid {} code {} {}ms",
-                    s(&g["comm"]),
-                    g["pid"],
-                    g["exit_code"],
-                    g["elapsed_ms"]
-                ),
-                Some("setup") => format!(
-                    "setup {}: {}",
-                    if g["ok"] == json!(true) {
-                        "ok"
-                    } else {
-                        "FAILED"
-                    },
-                    s(&g["step"])
-                ),
-                Some("shell_exit") => format!("shell {} exited with {}", g["id"], g["exit_code"]),
-                _ => g.to_string(),
-            }
-        }
-        "session" => format!("session {} {}", s(&e["state"]), s(&e["detail"])),
-        "dns" => format!(
-            "{} {}{}{}",
-            s(&e["rcode"]),
-            if e["name"] == json!("") {
-                "(invalid query)".to_string()
-            } else {
-                s(&e["name"])
-            },
-            e["answer"]
-                .as_str()
-                .map(|a| format!(" → {a}"))
-                .unwrap_or_default(),
-            e["reason"]
-                .as_str()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default()
-        ),
-        "shell" => format!("shell {} {}", e["id"], s(&e["state"])),
-        "config" => format!("config {}", s(&e["change"])),
-        "mcp" => format!(
-            "{} {}.{}{}",
-            if e["ok"] == json!(true) {
-                "ok"
-            } else {
-                "FAILED"
-            },
-            s(&e["server"]),
-            s(&e["tool"]),
-            e["error"]
-                .as_str()
-                .map(|x| format!(" ({x})"))
-                .unwrap_or_default()
-        ),
-        other => format!("{other} {e}"),
+        )
+    } else {
+        String::new()
     };
     let rule = e["rule"]
         .as_str()
         .map(|r| format!("  [{r}]"))
         .unwrap_or_default();
-    format!("{t} {sess:<6} {:<7} {detail}{rule}", s(&e["type"]))
+    format!(
+        "{t} {sess:<6} {:<7} {verdict}{}{hint}{rule}",
+        s(&e["type"]),
+        s(&e["summary"])
+    )
 }
 
 async fn serve(config_path: PathBuf) -> Result<()> {
     let d = zapper_core::Core::start(config_path.clone())?;
-    #[cfg(feature = "office")]
-    zapper_office::start(&d);
-    d.add_config_check(office_config);
+    office::start(&d);
     d.check_config()
         .with_context(|| format!("loading {}", config_path.display()))?;
-    let mount = mount(&d);
+    let mount = office::mount(&d);
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1397,19 +1224,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             );
         }
     }
-    #[cfg(feature = "office")]
-    for (name, firm) in &zapper_office::firm::all(&config) {
-        let dir = zapper_office::skills::dir(firm);
-        let missing = zapper_office::skills::missing(firm);
-        report(
-            missing.is_empty(),
-            &format!("firm {name}: skills in {}", dir.display()),
-            &format!(
-                "zapper init (writes the default skills), or add <name>/SKILL.md there for: {}",
-                missing.join(", ")
-            ),
-        );
-    }
+    office::check(&config, &mut report);
     let probe = |nic: bool| {
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.args(["__vmm", "--probe"]);
@@ -1531,19 +1346,301 @@ async fn check(config_path: &Path) -> Result<i32> {
 mod tests {
     use serde_json::json;
 
-    /// `zapper events`: a tool call through the gateway, and a refused one.
+    /// An event as `zapper events` prints it: the core's, at 01:01:01, of
+    /// session abc234 (none for a service).
+    fn line(body: zapper_core::EventBody) -> String {
+        let session =
+            (!matches!(body, zapper_core::EventBody::Service { .. })).then(|| "abc234".to_string());
+        let e = zapper_core::Event {
+            seq: 1,
+            ts: 3661.0,
+            session,
+            body,
+        };
+        super::event_line(&e.view())
+    }
+
+    /// `zapper events`: one line for each type of event.
     #[test]
-    fn mcp_events_read_as_the_tool_called() {
-        let e = json!({ "ts": 3661.0, "session": "abc234", "type": "mcp", "server": "office", "tool": "mail_send", "ok": true, "ms": 2.5 });
-        assert_eq!(
-            super::event_line(&e),
-            "01:01:01 abc234 mcp     ok office.mail_send"
-        );
-        let e = json!({ "ts": 0.0, "session": "abc234", "type": "mcp", "server": "x", "tool": "y", "ok": false, "ms": 0.1, "error": "no MCP server x for this session" });
-        assert_eq!(
-            super::event_line(&e),
-            "00:00:00 abc234 mcp     FAILED x.y (no MCP server x for this session)"
-        );
+    fn events_read_as_a_line_each() {
+        use zapper_core::EventBody as B;
+        use zapper_policy::proto::GuestEvent;
+        use zapper_policy::{Action, Kind};
+        let net = |method: Option<&str>, status, error: Option<&str>| B::Net {
+            host: "api.example.com".into(),
+            port: 443,
+            method: method.map(Into::into),
+            path: method.map(|_| "/v1/x".into()),
+            action: Action::Allow,
+            rule: Some("g-1".into()),
+            scope: Some("global".into()),
+            inspected: method.is_some(),
+            status,
+            secrets: vec!["gh".into()],
+            error: error.map(Into::into),
+        };
+        let cases = [
+            (net(Some("GET"), Some(200), None), "01:01:01 abc234 net     allow GET api.example.com:443/v1/x → 200  [secrets: gh]  [g-1]"),
+            (net(None, None, Some("refused")), "01:01:01 abc234 net     allow connect api.example.com:443  [secrets: gh]  refused  (tunnel)  [g-1]"),
+            (
+                B::Exec {
+                    pid: 7,
+                    uid: 0,
+                    path: "/usr/bin/git".into(),
+                    argv: vec!["git".into(), "push".into()],
+                    cwd: None,
+                    action: Action::Deny,
+                    rule: None,
+                    scope: None,
+                    wait_ms: 1.25,
+                },
+                "01:01:01 abc234 exec    deny git push  (1.2 ms)",
+            ),
+            (
+                B::Ask {
+                    id: "a-1".into(),
+                    kind: Kind::Net,
+                    subject: "example.org:443".into(),
+                },
+                "01:01:01 abc234 ask     ask a-1: example.org:443  (zapper approve a-1 | zapper deny a-1)",
+            ),
+            (
+                B::Answer {
+                    id: "a-1".into(),
+                    allow: true,
+                    remember: Some("session".into()),
+                },
+                "01:01:01 abc234 answer  allow a-1 · session",
+            ),
+            (
+                B::Answer {
+                    id: "a-2".into(),
+                    allow: false,
+                    remember: None,
+                },
+                "01:01:01 abc234 answer  deny a-2",
+            ),
+            (
+                B::Dns {
+                    name: "example.org".into(),
+                    qtype: 1,
+                    allowed: true,
+                    rcode: "noerror".into(),
+                    answer: Some("100.64.0.9".into()),
+                    reason: None,
+                },
+                "01:01:01 abc234 dns     allow noerror example.org → 100.64.0.9",
+            ),
+            (
+                B::Dns {
+                    name: "".into(),
+                    qtype: 1,
+                    allowed: false,
+                    rcode: "formerr".into(),
+                    answer: None,
+                    reason: Some("truncated name".into()),
+                },
+                "01:01:01 abc234 dns     deny formerr (invalid query)  (truncated name)",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Exit {
+                        pid: 9,
+                        ppid: 1,
+                        uid: 0,
+                        comm: "make".into(),
+                        exit_code: 2,
+                        signal: None,
+                        elapsed_ms: 40,
+                        user_ms: 1,
+                        sys_ms: 1,
+                        mem_kib: 1,
+                        io_bytes: 1,
+                    },
+                },
+                "01:01:01 abc234 guest   make pid 9 exit 2 · 40 ms",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Setup {
+                        step: "apt install".into(),
+                        ok: false,
+                        output: "".into(),
+                    },
+                },
+                "01:01:01 abc234 guest   setup FAILED: apt install",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::ShellExit {
+                        id: 3,
+                        exit_code: 0,
+                    },
+                },
+                "01:01:01 abc234 guest   shell 3 exited with 0",
+            ),
+            (
+                B::Shell {
+                    id: 3,
+                    state: "open".into(),
+                    argv: Some(vec!["bash".into()]),
+                    exit_code: None,
+                },
+                "01:01:01 abc234 shell   shell 3 open: bash",
+            ),
+            (
+                B::Session {
+                    state: "failed".into(),
+                    detail: Some("no image".into()),
+                },
+                "01:01:01 abc234 session failed: no image",
+            ),
+            (
+                B::Config {
+                    change: "rule g-2 added".into(),
+                },
+                "01:01:01 abc234 config  rule g-2 added",
+            ),
+            (
+                B::Service {
+                    change: "added".into(),
+                    service: zapper_core::ServiceInfo {
+                        id: 4,
+                        kind: "service",
+                        name: "git.acme.internal".into(),
+                        port: Some(443),
+                        sessions: [("firm".to_string(), "acme".to_string())].into(),
+                        to: "in the daemon".into(),
+                        owner: "office".into(),
+                    },
+                },
+                "01:01:01        service added service git.acme.internal:443 → in the daemon for firm=acme (office)",
+            ),
+            (
+                B::Driver {
+                    event: "turn_end".into(),
+                    detail: json!({ "outcome": "done", "tokens": 1200 }),
+                },
+                "01:01:01 abc234 driver  turn_end done · 1200 tokens",
+            ),
+            (
+                B::Mcp {
+                    server: "office".into(),
+                    tool: "mail_send".into(),
+                    ok: true,
+                    ms: 2.5,
+                    error: None,
+                },
+                "01:01:01 abc234 mcp     office.mail_send · 2.5 ms",
+            ),
+            (
+                B::Mcp {
+                    server: "x".into(),
+                    tool: "y".into(),
+                    ok: false,
+                    ms: 0.1,
+                    error: Some("no MCP server x for this session".into()),
+                },
+                "01:01:01 abc234 mcp     deny x.y · 0.1 ms  no MCP server x for this session",
+            ),
+            (
+                B::Exec {
+                    pid: 8,
+                    uid: 1000,
+                    path: "/usr/bin/curl".into(),
+                    argv: vec!["curl".into()],
+                    cwd: None,
+                    action: Action::Ask,
+                    rule: None,
+                    scope: None,
+                    wait_ms: 2000.0,
+                },
+                "01:01:01 abc234 exec    ask curl  (2000.0 ms)",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Exit {
+                        pid: 10,
+                        ppid: 1,
+                        uid: 0,
+                        comm: "sleep".into(),
+                        exit_code: 0,
+                        signal: Some(9),
+                        elapsed_ms: 5,
+                        user_ms: 0,
+                        sys_ms: 0,
+                        mem_kib: 1,
+                        io_bytes: 0,
+                    },
+                },
+                "01:01:01 abc234 guest   sleep pid 10 exit signal 9 · 5 ms",
+            ),
+            (
+                B::Guest {
+                    event: GuestEvent::Usage {
+                        load1: 0.5,
+                        mem_used_kib: 1024,
+                        procs: 12,
+                        disk_used_kib: 2048,
+                    },
+                },
+                "01:01:01 abc234 guest   {\"event\":\"usage\",\"load1\":0.5,\"mem_used_kib\":1024,\"procs\":12,\"disk_used_kib\":2048}",
+            ),
+            (
+                B::Shell {
+                    id: 4,
+                    state: "closed".into(),
+                    argv: None,
+                    exit_code: Some(130),
+                },
+                "01:01:01 abc234 shell   shell 4 closed exit 130",
+            ),
+            (
+                B::Service {
+                    change: "removed".into(),
+                    service: zapper_core::ServiceInfo {
+                        id: 5,
+                        kind: "zone",
+                        name: "acme.internal".into(),
+                        port: None,
+                        sessions: Default::default(),
+                        to: "nothing but its services".into(),
+                        owner: "operator".into(),
+                    },
+                },
+                "01:01:01        service removed zone acme.internal → nothing but its services (operator)",
+            ),
+            (
+                B::Driver {
+                    event: "error".into(),
+                    detail: json!({ "error": "claude not found" }),
+                },
+                "01:01:01 abc234 driver  deny error  claude not found",
+            ),
+            (
+                B::Driver {
+                    event: "turn_end".into(),
+                    detail: json!({ "outcome": "failed", "activity": "Edit a.md", "prompts": 2 }),
+                },
+                "01:01:01 abc234 driver  deny turn_end Edit a.md failed · 2 prompts",
+            ),
+        ];
+        for (body, want) in cases {
+            assert_eq!(line(body), want);
+        }
+    }
+
+    /// `examples/mini-firm`: a config this build loads, its firm valid, the
+    /// skills it points at there, and a task with a subject.
+    #[cfg(feature = "office")]
+    #[test]
+    fn the_mini_firm_example_loads() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mini-firm");
+        let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
+        let mini = &zapper_office::firm::all(&c)["mini"];
+        assert_eq!(zapper_office::skills::missing(mini), Vec::<String>::new());
+        let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
+        assert!(!task.lines().next().unwrap().trim().is_empty());
     }
 
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
@@ -1601,23 +1698,23 @@ mod tests {
             "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
         )
         .unwrap();
-        let e = super::office_config(&firms).err().map(|e| e.to_string());
+        let e = super::office::config(&firms).err().map(|e| e.to_string());
         assert_eq!(e.is_none(), cfg!(feature = "office"), "{e:?}");
-        assert!(super::office_config(&zapper_policy::Config::default()).is_ok());
+        assert!(super::office::config(&zapper_policy::Config::default()).is_ok());
 
         let t = zapper_core::testing::TestCore::new("");
-        let m = super::mount(&t.core);
+        let m = super::office::mount(&t.core);
         assert_eq!(m.page.is_some(), cfg!(feature = "office"));
     }
 
     /// What `zapper init` writes loads in this build, office or not.
     #[test]
     fn init_writes_a_config_this_build_loads() {
-        let c = zapper_policy::Config::from_yaml(super::example()).unwrap();
-        super::office_config(&c).unwrap();
+        let c = zapper_policy::Config::from_yaml(super::office::example()).unwrap();
+        super::office::config(&c).unwrap();
         assert!(c.profiles.contains_key("claude"));
         if !cfg!(feature = "office") {
-            assert!(!super::example().contains("Firms (docs/office.md)"));
+            assert!(!super::office::example().contains("Firms (docs/office.md)"));
         }
     }
 }

@@ -446,14 +446,16 @@ struct InboxQuery {
 async fn inbox(State(d): D, Path(f): Path<String>, Query(q): Query<InboxQuery>) -> R<Json<Value>> {
     let run = d.office().run(&f)?;
     let who = q.who.unwrap_or_else(|| BOARD.into());
-    let po = run.post.lock().unwrap();
-    Ok(Json(json!(po.inbox(&who, q.unread, 500))))
+    Ok(Json(json!(run
+        .post
+        .with(|po| po.inbox(&who, q.unread, 500)))))
 }
 
 async fn thread(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
     let run = d.office().run(&f)?;
-    let po = run.post.lock().unwrap();
-    Ok(Json(po.thread(&run.journal, &id, BOARD)?))
+    Ok(Json(
+        run.post.with(|po| po.thread(&run.journal, &id, BOARD))?,
+    ))
 }
 
 async fn drive_list(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
@@ -462,7 +464,7 @@ async fn drive_list(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
         .drive
         .lock()
         .unwrap()
-        .list(BOARD, &|_| true, None, None, None);
+        .list(BOARD, &|_| true, None, None, None, None);
     Ok(Json(json!(list)))
 }
 
@@ -674,7 +676,7 @@ async fn mark_read(State(d): D, Path(f): Path<String>, text: String) -> R<Json<V
         .flatten()
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect();
-    run.post.lock().unwrap().mark_read(BOARD, &ids);
+    run.post.mark_read(BOARD, &ids);
     Ok(Json(json!({ "ok": true })))
 }
 

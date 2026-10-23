@@ -5,7 +5,6 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// Where the files are: the daemon's state directory, and the keeper's
@@ -36,7 +35,7 @@ impl Store {
                 continue;
             };
             for run in runs.flatten() {
-                if run.path().join("run.json").is_file() {
+                if run.path().join(zapper_runs::INFO).is_file() {
                     let firm = firm.file_name().to_string_lossy().into_owned();
                     match self.load(&firm, &run.path()) {
                         Ok(r) => out.push(r),
@@ -64,7 +63,7 @@ impl Store {
     }
 
     fn load(&self, firm: &str, dir: &Path) -> Result<Run> {
-        let info: Value = serde_json::from_slice(&std::fs::read(dir.join("run.json"))?)
+        let info: Value = serde_json::from_slice(&std::fs::read(dir.join(zapper_runs::INFO))?)
             .context("parsing run.json")?;
         let started = info["started"].as_f64().unwrap_or(0.0);
         let mut run = Run {
@@ -84,18 +83,16 @@ impl Store {
             task: String::new(),
             messages: 0,
             people: Vec::new(),
-            transcripts: self.view(&dir.join("transcripts")),
+            transcripts: self.view(&dir.join(zapper_runs::TRANSCRIPTS)),
+            journal: Default::default(),
             slots: Vec::new(),
         };
         for w in info["chart"]["workers"].as_array().into_iter().flatten() {
             run.people.push(Person::from_chart(w, None, started));
         }
-        let journal = self.view(&dir.join("journal.jsonl"));
-        if let Ok(f) = std::fs::File::open(&journal) {
-            for line in BufReader::new(f).split(b'\n').map_while(Result::ok) {
-                if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                    run.apply(&v);
-                }
+        for line in zapper_runs::lines(&self.view(&dir.join(zapper_runs::JOURNAL))) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                run.apply(&v);
             }
         }
         Ok(run)
@@ -119,6 +116,8 @@ pub struct Run {
     pub messages: usize,
     pub people: Vec<Person>,
     transcripts: PathBuf,
+    /// What the journal says of the run: its state, mail and task.
+    journal: zapper_runs::Summary,
     /// Slots filled before the hire is journaled (the scenario names the
     /// worker first), by worker.
     slots: Vec<(String, Operative)>,
@@ -131,16 +130,16 @@ impl Run {
             self.last = self.last.max(ts);
         }
         match v["type"].as_str().unwrap_or("") {
-            "run" => {
-                if let Some(s) = v["state"].as_str() {
-                    self.state = s.to_string();
-                }
-            }
-            "mail" => {
-                self.messages += 1;
-                if self.task.is_empty() && v["from"] == "board" {
-                    self.task = str_of(&v["subject"]).unwrap_or_default();
-                }
+            "run" | "mail" => {
+                self.journal.apply(v);
+                self.state = self.journal.state.clone().unwrap_or_default();
+                self.messages = self.journal.messages as usize;
+                self.task = self
+                    .journal
+                    .kickoff
+                    .as_ref()
+                    .and_then(|m| str_of(&m["subject"]))
+                    .unwrap_or_default();
             }
             "hired" => {
                 let mut p = Person::from_chart(&v["worker"], str_of(&v["by"]), ts.unwrap_or(0.0));
@@ -356,6 +355,7 @@ mod tests {
                 100.0,
             )],
             transcripts: PathBuf::new(),
+            journal: Default::default(),
             slots: Vec::new(),
         };
         for v in [
@@ -392,6 +392,47 @@ mod tests {
         assert_eq!(fmt_time(1_792_517_038.9), "2026-10-20 17:23 UTC");
         assert_eq!(fmt_time(0.0), "-");
         assert_eq!(fmt_dur(3725.0), "1h 02m");
+    }
+
+    /// A run as it is on disk: run.json, then what its journal says.
+    #[test]
+    fn a_run_from_its_files() {
+        let state = std::env::temp_dir().join(format!("zapper-inspect-{}", std::process::id()));
+        let dir = state.join("firms/acme/runs/20261020-172358-8vm");
+        std::fs::create_dir_all(dir.join("transcripts")).unwrap();
+        std::fs::write(
+            dir.join("run.json"),
+            json!({ "run": "20261020-172358-8vm", "company": "Meridian", "started": 100.0, "chart": { "workers": [{ "name": "annie", "role": "ceo" }] } }).to_string(),
+        )
+        .unwrap();
+        let journal = [
+            json!({ "seq": 1, "ts": 100.5, "type": "run", "state": "running" }),
+            json!({ "seq": 2, "ts": 101.0, "type": "mail", "from": "annie", "subject": "Hello" }),
+            json!({ "seq": 3, "ts": 102.0, "type": "mail", "from": "board", "subject": "Build it" }),
+            json!({ "seq": 4, "ts": 103.0, "type": "mail", "from": "board", "subject": "And this" }),
+            json!({ "seq": 5, "ts": 110.0, "type": "hired", "by": "annie", "worker": { "name": "bo", "role": "engineer" } }),
+            json!({ "seq": 6, "ts": 150.0, "type": "worker", "worker": "bo", "state": "working" }),
+            json!({ "seq": 7, "ts": 160.0, "type": "run", "state": "ended" }),
+        ];
+        let text: String = journal.iter().map(|v| format!("{v}\n")).collect();
+        std::fs::write(dir.join("journal.jsonl"), text + "not json\n").unwrap();
+        std::fs::write(dir.join("transcripts/bo.jsonl"), "").unwrap();
+        let s = Store {
+            state: state.clone(),
+            keeper: None,
+        };
+        let r = s.find("20261020").unwrap();
+        assert_eq!((r.firm.as_str(), r.company.as_str()), ("acme", "Meridian"));
+        assert_eq!((r.task.as_str(), r.messages), ("Build it", 3));
+        assert_eq!(
+            (r.state.as_str(), r.started, r.last),
+            ("ended", 100.0, 160.0)
+        );
+        let names: Vec<_> = r.people.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["annie", "bo"]);
+        assert!(r.transcript(r.person("bo").unwrap()).is_some());
+        assert!(r.transcript(r.person("annie").unwrap()).is_none());
+        std::fs::remove_dir_all(state).unwrap();
     }
 
     #[test]

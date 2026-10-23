@@ -24,6 +24,8 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
 | `mcp` | `server`, `tool`, `ok`, `ms`, `error` (the first 512 characters) | A tool called through the [MCP gateway](architecture.md), an office tool included; a call to a server the session hasn't is one too, refused. Names are kept to 128 characters; arguments and results aren't recorded |
 
+The live stream adds `summary`, the event as one line, and `verdict` (`allow`, `deny` or `ask`) when the event decided something; `zapper events` and the UI's events view show those, and the audit log keeps the fields alone.
+
 The host writes `net`, `dns`, `exec` and `mcp` events from its own decisions, so the guest can't alter them. `exit` events come from the guest kernel, and are as reliable as the guest ([security](security.md#what-is-enforced-where)).
 
 ## The driver

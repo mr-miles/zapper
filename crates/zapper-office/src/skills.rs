@@ -18,7 +18,7 @@ macro_rules! defaults {
 }
 
 /// The skills `zapper init` writes.
-pub const DEFAULTS: &[(&str, &str)] = defaults![
+pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "office-mail",
     "office-publish",
     "office-resources",
@@ -53,7 +53,7 @@ pub fn dir(firm: &Firm) -> PathBuf {
 /// Each role's skills: everyone's shared skills, the role's own work skill,
 /// the manager skill for roles that hire, and the security skill for
 /// officers and the CEO (who holds security until an officer is hired).
-pub fn needed(firm: &Firm) -> Vec<(String, String)> {
+pub(crate) fn needed(firm: &Firm) -> Vec<(String, String)> {
     let root_role = firm
         .root()
         .and_then(|r| firm.worker(r))
@@ -96,7 +96,7 @@ pub fn missing(firm: &Firm) -> Vec<String> {
 }
 
 /// A skill's `SKILL.md` from `dir`.
-pub fn text(dir: &Path, name: &str) -> Result<String> {
+pub(crate) fn text(dir: &Path, name: &str) -> Result<String> {
     let path = dir.join(name).join("SKILL.md");
     std::fs::read_to_string(&path).with_context(|| {
         format!(
@@ -124,7 +124,7 @@ pub fn install(dir: &Path) -> Result<Vec<&'static str>> {
 }
 
 /// Writes `skills/<role>/<skill>/SKILL.md` in the run directory.
-pub fn prepare(run: &FirmRun, _config: &Config) -> Result<()> {
+pub(crate) fn prepare(run: &FirmRun, _config: &Config) -> Result<()> {
     let dir = dir(&run.config);
     for (role_name, skill) in needed(&run.config) {
         let out = run.dir.join("skills").join(&role_name).join(&skill);

@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
-use super::{drive, now, security, FirmRun};
+use super::{drive, now, security, FirmRun, WorkerRt};
 use crate::OfficeOf;
+use crate::{access, contracts, workforce};
 use zapper_core::{Core, McpServer, Session};
 
 /// Where the agent copies itself in every guest.
@@ -82,10 +83,6 @@ pub fn unregister(d: &Core, run: &FirmRun) {
     }
 }
 
-fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
-    json!({ "name": name, "description": description, "inputSchema": { "type": "object", "properties": props, "required": required } })
-}
-
 fn names() -> Value {
     json!({ "type": "array", "items": { "type": "string" }, "description": "Addresses: a worker's name, board, team:NAME (NAME's direct reports), or all" })
 }
@@ -114,7 +111,7 @@ pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
     let contractor = super::contracts::of(run, &w.name).is_some();
     Powers {
         officer: w.officer(),
-        budget: run.ledger.lock().unwrap().enabled,
+        budget: run.ledger.enabled(),
         root: chart.root() == Some(w.name.as_str()),
         hires: !contractor
             && run
@@ -128,15 +125,116 @@ pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
     }
 }
 
+/// A string argument's schema.
+fn s(description: &str) -> Value {
+    json!({ "type": "string", "description": description })
+}
+
+/// A tool call's arguments, read as agents write them: a list may be a
+/// comma-separated string, an empty string is no value, tokens may be
+/// `2M` and a due time `in 2h`.
+struct Args<'a>(&'a Value);
+
+impl<'a> Args<'a> {
+    fn raw(&self, k: &str) -> &'a Value {
+        &self.0[k]
+    }
+
+    fn opt(&self, k: &str) -> Option<String> {
+        opt_str(self.0, k)
+    }
+
+    fn req(&self, k: &str) -> Result<String> {
+        req_str(self.0, k)
+    }
+
+    fn list(&self, k: &str) -> Vec<String> {
+        strings(&self.0[k])
+    }
+
+    /// A list given as an array; none given otherwise.
+    fn list_if_array(&self, k: &str) -> Option<Vec<String>> {
+        self.0[k].as_array().map(|_| strings(&self.0[k]))
+    }
+
+    fn flag(&self, k: &str) -> bool {
+        self.0[k].as_bool().unwrap_or(false)
+    }
+
+    fn must_bool(&self, k: &str, missing: &str) -> Result<bool> {
+        self.0[k].as_bool().ok_or_else(|| anyhow!("{missing}"))
+    }
+
+    fn due(&self, k: &str) -> Result<Option<f64>> {
+        parse_due(&self.0[k])
+    }
+
+    fn tokens(&self, k: &str) -> Result<i64> {
+        workforce::tokens_arg(&self.0[k], k)
+    }
+
+    fn opt_tokens(&self, k: &str) -> Result<Option<i64>> {
+        match &self.0[k] {
+            Value::Null => Ok(None),
+            v => workforce::tokens_arg(v, k).map(Some),
+        }
+    }
+
+    fn attachments(&self) -> Result<Vec<String>> {
+        attachments(&self.0["attachments"])
+    }
+}
+
+/// What a tool's handler gets: who calls, from which session, and with
+/// what.
+struct Call<'a> {
+    d: &'a Core,
+    run: &'a Arc<FirmRun>,
+    s: &'a Arc<Session>,
+    w: &'a Arc<WorkerRt>,
+    me: &'a str,
+    args: Args<'a>,
+}
+
+enum Run {
+    Sync(fn(&Call) -> Result<Value>),
+    Async(for<'a> fn(&'a Call<'a>) -> BoxFuture<'a, Result<Value>>),
+}
+
+/// One office tool: who is shown it, and so may call it; what the model is
+/// told of it; and what it does.
+struct Tool {
+    name: &'static str,
+    shown: fn(Powers) -> bool,
+    description: &'static str,
+    /// Its arguments' schemas, by name.
+    props: fn() -> Value,
+    required: &'static [&'static str],
+    run: Run,
+}
+
+impl Tool {
+    fn definition(&self) -> Value {
+        json!({ "name": self.name, "description": self.description, "inputSchema": { "type": "object", "properties": (self.props)(), "required": self.required } })
+    }
+}
+
 /// The tools a worker's MCP server offers: by role.
 pub fn tools(p: Powers) -> Vec<Value> {
-    let officer = p.officer;
-    let s = |d: &str| json!({ "type": "string", "description": d });
-    let mut v = vec![
-        tool(
-            "mail_send",
-            "Start a new mail thread. Use kind=assignment to give work to your reports (only managers and the board may), question to ask, fyi to inform. Returns the message and thread ids. Don't wait for an answer: end your turn; the reply wakes you.",
-            json!({
+    TOOLS
+        .iter()
+        .filter(|t| (t.shown)(p))
+        .map(Tool::definition)
+        .collect()
+}
+
+/// The office's tools, in the order workers are shown them.
+static TOOLS: &[Tool] = &[
+    Tool {
+        name: "mail_send",
+        shown: |_| true,
+        description: "Start a new mail thread. Use kind=assignment to give work to your reports (only managers and the board may), question to ask, fyi to inform. Returns the message and thread ids. Don't wait for an answer: end your turn; the reply wakes you.",
+        props: || json!({
                 "to": names(), "cc": names(), "subject": s("States the ask; optional (the body's first line otherwise)"), "body": s("Markdown; start with the ask, then context, then what done looks like"),
                 "kind": { "type": "string", "enum": ["assignment", "question", "report", "fyi", "reply"] },
                 "expects": { "type": "string", "enum": ["reply", "done", "nothing"], "description": "Default: assignment→done, question→reply, else nothing" },
@@ -144,35 +242,140 @@ pub fn tools(p: Powers) -> Vec<Value> {
                 "attachments": { "type": "array", "items": { "type": "string" }, "description": "Shared drive references like drive:a-3@v2" },
                 "follow_up": { "type": "object", "properties": { "every": { "type": "string" }, "max": { "type": "integer" }, "off": { "type": "boolean" } } },
             }),
-            &["to", "body", "kind"],
-        ),
-        tool(
-            "mail_reply",
-            "Reply in a message's thread, to its sender (all=true: everyone in the thread). For an assignment you finished: kind=report and close=true, with a summary and drive attachments.",
-            json!({
+        required: &["to", "body", "kind"],
+        run: Run::Sync(|c| {
+            let context = c.w.context.lock().unwrap().clone();
+            let d = c.run.post.with(|po| draft_from(c.me, c.args.0, context, po))?;
+            if d.in_reply_to.is_some() {
+                bail!("to answer a message use mail_reply");
+            }
+            check_attachments(c.run, c.me, &d.attachments)?;
+            Ok(json!(c.run.send(d)?))
+        }),
+    },
+    Tool {
+        name: "mail_reply",
+        shown: |_| true,
+        description: "Reply in a message's thread, to its sender (all=true: everyone in the thread). For an assignment you finished: kind=report and close=true, with a summary and drive attachments.",
+        props: || json!({
                 "message": s("Message id, e.g. m-12"), "body": s("Markdown"),
                 "kind": { "type": "string", "enum": ["reply", "report", "question", "fyi"] },
                 "attachments": { "type": "array", "items": { "type": "string" } },
                 "close": { "type": "boolean", "description": "Marks the assignment you were given in this thread as done" },
                 "all": { "type": "boolean" },
             }),
-            &["message", "body"],
-        ),
-        tool("mail_inbox", "List messages to you, newest first.", json!({ "unread": { "type": "boolean" } }), &[]),
-        tool("mail_thread", "A whole thread, oldest first, with bodies.", json!({ "thread": s("Thread id, e.g. t-12") }), &["thread"]),
-        tool("mail_read", "One message with its body.", json!({ "message": s("Message id") }), &["message"]),
-        tool("desk", "What you owe (assignments and questions to you), what you wait for from others, and your pending access requests.", json!({}), &[]),
-        tool("directory", "The org chart: names, titles, roles, managers, reports, security officers, and who is busy.", json!({}), &[]),
-        tool(
-            "request_access",
-            "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision.",
-            json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
-            &["host", "reason"],
-        ),
-        tool(
-            "drive_publish",
-            "Publish files from your VM to the shared drive (paths under /work, your home or /tmp). Give artifact=a-N to add a new version of your own artifact, with `changes` saying what changed.",
-            json!({
+        required: &["message", "body"],
+        run: Run::Sync(|c| {
+            let d = c.run.post.with(|po| reply_from(c.me, c.args.0, po))?;
+            check_attachments(c.run, c.me, &d.attachments)?;
+            Ok(json!(c.run.send(d)?))
+        }),
+    },
+    Tool {
+        name: "mail_inbox",
+        shown: |_| true,
+        description: "List messages to you, newest first.",
+        props: || json!({ "unread": { "type": "boolean" } }),
+        required: &[],
+        run: Run::Sync(|c| {
+            let list = c.run.post.with(|po| po.inbox(c.me, c.args.flag("unread"), 50));
+            let fresh = list.iter().filter(|m| m["unread"] == json!(true)).count();
+            let mut v = json!({ "messages": list, "unread": fresh });
+            if fresh == 0 {
+                v["note"] = json!(NOTHING_NEW);
+            }
+            Ok(v)
+        }),
+    },
+    Tool {
+        name: "mail_thread",
+        shown: |_| true,
+        description: "A whole thread, oldest first, with bodies.",
+        props: || json!({ "thread": s("Thread id, e.g. t-12") }),
+        required: &["thread"],
+        run: Run::Sync(|c| {
+            let id = c.args.req("thread")?;
+            c.run.post.read_thread(&c.run.journal, &id, c.me)
+        }),
+    },
+    Tool {
+        name: "mail_read",
+        shown: |_| true,
+        description: "One message with its body.",
+        props: || json!({ "message": s("Message id") }),
+        required: &["message"],
+        run: Run::Sync(|c| {
+            let id = c.args.req("message")?;
+            c.run.post.read_message(&c.run.journal, &id, c.me)
+        }),
+    },
+    Tool {
+        name: "desk",
+        shown: |_| true,
+        description: "What you owe (assignments and questions to you), what you wait for from others, and your pending access requests.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| {
+            let desk = c.run.post.with(|po| po.desk(c.me));
+            let pending = security::pending_for(c.run, c.me);
+            let mut v =
+                json!({ "owed": desk.owed, "waiting": desk.waiting, "access_requests": pending });
+            if !desk.waiting.is_empty() || !pending.is_empty() {
+                v["note"] = json!(WAITING);
+            }
+            Ok(v)
+        }),
+    },
+    Tool {
+        name: "directory",
+        shown: |_| true,
+        description: "The org chart: names, titles, roles, managers, reports, security officers, and who is busy.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| {
+            let mut v = c.run.post.with(|po| po.directory());
+            for x in v["workers"].as_array_mut().into_iter().flatten() {
+                if let Some(rt) = x["name"].as_str().and_then(|n| c.run.rt(n)) {
+                    x["state"] = json!(rt.state());
+                }
+            }
+            Ok(v)
+        }),
+    },
+    Tool {
+        name: "request_access",
+        shown: |_| true,
+        description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision.",
+        props: || json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
+        required: &["host", "reason"],
+        run: Run::Sync(|c| {
+            let host = zapper_policy::names::hostname(&c.args.req("host")?)
+                .map_err(|e| anyhow!("host: {e}"))?;
+            let port = c.args.raw("port").as_u64().unwrap_or(443).min(65535) as u16;
+            let methods = c.args.list_if_array("methods").map(|m| {
+                m.into_iter()
+                    .map(|m| m.to_ascii_uppercase())
+                    .collect::<Vec<_>>()
+            });
+            let path = c.args.opt("path");
+            let reason = c.args.req("reason")?;
+            let req = NetRequest {
+                host,
+                port,
+                method: methods.as_ref().and_then(|m| m.first().cloned()),
+                path: None,
+            };
+            let id = security::ask(c.run, c.me, &req, methods, path, &reason)?;
+            Ok(
+                json!({ "request": id, "note": "the security officers will decide; you'll get mail" }),
+            )
+        }),
+    },
+    Tool {
+        name: "drive_publish",
+        shown: |_| true,
+        description: "Publish files from your VM to the shared drive (paths under /work, your home or /tmp). Give artifact=a-N to add a new version of your own artifact, with `changes` saying what changed.",
+        props: || json!({
                 "paths": { "type": "array", "items": { "type": "string" } }, "title": s("Title"),
                 "kind": { "type": "string", "enum": ["document", "report", "dataset", "deck", "board-pack"] },
                 "summary": s("One paragraph: what it is and what it says"),
@@ -180,128 +383,534 @@ pub fn tools(p: Powers) -> Vec<Value> {
                 "artifact": s("Existing artifact id to add a version to"), "thread": s("The thread it answers"),
                 "changes": s("What changed from the previous version, for readers: one or two lines. Required with artifact; optional for a first version"),
             }),
-            &["paths", "title", "kind", "summary"],
-        ),
-        tool("drive_list", "Find artifacts on the shared drive.", json!({ "kind": s("Kind"), "author": s("Author"), "query": s("Words in the title or summary") }), &[]),
-        tool("drive_fetch", "Copy an artifact into your VM.", json!({ "artifact": s("a-3 or a-3@v2 or drive:a-3@v2"), "dest": s("Directory, e.g. /work/in") }), &["artifact", "dest"]),
-    ];
-    if p.budget {
-        v.push(tool(
-            "budget",
-            "Your budget: what you have left and have spent, and your team's balances.",
-            json!({}),
-            &[],
-        ));
-    }
-    if p.budget && p.root {
-        v.push(tool(
-            "budget_request",
-            "Ask the board for the run's budget (or more of it): one total in tokens (the run's whole budget, the seed included), a short plan and a reason. It goes to the board as mail; the board approves or declines in its thread. One request at a time.",
-            json!({ "total": s("Tokens, like 40M"), "plan": s("Markdown: who you will hire and with what budgets, what you will contract, the order, a reserve"), "reason": s("Why this much: the task, what you learned scoping it") }),
-            &["total", "plan", "reason"],
-        ));
-    }
-    if p.budget && p.hires {
-        v.push(tool(
-            "hire",
-            "Hire a worker who reports to you, funded from your balance. The brief is their first assignment and all they know at the start: the job, the context, what done looks like. Their VM boots in about half a minute; the brief waits for them.",
-            json!({
+        required: &["paths", "title", "kind", "summary"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let a = drive::PublishArgs {
+                    paths: c.args.list("paths"),
+                    title: c.args.req("title")?,
+                    kind: c.args.req("kind")?,
+                    summary: c.args.opt("summary").unwrap_or_default(),
+                    space: c.args.opt("space"),
+                    artifact: c.args.opt("artifact"),
+                    thread: c
+                        .args
+                        .opt("thread")
+                        .or_else(|| c.w.context.lock().unwrap().clone()),
+                    changes: c.args.opt("changes").unwrap_or_default(),
+                };
+                drive::publish(c.run, c.me, c.s, a).await
+            })
+        }),
+    },
+    Tool {
+        name: "drive_list",
+        shown: |_| true,
+        description: "Find artifacts on the shared drive.",
+        props: || json!({ "kind": s("Kind"), "author": s("Author"), "query": s("Words in the title or summary"), "thread": s("A task's thread, e.g. t-12: what was published for it, the work delegated from it included") }),
+        required: &[],
+        run: Run::Sync(|c| {
+            let task = c
+                .args
+                .opt("thread")
+                .map(|t| c.run.post.with(|po| po.task_threads(&t)));
+            let d = c.run.drive.lock().unwrap();
+            Ok(json!(d.list(
+                c.me,
+                &|sp| access::can_read_space(c.run, c.me, sp),
+                c.args.opt("kind").as_deref(),
+                c.args.opt("author").as_deref(),
+                c.args.opt("query").as_deref(),
+                task.as_ref()
+            )))
+        }),
+    },
+    Tool {
+        name: "drive_fetch",
+        shown: |_| true,
+        description: "Copy an artifact into your VM.",
+        props: || json!({ "artifact": s("a-3 or a-3@v2 or drive:a-3@v2"), "dest": s("Directory, e.g. /work/in") }),
+        required: &["artifact", "dest"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let artifact = c.args.req("artifact")?;
+                let dest = c.args.req("dest")?;
+                drive::fetch(c.run, c.me, c.s, &artifact, &dest).await
+            })
+        }),
+    },
+    Tool {
+        name: "budget",
+        shown: |p| p.budget,
+        description: "Your budget: what you have left and have spent, and your team's balances.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(workforce::summary(c.run, c.me))),
+    },
+    Tool {
+        name: "budget_request",
+        shown: |p| p.budget && p.root,
+        description: "Ask the board for the run's budget (or more of it): one total in tokens (the run's whole budget, the seed included), a short plan and a reason. It goes to the board as mail; the board approves or declines in its thread. One request at a time.",
+        props: || json!({ "total": s("Tokens, like 40M"), "plan": s("Markdown: who you will hire and with what budgets, what you will contract, the order, a reserve"), "reason": s("Why this much: the task, what you learned scoping it") }),
+        required: &["total", "plan", "reason"],
+        run: Run::Sync(|c| {
+            workforce::request(
+                c.run,
+                c.me,
+                c.args.tokens("total")?,
+                &c.args.req("plan")?,
+                &c.args.req("reason")?,
+            )
+        }),
+    },
+    Tool {
+        name: "hire",
+        shown: |p| p.budget && p.hires,
+        description: "Hire a worker who reports to you, funded from your balance. The brief is their first assignment and all they know at the start: the job, the context, what done looks like. Their VM boots in about half a minute; the brief waits for them.",
+        props: || json!({
                 "role": s("A role you may hire (your manager knows the catalog; directory shows the chart)"), "budget": s("Tokens you give them for the run, like 5M"),
                 "subject": s("Their first assignment's subject"), "brief": s("Markdown: the job, context, acceptance criteria, who to talk to"), "reason": s("Why the firm needs them"),
                 "name": s("Optional: their name (lowercase); else one is picked"), "title": s("Optional: their title, e.g. CTO"), "due": s("Optional: when the first assignment is due, like 4h"),
                 "attachments": { "type": "array", "items": { "type": "string" }, "description": "Shared drive references for the brief" },
             }),
-            &["role", "budget", "brief", "reason"],
-        ));
-    }
-    if p.budget && p.hires {
-        v.extend([
-            tool(
-                "contract_offer",
-                "Offer one job to a contractor: any role in the catalog, with a free title (Security auditor, Brand designer). A candidate boots, is checked by the security officers and quotes in a mail thread (scope, budget, due date), paid from a small quoting fee from your balance. Leave budget or due open to have them quote one. Use contractors for bounded, specialist or one-off work; hire for ongoing ownership.",
-                json!({
+        required: &["role", "budget", "brief", "reason"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let a = workforce::HireArgs {
+                    role: c.args.req("role")?,
+                    name: c.args.opt("name"),
+                    title: c.args.opt("title"),
+                    budget: c.args.tokens("budget")?,
+                    subject: c.args.opt("subject").unwrap_or_default(),
+                    brief: c.args.req("brief")?,
+                    reason: c.args.req("reason")?,
+                    due: c.args.due("due")?,
+                    attachments: c.args.attachments()?,
+                };
+                check_attachments(c.run, c.me, &a.attachments)?;
+                workforce::hire(c.d, c.run, c.me, a).await
+            })
+        }),
+    },
+    Tool {
+        name: "contract_offer",
+        shown: |p| p.budget && p.hires,
+        description: "Offer one job to a contractor: any role in the catalog, with a free title (Security auditor, Brand designer). A candidate boots, is checked by the security officers and quotes in a mail thread (scope, budget, due date), paid from a small quoting fee from your balance. Leave budget or due open to have them quote one. Use contractors for bounded, specialist or one-off work; hire for ongoing ownership.",
+        props: || json!({
                     "role": s("A role from the catalog"), "title": s("The job's title, e.g. Security auditor"),
                     "brief": s("Markdown: the job, context, what done looks like, what they get to work with"),
                     "budget": s("Optional: the tokens you offer, like 2M"), "due": s("Optional: when it is due, like 6h"), "name": s("Optional: their name"),
                 }),
-                &["role", "title", "brief"],
-            ),
-            tool("contract_accept", "Accept a contractor's quote: the quoted budget moves from your balance to them and the job goes to them as an assignment. Needs the board's approved budget.", json!({ "contract": s("k-1") }), &["contract"]),
-            tool("contract_counter", "Counter a contractor's quote with other terms (a few rounds at most); unset terms stay as quoted.", json!({ "contract": s("k-1"), "budget": s("Tokens, like 1.5M"), "due": s("Like 4h"), "scope": s("The scope you want"), "note": s("Why") }), &["contract", "note"]),
-            tool("contract_withdraw", "Walk away from an offer or a quote; the candidate's machine stops and the rest of the fee comes back. End an active contract with release instead.", json!({ "contract": s("k-1"), "reason": s("Why") }), &["contract", "reason"]),
-            tool("contract_add", "Add a colleague to a contract's job: the contractor may then mail them.", json!({ "contract": s("k-1"), "worker": s("Name") }), &["contract", "worker"]),
-            tool("contracts", "Your contracts and offers: state, terms, quotes, who is on the job.", json!({}), &[]),
-        ]);
-    }
-    if p.contractor {
-        v.extend([
-            tool("contract_quote", "Quote on an offer or a counter-offer: the scope you will deliver (and what is out of it), a budget in tokens and a due date.", json!({ "contract": s("k-1"), "scope": s("Markdown: what you deliver, what is out of scope, what you need"), "budget": s("Tokens, like 2M"), "due": s("Like 6h") }), &["contract", "scope", "budget"]),
-            tool("contract_decline", "Turn an offer down, with the reason.", json!({ "contract": s("k-1"), "reason": s("Why") }), &["contract", "reason"]),
-            tool("contract_complete", "Deliver: your report goes to the hirer and the contract ends (your machine stops). Publish or push the work first.", json!({ "contract": s("k-1"), "report": s("Markdown: what you delivered, where it is, what is left"), "attachments": { "type": "array", "items": { "type": "string" }, "description": "Shared drive references" } }), &["contract", "report"]),
-            tool("contracts", "Your contract: state and terms.", json!({}), &[]),
-        ]);
-    }
-    if p.budget && (p.hires || p.manages) {
-        v.extend([
-            tool("fund", "Give one of your reports (or their reports) more budget from yours; a negative amount takes unspent budget back.", json!({ "worker": s("Name"), "tokens": s("Tokens, like 2M or -500k"), "reason": s("Why") }), &["worker", "tokens", "reason"]),
-            tool("release", "Let one of your reports go: their VM stops, their reports, open work and unspent budget come to you.", json!({ "worker": s("Name"), "reason": s("Why") }), &["worker", "reason"]),
-        ]);
-    }
-    let decide = tool(
-        "access_decide",
-        "Decide an access request. scope once (one connection or request), worker or role (standing). Give an expiry. methods or path make the proxy inspect TLS with the session's CA, which only worker VMs trust: for the cluster, and for CONNECT tunnels, pass methods: [] to let the connection through untouched.",
-        json!({
+        required: &["role", "title", "brief"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let budget = c.args.opt_tokens("budget")?;
+                let a = contracts::OfferArgs {
+                    role: c.args.req("role")?,
+                    title: c.args.req("title")?,
+                    brief: c.args.req("brief")?,
+                    budget,
+                    due: c.args.due("due")?,
+                    name: c.args.opt("name"),
+                };
+                contracts::offer(c.d, c.run, c.me, a).await
+            })
+        }),
+    },
+    Tool {
+        name: "contract_accept",
+        shown: |p| p.budget && p.hires,
+        description: "Accept a contractor's quote: the quoted budget moves from your balance to them and the job goes to them as an assignment. Needs the board's approved budget.",
+        props: || json!({ "contract": s("k-1") }),
+        required: &["contract"],
+        run: Run::Sync(|c| contracts::accept(c.run, c.me, &c.args.req("contract")?)),
+    },
+    Tool {
+        name: "contract_counter",
+        shown: |p| p.budget && p.hires,
+        description: "Counter a contractor's quote with other terms (a few rounds at most); unset terms stay as quoted.",
+        props: || json!({ "contract": s("k-1"), "budget": s("Tokens, like 1.5M"), "due": s("Like 4h"), "scope": s("The scope you want"), "note": s("Why") }),
+        required: &["contract", "note"],
+        run: Run::Sync(|c| {
+            let budget = c.args.opt_tokens("budget")?;
+            contracts::counter(
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                budget,
+                c.args.due("due")?,
+                c.args.opt("scope"),
+                &c.args.req("note")?,
+            )
+        }),
+    },
+    Tool {
+        name: "contract_withdraw",
+        shown: |p| p.budget && p.hires,
+        description: "Walk away from an offer or a quote; the candidate's machine stops and the rest of the fee comes back. End an active contract with release instead.",
+        props: || json!({ "contract": s("k-1"), "reason": s("Why") }),
+        required: &["contract", "reason"],
+        run: Run::Sync(|c| {
+            contracts::withdraw(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                &c.args.req("reason")?,
+            )
+        }),
+    },
+    Tool {
+        name: "contract_add",
+        shown: |p| p.budget && p.hires,
+        description: "Add a colleague to a contract's job: the contractor may then mail them.",
+        props: || json!({ "contract": s("k-1"), "worker": s("Name") }),
+        required: &["contract", "worker"],
+        run: Run::Sync(|c| {
+            contracts::add(
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                &c.args.req("worker")?,
+            )
+        }),
+    },
+    Tool {
+        name: "contracts",
+        shown: |p| p.budget && p.hires,
+        description: "Your contracts and offers: state, terms, quotes, who is on the job.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(json!(contracts::mine(c.run, c.me)))),
+    },
+    Tool {
+        name: "contract_quote",
+        shown: |p| p.contractor,
+        description: "Quote on an offer or a counter-offer: the scope you will deliver (and what is out of it), a budget in tokens and a due date.",
+        props: || json!({ "contract": s("k-1"), "scope": s("Markdown: what you deliver, what is out of scope, what you need"), "budget": s("Tokens, like 2M"), "due": s("Like 6h") }),
+        required: &["contract", "scope", "budget"],
+        run: Run::Sync(|c| {
+            contracts::quote(
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                &c.args.req("scope")?,
+                c.args.tokens("budget")?,
+                c.args.due("due")?,
+            )
+        }),
+    },
+    Tool {
+        name: "contract_decline",
+        shown: |p| p.contractor,
+        description: "Turn an offer down, with the reason.",
+        props: || json!({ "contract": s("k-1"), "reason": s("Why") }),
+        required: &["contract", "reason"],
+        run: Run::Sync(|c| {
+            contracts::decline(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                &c.args.req("reason")?,
+            )
+        }),
+    },
+    Tool {
+        name: "contract_complete",
+        shown: |p| p.contractor,
+        description: "Deliver: your report goes to the hirer and the contract ends (your machine stops). Publish or push the work first.",
+        props: || json!({ "contract": s("k-1"), "report": s("Markdown: what you delivered, where it is, what is left"), "attachments": { "type": "array", "items": { "type": "string" }, "description": "Shared drive references" } }),
+        required: &["contract", "report"],
+        run: Run::Sync(|c| {
+            let att = c.args.attachments()?;
+            check_attachments(c.run, c.me, &att)?;
+            contracts::complete(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("contract")?,
+                &c.args.req("report")?,
+                att,
+            )
+        }),
+    },
+    Tool {
+        name: "contracts",
+        shown: |p| p.contractor,
+        description: "Your contract: state and terms.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(json!(contracts::mine(c.run, c.me)))),
+    },
+    Tool {
+        name: "fund",
+        shown: |p| p.budget && (p.hires || p.manages),
+        description: "Give one of your reports (or their reports) more budget from yours; a negative amount takes unspent budget back.",
+        props: || json!({ "worker": s("Name"), "tokens": s("Tokens, like 2M or -500k"), "reason": s("Why") }),
+        required: &["worker", "tokens", "reason"],
+        run: Run::Sync(|c| {
+            workforce::fund(
+                c.run,
+                c.me,
+                &c.args.req("worker")?,
+                c.args.tokens("tokens")?,
+                &c.args.req("reason")?,
+            )
+        }),
+    },
+    Tool {
+        name: "release",
+        shown: |p| p.budget && (p.hires || p.manages),
+        description: "Let one of your reports go: their VM stops, their reports, open work and unspent budget come to you.",
+        props: || json!({ "worker": s("Name"), "reason": s("Why") }),
+        required: &["worker", "reason"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let worker = c.args.req("worker")?;
+                let reason = c.args.req("reason")?;
+                workforce::release(c.d, c.run, c.me, &worker, &reason).await
+            })
+        }),
+    },
+    Tool {
+        name: "credentials_request",
+        shown: |_| true,
+        description: "Ask for access to one of the firm's resources, with a reason: a git repository (read: fetch; write: push branches; admin: also main and tags; each repository is its own grant), the cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
+        props: || json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "repo": s("For git: the repository's name, e.g. product (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
+        required: &["resource", "level", "reason"],
+        run: Run::Sync(|c| {
+            let level = access::Level::parse(&c.args.req("level")?)?;
+            let reason = c.args.req("reason")?;
+            let resource = c.args.req("resource")?;
+            let keys: Vec<String> = if resource == "drive" {
+                let sp = c.args.list("spaces");
+                if sp.is_empty() {
+                    bail!("for drive, name the spaces");
+                }
+                sp.into_iter().map(|x| format!("drive:{x}")).collect()
+            } else if let (true, Some(repo)) = (resource == "git", c.args.opt("repo")) {
+                vec![format!("git:{repo}")]
+            } else {
+                vec![resource]
+            };
+            let ids = keys
+                .iter()
+                .map(|k| access::request(c.run, c.me, k, level, &reason))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!({ "requests": ids, "note": "the policy owner decides; you'll get mail" }))
+        }),
+    },
+    Tool {
+        name: "credentials",
+        shown: |_| true,
+        description: "Your grants (with expiry), your requests, and the resources and spaces there are.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| {
+            let mut v = access::mine(c.run, c.me);
+            let pending = v["requests"].as_array().is_some_and(|r| {
+                r.iter()
+                    .any(|q| matches!(q["state"].as_str(), Some("pending" | "escalated")))
+            });
+            if pending {
+                v["note"] = json!(WAITING);
+            }
+            Ok(v)
+        }),
+    },
+    Tool {
+        name: "credentials_list",
+        shown: |p| p.owner,
+        description: "Every grant and credential request in the firm.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(access::all(c.run))),
+    },
+    Tool {
+        name: "credentials_decide",
+        shown: |p| p.owner,
+        description: "Decide a credential request: grant (at most the level asked, for the least time that does the job) or deny with a note. Default expiry is the firm's.",
+        props: || json!({ "request": s("p-3"), "grant": { "type": "boolean" }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "expires_in": s("e.g. 8h"), "note": s("Why; the requester reads it") }),
+        required: &["request", "grant", "note"],
+        run: Run::Sync(|c| {
+            let level = c
+                .args
+                .opt("level")
+                .map(|l| access::Level::parse(&l))
+                .transpose()?;
+            let grant = c.args.must_bool("grant", "grant: true or false")?;
+            access::decide(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("request")?,
+                grant,
+                level,
+                c.args.opt("expires_in").as_deref(),
+                &c.args.opt("note").unwrap_or_default(),
+            )
+        }),
+    },
+    Tool {
+        name: "credentials_escalate",
+        shown: |p| p.owner,
+        description: "Hand a credential request up (an officer to the CEO, the CEO to the board), with your recommendation.",
+        props: || json!({ "request": s("p-3"), "recommendation": s("What you recommend and why") }),
+        required: &["request", "recommendation"],
+        run: Run::Sync(|c| {
+            access::escalate(
+                c.run,
+                c.me,
+                &c.args.req("request")?,
+                &c.args.req("recommendation")?,
+            )
+        }),
+    },
+    Tool {
+        name: "credentials_revoke",
+        shown: |p| p.owner,
+        description: "Take a grant back.",
+        props: || json!({ "worker": s("Name"), "resource": s("git, cluster or drive:<space>"), "reason": s("Why") }),
+        required: &["worker", "resource", "reason"],
+        run: Run::Sync(|c| {
+            access::revoke(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("worker")?,
+                &c.args.req("resource")?,
+                &c.args.req("reason")?,
+            )
+        }),
+    },
+    Tool {
+        name: "traffic",
+        shown: |p| p.officer,
+        description: "The firm's requests: method, URL, status, sizes, rule, allowed or denied.",
+        props: || json!({ "worker": s("Worker"), "host": s("Host prefix"), "since": s("e.g. 1h"), "limit": { "type": "integer" } }),
+        required: &[],
+        run: Run::Sync(|c| {
+            let since = match c.args.opt("since") {
+                Some(x) => Some(now() - parse_duration(&x)?.as_secs_f64()),
+                None => None,
+            };
+            let limit = c.args.raw("limit").as_u64().unwrap_or(100).min(500) as usize;
+            Ok(json!(security::traffic(
+                c.run,
+                c.args.opt("worker").as_deref(),
+                c.args.opt("host").as_deref(),
+                since,
+                limit
+            )))
+        }),
+    },
+    Tool {
+        name: "traffic_digest",
+        shown: |p| p.officer,
+        description: "A summary of traffic since the last digest: new hosts, large uploads, approvals.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| {
+            c.w.digest_due
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            Ok(json!(security::take_wake_digest(c.run).unwrap_or_else(
+                || "No new traffic since the last digest.".into()
+            )))
+        }),
+    },
+    Tool {
+        name: "access_requests",
+        shown: |p| p.officer,
+        description: "Pending access requests.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(json!(security::requests(c.run, true)))),
+    },
+    Tool {
+        name: "background_checks",
+        shown: |p| p.officer,
+        description: "Pending background checks on new hires: who, the role and what it can reach, the hirer, the budget, the reason and the brief. Decide each with background_check.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(json!(security::screenings_pending(c.run, c.me)))),
+    },
+    Tool {
+        name: "access_rules",
+        shown: |p| p.officer,
+        description: "Standing approvals made so far, with how many requests each allowed.",
+        props: || json!({}),
+        required: &[],
+        run: Run::Sync(|c| Ok(json!(security::standing(c.run)))),
+    },
+    Tool {
+        name: "access_decide",
+        shown: |p| p.officer,
+        description: "Decide an access request. scope once (one connection or request), worker or role (standing). Give an expiry. methods or path make the proxy inspect TLS with the session's CA, which only worker VMs trust: for the cluster, and for CONNECT tunnels, pass methods: [] to let the connection through untouched.",
+        props: || json!({
             "request": s("r-4"), "allow": { "type": "boolean" }, "scope": { "type": "string", "enum": ["once", "worker", "role"] }, "reason": s("One line; the worker and the board read it"),
             "methods": { "type": "array", "items": { "type": "string" }, "description": "HTTP methods to allow, e.g. [\"GET\"] (inspects TLS). [] approves the host and port without inspection. Omitted: the request's own methods. Never [\"CONNECT\"]." },
             "path": s("URL path glob (inspects TLS)"), "expires_in": s("e.g. 4h"),
         }),
-        &["request", "allow", "scope", "reason"],
-    );
-    // Credentials: everyone asks for access to git, the cluster and drive
-    // spaces; the policy owners decide.
-    v.extend([
-        tool(
-            "credentials_request",
-            "Ask for access to one of the firm's resources, with a reason: a git repository (read: fetch; write: push branches; admin: also main and tags; each repository is its own grant), the cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
-            json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "repo": s("For git: the repository's name, e.g. product (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
-            &["resource", "level", "reason"],
-        ),
-        tool("credentials", "Your grants (with expiry), your requests, and the resources and spaces there are.", json!({}), &[]),
-    ]);
-    if p.owner {
-        v.extend([
-            tool("credentials_list", "Every grant and credential request in the firm.", json!({}), &[]),
-            tool(
-                "credentials_decide",
-                "Decide a credential request: grant (at most the level asked, for the least time that does the job) or deny with a note. Default expiry is the firm's.",
-                json!({ "request": s("p-3"), "grant": { "type": "boolean" }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "expires_in": s("e.g. 8h"), "note": s("Why; the requester reads it") }),
-                &["request", "grant", "note"],
-            ),
-            tool("credentials_escalate", "Hand a credential request up (an officer to the CEO, the CEO to the board), with your recommendation.", json!({ "request": s("p-3"), "recommendation": s("What you recommend and why") }), &["request", "recommendation"]),
-            tool("credentials_revoke", "Take a grant back.", json!({ "worker": s("Name"), "resource": s("git, cluster or drive:<space>"), "reason": s("Why") }), &["worker", "resource", "reason"]),
-        ]);
-    }
-    if officer {
-        v.extend([
-            tool("traffic", "The firm's requests: method, URL, status, sizes, rule, allowed or denied.", json!({ "worker": s("Worker"), "host": s("Host prefix"), "since": s("e.g. 1h"), "limit": { "type": "integer" } }), &[]),
-            tool("traffic_digest", "A summary of traffic since the last digest: new hosts, large uploads, approvals.", json!({}), &[]),
-            tool("access_requests", "Pending access requests.", json!({}), &[]),
-            tool("background_checks", "Pending background checks on new hires: who, the role and what it can reach, the hirer, the budget, the reason and the brief. Decide each with background_check.", json!({}), &[]),
-            tool("access_rules", "Standing approvals made so far, with how many requests each allowed.", json!({}), &[]),
-            decide,
-            tool(
-                "background_check",
-                "Clear a new hire to start, or object (with the reason): an objection cancels the hire and returns its budget to the hirer. Clearing can grant the access the brief names (not admin on git or the cluster, which is the CEO's).",
-                json!({ "screening": s("c-2"), "clear": { "type": "boolean" }, "note": s("One line; the hirer and the board read it. Required to object"),
+        required: &["request", "allow", "scope", "reason"],
+        run: Run::Sync(|c| {
+            let a = security::DecideArgs {
+                allow: c.args.must_bool("allow", "allow is required")?,
+                scope: c.args.req("scope")?,
+                reason: c.args.req("reason")?,
+                methods: c.args.list_if_array("methods"),
+                path: c.args.opt("path"),
+                expires_in: c.args.opt("expires_in"),
+            };
+            security::decide(c.run, c.me, &c.args.req("request")?, a)
+        }),
+    },
+    Tool {
+        name: "background_check",
+        shown: |p| p.officer,
+        description: "Clear a new hire to start, or object (with the reason): an objection cancels the hire and returns its budget to the hirer. Clearing can grant the access the brief names (not admin on git or the cluster, which is the CEO's).",
+        props: || json!({ "screening": s("c-2"), "clear": { "type": "boolean" }, "note": s("One line; the hirer and the board read it. Required to object"),
                     "grants": { "type": "array", "description": "With clear: access the brief names, granted at once", "items": { "type": "object", "properties": { "resource": s("git:<repo> (or git, when there is one), cluster or drive:<space>"), "level": { "type": "string", "enum": ["read", "write", "admin"] }, "expires_in": s("e.g. 8h; default the firm's") }, "required": ["resource", "level"] } } }),
-                &["screening", "clear"],
-            ),
-            tool("access_revoke", "Remove a standing approval.", json!({ "rule": s("Rule id"), "reason": s("Why") }), &["rule", "reason"]),
-            tool("escalate", "Hand a request to the board: secrets, private networks, global rules.", json!({ "request": s("r-4"), "recommendation": s("What you recommend and why") }), &["request", "recommendation"]),
-        ]);
-    }
-    v
-}
+        required: &["screening", "clear"],
+        run: Run::Sync(|c| {
+            security::decide_screening(
+                c.d,
+                c.run,
+                c.me,
+                &c.args.req("screening")?,
+                c.args
+                    .must_bool("clear", "clear is required: true or false")?,
+                &c.args.opt("note").unwrap_or_default(),
+                c.args.raw("grants"),
+            )
+        }),
+    },
+    Tool {
+        name: "access_revoke",
+        shown: |p| p.officer,
+        description: "Remove a standing approval.",
+        props: || json!({ "rule": s("Rule id"), "reason": s("Why") }),
+        required: &["rule", "reason"],
+        run: Run::Sync(|c| {
+            security::revoke(c.run, c.me, &c.args.req("rule")?, &c.args.req("reason")?)
+        }),
+    },
+    Tool {
+        name: "escalate",
+        shown: |p| p.officer,
+        description: "Hand a request to the board: secrets, private networks, global rules.",
+        props: || json!({ "request": s("r-4"), "recommendation": s("What you recommend and why") }),
+        required: &["request", "recommendation"],
+        run: Run::Sync(|c| {
+            security::escalate(
+                c.run,
+                c.me,
+                &c.args.req("request")?,
+                &c.args.req("recommendation")?,
+            )
+        }),
+    },
+];
 
 /// What the office tools say when there's nothing to act on: agents that
 /// poll instead of ending their turn waste it.
@@ -472,7 +1081,7 @@ pub fn reply_from(from: &str, v: &Value, po: &PostOffice) -> Result<Draft> {
 }
 
 pub async fn dispatch(
-    _d: &Core,
+    d: &Core,
     run: &Arc<FirmRun>,
     s: &Arc<Session>,
     me: &str,
@@ -481,405 +1090,28 @@ pub async fn dispatch(
 ) -> Result<Value> {
     let w = run.worker(me)?;
     let p = powers(run, &w);
-    let officer_only = [
-        "traffic",
-        "traffic_digest",
-        "access_requests",
-        "access_rules",
-        "access_decide",
-        "access_revoke",
-        "escalate",
-        "background_check",
-        "background_checks",
-    ];
-    if officer_only.contains(&op) && !w.officer() {
-        bail!("{op} is for security officers");
-    }
-    let allowed = match op {
-        "budget" => p.budget,
-        "budget_request" => p.budget && p.root,
-        "hire" => p.budget && p.hires,
-        "fund" | "release" => p.budget && (p.hires || p.manages),
-        "contract_offer" | "contract_accept" | "contract_counter" | "contract_withdraw"
-        | "contract_add" => p.budget && p.hires,
-        "contract_quote" | "contract_decline" | "contract_complete" => p.contractor,
-        "contracts" => p.contractor || (p.budget && p.hires),
-        "credentials_list"
-        | "credentials_decide"
-        | "credentials_escalate"
-        | "credentials_revoke" => p.owner,
-        _ => true,
-    };
-    if !allowed {
+    // A worker may call the tools they are shown, and `tools` and the stop
+    // hook's `stop_check`.
+    let known = TOOLS.iter().any(|t| t.name == op);
+    let mine = TOOLS.iter().find(|t| t.name == op && (t.shown)(p));
+    if known && mine.is_none() {
+        let officers = Powers {
+            officer: true,
+            ..Default::default()
+        };
+        if !w.officer() && TOOLS.iter().any(|t| t.name == op && (t.shown)(officers)) {
+            bail!("{op} is for security officers");
+        }
         bail!("{op} isn't one of your tools");
     }
     if run.ended() {
         bail!("the firm is stopping");
     }
-    match op {
-        "tools" => Ok(json!(tools(p))),
-        "credentials_request" => {
-            let level = super::access::Level::parse(&req_str(args, "level")?)?;
-            let reason = req_str(args, "reason")?;
-            let resource = req_str(args, "resource")?;
-            let keys: Vec<String> = if resource == "drive" {
-                let sp = strings(&args["spaces"]);
-                if sp.is_empty() {
-                    bail!("for drive, name the spaces");
-                }
-                sp.into_iter().map(|x| format!("drive:{x}")).collect()
-            } else if let (true, Some(repo)) = (resource == "git", opt_str(args, "repo")) {
-                vec![format!("git:{repo}")]
-            } else {
-                vec![resource]
-            };
-            let ids = keys
-                .iter()
-                .map(|k| super::access::request(run, me, k, level, &reason))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(json!({ "requests": ids, "note": "the policy owner decides; you'll get mail" }))
-        }
-        "credentials" => {
-            let mut v = super::access::mine(run, me);
-            let pending = v["requests"].as_array().is_some_and(|r| {
-                r.iter()
-                    .any(|q| matches!(q["state"].as_str(), Some("pending" | "escalated")))
-            });
-            if pending {
-                v["note"] = json!(WAITING);
-            }
-            Ok(v)
-        }
-        "credentials_list" => Ok(super::access::all(run)),
-        "credentials_decide" => {
-            let level = opt_str(args, "level")
-                .map(|l| super::access::Level::parse(&l))
-                .transpose()?;
-            let grant = args["grant"]
-                .as_bool()
-                .ok_or_else(|| anyhow!("grant: true or false"))?;
-            super::access::decide(
-                _d,
-                run,
-                me,
-                &req_str(args, "request")?,
-                grant,
-                level,
-                opt_str(args, "expires_in").as_deref(),
-                &opt_str(args, "note").unwrap_or_default(),
-            )
-        }
-        "credentials_escalate" => super::access::escalate(
-            run,
-            me,
-            &req_str(args, "request")?,
-            &req_str(args, "recommendation")?,
-        ),
-        "credentials_revoke" => super::access::revoke(
-            _d,
-            run,
-            me,
-            &req_str(args, "worker")?,
-            &req_str(args, "resource")?,
-            &req_str(args, "reason")?,
-        ),
-        "stop_check" => Ok(super::foreman::stop_check(run, &w)),
-        "budget" => Ok(super::workforce::summary(run, me)),
-        "budget_request" => super::workforce::request(
-            run,
-            me,
-            super::workforce::tokens_arg(&args["total"], "total")?,
-            &req_str(args, "plan")?,
-            &req_str(args, "reason")?,
-        ),
-        "hire" => {
-            let a = super::workforce::HireArgs {
-                role: req_str(args, "role")?,
-                name: opt_str(args, "name"),
-                title: opt_str(args, "title"),
-                budget: super::workforce::tokens_arg(&args["budget"], "budget")?,
-                subject: opt_str(args, "subject").unwrap_or_default(),
-                brief: req_str(args, "brief")?,
-                reason: req_str(args, "reason")?,
-                due: parse_due(&args["due"])?,
-                attachments: attachments(&args["attachments"])?,
-            };
-            check_attachments(run, me, &a.attachments)?;
-            super::workforce::hire(_d, run, me, a).await
-        }
-        "fund" => super::workforce::fund(
-            run,
-            me,
-            &req_str(args, "worker")?,
-            super::workforce::tokens_arg(&args["tokens"], "tokens")?,
-            &req_str(args, "reason")?,
-        ),
-        "release" => {
-            super::workforce::release(
-                _d,
-                run,
-                me,
-                &req_str(args, "worker")?,
-                &req_str(args, "reason")?,
-            )
-            .await
-        }
-        "contract_offer" => {
-            let budget = match &args["budget"] {
-                Value::Null => None,
-                v => Some(super::workforce::tokens_arg(v, "budget")?),
-            };
-            let a = super::contracts::OfferArgs {
-                role: req_str(args, "role")?,
-                title: req_str(args, "title")?,
-                brief: req_str(args, "brief")?,
-                budget,
-                due: parse_due(&args["due"])?,
-                name: opt_str(args, "name"),
-            };
-            super::contracts::offer(_d, run, me, a).await
-        }
-        "contract_quote" => super::contracts::quote(
-            run,
-            me,
-            &req_str(args, "contract")?,
-            &req_str(args, "scope")?,
-            super::workforce::tokens_arg(&args["budget"], "budget")?,
-            parse_due(&args["due"])?,
-        ),
-        "contract_counter" => {
-            let budget = match &args["budget"] {
-                Value::Null => None,
-                v => Some(super::workforce::tokens_arg(v, "budget")?),
-            };
-            super::contracts::counter(
-                run,
-                me,
-                &req_str(args, "contract")?,
-                budget,
-                parse_due(&args["due"])?,
-                opt_str(args, "scope"),
-                &req_str(args, "note")?,
-            )
-        }
-        "contract_accept" => super::contracts::accept(run, me, &req_str(args, "contract")?),
-        "contract_withdraw" => super::contracts::withdraw(
-            _d,
-            run,
-            me,
-            &req_str(args, "contract")?,
-            &req_str(args, "reason")?,
-        ),
-        "contract_add" => super::contracts::add(
-            run,
-            me,
-            &req_str(args, "contract")?,
-            &req_str(args, "worker")?,
-        ),
-        "contract_decline" => super::contracts::decline(
-            _d,
-            run,
-            me,
-            &req_str(args, "contract")?,
-            &req_str(args, "reason")?,
-        ),
-        "contract_complete" => {
-            let att = attachments(&args["attachments"])?;
-            check_attachments(run, me, &att)?;
-            super::contracts::complete(
-                _d,
-                run,
-                me,
-                &req_str(args, "contract")?,
-                &req_str(args, "report")?,
-                att,
-            )
-        }
-        "contracts" => Ok(json!(super::contracts::mine(run, me))),
-        "mail_send" => {
-            let context = w.context.lock().unwrap().clone();
-            let d = draft_from(me, args, context, &run.post.lock().unwrap())?;
-            if d.in_reply_to.is_some() {
-                bail!("to answer a message use mail_reply");
-            }
-            check_attachments(run, me, &d.attachments)?;
-            let sent = run.send(d)?;
-            Ok(json!(sent))
-        }
-        "mail_reply" => {
-            let d = reply_from(me, args, &run.post.lock().unwrap())?;
-            check_attachments(run, me, &d.attachments)?;
-            Ok(json!(run.send(d)?))
-        }
-        "mail_inbox" => {
-            let unread = args["unread"].as_bool().unwrap_or(false);
-            let list = run.post.lock().unwrap().inbox(me, unread, 50);
-            let fresh = list.iter().filter(|m| m["unread"] == json!(true)).count();
-            let mut v = json!({ "messages": list, "unread": fresh });
-            if fresh == 0 {
-                v["note"] = json!(NOTHING_NEW);
-            }
-            Ok(v)
-        }
-        "mail_thread" => {
-            let id = req_str(args, "thread")?;
-            let mut po = run.post.lock().unwrap();
-            let v = po.thread(&run.journal, &id, me)?;
-            let ids: Vec<String> = v["messages"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| m["id"].as_str().map(str::to_string))
-                .collect();
-            po.mark_read(me, &ids);
-            Ok(v)
-        }
-        "mail_read" => {
-            let id = req_str(args, "message")?;
-            let mut po = run.post.lock().unwrap();
-            let v = po.message(&run.journal, &id, me)?;
-            po.mark_read(me, &[id]);
-            Ok(v)
-        }
-        "desk" => {
-            let desk = run.post.lock().unwrap().desk(me);
-            let pending = security::pending_for(run, me);
-            let mut v =
-                json!({ "owed": desk.owed, "waiting": desk.waiting, "access_requests": pending });
-            if !desk.waiting.is_empty() || !pending.is_empty() {
-                v["note"] = json!(WAITING);
-            }
-            Ok(v)
-        }
-        "directory" => {
-            let mut v = run.post.lock().unwrap().directory();
-            for x in v["workers"].as_array_mut().into_iter().flatten() {
-                if let Some(rt) = x["name"].as_str().and_then(|n| run.rt(n)) {
-                    x["state"] = json!(rt.state());
-                }
-            }
-            Ok(v)
-        }
-        "request_access" => {
-            let host = zapper_policy::names::hostname(&req_str(args, "host")?)
-                .map_err(|e| anyhow!("host: {e}"))?;
-            let port = args["port"].as_u64().unwrap_or(443).min(65535) as u16;
-            let methods = args["methods"].as_array().map(|_| {
-                strings(&args["methods"])
-                    .into_iter()
-                    .map(|m| m.to_ascii_uppercase())
-                    .collect::<Vec<_>>()
-            });
-            let path = opt_str(args, "path");
-            let reason = req_str(args, "reason")?;
-            let req = NetRequest {
-                host,
-                port,
-                method: methods.as_ref().and_then(|m| m.first().cloned()),
-                path: None,
-            };
-            let id = security::ask(run, me, &req, methods, path, &reason)?;
-            Ok(
-                json!({ "request": id, "note": "the security officers will decide; you'll get mail" }),
-            )
-        }
-        "drive_publish" => {
-            let a = drive::PublishArgs {
-                paths: strings(&args["paths"]),
-                title: req_str(args, "title")?,
-                kind: req_str(args, "kind")?,
-                summary: opt_str(args, "summary").unwrap_or_default(),
-                space: opt_str(args, "space"),
-                artifact: opt_str(args, "artifact"),
-                thread: opt_str(args, "thread").or_else(|| w.context.lock().unwrap().clone()),
-                changes: opt_str(args, "changes").unwrap_or_default(),
-            };
-            drive::publish(run, me, s, a).await
-        }
-        "drive_list" => {
-            let d = run.drive.lock().unwrap();
-            Ok(json!(d.list(
-                me,
-                &|sp| super::access::can_read_space(run, me, sp),
-                opt_str(args, "kind").as_deref(),
-                opt_str(args, "author").as_deref(),
-                opt_str(args, "query").as_deref()
-            )))
-        }
-        "drive_fetch" => {
-            drive::fetch(
-                run,
-                me,
-                s,
-                &req_str(args, "artifact")?,
-                &req_str(args, "dest")?,
-            )
-            .await
-        }
-        "traffic" => {
-            let since = match opt_str(args, "since") {
-                Some(x) => Some(now() - parse_duration(&x)?.as_secs_f64()),
-                None => None,
-            };
-            let limit = args["limit"].as_u64().unwrap_or(100).min(500) as usize;
-            Ok(json!(security::traffic(
-                run,
-                opt_str(args, "worker").as_deref(),
-                opt_str(args, "host").as_deref(),
-                since,
-                limit
-            )))
-        }
-        "traffic_digest" => {
-            w.digest_due
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            Ok(json!(security::take_wake_digest(run).unwrap_or_else(
-                || "No new traffic since the last digest.".into()
-            )))
-        }
-        "access_requests" if w.officer() => Ok(json!(security::requests(run, true))),
-        "access_requests" => Ok(json!(security::requests(run, true)
-            .into_iter()
-            .filter(|r| r["officer"] == json!(me))
-            .collect::<Vec<_>>())),
-        "background_checks" => Ok(json!(security::screenings_pending(run, me))),
-        "access_rules" => Ok(json!(security::standing(run))),
-        "access_decide" => {
-            let a = security::DecideArgs {
-                allow: args["allow"]
-                    .as_bool()
-                    .ok_or_else(|| anyhow!("allow is required"))?,
-                scope: req_str(args, "scope")?,
-                reason: req_str(args, "reason")?,
-                methods: args["methods"]
-                    .as_array()
-                    .map(|_| strings(&args["methods"])),
-                path: opt_str(args, "path"),
-                expires_in: opt_str(args, "expires_in"),
-            };
-            security::decide(run, me, &req_str(args, "request")?, a)
-        }
-        "access_revoke" => {
-            security::revoke(run, me, &req_str(args, "rule")?, &req_str(args, "reason")?)
-        }
-        "background_check" => security::decide_screening(
-            _d,
-            run,
-            me,
-            &req_str(args, "screening")?,
-            args["clear"]
-                .as_bool()
-                .ok_or_else(|| anyhow!("clear is required: true or false"))?,
-            &opt_str(args, "note").unwrap_or_default(),
-            &args["grants"],
-        ),
-        "escalate" => security::escalate(
-            run,
-            me,
-            &req_str(args, "request")?,
-            &req_str(args, "recommendation")?,
-        ),
-        _ => bail!(
+    let tool = match (op, mine) {
+        ("tools", _) => return Ok(json!(tools(p))),
+        ("stop_check", _) => return Ok(super::foreman::stop_check(run, &w)),
+        (_, Some(tool)) => tool,
+        (_, None) => bail!(
             "unknown op {op:?}; ops: tools, {}",
             tools(p)
                 .iter()
@@ -887,6 +1119,18 @@ pub async fn dispatch(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    };
+    let c = Call {
+        d,
+        run,
+        s,
+        w: &w,
+        me,
+        args: Args(args),
+    };
+    match tool.run {
+        Run::Sync(f) => f(&c),
+        Run::Async(f) => f(&c).await,
     }
 }
 
@@ -901,4 +1145,130 @@ fn check_attachments(run: &FirmRun, me: &str, list: &[String]) -> Result<()> {
 #[allow(dead_code)]
 fn board() -> &'static str {
     BOARD
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Args, TOOLS};
+
+    /// Arguments as agents write them: lists as one string, tokens with a
+    /// unit, empty strings as nothing; each refusal says what to give.
+    #[test]
+    fn arguments_are_read_as_agents_write_them() {
+        let v = json!({
+            "to": "ada, bob ,", "list": ["a", "b"], "empty": "", "name": "x",
+            "m": "2M", "k": "-500k", "n": 7, "yes": true, "no": "true", "due": "in 2h",
+            "attachments": ["a-3@v2", "drive:a-4"],
+        });
+        let a = Args(&v);
+        assert_eq!(a.list("to"), ["ada", "bob"]);
+        assert_eq!(a.list("list"), ["a", "b"]);
+        assert_eq!(a.list_if_array("to"), None, "a string isn't an array");
+        assert_eq!(a.list_if_array("list").unwrap(), ["a", "b"]);
+        assert_eq!(a.list("missing"), Vec::<String>::new());
+        assert_eq!(
+            (a.opt("empty"), a.opt("name").as_deref()),
+            (None, Some("x"))
+        );
+        assert_eq!(a.req("empty").unwrap_err().to_string(), "empty is required");
+        assert_eq!(
+            (
+                a.tokens("m").unwrap(),
+                a.tokens("k").unwrap(),
+                a.tokens("n").unwrap()
+            ),
+            (2_000_000, -500_000, 7)
+        );
+        assert_eq!(a.opt_tokens("missing").unwrap(), None);
+        assert_eq!(
+            a.tokens("missing").unwrap_err().to_string(),
+            "missing is required: tokens, like 2M or 500k"
+        );
+        assert_eq!(
+            a.tokens("yes").unwrap_err().to_string(),
+            "yes: tokens, like 2M or 500k"
+        );
+        assert!((a.flag("yes"), a.flag("no"), a.flag("missing")) == (true, false, false));
+        assert!(a.must_bool("yes", "yes?").unwrap());
+        assert_eq!(
+            a.must_bool("no", "say true or false")
+                .unwrap_err()
+                .to_string(),
+            "say true or false"
+        );
+        let due = a.due("due").unwrap().unwrap() - super::now();
+        assert!((7190.0..7210.0).contains(&due), "{due}");
+        assert_eq!(a.due("missing").unwrap(), None);
+        assert_eq!(a.attachments().unwrap(), ["drive:a-3@v2", "drive:a-4"]);
+        let bad = json!({ "attachments": "notes.md" });
+        assert!(Args(&bad)
+            .attachments()
+            .unwrap_err()
+            .to_string()
+            .contains("drive:a-3@v2"));
+    }
+
+    /// Every argument a tool's handler reads is in the schema its model is
+    /// shown: a misspelt name would be read as missing.
+    #[test]
+    fn handlers_read_only_the_arguments_their_schemas_name() {
+        let src = include_str!("ops.rs");
+        let table = &src[src.find("static TOOLS: &[Tool] = &[").unwrap()..];
+        let table = &table[..table.find("\n];\n").unwrap()];
+        // Without whitespace: rustfmt breaks calls across lines.
+        let flat = |s: &str| s.split_whitespace().collect::<String>();
+        // The string literals that follow `pat` in `s`.
+        let after = |s: &str, pat: &str| -> Vec<String> {
+            s.match_indices(pat)
+                .map(|(i, _)| {
+                    let rest = &s[i + pat.len()..];
+                    rest[..rest.find('"').unwrap()].to_string()
+                })
+                .collect()
+        };
+        let readers = [
+            "opt",
+            "req",
+            "list",
+            "list_if_array",
+            "flag",
+            "must_bool",
+            "due",
+            "tokens",
+            "opt_tokens",
+            "raw",
+        ];
+        let mut seen = 0;
+        for entry in table.split("\n    Tool {").skip(1) {
+            let name = entry.split('"').nth(1).unwrap();
+            let entry = flat(entry);
+            let props = &entry[entry.find("props:").unwrap()..entry.find("required:").unwrap()];
+            // Keys are the strings followed by a colon.
+            let schema: Vec<&str> = props
+                .split('"')
+                .collect::<Vec<_>>()
+                .windows(2)
+                .filter(|w| w[1].starts_with(':'))
+                .map(|w| w[0])
+                .collect();
+            let mut reads: Vec<String> = readers
+                .iter()
+                .flat_map(|m| after(&entry, &format!("c.args.{m}(\"")))
+                .collect();
+            if entry.contains("c.args.attachments()") {
+                reads.push("attachments".into());
+            }
+            for r in &reads {
+                assert!(
+                    schema.contains(&r.as_str()),
+                    "{name} reads {r:?}, which its schema doesn't name"
+                );
+            }
+            assert!(TOOLS.iter().any(|t| t.name == name), "{name}");
+            seen += 1;
+        }
+        assert_eq!(seen, TOOLS.len());
+    }
 }

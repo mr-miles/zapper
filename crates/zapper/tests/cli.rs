@@ -222,12 +222,24 @@ async fn serve_listens_on_its_socket() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    for _ in 0..200 {
+    // Up within a minute, however loaded the machine (an instrumented
+    // build under coverage starts slowly); a serve that exits says so.
+    let mut up = false;
+    for _ in 0..1200 {
         if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            up = true;
             break;
+        }
+        if let Some(status) = serve.try_wait().unwrap() {
+            panic!("zapper serve exited: {status}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    assert!(
+        up,
+        "zapper serve didn't listen on {} within a minute",
+        socket.display()
+    );
     let text = ok(run(&t.startup(), Some(&socket), &["rules"]).await);
     assert!(text.contains("global-deny"), "{text}");
     let text = ok(run(&t.startup(), Some(&socket), &["ps"]).await);
@@ -456,6 +468,19 @@ async fn check_reports_the_driver_and_the_daemon() {
         "{}",
         out(&o)
     );
+}
+
+/// `zapper check` notes a firm config that is valid but likely not meant.
+#[cfg(feature = "office")]
+#[tokio::test]
+async fn check_notes_officers_without_a_budget() {
+    let t = TestCore::new(
+        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    budget: { seed: 1000, security_share: 0 }\n    security: { officers: [sec] }\n    roles:\n      ceo: { profile: w, skills: { work: ceo } }\n      sec: { profile: w, skills: { work: security-review } }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: sec, role: sec, reports_to: ceo }\n",
+    );
+    let text = out(&run(&t.startup(), None, &["check"]).await);
+    let notes = lines_of(&text, "note   firm acme");
+    assert_eq!(notes.len(), 1, "{text}");
+    assert!(notes[0].contains("budget.security_share is 0"), "{text}");
 }
 
 #[cfg(feature = "office")]

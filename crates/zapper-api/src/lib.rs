@@ -79,11 +79,14 @@ fn read_routes() -> Router<Core> {
 
 /// What a client of the core (the office) adds to the API and the UI: its
 /// routes, under `/v1` and `/api` behind the same guard as the rest, and its
-/// page, the UI's front page instead of the sessions page.
+/// page, the UI's front page instead of the sessions page, with the files
+/// the page loads, served under `/mount/` (stylesheets and scripts, by
+/// their extension).
 #[derive(Clone, Default)]
 pub struct Mount {
     pub routes: Router,
     pub page: Option<&'static str>,
+    pub assets: &'static [(&'static str, &'static str)],
 }
 
 /// The API, with what is mounted on it.
@@ -120,7 +123,14 @@ pub fn api(core: Core, mount: &Mount) -> Router {
 /// on an address other than loopback (`daemon.ui`), for a remote host.
 pub fn ui(core: Core, port: u16, remote: bool, mount: &Mount) -> Router {
     let page = mount.page;
-    Router::new()
+    let mut router = Router::new();
+    for &(name, body) in mount.assets {
+        router = router.route(
+            &format!("/mount/{name}"),
+            get(move || ui::asset(name, body)),
+        );
+    }
+    router
         .route("/", get(move || ui::index(page)))
         .route("/sessions", get(move || ui::sessions(page.is_some())))
         .route("/favicon.ico", get(ui::favicon))
@@ -538,7 +548,7 @@ async fn get_audit(State(d): D, Path(id): Path<String>) -> R<Response> {
 /// The session's HTTP requests and connections, oldest first.
 async fn list_requests(State(d): D, Path(id): Path<String>) -> R<Json<Vec<Value>>> {
     let s = d.session(&id)?;
-    let list = s.requests.lock().unwrap().list();
+    let list = s.requests();
     Ok(Json(list))
 }
 
@@ -546,23 +556,14 @@ async fn list_requests(State(d): D, Path(id): Path<String>) -> R<Json<Vec<Value>
 async fn get_request(State(d): D, Path((id, n)): Path<(String, u64)>) -> R<Json<Value>> {
     let s = d.session(&id)?;
     let r = s
-        .requests
-        .lock()
-        .unwrap()
-        .get(n)
+        .request(n)
         .ok_or_else(|| anyhow::anyhow!("no request {n}"))?;
     Ok(Json(r))
 }
 
 async fn list_terminals(State(d): D, Path(id): Path<String>) -> R<Json<Vec<TerminalInfo>>> {
     let s = d.session(&id)?;
-    let terms = s
-        .terminals
-        .lock()
-        .unwrap()
-        .values()
-        .map(|t| t.info())
-        .collect();
+    let terms = s.terminals();
     Ok(Json(terms))
 }
 
@@ -576,11 +577,7 @@ async fn terminal_stream(
     use base64::Engine as _;
     let s = d.session(&id)?;
     let term = s
-        .terminals
-        .lock()
-        .unwrap()
-        .get(&n)
-        .cloned()
+        .terminal(n)
         .ok_or_else(|| anyhow::anyhow!("no terminal {n}"))?;
     let (snapshot, rx) = term.watch();
     let live = BroadcastStream::new(rx).filter_map(|r| async move { r.ok() });
@@ -775,7 +772,7 @@ async fn events(
     });
     let stream = stream::iter(history)
         .chain(live)
-        .map(|e| Ok(SseEvent::default().json_data(&e).unwrap_or_default()));
+        .map(|e| Ok(SseEvent::default().json_data(e.view()).unwrap_or_default()));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 

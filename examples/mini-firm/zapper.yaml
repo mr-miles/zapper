@@ -1,0 +1,84 @@
+# The smallest company that shows its people at work: Ada, the CEO, and
+# Ben, a writer, both Claude Code, each in a VM of their own. No budget (so
+# no hiring), no git repository, no cluster: only mail and the shared drive.
+# The board (you) gives Ada a task; she briefs Ben, reviews his draft,
+# publishes the result and reports back. See README.md beside this file.
+#
+# A complete config, to run instead of config/zapper.yaml:
+#   zapper --config examples/mini-firm/zapper.yaml serve
+# Relative paths resolve against this file's directory. Downloads, images,
+# state and the Claude token are the main config's, under your home.
+
+daemon:
+  firecracker: ~/.local/share/zapper/bin/firecracker
+  images: ~/.local/share/zapper/images
+  kernels: ~/.local/share/zapper/kernels
+  state: ~/.local/state/zapper
+  ui: 127.0.0.1:7878
+  ask_timeout_secs: 60
+  max_sessions: 16
+
+# Your Claude subscription's token, as config/zapper.yaml sets it up: from
+# `claude setup-token`, in a 0600 file. The VMs never see it.
+secrets:
+  claude:
+    file: ~/.config/zapper/claude-token
+    hosts: [api.anthropic.com]
+
+policy:
+  defaults: { net: deny, exec: allow }
+
+profiles:
+  base:
+    engine:
+      image: ubuntu-26.04
+      kernel: vmlinux-6.1
+      vcpus: 2
+      memory_mib: 2048
+      disk: 4GiB
+      network: nic
+    agent:
+      kind: generic
+      command: [bash, -l]
+      user: user
+      workdir: /work
+  default:
+    extends: base
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw }
+  # Claude Code (image: make image IMAGE=office). The Claude API is allowed
+  # with the token the host adds; any other host is asked about, and in a
+  # firm the CEO (who holds security here) or the board decides.
+  claude:
+    extends: default
+    engine: { image: office, memory_mib: 4096, disk: 8GiB }
+    agent:
+      kind: claude-code
+      command: [claude]
+      user: agent
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+    policy:
+      net:
+        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+      defaults: { net: ask }
+
+firms:
+  mini:
+    description: Two people and a writing task
+    # The repository's skills: the playbooks workers read.
+    skills_dir: ../../config/skills
+    roles:
+      ceo:
+        profile: claude
+        title: CEO
+        model: claude-sonnet-5-5
+        skills: { work: ceo }
+      writer:
+        profile: claude
+        title: Writer
+        model: claude-sonnet-5-5
+        skills: { work: researcher }
+    workers:
+      - { name: ada, role: ceo }
+      - { name: ben, role: writer, reports_to: ada }

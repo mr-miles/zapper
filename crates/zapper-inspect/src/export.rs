@@ -215,7 +215,7 @@ fn thinking(md: &mut String, v: &Value) {
 
 fn call(md: &mut String, name: &Value, input: &Value) {
     let name = name.as_str().unwrap_or("?");
-    let name = name.strip_prefix("mcp__office__").unwrap_or(name);
+    let name = zapper_policy::proto::mcp_tool_name(name);
     let _ = writeln!(md, "**→ `{name}`**\n");
     let Some(args) = input.as_object() else {
         fenced(

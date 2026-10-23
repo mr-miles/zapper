@@ -136,7 +136,7 @@ fn pick_officer(run: &FirmRun, sec: &mut Security, requester: &str) -> Option<St
     let chart = run.chart();
     // Officers out of budget can't take it: it goes to the others, or to
     // the board.
-    let funded = |o: &String| run.ledger.lock().unwrap().can_work(o);
+    let funded = |o: &String| run.ledger.can_work(o);
     let officers: Vec<&String> = chart
         .security
         .officers
@@ -163,9 +163,7 @@ pub fn ask(
     // The post office's lock is never taken while this one is held.
     let assignment = run
         .post
-        .lock()
-        .unwrap()
-        .desk(worker)
+        .with(|po| po.desk(worker))
         .owed
         .first()
         .map(|o| o.subject.clone());
@@ -777,7 +775,7 @@ fn recent_traffic(run: &FirmRun, worker: &str) -> String {
     let Some(s) = run.rt(worker).and_then(|w| w.session()) else {
         return "none".into();
     };
-    let list = s.requests.lock().unwrap().list();
+    let list = s.requests();
     let allowed = list.iter().filter(|r| r["action"] == "allow").count();
     let denied = list.len() - allowed;
     let mut hosts: Vec<String> = list
@@ -904,10 +902,7 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 sec.rule_counter += 1;
                 let mut rl = rule.clone();
                 rl.id = Some(format!("a-net-{}", sec.rule_counter));
-                s.policy
-                    .write()
-                    .unwrap()
-                    .insert(AnyRule::Net(rl.clone()), Some(0));
+                s.put_rule(AnyRule::Net(rl.clone()));
                 rule_id = rl.id.clone();
                 let expires = if scope == "once" {
                     Some(now() + ONCE_SECS)
@@ -1051,7 +1046,7 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
                 .and_then(|w| w.session())
                 .or_else(|| run.facility.session_of(worker))
             {
-                s.policy.write().unwrap().remove(id);
+                s.remove_rule(id);
             }
         }
         None => {}
@@ -1129,7 +1124,7 @@ pub fn standing(run: &FirmRun) -> Vec<Value> {
     let mut uses: HashMap<String, u64> = HashMap::new();
     for w in run.rts() {
         if let Some(s) = w.session() {
-            for r in s.requests.lock().unwrap().list() {
+            for r in s.requests() {
                 if let Some(id) = r["rule"].as_str() {
                     *uses.entry(id.to_string()).or_default() += 1;
                 }
@@ -1170,7 +1165,7 @@ pub fn traffic(
             continue;
         }
         let Some(s) = w.session() else { continue };
-        for mut r in s.requests.lock().unwrap().list() {
+        for mut r in s.requests() {
             if since.is_some_and(|t| r["ts"].as_f64().unwrap_or(0.0) < t) {
                 continue;
             }
@@ -1210,7 +1205,7 @@ fn digest_text(run: &FirmRun) -> Option<String> {
         let Some(s) = w.session() else { continue };
         let last = sec.digested.get(&s.id).copied().unwrap_or(0);
         let mut max_id = last;
-        for r in s.requests.lock().unwrap().list() {
+        for r in s.requests() {
             let rid = r["id"].as_u64().unwrap_or(0);
             if rid <= last {
                 continue;
@@ -1364,10 +1359,7 @@ pub fn tick(run: &FirmRun, last_digest: &mut f64) {
             .filter_map(|w| w.session())
             .map(|s| {
                 let last = sec.digested.get(&s.id).copied().unwrap_or(0);
-                s.requests
-                    .lock()
-                    .unwrap()
-                    .list()
+                s.requests()
                     .iter()
                     .filter(|r| r["id"].as_u64().unwrap_or(0) > last)
                     .count()

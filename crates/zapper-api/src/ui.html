@@ -479,21 +479,7 @@ $('cfg-view').addEventListener('change', renderConfig);
 // Live events.
 const events = [];
 function eventRow(e) {
-  let action = e.action, detail = '', rule = e.rule || '';
-  switch (e.type) {
-    case 'net': detail = (e.method ? e.method + ' ' : 'connect ') + e.host + ':' + e.port + (e.path || '') + (e.status ? ' → ' + e.status : '') + (e.secrets ? '  [secrets: ' + e.secrets.join(',') + ']' : '') + (e.error ? '  ' + e.error : '') + (e.inspected ? '' : '  (tunnel)'); break;
-    case 'exec': detail = e.argv.join(' ') + '  (' + e.wait_ms.toFixed(1) + ' ms)'; break;
-    case 'ask': action = 'ask'; detail = e.id + ': ' + e.subject; break;
-    case 'answer': action = e.allow ? 'allow' : 'deny'; detail = e.id + (e.remember ? ' · ' + e.remember : ''); break;
-    case 'guest': { const x = e.event; detail = x.event === 'exit' ? x.comm + ' pid ' + x.pid + ' exit ' + (x.signal ? 'signal ' + x.signal : x.exit_code) + ' · ' + x.elapsed_ms + ' ms' : x.event === 'setup' ? (x.ok ? 'ok: ' : 'FAILED: ') + x.step : JSON.stringify(x); break; }
-    case 'shell': detail = 'shell ' + e.id + ' ' + e.state + (e.argv ? ': ' + e.argv.join(' ') : '') + (e.exit_code != null ? ' exit ' + e.exit_code : ''); break;
-    case 'dns': action = e.allowed ? 'allow' : 'deny'; detail = e.rcode + ' ' + (e.name || '(invalid query)') + (e.answer ? ' → ' + e.answer : '') + (e.reason ? '  (' + e.reason + ')' : ''); break;
-    case 'session': detail = e.state + (e.detail ? ': ' + e.detail : ''); break;
-    case 'config': detail = e.change; break;
-    case 'mcp': action = e.ok ? '' : 'deny'; detail = e.server + '.' + e.tool + ' · ' + e.ms.toFixed(1) + ' ms' + (e.error ? '  ' + e.error : ''); break;
-    case 'driver': { const x = e.detail || {}; action = x.outcome === 'failed' || e.event === 'error' ? 'deny' : ''; detail = e.event + (x.activity ? ' ' + x.activity : '') + (x.outcome ? ' ' + x.outcome : '') + (x.tokens != null ? ' · ' + x.tokens + ' tokens' : '') + (x.prompts != null ? ' · ' + x.prompts + ' prompts' : '') + (x.error ? '  ' + x.error : ''); break; }
-  }
-  return { e, action: action || '', detail, rule };
+  return { e, action: e.verdict || '', detail: e.summary || '', rule: e.rule || '' };
 }
 function renderEvents() {
   const s = $('ev-session').value, t = $('ev-type').value, a = $('ev-action').value, q = $('ev-q').value.toLowerCase();

@@ -102,9 +102,10 @@ crates/zapper-api/       the REST API (the CLI's, on a unix socket) and the web 
   src/ui.html              the web UI: state, terminal viewer, answering approvals (textContent only)
   src/assets/              xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
 crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the `firms` config (`firm.rs`), which it parses and checks
-  src/office.html          the office UI (org chart, messages, security, drive, statistics, replay)
+  src/office.html          the office UI (org chart, messages, security, drive, statistics, replay); its stylesheet and scripts, one per tab or part, in src/ui/
 crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
+crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI) and the fake Claude and pi
 config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it);
@@ -115,6 +116,7 @@ scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
 tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
 tests/e2e-office.sh      end-to-end tests of firms, with the fake Claude
 docs/                    one page per topic; index in docs/README.md
+examples/                configs to run as they are (mini-firm: the smallest company at work); each loads in a test
 skills/zapper/           operating skill, linked from .claude/skills/zapper
 ```
 

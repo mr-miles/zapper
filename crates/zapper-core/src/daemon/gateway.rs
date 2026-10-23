@@ -6,12 +6,10 @@
 //! nothing in a message can say otherwise. Each tool call is an `mcp` event
 //! of the session's.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -19,6 +17,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 use zapper_policy::proto::MAX_MCP_LINE;
 
+use super::registry::{Entry, Registry, Selector};
 use super::session::Session;
 use super::EventBody;
 
@@ -40,67 +39,42 @@ pub trait McpServer: Send + Sync {
     ) -> BoxFuture<'a, Result<Value>>;
 }
 
-struct Entry {
+/// A server by its name.
+#[derive(Clone)]
+pub struct Named {
     name: String,
-    sessions: BTreeMap<String, String>,
     server: Arc<dyn McpServer>,
 }
 
 #[derive(Default)]
-pub struct Gateway {
-    next: AtomicU64,
-    entries: RwLock<BTreeMap<u64, Entry>>,
-}
+pub struct Gateway(Registry<Named>);
 
 /// Connections a session may hold open to the gateway at once.
 const MAX_CONNECTIONS: usize = 8;
 
 impl Gateway {
-    pub fn add(
-        &self,
-        name: &str,
-        sessions: BTreeMap<String, String>,
-        server: Arc<dyn McpServer>,
-    ) -> Result<u64> {
+    pub fn add(&self, name: &str, sessions: Selector, server: Arc<dyn McpServer>) -> Result<u64> {
         if !zapper_policy::valid_worker_name(name) {
             bail!("{name:?} is not an MCP server name");
         }
-        let mut entries = self.entries.write().unwrap();
-        if entries
-            .values()
-            .any(|e| e.name == name && e.sessions == sessions)
-        {
-            bail!("an MCP server {name} is already registered for these sessions");
-        }
-        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        entries.insert(
-            id,
-            Entry {
-                name: name.to_string(),
-                sessions,
-                server,
-            },
-        );
-        Ok(id)
+        let named = Named {
+            name: name.to_string(),
+            server,
+        };
+        self.0
+            .add_unless(sessions.clone(), named, |e| {
+                e.item.name == name && e.sessions == sessions
+            })
+            .ok_or_else(|| anyhow!("an MCP server {name} is already registered for these sessions"))
     }
 
-    pub fn remove(&self, id: u64) -> bool {
-        self.entries.write().unwrap().remove(&id).is_some()
+    pub fn remove(&self, id: u64) -> Option<Entry<Named>> {
+        self.0.remove(id)
     }
 
     /// The server `name` for `s`: the earliest registered that picks it.
     pub fn server(&self, s: &Session, name: &str) -> Option<Arc<dyn McpServer>> {
-        self.entries
-            .read()
-            .unwrap()
-            .values()
-            .find(|e| {
-                e.name == name
-                    && e.sessions
-                        .iter()
-                        .all(|(k, v)| s.label(k) == Some(v.as_str()))
-            })
-            .map(|e| e.server.clone())
+        self.0.first(s, |n| n.name == name).map(|n| n.server)
     }
 }
 
