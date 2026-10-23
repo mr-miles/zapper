@@ -136,7 +136,7 @@ fn pick_officer(run: &FirmRun, sec: &mut Security, requester: &str) -> Option<St
     let chart = run.chart();
     // Officers out of budget can't take it: it goes to the others, or to
     // the board.
-    let funded = |o: &String| run.ledger.lock().unwrap().can_work(o);
+    let funded = |o: &String| run.ledger.can_work(o);
     let officers: Vec<&String> = chart
         .security
         .officers

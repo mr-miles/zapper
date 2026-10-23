@@ -114,7 +114,7 @@ pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
     let contractor = super::contracts::of(run, &w.name).is_some();
     Powers {
         officer: w.officer(),
-        budget: run.ledger.lock().unwrap().enabled,
+        budget: run.ledger.enabled(),
         root: chart.root() == Some(w.name.as_str()),
         hires: !contractor
             && run

@@ -196,7 +196,7 @@ pub(crate) struct FirmRun {
     pub post: Mutex<PostOffice>,
     workers: RwLock<BTreeMap<String, Arc<WorkerRt>>>,
     /// The run's budget: the board's grants, balances, budget requests.
-    pub ledger: Mutex<workforce::Ledger>,
+    pub ledger: workforce::Books,
     /// The model each role's workers run, as the run started.
     pub models: BTreeMap<String, Option<String>>,
     /// Each office profile's agent and model, for workers on their own
@@ -497,7 +497,7 @@ impl FirmRun {
     }
 
     pub fn count_turn(&self, worker: &str, tokens: u64) {
-        self.ledger.lock().unwrap().spend(worker, tokens);
+        self.ledger.spend(worker, tokens);
         let mut u = self.usage.lock().unwrap();
         let today = utc_day(now());
         if u.day != today {
@@ -512,7 +512,7 @@ impl FirmRun {
     }
 
     pub fn status(&self) -> Value {
-        let ledger = self.ledger.lock().unwrap().status();
+        let ledger = self.ledger.status();
         let workers: Vec<Value> = self
             .rts()
             .iter()

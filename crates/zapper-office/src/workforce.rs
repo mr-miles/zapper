@@ -6,7 +6,7 @@
 //! someone go stops it and hands their work and money to their manager.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::firm::{Firm, Worker, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
@@ -60,6 +60,79 @@ pub struct Ledger {
     /// Workers whose manager was told they ran out, until they are funded:
     /// when, and how far it has gone up since (see `tick`).
     told: BTreeMap<String, (f64, u8)>,
+}
+
+/// The run's ledger behind its lock. Other modules ask it; only this one
+/// changes it, so the rules on moving tokens live here.
+pub(crate) struct Books(Mutex<Ledger>);
+
+impl Books {
+    pub(crate) fn new(firm: &Firm) -> Books {
+        Books(Mutex::new(Ledger::new(firm)))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Ledger> {
+        self.0.lock().unwrap()
+    }
+
+    /// Whether the firm has a run budget at all.
+    pub(crate) fn enabled(&self) -> bool {
+        self.lock().enabled
+    }
+
+    pub(crate) fn balance(&self, w: &str) -> i64 {
+        self.lock().balance(w)
+    }
+
+    pub(crate) fn can_work(&self, w: &str) -> bool {
+        self.lock().can_work(w)
+    }
+
+    pub(crate) fn spent_by(&self, w: &str) -> u64 {
+        self.lock().spent_by(w)
+    }
+
+    pub(crate) fn progress(&self) -> f64 {
+        self.lock().progress()
+    }
+
+    /// A turn's tokens, spent by `w`.
+    pub(crate) fn spend(&self, w: &str, tokens: u64) {
+        self.lock().spend(w, tokens)
+    }
+
+    pub(crate) fn status(&self) -> Value {
+        self.lock().status()
+    }
+
+    /// What a turn of `w` costs, from the firm's reference price.
+    pub(crate) fn turn_price(&self, w: &str, reference: u64) -> u64 {
+        self.lock().turn_price(w, reference)
+    }
+
+    /// Tokens the board gives `to` outside any budget (a last turn to
+    /// debrief it).
+    pub(crate) fn board_gives(&self, to: &str, tokens: u64) {
+        self.lock().transfer(None, to, tokens)
+    }
+
+    /// Pays `to` from `from`'s balance for agreed work: only within the
+    /// board's approved budget, and only what `from` has.
+    pub(crate) fn pay(&self, from: &str, to: &str, tokens: u64) -> Result<()> {
+        let mut l = self.lock();
+        if l.approved == 0 {
+            bail!("the board hasn't approved a budget yet: you can ask for quotes, not contract");
+        }
+        if l.balance(from) < tokens as i64 {
+            bail!(
+                "you have {} tokens; the quote is {}",
+                fmt_tokens(l.balance(from)),
+                fmt_tokens(tokens as i64)
+            );
+        }
+        l.transfer(Some(from), to, tokens);
+        Ok(())
+    }
 }
 
 impl Ledger {
@@ -226,7 +299,7 @@ fn grant(run: &FirmRun, tokens: u64, reason: &str) {
         .filter(|o| chart.worker(o).is_some() && **o != root)
         .cloned()
         .collect();
-    let mut l = run.ledger.lock().unwrap();
+    let mut l = run.ledger.lock();
     let security = if officers.is_empty() {
         0
     } else {
@@ -269,7 +342,7 @@ pub fn settle_security(run: &FirmRun) {
     if officers.is_empty() {
         return;
     }
-    let mut l = run.ledger.lock().unwrap();
+    let mut l = run.ledger.lock();
     if !l.enabled {
         return;
     }
@@ -298,7 +371,7 @@ pub fn settle_security(run: &FirmRun) {
 /// The seed, at the start of a run with a budget.
 pub fn seed(run: &FirmRun) {
     let (enabled, seed) = {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         (l.enabled, l.seed)
     };
     if enabled {
@@ -309,7 +382,7 @@ pub fn seed(run: &FirmRun) {
 /// A line for the wake prompt: the worker's balance, and for a manager
 /// their team's.
 pub fn balance_note(run: &FirmRun, w: &str) -> Option<String> {
-    let l = run.ledger.lock().unwrap();
+    let l = run.ledger.lock();
     if !l.enabled {
         return None;
     }
@@ -362,7 +435,7 @@ const SMALL_PRODUCT_TURNS: u64 = 50;
 /// Your balance and your team's, for the `budget` tool.
 pub fn summary(run: &FirmRun, w: &str) -> Value {
     let chart = run.chart();
-    let l = run.ledger.lock().unwrap();
+    let l = run.ledger.lock();
     let team: Vec<Value> = chart
         .workers
         .iter()
@@ -381,7 +454,7 @@ pub fn summary(run: &FirmRun, w: &str) -> Value {
 /// Whether `w` has money for a turn. Tells their manager (the board, for
 /// the CEO and the founding officers) once when they run out.
 pub fn allows(run: &FirmRun, w: &str) -> bool {
-    let mut l = run.ledger.lock().unwrap();
+    let mut l = run.ledger.lock();
     if !l.enabled || l.balance(w) > 0 {
         return true;
     }
@@ -447,7 +520,7 @@ pub fn tick(run: &FirmRun) {
     // CEO are told now, as on a refused wake, while the plan may still need
     // them.
     let silent: Vec<String> = {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         if !l.enabled {
             return;
         }
@@ -461,7 +534,7 @@ pub fn tick(run: &FirmRun) {
         allows(run, &w);
     }
     let stalled: Vec<(String, f64, u8)> = {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         l.told
             .iter()
             .filter(|(w, _)| l.balance(w) <= 0)
@@ -497,7 +570,7 @@ pub fn tick(run: &FirmRun) {
             "funds",
             json!({ "event": "stalled", "worker": w, "minutes": mins, "told": if next == 1 { ceo.unwrap_or(BOARD) } else { BOARD } }),
         );
-        if let Some(e) = run.ledger.lock().unwrap().told.get_mut(&w) {
+        if let Some(e) = run.ledger.lock().told.get_mut(&w) {
             e.1 = next;
         }
     }
@@ -528,7 +601,7 @@ pub fn request(run: &FirmRun, by: &str, total: i64, plan: &str, reason: &str) ->
             chart.root().unwrap_or("the root")
         );
     }
-    if !run.ledger.lock().unwrap().enabled {
+    if !run.ledger.lock().enabled {
         bail!("this firm has no run budget (budget.seed in the config)");
     }
     if total <= 0 {
@@ -538,7 +611,7 @@ pub fn request(run: &FirmRun, by: &str, total: i64, plan: &str, reason: &str) ->
         bail!("give a plan (who you will hire, what you will contract, a reserve) of up to {MAX_PLAN} bytes");
     }
     {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         if total as u64 <= l.total() {
             bail!(
                 "the budget is the run's total, seed included: you have {} already, so ask for more than that",
@@ -546,18 +619,18 @@ pub fn request(run: &FirmRun, by: &str, total: i64, plan: &str, reason: &str) ->
             );
         }
     }
-    if let Some(p) = run.ledger.lock().unwrap().pending() {
+    if let Some(p) = run.ledger.lock().pending() {
         bail!(
             "request {} ({} tokens) is waiting for the board; wait for its answer",
             p.id,
             fmt_tokens(p.total as i64)
         );
     }
-    let id = format!("b-{}", run.ledger.lock().unwrap().requests.len() + 1);
+    let id = format!("b-{}", run.ledger.lock().requests.len() + 1);
     // The office's own check, for the board: the request against what a
     // small product has cost.
     let check = {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         let price = l.turn_price(by, run.config.budget.turn_price);
         format!(
             "**Office check:** a turn costs {} tokens ({}), so this is {} CEO turns' worth; a small product took about {} turns ({}).",
@@ -591,7 +664,7 @@ pub fn request(run: &FirmRun, by: &str, total: i64, plan: &str, reason: &str) ->
         decided: None,
     };
     run.journal.append("funds", json!({ "event": "request", "id": id, "by": by, "total": total, "plan": plan.trim(), "reason": reason.trim(), "message": sent.id, "thread": sent.thread }));
-    run.ledger.lock().unwrap().requests.push(r);
+    run.ledger.lock().requests.push(r);
     Ok(
         json!({ "request": id, "message": sent.id, "note": "the board will answer in the thread; end your turn" }),
     )
@@ -600,7 +673,7 @@ pub fn request(run: &FirmRun, by: &str, total: i64, plan: &str, reason: &str) ->
 /// The board approves or declines a budget request, answering in its thread.
 pub fn decide(run: &FirmRun, id: &str, approve: bool, note: &str) -> Result<Value> {
     let (r, granted) = {
-        let mut l = run.ledger.lock().unwrap();
+        let mut l = run.ledger.lock();
         let r = l
             .requests
             .iter_mut()
@@ -630,7 +703,7 @@ pub fn decide(run: &FirmRun, id: &str, approve: bool, note: &str) -> Result<Valu
     if granted > 0 {
         grant(run, granted, &format!("budget {id}, approved by the board"));
     }
-    let balance = run.ledger.lock().unwrap().balance(&r.by);
+    let balance = run.ledger.lock().balance(&r.by);
     let body = if approve {
         format!(
             "**Approved: {} tokens in all** (budget {id}), the seed included: {} new.{}\n\nYour balance is now {} tokens; the security officers have their share. Hire and contract from it: running the firm is up to you.\n",
@@ -658,7 +731,7 @@ fn board_fund(run: &FirmRun, worker: &str, tokens: u64, reason: &str) -> Result<
         bail!("give a reason");
     }
     {
-        let mut l = run.ledger.lock().unwrap();
+        let mut l = run.ledger.lock();
         if !l.enabled {
             bail!("this firm has no run budget");
         }
@@ -675,7 +748,7 @@ fn board_fund(run: &FirmRun, worker: &str, tokens: u64, reason: &str) -> Result<
     if let Some(w) = run.rt(worker) {
         w.wake.notify_one();
     }
-    Ok(json!({ "worker": worker, "their_balance": run.ledger.lock().unwrap().balance(worker) }))
+    Ok(json!({ "worker": worker, "their_balance": run.ledger.lock().balance(worker) }))
 }
 
 /// A manager moves tokens to a report (or back, with a negative amount).
@@ -707,7 +780,7 @@ pub fn fund(run: &FirmRun, by: &str, worker: &str, tokens: i64, reason: &str) ->
     if tokens < 0 && by != BOARD && busy {
         bail!("{worker} is in a turn: its cost isn't in their balance yet. Take budget back once they are idle");
     }
-    let mut l = run.ledger.lock().unwrap();
+    let mut l = run.ledger.lock();
     if !l.enabled {
         bail!("this firm has no run budget");
     }
@@ -919,7 +992,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
         .cloned()
         .ok_or_else(|| anyhow!("no role {}", a.role))?;
     {
-        let l = run.ledger.lock().unwrap();
+        let l = run.ledger.lock();
         if !l.enabled {
             bail!("this firm has no run budget, so it doesn't hire");
         }
@@ -1009,7 +1082,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
             &serde_json::Value::Null,
         );
     }
-    let left = run.ledger.lock().unwrap().balance(by);
+    let left = run.ledger.lock().balance(by);
     Ok(json!({
         "worker": name, "title": firm.title_of(&name), "reports_to": by, "budget": a.budget, "your_balance": left,
         "brief": sent.id, "thread": sent.thread, "background_check": check,
@@ -1100,10 +1173,7 @@ pub(super) fn join(
         .write()
         .unwrap()
         .insert(name.clone(), rt.clone());
-    run.ledger
-        .lock()
-        .unwrap()
-        .transfer(Some(by), &name, budget as u64);
+    run.ledger.lock().transfer(Some(by), &name, budget as u64);
     let mut worker = super::worker_json(&firm, &run.models, &run.agents, &w);
     if let Some(c) = contract {
         worker["contract"] = json!(c);
@@ -1211,7 +1281,7 @@ pub fn let_go(
         });
     }
     let returned = {
-        let mut l = run.ledger.lock().unwrap();
+        let mut l = run.ledger.lock();
         let left = l.balance(worker).max(0) as u64;
         if left > 0 {
             l.transfer(Some(worker), &manager, left);

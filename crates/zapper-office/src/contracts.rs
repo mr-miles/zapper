@@ -223,18 +223,16 @@ pub async fn offer(d: &Core, run: &Arc<FirmRun>, by: &str, a: OfferArgs) -> Resu
         bail!("budget: tokens, like 2M; or leave it open for a quote");
     }
     let fee = run.config.budget.quote_fee as i64;
-    {
-        let l = run.ledger.lock().unwrap();
-        if !l.enabled {
-            bail!("this firm has no run budget, so it doesn't contract");
-        }
-        if l.balance(by) < fee {
-            bail!(
-                "a quote costs a {} token fee; you have {}",
-                fmt_tokens(fee),
-                fmt_tokens(l.balance(by))
-            );
-        }
+    if !run.ledger.enabled() {
+        bail!("this firm has no run budget, so it doesn't contract");
+    }
+    let balance = run.ledger.balance(by);
+    if balance < fee {
+        bail!(
+            "a quote costs a {} token fee; you have {}",
+            fmt_tokens(fee),
+            fmt_tokens(balance)
+        );
     }
     let config = room(d, &a.role, &role)?;
     let id = {
@@ -419,20 +417,7 @@ pub fn accept(run: &FirmRun, by: &str, id: &str) -> Result<Value> {
     }
     let q = c.quote.clone().ok_or_else(|| anyhow!("no quote"))?;
     let budget = q.budget.unwrap_or(0);
-    {
-        let mut l = run.ledger.lock().unwrap();
-        if l.approved == 0 {
-            bail!("the board hasn't approved a budget yet: you can ask for quotes, not contract");
-        }
-        if l.balance(by) < budget {
-            bail!(
-                "you have {} tokens; the quote is {}",
-                fmt_tokens(l.balance(by)),
-                fmt_tokens(budget)
-            );
-        }
-        l.transfer(Some(by), &c.worker, budget as u64);
-    }
+    run.ledger.pay(by, &c.worker, budget as u64)?;
     run.journal.append("funds", json!({ "event": "move", "from": by, "to": c.worker, "tokens": budget, "reason": format!("contract {id}: {}", c.title) }));
     let c = update(run, id, |c| {
         c.state = "active".into();
@@ -688,7 +673,7 @@ pub fn tick(d: &Core, run: &Arc<FirmRun>) {
             }
             continue;
         }
-        let spent = run.ledger.lock().unwrap().balance(&c.worker) <= 0;
+        let spent = run.ledger.balance(&c.worker) <= 0;
         let due = c.agreed.as_ref().and_then(|a| a.due);
         if spent {
             finish(d, run, &c, "ended", "its budget is spent");

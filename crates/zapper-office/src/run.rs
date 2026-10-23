@@ -424,7 +424,7 @@ fn create_run(
         dir: dir.clone(),
         post: Mutex::new(PostOffice::new(&firm, live.clone())),
         chart: live,
-        ledger: Mutex::new(workforce::Ledger::new(&firm)),
+        ledger: workforce::Books::new(&firm),
         models: models.clone(),
         agents: agents.clone(),
         company: company.clone(),

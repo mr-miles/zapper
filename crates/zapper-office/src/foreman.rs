@@ -379,11 +379,7 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 // conversation. The mail isn't handed over again (Claude
                 // has seen it); a note says what the turn was on.
                 proc = None;
-                let price = run
-                    .ledger
-                    .lock()
-                    .unwrap()
-                    .turn_price(&w.name, run.config.budget.turn_price);
+                let price = run.ledger.turn_price(&w.name, run.config.budget.turn_price);
                 run.count_turn(&w.name, price);
                 let subjects: Vec<String> = {
                     let po = run.post.lock().unwrap();

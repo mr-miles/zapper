@@ -193,11 +193,8 @@ pub async fn debrief(run: &FirmRun, worker: &str, why: &str) {
     ) {
         return;
     }
-    if run.ledger.lock().unwrap().balance(worker) <= 0 {
-        run.ledger
-            .lock()
-            .unwrap()
-            .transfer(None, worker, DEBRIEF_FUNDS);
+    if run.ledger.balance(worker) <= 0 {
+        run.ledger.board_gives(worker, DEBRIEF_FUNDS);
         run.journal.append(
             "funds",
             json!({ "event": "move", "from": BOARD, "to": worker, "tokens": DEBRIEF_FUNDS, "reason": "a last turn to debrief the board" }),
@@ -252,9 +249,7 @@ fn due(run: &FirmRun, s: &Step) -> bool {
         .as_deref()
         .and_then(|a| parse_duration(a).ok())
         .is_none_or(|d| now() - run.started >= d.as_secs_f64());
-    let spent = s
-        .spent
-        .is_none_or(|f| run.ledger.lock().unwrap().progress() >= f);
+    let spent = s.spent.is_none_or(|f| run.ledger.progress() >= f);
     after && spent
 }
 
@@ -275,7 +270,7 @@ fn target(run: &FirmRun, name: Option<&str>, role: Option<&str>) -> Option<Strin
         .map(|w| {
             (
                 super::contracts::of(run, &w.name).is_none(),
-                run.ledger.lock().unwrap().spent_by(&w.name),
+                run.ledger.spent_by(&w.name),
                 turns(run, &w.name),
                 w.name.clone(),
             )
