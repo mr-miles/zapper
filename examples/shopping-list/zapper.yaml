@@ -80,7 +80,8 @@ firms:
     # The firm's git repository, `product`, at git.shop.internal.
     git: {}
     credentials:
-      spaces: [general, product, engineering]
+      # board: where the CEO publishes the board pack for the board.
+      spaces: [general, product, engineering, board]
     # Names for hires, in order, when the hirer doesn't pick one.
     names: [priya, sam, leo, mia]
     roles:
