@@ -100,9 +100,9 @@ This is for your information; no reply is expected.
 
 Your desk:
   Assigned to you / owed by you:
-    - "{{subject}}" from {{from}} ({{kind}}), {{due {{when}} | OVERDUE since {{when}} | no due date}}
+    - "{{subject}}" from {{from}} ({{kind}}, reply to {{message id}} in {{thread id}}), {{due {{when}} | OVERDUE since {{when}} | no due date}}
   Waiting on others:
-    - "{{subject}}" — waiting for {{who}} since {{when}}
+    - "{{subject}}" — waiting for {{who}} since {{when}} ({{message id}} in {{thread id}})
   Access requests pending:
     - {{METHOD}} {{host}}:{{port}} ({{request id}})
 ```

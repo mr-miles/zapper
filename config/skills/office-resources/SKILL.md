@@ -35,7 +35,7 @@ You start with no access to the firm's resources. Access is a **grant** per reso
 
 ## Outside sites
 
-Traffic to sites outside the firm is checked by the security officers. Ask ahead for what your work needs: `request_access(host, port?, methods?, path?, reason)`, as narrow as works ("GET registry.npmjs.org to install the dependencies for t-12"). A 403 that says the request went to security means it's waiting: don't retry in a loop, do other work or end your turn; the decision comes by mail. Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
+Traffic to sites outside the firm is checked by the security officers. Ask ahead for what your work needs: `request_access(host, port?, methods?, path?, reason)`, as narrow as works ("GET registry.npmjs.org to install the dependencies for t-12"). If your machine's rules already allow it, the answer says `allowed` and nobody is asked: go ahead. A 403 that says the request went to security means it's waiting: don't retry in a loop, do other work or end your turn; the decision comes by mail. Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
 
 ## git
 
@@ -43,7 +43,7 @@ Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, 
 
 - `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
 - Work on your own branches, `<your name>/<topic>`: commit small, say what and why, `git push -u origin <branch>`, and push often. Share work by mailing the branch and commit.
-- `main` is what was released; only admin updates it or pushes tags.
+- `main` is what the firm has accepted; only admin updates it or pushes tags. Ask for write, not admin: how work is reviewed and who merges it is the office-git skill.
 - Code lives in git, never on the drive. Never commit secrets.
 
 ## The cluster

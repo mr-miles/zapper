@@ -194,21 +194,21 @@ function renderChecks(M) {
   box.replaceChildren(...list.map((c) => {
     const note = el('input', { placeholder: 'Reason (required to object; the hirer reads it)', style: 'flex:1;min-width:220px', maxlength: 500 });
     const act = (clear) => async () => {
-      try { await write('POST', F() + '/security/screenings/' + enc(c.id), { clear, note: note.value }); toast((clear ? 'Cleared ' : 'Objected to ') + c.worker); box.dataset.sig = ''; loadFirm(); }
+      try { await write('POST', F() + '/security/screenings/' + enc(c.id), { clear, note: note.value }); toast((clear ? 'Approved ' : 'Objected to ') + c.worker); box.dataset.sig = ''; loadFirm(); }
       catch (e) { toast(e.message, true); }
     };
     const pending = c.state === 'pending';
     return el('div', { class: 'card', style: 'margin-bottom:10px' + (pending ? ';border-left:3px solid var(--warn)' : '') },
       el('div', { style: 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap' },
         miniAvatar(c.worker), el('b', {}, c.worker), el('span', {}, c.title + ' (' + c.role + ')'), el('span', { class: 'muted small' }, 'hired by ' + c.by + ' with ' + fmtTok(c.budget) + ', ' + ago(c.ts)),
-        pill(pending ? 'waiting' : c.state === 'cleared' ? 'closed' : 'error', pending ? (c.boardAsked || !c.officer ? 'waiting for you' : 'waiting for ' + c.officer) : c.state + ' by ' + c.decidedBy)),
+        pill(pending ? 'waiting' : c.state === 'cleared' ? 'closed' : 'error', pending ? (c.boardAsked || !c.officer ? 'waiting for you' : 'waiting for ' + c.officer) : (c.state === 'cleared' ? 'approved' : c.state) + ' by ' + c.decidedBy)),
       c.note ? el('div', { class: 'small', style: 'margin-top:4px' }, c.note) : '',
       el('details', { style: 'margin-top:6px' }, el('summary', { class: 'muted small' }, 'Access, reason and brief'),
         el('pre', { class: 'mono small', style: 'white-space:pre-wrap;margin:6px 0' }, c.access),
         el('div', { class: 'small' }, el('b', {}, 'Reason: '), c.reason),
         el('div', { class: 'small', style: 'margin-top:4px' }, el('b', {}, 'Brief: '), clip(c.brief, 1500))),
       pending && live() && canWrite() ? el('div', { class: 'bar', style: 'margin:10px 0 0' }, note,
-        el('button', { class: 'btn ok', type: 'button', onclick: act(true) }, 'Clear'),
+        el('button', { class: 'btn ok', type: 'button', onclick: act(true) }, 'Approve'),
         el('button', { class: 'btn danger', type: 'button', onclick: act(false) }, 'Object')) : '');
   }));
 }

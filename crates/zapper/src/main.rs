@@ -1319,14 +1319,21 @@ async fn check(config_path: &Path) -> Result<i32> {
             .filter(|n| config.resolve(n).is_ok_and(|p| p.agent.driven))
             .map(String::as_str)
             .collect();
-        println!(
-            "note   the driver is on: {}",
-            if driven.is_empty() {
-                "no profile is driven (agent.driven)".to_string()
-            } else {
-                format!("driven profiles: {}", driven.join(", "))
-            }
-        );
+        // What it drives: firms' workers (through the office's foreman) and
+        // sessions of driven profiles.
+        let firms: Vec<&str> = config.firms.keys().map(String::as_str).collect();
+        let mut uses = Vec::new();
+        if !firms.is_empty() {
+            uses.push(format!("the workers of firm {}", firms.join(", ")));
+        }
+        if !driven.is_empty() {
+            uses.push(format!("driven profiles: {}", driven.join(", ")));
+        }
+        if uses.is_empty() {
+            println!("note   the driver is on, unused: no firm, and no profile sets agent.driven");
+        } else {
+            println!("note   the driver is on, for {}", uses.join("; "));
+        }
     } else {
         println!(
             "note   the driver is disabled (daemon.driver: false): sandboxing and monitoring only"
@@ -1630,17 +1637,77 @@ mod tests {
         }
     }
 
-    /// `examples/mini-firm`: a config this build loads, its firm valid, the
-    /// skills it points at there, and a task with a subject.
+    /// An example's directory: a config this build loads, whose profiles
+    /// are all on the one image the firms need (`zapper check` asks for
+    /// every profile's image), each firm's skills there, and a task with a
+    /// subject.
+    #[cfg(feature = "office")]
+    fn example(name: &str) -> zapper_policy::Config {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name);
+        let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
+        for p in c.profiles.keys() {
+            assert_eq!(c.resolve(p).unwrap().engine.image, "office", "{name}: {p}");
+        }
+        for firm in zapper_office::firm::all(&c).values() {
+            assert_eq!(zapper_office::skills::missing(firm), Vec::<String>::new());
+        }
+        let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
+        assert!(!task.lines().next().unwrap().trim().is_empty());
+        c
+    }
+
+    /// `examples/mini-firm`: Ada alone, who may contract a writer, named
+    /// Ben from the pool.
     #[cfg(feature = "office")]
     #[test]
     fn the_mini_firm_example_loads() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mini-firm");
-        let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
+        let c = example("mini-firm");
+        assert_eq!(c.profiles.len(), 1);
         let mini = &zapper_office::firm::all(&c)["mini"];
-        assert_eq!(zapper_office::skills::missing(mini), Vec::<String>::new());
-        let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
-        assert!(!task.lines().next().unwrap().trim().is_empty());
+        let founders: Vec<&str> = mini.workers.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(founders, ["ada"]);
+        assert_eq!(mini.roles["ceo"].hires, ["writer"]);
+        assert!(mini.budget.seed > 0);
+        assert_eq!(mini.names, ["ben"]);
+    }
+
+    /// `examples/shopping-list`: Ada alone, who may hire a product manager
+    /// and engineers; a git repository, which the profile leaves to grants;
+    /// npm for the engineers only.
+    #[cfg(feature = "office")]
+    #[test]
+    fn the_shopping_list_example_loads() {
+        let c = example("shopping-list");
+        let shop = &zapper_office::firm::all(&c)["shop"];
+        let founders: Vec<&str> = shop.workers.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(founders, ["ada"]);
+        assert_eq!(shop.roles["ceo"].hires, ["product-manager", "engineer"]);
+        assert!(shop.budget.seed > 0);
+        assert_eq!(shop.git_repos(), ["product"]);
+        let hosts = |profile: &str| -> Vec<(String, zapper_policy::Action)> {
+            c.resolve(profile)
+                .unwrap()
+                .layers
+                .iter()
+                .flat_map(|(_, l)| l.net.iter().map(|n| (n.host.clone(), n.action)))
+                .collect()
+        };
+        let git = format!("git.{}", shop.domain("shop"));
+        let npm = "registry.npmjs.org".to_string();
+        for role in ["ceo", "product-manager", "engineer"] {
+            let h = hosts(&shop.roles[role].profile);
+            assert!(
+                h.contains(&(git.clone(), zapper_policy::Action::Deny)),
+                "{role}: {h:?}"
+            );
+            assert_eq!(
+                h.iter().any(|(x, _)| *x == npm),
+                role == "engineer",
+                "{role}: {h:?}"
+            );
+        }
     }
 
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.

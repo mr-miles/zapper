@@ -191,6 +191,29 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
     );
 }
 
+/// The desk names the message to reply to for each piece of work owed, so
+/// a report can go to its assignment's thread rather than a later one.
+#[tokio::test]
+async fn the_desk_names_what_to_reply_to() {
+    let (t, run) = run_with(FIRM);
+    let mut vm = pats_foreman(&t, &run);
+    let sent = tool(
+        &t,
+        &session_of(&run, "ceo"),
+        "mail_send",
+        json!({ "to": ["pat"], "subject": "Build it", "body": "Please.", "kind": "assignment" }),
+    )
+    .await;
+    let (id, thread) = (
+        sent["id"].as_str().unwrap(),
+        sent["thread"].as_str().unwrap(),
+    );
+    let mut agent = next(&mut vm).await;
+    let text = wake(&mut agent).await;
+    let line = format!("\"Build it\" from ceo (assignment, reply to {id} in {thread})");
+    assert!(text.contains(&line), "{text}");
+}
+
 #[tokio::test]
 async fn mail_that_comes_during_a_turn_goes_over_through_the_stop_hook() {
     let (t, run) = run_with(FIRM);

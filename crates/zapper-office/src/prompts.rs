@@ -373,11 +373,14 @@ fn desk_text(firm: &Firm, desk: &Desk, pending_access: &[String], now: f64) -> S
                 Some(d) => format!("due {}", when(d)),
                 None => "no due date".into(),
             };
+            // The message to reply to, so the answer settles this thread.
             format!(
-                "  - \"{}\" from {} ({}), {due}",
+                "  - \"{}\" from {} ({}, reply to {} in {}), {due}",
                 o.subject,
                 o.creditor,
-                kind_name(o.kind)
+                kind_name(o.kind),
+                o.message,
+                o.thread
             )
         })
         .collect();
@@ -386,10 +389,12 @@ fn desk_text(firm: &Firm, desk: &Desk, pending_access: &[String], now: f64) -> S
         .iter()
         .map(|o| {
             format!(
-                "  - \"{}\" — waiting for {} since {}",
+                "  - \"{}\" — waiting for {} since {} ({} in {})",
                 o.subject,
                 o.debtor,
-                when(o.created)
+                when(o.created),
+                o.message,
+                o.thread
             )
         })
         .collect();

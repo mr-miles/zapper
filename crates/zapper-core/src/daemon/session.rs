@@ -575,7 +575,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
             path: m.guest.clone(),
             read_only: ro,
         });
-        tracing::info!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
+        tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
     }
     let spec = {
         let c = daemon.config.read().unwrap();

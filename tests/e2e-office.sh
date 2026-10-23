@@ -674,7 +674,7 @@ swait_for "funds request b-1" 60 && pass "the CEO asks for a budget" || fail "th
 "$Z" firm budget solo approve b-1 > /dev/null
 expect "while the CEO holds security, the CEO keeps the security share" "$("$Z" --json firm budget solo | python3 -c 'import sys,json; f=json.load(sys.stdin); print(f["workers"]["ceo"]["received"])')" "20000"
 swait_for "screening c-1 of ada by the board" 60 && pass "the CEO's own hire is checked by the board" || fail "the CEO's own hire is checked by the board" "$(sjournal | grep -i "screening\|hired" | tail -5)"
-"$Z" firm screen solo c-1 --clear --note "fine" > /dev/null
+"$Z" firm screen solo c-1 --approve --note "fine" > /dev/null
 swait_for "access requested r-1 ada example.com:443" 120 && pass "a colleague's access request" || fail "a colleague's access request" "$(sjournal | tail -8)"
 swait_for "access decided r-1" 90 && pass "is decided" || fail "is decided" "$(sjournal | grep access | tail -5)"
 expect "by the CEO, who holds security" "$("$Z" --json firm journal solo | python3 -c '
