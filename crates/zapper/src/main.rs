@@ -1319,14 +1319,21 @@ async fn check(config_path: &Path) -> Result<i32> {
             .filter(|n| config.resolve(n).is_ok_and(|p| p.agent.driven))
             .map(String::as_str)
             .collect();
-        println!(
-            "note   the driver is on: {}",
-            if driven.is_empty() {
-                "no profile is driven (agent.driven)".to_string()
-            } else {
-                format!("driven profiles: {}", driven.join(", "))
-            }
-        );
+        // What it drives: firms' workers (through the office's foreman) and
+        // sessions of driven profiles.
+        let firms: Vec<&str> = config.firms.keys().map(String::as_str).collect();
+        let mut uses = Vec::new();
+        if !firms.is_empty() {
+            uses.push(format!("the workers of firm {}", firms.join(", ")));
+        }
+        if !driven.is_empty() {
+            uses.push(format!("driven profiles: {}", driven.join(", ")));
+        }
+        if uses.is_empty() {
+            println!("note   the driver is on, unused: no firm, and no profile sets agent.driven");
+        } else {
+            println!("note   the driver is on, for {}", uses.join("; "));
+        }
     } else {
         println!(
             "note   the driver is disabled (daemon.driver: false): sandboxing and monitoring only"

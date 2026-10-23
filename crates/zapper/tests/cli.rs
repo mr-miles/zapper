@@ -428,7 +428,7 @@ async fn check_reports_the_driver_and_the_daemon() {
     let d = daemon(TestCore::new(CONFIG)).await;
     let text = out(&zapper(&d, &["check"]).await);
     assert!(
-        text.contains("note   the driver is on: driven profiles: bot\n"),
+        text.contains("note   the driver is on, for driven profiles: bot\n"),
         "{text}"
     );
     assert!(
@@ -454,7 +454,7 @@ async fn check_reports_the_driver_and_the_daemon() {
     let t = TestCore::new("profiles:\n  web: {}\n");
     let text = out(&run(&t.startup(), None, &["check"]).await);
     assert!(
-        text.contains("no profile is driven (agent.driven)"),
+        text.contains("note   the driver is on, unused: no firm, and no profile sets agent.driven"),
         "{text}"
     );
 
@@ -481,6 +481,10 @@ async fn check_notes_officers_without_a_budget() {
     let notes = lines_of(&text, "note   firm acme");
     assert_eq!(notes.len(), 1, "{text}");
     assert!(notes[0].contains("budget.security_share is 0"), "{text}");
+    assert!(
+        text.contains("note   the driver is on, for the workers of firm acme\n"),
+        "{text}"
+    );
 }
 
 #[cfg(feature = "office")]
