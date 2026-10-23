@@ -624,6 +624,9 @@ pub fn redact(mut c: Config) -> Config {
 }
 
 #[cfg(test)]
+mod limits_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

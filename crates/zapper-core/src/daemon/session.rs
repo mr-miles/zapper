@@ -706,18 +706,7 @@ async fn guest_control(
     });
 
     let mut reader = BufReader::new(r);
-    loop {
-        let mut line = Vec::new();
-        let n = (&mut reader)
-            .take(MAX_LINE as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .await?;
-        if n == 0 {
-            break;
-        }
-        if n > MAX_LINE {
-            bail!("guest sent an oversized message");
-        }
+    while let Some(line) = read_guest_line(&mut reader).await? {
         let msg: GuestMsg = match serde_json::from_slice(&line) {
             Ok(m) => m,
             Err(e) => {
@@ -1049,6 +1038,25 @@ impl Terminal {
             open: st.open,
         }
     }
+}
+
+/// One line from the guest's control channel, at most `MAX_LINE` bytes:
+/// `None` at the end, an error for a longer one.
+pub(crate) async fn read_guest_line(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    let n = reader
+        .take(MAX_LINE as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n > MAX_LINE {
+        bail!("guest sent an oversized message");
+    }
+    Ok(Some(line))
 }
 
 pub async fn read_frame(
