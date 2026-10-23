@@ -21,6 +21,7 @@ profiles:
     policy:
       net:
         - { action: ask, host: '*.example' }
+        - { action: allow, host: registry.npmjs.org, ports: [443] }
 firms:
   acme:
     budget: { seed: 1000000, security_share: 0.2, quote_fee: 10000 }
@@ -266,6 +267,45 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
         .into_iter()
         .any(|e| e["type"] == "access" && e["event"] == "escalated");
     assert!(escalated, "{:?}", journal(&run));
+}
+
+/// What the worker's rules already allow isn't asked about: the answer
+/// says so, and nobody gets a request to decide.
+#[tokio::test]
+async fn access_already_allowed_is_not_asked_for() {
+    let (t, run) = run();
+    let r = ok(
+        &t,
+        &run,
+        "pat",
+        "request_access",
+        json!({ "host": "registry.npmjs.org", "methods": ["get"], "reason": "npm install" }),
+    )
+    .await;
+    assert_eq!(r["allowed"], true, "{r}");
+    assert!(r["request"].is_null(), "{r}");
+    assert!(
+        r["note"].as_str().unwrap().contains("already allowed"),
+        "{r}"
+    );
+    assert_eq!(
+        ok(&t, &run, "sec", "access_requests", json!({})).await,
+        json!([])
+    );
+    let asked = journal(&run)
+        .into_iter()
+        .any(|e| e["type"] == "access" && e["event"] == "requested");
+    assert!(!asked, "{:?}", journal(&run));
+    // Another port isn't allowed, so it is asked about.
+    let r = ok(
+        &t,
+        &run,
+        "pat",
+        "request_access",
+        json!({ "host": "registry.npmjs.org", "port": 80, "reason": "npm over http" }),
+    )
+    .await;
+    assert!(r["request"].is_string(), "{r}");
 }
 
 #[tokio::test]

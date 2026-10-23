@@ -187,6 +187,39 @@ impl<'a> Args<'a> {
 
 /// What a tool's handler gets: who calls, from which session, and with
 /// what.
+/// The rule that already allows a worker's request, if their session's
+/// rules allow it for every method asked for (or the connection, with
+/// none).
+fn allowed_by(
+    c: &Call,
+    host: &str,
+    port: u16,
+    methods: Option<&[String]>,
+    path: Option<&str>,
+) -> Result<Option<String>> {
+    let layers = c.d.layers_for(Some(&c.s.id), None)?;
+    let layers: Vec<_> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
+    let methods: Vec<Option<String>> = match methods {
+        Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
+        _ => vec![None],
+    };
+    let mut rule = None;
+    for method in methods {
+        let req = NetRequest {
+            host: host.to_string(),
+            port,
+            method,
+            path: path.map(str::to_string),
+        };
+        let (d, _) = zapper_policy::evaluate_net(&layers, &req);
+        if d.action != zapper_policy::Action::Allow {
+            return Ok(None);
+        }
+        rule = d.rule.or(rule);
+    }
+    Ok(Some(rule.unwrap_or_else(|| "default".into())))
+}
+
 struct Call<'a> {
     d: &'a Core,
     run: &'a Arc<FirmRun>,
@@ -345,7 +378,7 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "request_access",
         shown: |_| true,
-        description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision.",
+        description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision. If your machine's rules already allow it, the answer says so and nothing is asked.",
         props: || json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
         required: &["host", "reason"],
         run: Run::Sync(|c| {
@@ -359,6 +392,15 @@ static TOOLS: &[Tool] = &[
             });
             let path = c.args.opt("path");
             let reason = c.args.req("reason")?;
+            // What the worker's rules already allow (every method asked
+            // for, on the path if given) needs no one's decision.
+            if let Some(rule) = allowed_by(c, &host, port, methods.as_deref(), path.as_deref())? {
+                return Ok(json!({
+                    "allowed": true,
+                    "rule": rule,
+                    "note": "already allowed by your machine's rules: go ahead, no request needed. If it's still blocked, the error names the rule; ask again with that",
+                }));
+            }
             let req = NetRequest {
                 host,
                 port,

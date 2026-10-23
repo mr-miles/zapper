@@ -246,7 +246,7 @@ An `assignment` from someone without authority over the receiver is rejected wit
 | `mail_thread(thread)` | Full thread, oldest first |
 | `desk()` | My open assignments, threads waiting on others, pending access requests |
 | `directory()` | The org chart: names, titles, roles, who reports to whom, who is busy |
-| `request_access(host, port?, methods?, path?, reason)` | Ask the security officers ahead of time, with a reason (outside hosts; the firm's own services are grants) |
+| `request_access(host, port?, methods?, path?, reason)` | Ask the security officers ahead of time, with a reason (outside hosts; the firm's own services are grants). What the worker's rules already allow, for every method asked for, is answered `allowed` with the rule, and nothing is queued |
 | `credentials_request(resource, level, repo?, spaces?, reason)`, `credentials()` | Ask for a grant on a git repository, the cluster or drive spaces; see your grants and requests |
 | `credentials_decide`, `credentials_escalate`, `credentials_revoke`, `credentials_list` | The CEO and security officers: decide, hand up, revoke, list |
 
