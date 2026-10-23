@@ -666,8 +666,20 @@ async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     let app = super::ui(t.core.clone(), PORT, false, &Mount::default());
     let token = t.core.ui_token().to_string();
 
+    const MISSING: &str = "No token found matching this server.  See URL printed by zapper serve";
+    const WRONG: &str = "Token does not match current server.  See URL printed by zapper serve";
     let r = send(&app, Method::GET, "/api/status", &[("host", HOST)], "").await;
-    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        (r.status, r.body.as_str()),
+        (StatusCode::UNAUTHORIZED, MISSING)
+    );
+    // Another server's cookie, or the old one of a restarted server.
+    let stale = [("host", HOST), ("cookie", "other=1; zapper_token=stale")];
+    let r = send(&app, Method::GET, "/api/status", &stale, "").await;
+    assert_eq!(
+        (r.status, r.body.as_str()),
+        (StatusCode::UNAUTHORIZED, WRONG)
+    );
     let r = send(
         &app,
         Method::GET,
@@ -678,7 +690,10 @@ async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     .await;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "a foreign Host");
     let r = send(&app, Method::GET, "/?token=wrong", &[("host", HOST)], "").await;
-    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        (r.status, r.body.as_str()),
+        (StatusCode::UNAUTHORIZED, WRONG)
+    );
 
     let cookie = signed_in(&app, &token).await;
     let r = send(

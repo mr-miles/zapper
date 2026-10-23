@@ -222,19 +222,24 @@ async fn ui_guard(
             .insert(header::SET_COOKIE, cookie.parse().unwrap());
         return resp;
     }
-    let cookie_ok = req
+    // The tokens the browser offers: its cookies, and one in the query.
+    let offered: Vec<String> = req
         .headers()
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|c| c.to_str().ok())
         .flat_map(|c| c.split(';'))
-        .any(|c| c.trim() == format!("zapper_token={}", d.ui_token()));
-    if !cookie_ok {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "open the URL printed by `zapper serve`",
-        )
-            .into_response();
+        .filter_map(|c| c.trim().strip_prefix("zapper_token=").map(str::to_string))
+        .chain(query.get("token").cloned())
+        .collect();
+    if !offered.iter().any(|t| t == d.ui_token()) {
+        // A token from another server, or from before a restart, says so.
+        let why = if offered.is_empty() {
+            "No token found matching this server.  See URL printed by zapper serve"
+        } else {
+            "Token does not match current server.  See URL printed by zapper serve"
+        };
+        return (StatusCode::UNAUTHORIZED, why).into_response();
     }
     if !matches!(
         *req.method(),
