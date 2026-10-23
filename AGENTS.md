@@ -116,6 +116,7 @@ scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
 tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
 tests/e2e-office.sh      end-to-end tests of firms, with the fake Claude
 docs/                    one page per topic; index in docs/README.md
+examples/                configs to run as they are (mini-firm: the smallest company at work); each loads in a test
 skills/zapper/           operating skill, linked from .claude/skills/zapper
 ```
 

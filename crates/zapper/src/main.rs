@@ -1630,6 +1630,19 @@ mod tests {
         }
     }
 
+    /// `examples/mini-firm`: a config this build loads, its firm valid, the
+    /// skills it points at there, and a task with a subject.
+    #[cfg(feature = "office")]
+    #[test]
+    fn the_mini_firm_example_loads() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mini-firm");
+        let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
+        let mini = &zapper_office::firm::all(&c)["mini"];
+        assert_eq!(zapper_office::skills::missing(mini), Vec::<String>::new());
+        let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
+        assert!(!task.lines().next().unwrap().trim().is_empty());
+    }
+
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
     fn example_config_is_valid() {
