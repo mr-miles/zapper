@@ -1165,6 +1165,20 @@ fn event_line(e: &Value) -> String {
         ),
         "shell" => format!("shell {} {}", e["id"], s(&e["state"])),
         "config" => format!("config {}", s(&e["change"])),
+        "mcp" => format!(
+            "{} {}.{}{}",
+            if e["ok"] == json!(true) {
+                "ok"
+            } else {
+                "FAILED"
+            },
+            s(&e["server"]),
+            s(&e["tool"]),
+            e["error"]
+                .as_str()
+                .map(|x| format!(" ({x})"))
+                .unwrap_or_default()
+        ),
         other => format!("{other} {e}"),
     };
     let rule = e["rule"]
@@ -1482,6 +1496,23 @@ async fn check(config_path: &Path) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    /// `zapper events`: a tool call through the gateway, and a refused one.
+    #[test]
+    fn mcp_events_read_as_the_tool_called() {
+        let e = json!({ "ts": 3661.0, "session": "abc234", "type": "mcp", "server": "office", "tool": "mail_send", "ok": true, "ms": 2.5 });
+        assert_eq!(
+            super::event_line(&e),
+            "01:01:01 abc234 mcp     ok office.mail_send"
+        );
+        let e = json!({ "ts": 0.0, "session": "abc234", "type": "mcp", "server": "x", "tool": "y", "ok": false, "ms": 0.1, "error": "no MCP server x for this session" });
+        assert_eq!(
+            super::event_line(&e),
+            "00:00:00 abc234 mcp     FAILED x.y (no MCP server x for this session)"
+        );
+    }
+
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
     fn example_config_is_valid() {

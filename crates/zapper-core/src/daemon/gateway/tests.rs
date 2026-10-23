@@ -60,6 +60,21 @@ fn session(t: &TestCore, pairs: &[(&str, &str)]) -> Arc<Session> {
 
 const CONFIG: &str = "profiles:\n  web: {}\n";
 
+/// The session's `mcp` events: server, tool, ok and error.
+fn calls(t: &TestCore, s: &Session) -> Vec<Value> {
+    t.core
+        .daemon()
+        .recent_events(Some(&s.id))
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .filter(|e| e["type"] == "mcp")
+        .map(|e| {
+            assert!(e["ms"].as_f64().unwrap() >= 0.0, "{e}");
+            json!([e["server"], e["tool"], e["ok"], e["error"]])
+        })
+        .collect()
+}
+
 /// A connection to the gateway as `s`'s VM: the server named, then lines.
 struct Conn {
     w: tokio::io::WriteHalf<UnixStream>,
@@ -150,6 +165,15 @@ async fn a_session_talks_mcp_with_its_server() {
         [s.id.clone(), s.id.clone()]
     );
 
+    // Each tool call is an event, and nothing else is.
+    assert_eq!(
+        calls(&t, &s),
+        [
+            json!(["echo", "echo", true, null]),
+            json!(["echo", "nope", false, "no tool nope"]),
+        ]
+    );
+
     c.send("not json").await;
     let r = c.reply().await.unwrap();
     assert_eq!(r["error"]["code"], -32700);
@@ -171,6 +195,17 @@ async fn a_server_is_only_for_the_sessions_it_picks() {
     c.send("echo").await;
     let r = c.ask(1, "tools/list", json!({})).await;
     assert_eq!(r["error"]["message"], "no MCP server echo for this session");
+    // A call to a server the session hasn't is an event too, refused.
+    c.ask(9, "tools/call", json!({ "name": "echo" })).await;
+    assert_eq!(
+        calls(&t, &b),
+        [json!([
+            "echo",
+            "echo",
+            false,
+            "no MCP server echo for this session"
+        ])]
+    );
     // Not even a notification is anyone's.
     c.send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
         .await;
@@ -312,6 +347,27 @@ async fn a_server_that_cant_list_its_tools_says_so() {
     let r = c.ask(2, "tools/list", json!({})).await;
     assert_eq!(r["error"]["code"], -32603);
     assert_eq!(r["error"]["message"], "the tools are elsewhere");
+}
+
+#[tokio::test]
+async fn a_call_the_guest_names_at_length_is_an_event_of_bounded_names() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let mut c = Conn::open(&t, &s);
+    c.send(&"s".repeat(1000)).await;
+    c.ask(1, "tools/call", json!({ "name": "t".repeat(1000) }))
+        .await;
+    // A call without an id gets no answer, and is an event all the same.
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"}}"#)
+        .await;
+    assert_eq!(c.ask(2, "ping", json!({})).await["id"], 2);
+    let calls = calls(&t, &s);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0][0].as_str().unwrap().len(), super::MAX_NAME);
+    assert_eq!(calls[0][1].as_str().unwrap().len(), super::MAX_NAME);
+    assert!(calls[0][3].as_str().unwrap().len() <= super::MAX_ERROR);
+    assert_eq!(calls[1][1], "x");
+    assert_eq!(calls[1][2], false);
 }
 
 #[tokio::test]

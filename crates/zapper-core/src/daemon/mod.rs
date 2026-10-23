@@ -152,6 +152,15 @@ pub enum EventBody {
         event: String,
         detail: serde_json::Value,
     },
+    /// A tool called through the MCP gateway (`gateway`).
+    Mcp {
+        server: String,
+        tool: String,
+        ok: bool,
+        ms: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 pub fn now() -> f64 {

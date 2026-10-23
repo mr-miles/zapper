@@ -3,11 +3,13 @@
 //! A connection names a server on its first line, then carries MCP as on
 //! stdio, one JSON-RPC message per line each way, so the agent's bridge
 //! only copies lines. Who calls is the session the connection's VM is;
-//! nothing in a message can say otherwise.
+//! nothing in a message can say otherwise. Each tool call is an `mcp` event
+//! of the session's.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use anyhow::{bail, Result};
 use futures_util::future::BoxFuture;
@@ -18,6 +20,7 @@ use tokio::sync::Semaphore;
 use zapper_policy::proto::MAX_MCP_LINE;
 
 use super::session::Session;
+use super::EventBody;
 
 /// An MCP server in the daemon: its tools, for each session that calls.
 pub trait McpServer: Send + Sync {
@@ -170,22 +173,68 @@ where
         }
         let reply = match serde_json::from_slice::<Value>(&msg) {
             Err(e) => Some(error(Value::Null, -32700, format!("bad request: {e}"))),
-            Ok(m) => match &server {
-                Some(server) => answer(server.as_ref(), &name, s, m).await,
-                None => m.get("id").map(|id| {
-                    error(
-                        id.clone(),
-                        -32601,
-                        format!("no MCP server {name} for this session"),
+            Ok(m) => {
+                let call = (m["method"] == "tools/call").then(|| {
+                    (
+                        clip(m["params"]["name"].as_str().unwrap_or("")),
+                        Instant::now(),
                     )
-                }),
-            },
+                });
+                let reply = match &server {
+                    Some(server) => answer(server.as_ref(), &name, s, m).await,
+                    None => m.get("id").map(|id| {
+                        error(
+                            id.clone(),
+                            -32601,
+                            format!("no MCP server {name} for this session"),
+                        )
+                    }),
+                };
+                if let Some((tool, start)) = call {
+                    d.emit(Some(s), called(&name, tool, start, reply.as_ref()));
+                }
+                reply
+            }
         };
         if let Some(reply) = reply {
             write(&mut w, &reply).await?;
         }
     }
 }
+
+/// A guest's name for a server or tool, as far as an event keeps it.
+fn clip(s: &str) -> String {
+    s.chars().take(MAX_NAME).collect()
+}
+
+const MAX_NAME: usize = 128;
+
+/// The event of a tool call: what the reply said of it, or that it had none
+/// (a notification).
+fn called(server: &str, tool: String, start: Instant, reply: Option<&Value>) -> EventBody {
+    let error = match reply {
+        None => Some("no id, no answer".to_string()),
+        Some(r) if r["result"]["isError"] == false => None,
+        Some(r) => Some(
+            r["error"]["message"]
+                .as_str()
+                .or(r["result"]["content"][0]["text"].as_str())
+                .unwrap_or("error")
+                .chars()
+                .take(MAX_ERROR)
+                .collect(),
+        ),
+    };
+    EventBody::Mcp {
+        server: clip(server),
+        tool,
+        ok: error.is_none(),
+        ms: start.elapsed().as_secs_f64() * 1000.0,
+        error,
+    }
+}
+
+const MAX_ERROR: usize = 512;
 
 async fn write<W: AsyncWrite + Unpin>(w: &mut W, v: &Value) -> Result<()> {
     let mut b = serde_json::to_vec(v)?;

@@ -105,7 +105,7 @@
   <section id="events">
     <div class="bar">
       <select id="ev-session"><option value="">all sessions</option></select>
-      <select id="ev-type"><option value="">all types</option><option>net</option><option>dns</option><option>exec</option><option>ask</option><option>answer</option><option>guest</option><option>shell</option><option>session</option><option>driver</option><option>config</option></select>
+      <select id="ev-type"><option value="">all types</option><option>net</option><option>dns</option><option>exec</option><option>ask</option><option>answer</option><option>guest</option><option>shell</option><option>session</option><option>driver</option><option>mcp</option><option>config</option></select>
       <select id="ev-action"><option value="">any action</option><option>allow</option><option>deny</option></select>
       <input id="ev-q" placeholder="filter text">
       <span class="dim" id="ev-count"></span>
@@ -490,6 +490,7 @@ function eventRow(e) {
     case 'dns': action = e.allowed ? 'allow' : 'deny'; detail = e.rcode + ' ' + (e.name || '(invalid query)') + (e.answer ? ' → ' + e.answer : '') + (e.reason ? '  (' + e.reason + ')' : ''); break;
     case 'session': detail = e.state + (e.detail ? ': ' + e.detail : ''); break;
     case 'config': detail = e.change; break;
+    case 'mcp': action = e.ok ? '' : 'deny'; detail = e.server + '.' + e.tool + ' · ' + e.ms.toFixed(1) + ' ms' + (e.error ? '  ' + e.error : ''); break;
     case 'driver': { const x = e.detail || {}; action = x.outcome === 'failed' || e.event === 'error' ? 'deny' : ''; detail = e.event + (x.activity ? ' ' + x.activity : '') + (x.outcome ? ' ' + x.outcome : '') + (x.tokens != null ? ' · ' + x.tokens + ' tokens' : '') + (x.prompts != null ? ' · ' + x.prompts + ' prompts' : '') + (x.error ? '  ' + x.error : ''); break; }
   }
   return { e, action: action || '', detail, rule };

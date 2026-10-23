@@ -108,7 +108,7 @@ A firm's workers are sessions with a link to their firm's run ([office](office.m
 |---|---|---|
 | Post office | daemon (`office/mail.rs`) | Mail, threads, who owes whom an answer, follow-ups; bodies in the run's journal |
 | Foreman | daemon (`office/foreman.rs`), one per worker | Runs the agent headless in the worker's VM over a terminal channel (`claude -p --input-format stream-json`, or `pi --mode rpc`), writes wake prompts, ends a turn when the agent reports it, records the transcript |
-| MCP gateway | vsock port 1100 of every VM | The MCP servers registered in the daemon for the session (the office's tools for a firm's workers): a connection names a server on its first line, then carries MCP as on stdio, one JSON-RPC message per line; the caller is the VM it comes from |
+| MCP gateway | vsock port 1100 of every VM | The MCP servers registered in the daemon for the session (the office's tools for a firm's workers): a connection names a server on its first line, then carries MCP as on stdio, one JSON-RPC message per line; the caller is the VM it comes from, and each tool call is an `mcp` event ([instrumentation](instrumentation.md#events)) |
 | `office` | in the guest: `zapper-agent office mcp` | The MCP server the agent loads: its stdio bridged line by line to the office's server in the gateway; also a command line and Claude Code's stop hook |
 | Shared drive | daemon (`office/drive.rs`) | Copies published files out of the VM over a system terminal, by content hash |
 | Security | daemon (`office/security.rs`) | Access requests from `ask` rules, officers' decisions as rules at the worker's or role's layer, digests |
