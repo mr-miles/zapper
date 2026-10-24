@@ -242,6 +242,7 @@
   .legend .gauge i { display:block; height: 100%; margin: 0; border-radius: 0; vertical-align: 0; }
   .legend .ic { display:inline-flex; align-items:center; gap: 2px; font-size: 11px; background: var(--card); border: 1px solid var(--line2); border-radius: 999px; padding: 0 6px; height: 17px; flex: none; }
   .legend .ic.mail { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .legend .ic svg { width: 11px; height: 11px; }
   .legend .ic.lock { color: var(--warn); }
   .legend .ic.clock { color: var(--bad); }
   .postoffice { position: absolute; display:flex; align-items:center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }

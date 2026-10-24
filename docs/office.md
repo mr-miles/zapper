@@ -629,7 +629,7 @@ Schematic, flat and calm, in the spirit of Claude's design: warm off-white backg
 | Over budget | dimmed, a small gauge | the worker's or firm's budget is used up |
 | Error | dimmed, red dot | the agent process keeps failing, or the VM stopped |
 
-Badges sit on top of any state: unread mail (a count), an access request pending (a padlock), overdue threads (a clock).
+Badges sit on top of any state: unread mail (a count), an access request waiting for a decision (a padlock: a site, or a grant on git, the cluster or a drive space), overdue threads (a clock).
 
 `prefers-reduced-motion` turns the animations into static state icons.
 

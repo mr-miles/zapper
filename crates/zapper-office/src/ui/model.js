@@ -407,8 +407,12 @@ function desk(M, name, now) {
     if (o.debtor === name) owes.push(o);
     if (o.creditor === name) waits.push(o);
   }
-  const reqs = [...M.requests.values()].filter((r) => r.worker === name && (r.state === 'pending' || r.state === 'escalated'));
-  return { owes, waits, overdue: owes.filter((o) => overdue(o, now)), reqs };
+  const waiting = (r) => r.worker === name && (r.state === 'pending' || r.state === 'escalated');
+  // Access asked for and not yet decided: sites, and grants on git, the
+  // cluster and drive spaces.
+  const reqs = [...M.requests.values()].filter(waiting);
+  const creds = [...M.credReqs.values()].filter(waiting);
+  return { owes, waits, overdue: owes.filter((o) => overdue(o, now)), reqs, creds };
 }
 function statusLine(M, w, now) {
   const d = desk(M, w.name, now);

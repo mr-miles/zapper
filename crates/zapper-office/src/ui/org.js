@@ -230,7 +230,7 @@ function mountOverview() {
     el('div', { class: 'muted small' }, 'Hover a bar for the numbers.')));
   lg.append(el('h4', {}, 'Marks'),
     row(el('span', { class: 'ic mail' }, ICONS.mail(), '2'), 'unread mail'),
-    row(el('span', { class: 'ic lock' }, ICONS.lock()), 'access request pending'),
+    row(el('span', { class: 'ic lock' }, ICONS.lock()), 'waiting for an access decision: a site, git, the cluster or a drive space'),
     row(el('span', { class: 'ic clock' }, ICONS.clock(), '1'), 'overdue work'),
     row(el('span', { class: 'dashed' }), 'contractor'),
     row(el('span', { class: 'agentsw' }), 'on another agent (pi); its name and model under the title'),
@@ -336,7 +336,7 @@ function updateOverview() {
     const d = desk(M, name, now), unread = workerUnread(name);
     n.bdg.replaceChildren(
       unread ? el('span', { class: 'ic mail', title: unread + ' unread: click to see them', onclick: (ev) => { ev.stopPropagation(); openPanel(name); } }, ICONS.mail(), unread) : '',
-      d.reqs.length ? el('span', { class: 'ic lock', title: d.reqs.length + ' access request(s) pending' }, ICONS.lock()) : '',
+      d.reqs.length + d.creds.length ? el('span', { class: 'ic lock', title: [d.reqs.length ? d.reqs.length + ' site(s)' : '', d.creds.length ? d.creds.map((q) => q.resource).join(', ') : ''].filter(Boolean).join(' and ') + ': waiting for an access decision' }, ICONS.lock()) : '',
       d.overdue.length ? el('span', { class: 'ic clock', title: d.overdue.length + ' overdue' }, ICONS.clock(), d.overdue.length) : '');
     n.el.classList.toggle('sel', PANEL.name === name);
   }
@@ -488,6 +488,8 @@ function updatePanel() {
   for (const o of d.owes) items.push(oblItem(o, true));
   for (const o of d.waits) items.push(oblItem(o, false));
   for (const r of d.reqs) items.push(el('div', { class: 'item' }, pill(r.state, r.state), el('span', {}, 'access: ' + (r.method ? r.method + ' ' : '') + r.host + (r.port && r.port !== 443 ? ':' + r.port : '') + (r.path || '')),
+    el('button', { class: 'linkish', onclick: () => showTab('security') }, 'security')));
+  for (const q of d.creds) items.push(el('div', { class: 'item' }, pill(q.state, q.state), el('span', {}, 'grant: ' + q.resource + ' ' + q.level),
     el('button', { class: 'linkish', onclick: () => showTab('security') }, 'security')));
   PANEL.desk.replaceChildren(...(items.length ? items : [el('div', { class: 'muted' }, 'Nothing on the desk.')]));
   // Unread: delivered, not yet handed to a turn. A worker reads its mail
