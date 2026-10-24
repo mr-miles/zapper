@@ -23,6 +23,7 @@ zapper itself never needs root. Only host prerequisites may:
 | Command | Why it needs root |
 |---|---|
 | `sudo usermod -aG kvm $USER` | `/dev/kvm` access, if `check` reports none (then log in again) |
+| `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER` and `sudo apt install uidmap` | Each session's Firecracker as a uid of its own, if `check` notes it runs as this user; often both are there already |
 | `sudo apt install podman e2fsprogs` | building images, if missing |
 | `sudo apt install iproute2 nftables` | guest NICs, if missing |
 | `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` | VMM confinement, if user namespaces are restricted |

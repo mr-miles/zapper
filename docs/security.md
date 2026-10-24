@@ -97,7 +97,8 @@ A guest that escapes Firecracker gets the Firecracker process. zapper starts eac
 1. enters new user, network and mount namespaces, and becomes root inside them without host privileges;
 2. for a NIC session, builds the guest's network in the new network namespace ([network](network.md)); in vsock mode, that namespace stays empty;
 3. builds a root on a tmpfs, holding bind mounts at their host paths: the session's `vm/` directory (disks, VM config, metrics, sockets), the kernel, the initramfs and the Firecracker binary read-only, `/dev/kvm`, `/dev/null`, `/dev/urandom`, `/dev/net/tun` for a NIC, and a private `/tmp`;
-4. `pivot_root`s into it and makes it read-only.
+4. `pivot_root`s into it and makes it read-only;
+5. with subordinate ids (`daemon.vmm_subids`), starts Firecracker as the session's own subordinate uid, without capabilities and with `no_new_privs`. The daemon maps two ids into the namespace with `newuidmap` and `newgidmap`: 0, the daemon user, who does the steps above and owns the session's files, and 1, a subordinate uid no other running session holds. The VM directory is shared with it through the daemon user's group, and the tap is its own.
 
 From there, the VMM sees none of the daemon user's other files: the config, secret files, the session's audit log and recordings, and other sessions all stay outside its view. `tests/e2e.sh` checks this through `/proc/<pid>/root` of a running VMM.
 
@@ -128,7 +129,7 @@ make test-e2e      # ends with "all e2e checks passed"
 
 - **Exec checks may race.** The host decides on the path the process passed. A multithreaded process written for it may change that memory between the check and the kernel's own read; the kernel documents this limit of seccomp user notification. The tests haven't shown it, but treat exec policy as a guardrail and rely on network and secrets for the boundary.
 - **`fs` rules apply at boot.** Files created later aren't covered, and root in the guest can undo the rules.
-- **The VMM keeps the daemon user's uid.** Its namespaces hide the daemon user's files and the host network from it, but kernel interfaces it keeps (`/dev/kvm`, and `/dev/net/tun` with a NIC) are shared with the host. Running it as a separate uid would need `/etc/subuid` entries, a one-time root step.
+- **Firecracker's uid needs subordinate ids.** With ranges for the daemon user in `/etc/subuid` and `/etc/subgid` and the `uidmap` helpers (`daemon.vmm_subids`, on by default), each session's Firecracker runs as a subordinate uid of its own, without capabilities: it owns nothing on the host and can't signal or trace the daemon or another session's VMM. The VMM process that sets up its namespaces keeps the daemon user's uid, as does Firecracker on a host without the ranges or helpers (`zapper check` says which). Either way the kernel interfaces it keeps (`/dev/kvm`, and `/dev/net/tun` with a NIC) are shared with the host, and Firecracker keeps the daemon user's groups, `kvm` among them.
 - **The daemon is one process that holds the secrets and runs the proxy.** It parses HTTP, TLS, JSON and frames from the guest with memory-safe libraries, and a bug in that code would be a bug in the boundary.
 - **Rate and volume limits** for network traffic are planned: see [the README](../README.md#next).
 - **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed.

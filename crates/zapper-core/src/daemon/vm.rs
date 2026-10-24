@@ -147,6 +147,8 @@ pub struct VmSpec<'a> {
     /// Give the guest a NIC, captured in the VMM's network namespace
     /// (`crate::netns`).
     pub nic: bool,
+    /// Run Firecracker as a subordinate uid of its own (`daemon.vmm_subids`).
+    pub subids: bool,
 }
 
 /// The part of a session directory the VMM sees: disks, its config,
@@ -196,6 +198,9 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     tokio::fs::write(vmdir.join("metrics.json"), b"").await?;
     // The VMM runs confined in its own namespaces, set up by this binary's
     // `__vmm` mode (`crate::vmm`).
+    // Firecracker as a uid of the session's own where the host has
+    // subordinate ids; else as the daemon user (`zapper check` says why).
+    let ids = spec.subids.then(crate::subids::host).and_then(Result::ok);
     let shim = crate::vmm::Args {
         dir: vmdir.clone(),
         firecracker: spec.firecracker.to_path_buf(),
@@ -204,6 +209,7 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
         kernel: spec.kernel.clone(),
         initrd: spec.initrd.to_path_buf(),
         nic: spec.nic,
+        sub: ids.is_some(),
     };
     // The daemon's own binary as it runs: /proc/self/exe stays valid when
     // the file on disk is replaced (a rebuild, `make install`), where the
@@ -231,6 +237,19 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
                 spec.firecracker.display()
             )
         })?;
+    // Firecracker as a uid of the session's own: the VMM waits for its map.
+    if let Some(ids) = ids {
+        let mapped = match (crate::subids::lease(ids, spec.id), child.id()) {
+            (Ok(n), Some(pid)) => crate::subids::map(ids, pid, n).await,
+            (Err(e), _) => Err(e),
+            (_, None) => Err(anyhow::anyhow!("the VMM exited at once")),
+        };
+        if let Err(e) = mapped {
+            let _ = child.kill().await;
+            crate::subids::release(spec.id);
+            return Err(e.context("mapping the VMM's subordinate ids"));
+        }
+    }
     let console = spec.dir.join("console.log");
     for stream in [
         child

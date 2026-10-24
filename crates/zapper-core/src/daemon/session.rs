@@ -605,6 +605,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
         tokio::spawn(super::nic::serve(daemon.clone(), session.clone(), listener));
     }
 
+    let subids = daemon.config.read().unwrap().daemon.vmm_subids;
     let child = vm::start(vm::VmSpec {
         firecracker: &daemon.paths.firecracker,
         kernel: daemon.paths.kernels.join(&engine.kernel),
@@ -615,6 +616,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
         dir,
         id: &session.id,
         nic,
+        subids,
     })
     .await?;
     *session.vm.lock().await = Some(child);
@@ -840,6 +842,7 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
             let _ = child.kill().await;
         }
     }
+    crate::subids::release(&session.id);
     *session.guest.lock().unwrap() = None;
     if let Some(reason) = reason {
         daemon.emit(
