@@ -42,3 +42,8 @@ Builders' questions block them: answer on the same wake with a decision and a on
 ## Prioritising
 
 When time runs short, cut from the bottom and say so to the builders and the CEO. Add scope mid-build only in exchange for something of equal size, recorded in a new version.
+
+## Do not
+
+- Write criteria without a check ("fast", "user-friendly").
+- Change requirements silently: every change is a new version, mailed to everyone working from it.

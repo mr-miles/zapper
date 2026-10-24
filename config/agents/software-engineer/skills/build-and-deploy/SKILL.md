@@ -14,13 +14,12 @@ description: "How engineers build and deploy in the firm's cluster: dev and prod
 ## Working with the team
 
 - Agree interfaces with teammates by mail before building against them (API shapes, ports, paths, who owns which directories).
-- If the repository is empty, push the initial layout (README, directories, a deploy script) on a branch and ask the CTO to merge it into `main`.
-- Rebase on `origin/main` before asking for a release, and resolve conflicts yourself.
+- If the repository is empty, push the initial layout (README, directories, a deploy script) on a branch and hand it to the merger (office-git), so everyone branches from the same `main`.
 
 ## Building and deploying
 
 - Pick the simplest approach that works (images built with podman and a registry in the cluster, in-cluster builds, or public images with manifests), and write it down in the repository so a teammate can redeploy.
-- **Build and deploy tooling is yours to deploy.** An internal container registry, a build job or any other supporting service is a workload in the cluster: deploy it yourself with your cluster grant (in `dev`, named with your prefix; for the release, with the cluster admin you request with the release assignment), and write how in the repository. Don't ask the CEO, the CTO or the board to "approve" a tool: the cluster grant is the approval. Security decides only the access it needs, such as the network access to pull its image (`request_access`) or a grant that doesn't reach yet (`credentials_request`); ask for those with a reason and carry on.
+- **Build and deploy tooling is yours to deploy**, with your cluster grant (office-resources, *The cluster*): nobody approves tools; security decides only the access they need.
 - Manifests in the repository, applied with `kubectl apply -f`; the namespace and your prefix as parameters (`./deploy.sh dev ada`, `./deploy.sh prod`).
 - Deployments with readiness and liveness probes, resource requests, and an image tag per build; a Service in front of each.
 - In `prod`, an Ingress for `apps.<domain>` (or with no `host`) on `path: /`, `pathType: Prefix`: it replaces the firm's landing page (namespace `landing`, lowest priority); a `defaultBackend` doesn't. The board sees the same through its own port, which asks for `apps.<domain>` and maps it back to its address in redirects and links.

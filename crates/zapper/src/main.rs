@@ -1739,7 +1739,10 @@ mod tests {
         let lab = &zapper_office::firm::all(&c)["lab"];
         let founders: Vec<&str> = lab.workers.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(founders, ["ada"]);
-        assert_eq!(lab.roles["ceo"].hires, ["research-manager", "prototype-engineer"]);
+        assert_eq!(
+            lab.roles["ceo"].hires,
+            ["research-manager", "prototype-engineer"]
+        );
         assert_eq!(lab.roles["research-manager"].hires, ["researcher"]);
         assert!(lab.budget.seed > 0);
         assert_eq!(lab.git_repos(), ["prototypes"]);

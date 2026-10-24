@@ -16,3 +16,7 @@ references.md     every source once, numbered:
 ```
 
 Cite as `[n]`, the number in `references.md`, on every non-obvious claim; the same source keeps its number across documents. The answer first; as short as the question allows. A new version of the pack, after review, is a new version of the same artifact, with `changes`.
+
+## Your report
+
+Reply to your assignment with `kind: report`, `close: true`: the answer, the confidence and the main caveat, the pack attached, and any suggested sources still open.

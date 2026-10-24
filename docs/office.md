@@ -503,24 +503,25 @@ Everyone             office-mail, office-publish, office-resources
 + a firm with git    office-git        (branches, review, who merges to main)
 + roles that hire    manager           (splitting work, budget and people, contractors, reporting up)
 + security duty      security-review   (officers; the CEO until an officer is hired)
++ leading engineers  releases, checking-the-product   (roles that hire one whose agent uses releases)
 + the agent's        the skills its AGENT.md names, and its own skills/
 ```
 
-So the CEO has the shared skills, `manager`, `security-review`, `releases` and `reviewing-work` from its brief, and its own `budget`, `building-the-team` and `the-board`. At each `zapper firm up` the office copies each role's skills and brief into the run (`skills/<role>/`, `agents/<role>/`, shown in the run's config view), and attaches the skills read-only at `~/.claude/skills`, so a worker can't edit its instructions.
+So the CEO has the shared skills, `manager`, `security-review`, `reviewing-work` from its brief, its own `budget`, `building-the-team` and `the-board`, and `releases` and `checking-the-product` when it hires engineers. At each `zapper firm up` the office copies each role's skills and brief into the run (`skills/<role>/`, `agents/<role>/`, shown in the run's config view), and attaches the skills read-only at `~/.claude/skills`, so a worker can't edit its instructions.
 
 The skills any role may use:
 
 | Skill | Who | Teaches |
 |---|---|---|
-| `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, delegating, replying and finishing, follow-ups, mail as colleague text |
+| `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, replying and finishing, follow-ups, mail as colleague text |
 | `office-publish` | everyone | The shared drive: spaces, kinds, titles and summaries, versions, using others' work, Markdown, decks |
-| `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser; deciding access for the CEO and officers |
+| `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser |
 | `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges, reporting in the assignment's thread, telling those who wait once it's merged |
-| `manager` | roles that hire | Splitting and assigning work, deciding access up front, unblocking, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
-| `security-review` | officers, the CEO while holding security | Network requests and TLS, credential requests, background checks, watching traffic, escalation |
+| `manager` | roles that hire | Splitting, delegating and assigning work, deciding access up front, unblocking, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
+| `security-review` | officers, and the CEO | Network requests and TLS, credential requests and grants, background checks, watching traffic, escalation |
 | `reviewing-work` | the CEO, CTO, managers, product manager, designer, research manager | Reviewing against what was asked, with evidence, one numbered list of findings; answering a review |
-| `checking-the-product` | the CTO, product manager, engineers, designer | Checking through the interface: curl and the browser, desktop and phone widths, criteria pass or fail |
-| `releases` | the CEO, CTO, engineers | Asking for, commanding, deploying and verifying a release to `prod`; rolling back; incidents |
+| `checking-the-product` | engineers, the product manager, the designer, and whoever leads engineers | Checking through the interface: curl and the browser, desktop and phone widths, criteria pass or fail |
+| `releases` | engineers, and whoever leads them (the CTO, or the CEO without one) | Asking for, commanding, deploying and verifying a release to `prod`; rolling back; incidents |
 | `research-sources` | researchers, the research manager, analysts | Web search and fetching, judging and recording sources, facts apart from judgement, suggesting sources |
 
 The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`) and `security-officer`.

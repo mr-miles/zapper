@@ -7,11 +7,10 @@ description: "Scoping a question with web search and writing the research plan: 
 
 ## Scope with web search
 
-Before you plan, look at the ground. Your agent's web search tool (`WebSearch`) runs on the model's side, not through the firm's network: use it freely, it needs no access request. Fetching pages (`WebFetch`, `browse`, `curl`) goes through the firm's network and needs access to each host.
+Before you plan, look at the ground, with web search, which needs no access (research-sources).
 
 - Search the question and its obvious sub-questions: what is known, who publishes on it, what is contested.
 - Note the sources worth reading and the domains that hold them: official bodies, standards, datasets, papers, first-party documentation. Prefer few, primary domains to many secondary ones.
-- Check the drive for earlier work (`drive_list(query: ...)`).
 - Stop when you can name the sub-questions and, for each, two or three domains likely to answer it. Scoping is a few searches, not the research.
 
 ## The plan

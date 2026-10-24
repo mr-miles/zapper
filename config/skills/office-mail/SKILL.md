@@ -42,10 +42,6 @@ Only the board or someone above the receiver may send an `assignment`; for anyon
 - Attach published work as `drive:a-3@v2`; don't paste it.
 - Short and specific; lists over paragraphs; no pleasantries.
 
-## Delegating
-
-If you have reports and the work fits their roles, delegate: one assignment per owner and outcome, with what they need (outcome, constraints, acceptance criteria, due, the access it needs). Never forward an assignment unchanged. Otherwise do it yourself.
-
 ## Replying and finishing
 
 - `mail_reply(message, body, kind?)` answers in the thread; one topic per thread.

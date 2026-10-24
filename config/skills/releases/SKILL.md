@@ -5,7 +5,7 @@ description: "How work reaches prod: asking for a release, commanding one (who l
 
 # Releases
 
-`prod`, at `http://apps.<domain>`, is what the board and everyone see. It changes only in a release that whoever leads engineering commands: the CTO, or the CEO when there is none. Nobody patches it in place.
+`prod`, at `http://apps.<domain>`, is what the board and everyone see. It changes only in a release that whoever leads engineering commands: the CTO, or the CEO when there is none. Nobody patches it in place. Branches reach `main` through review and the merger (office-git); a release merges what it names, tags it and deploys it.
 
 ## Asking for one (engineers)
 

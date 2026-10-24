@@ -197,23 +197,44 @@ pub(crate) struct Needed {
     pub from: PathBuf,
 }
 
+/// Who leads engineers commands their releases and checks them: a role
+/// that hires one whose agent works by the releases skill gets these.
+const LEADS_ENGINEERS: &[&str] = &[RELEASES, "checking-the-product"];
+const RELEASES: &str = "releases";
+
 /// Each role's skills, and their sources; an agent that can't be read is an
 /// error.
 pub(crate) fn needed(firm: &Firm) -> Result<Vec<Needed>> {
     let (skills, agents) = (dir(firm), agents_dir(firm));
-    let mut out = Vec::new();
+    let mut defs = std::collections::BTreeMap::new();
     for (role_name, role) in &firm.roles {
         let a = agent(&agents, role.agent_name(role_name))
             .with_context(|| format!("role {role_name}"))?;
+        defs.insert(role_name.clone(), a);
+    }
+    let mut out = Vec::new();
+    for (role_name, role) in &firm.roles {
+        let a = &defs[role_name];
         let mut general: Vec<String> = automatic(firm, role_name, role)
             .into_iter()
             .map(str::to_string)
             .collect();
+        let leads = role
+            .hires
+            .iter()
+            .filter_map(|h| defs.get(h))
+            .any(|d| d.uses.iter().any(|u| u == RELEASES));
+        if leads {
+            general.extend(LEADS_ENGINEERS.iter().map(|s| s.to_string()));
+        }
         for s in &a.uses {
             if !general.contains(s) {
                 general.push(s.clone());
             }
         }
+        general.dedup();
+        let mut seen = std::collections::BTreeSet::new();
+        general.retain(|s| seen.insert(s.clone()));
         let own_dir = agents.join(&a.name).join("skills");
         for s in &a.own {
             if general.contains(s) {
@@ -477,6 +498,29 @@ mod tests {
         std::fs::write(base.join("agents/boss/skills/a-general/SKILL.md"), "x").unwrap();
         assert!(agent(&base.join("agents"), "boss").is_err());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A role that hires engineers (whose agent works by the releases skill)
+    /// gets releases and checking-the-product; one that doesn't, doesn't.
+    #[test]
+    fn who_leads_engineers_gets_releases_and_checking() {
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let mut f = firm(
+            "  ceo: { agent: ceo, hires: [lead, rm, pm] }\n  lead: { agent: manager, hires: [eng] }\n  pm: { agent: product-manager, hires: [eng] }\n  eng: { agent: software-engineer }\n  rm: { agent: research-manager, hires: [res] }\n  res: { agent: researcher }\n",
+            "",
+        );
+        f.skills_dir = Some(config.join("skills").to_string_lossy().into());
+        f.agents_dir = Some(config.join("agents").to_string_lossy().into());
+        let n = needed(&f).unwrap();
+        let has = |role: &str, s: &str| n.iter().any(|x| x.role == role && x.skill == s);
+        assert!(has("lead", "releases") && has("lead", "checking-the-product"));
+        assert!(!has("rm", "releases") && !has("rm", "checking-the-product"));
+        assert!(!has("ceo", "releases"), "the CEO hires no engineer here");
+        let count = n
+            .iter()
+            .filter(|x| x.role == "pm" && x.skill == "checking-the-product")
+            .count();
+        assert_eq!(count, 1, "once, though the PM's brief names it too");
     }
 
     #[test]

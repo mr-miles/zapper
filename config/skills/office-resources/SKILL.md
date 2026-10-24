@@ -1,6 +1,6 @@
 ---
 name: office-resources
-description: "Onboarding for everyone in the firm: your machine, your budget, the charter, the firm's resources (git, the cluster's dev and prod, the shared drive's spaces, the product), how to get access to them and to outside sites, and how to work with each; for the CEO and security officers, how to decide access. Use it on your first wake and whenever your work touches a resource."
+description: "Onboarding for everyone in the firm: your machine, your budget, the charter, the firm's resources (git, the cluster's dev and prod, the shared drive's spaces, the product and the browser), and how to get access to them and to outside sites. Use it on your first wake, and whenever you need access to something or use git, the cluster, the drive or the browser."
 ---
 
 # The firm and its resources
@@ -42,9 +42,8 @@ Traffic to sites outside the firm is checked by the security officers. Ask ahead
 Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, each empty at the start; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
 - `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
-- Work on your own branches, `<your name>/<topic>`: commit small, say what and why, `git push -u origin <branch>`, and push often. Share work by mailing the branch and commit.
-- `main` is what the firm has accepted; only admin updates it or pushes tags. Ask for write, not admin: how work is reviewed and who merges it is the office-git skill.
-- Code lives in git, never on the drive. Never commit secrets.
+- Ask for write, not admin. Branches, review and who merges to `main`: the office-git skill.
+- Code lives in git, never on the drive.
 
 ## The cluster
 
@@ -67,13 +66,3 @@ Published work lives in **spaces**, such as `general`, `product`, `engineering`,
 - `browse text URL` prints the visible text; `browse console URL` prints script errors and failed requests.
 - It loads only the page's own site and the firm's domain; outside hosts are skipped and `console` lists them. `--all` loads everything, and each outside host becomes an access request.
 - For clicks and multi-step flows, write a Playwright script and run it with node.
-
-## Deciding access (the CEO and security officers)
-
-Credential requests come to you by mail. `credentials_decide(request, grant, level?, expires_in?, note)`:
-
-- Grant what the work needs: the lowest level, the shortest time. You may grant less than asked.
-- Check the need against the requester's role and assignment (the thread the reason names).
-- Admin (git `main` and tags, the cluster's `prod`) is the CEO's: hand it up with `credentials_escalate(request, recommendation)`.
-- Never decide your own request.
-- `credentials_list()` shows every grant; `credentials_revoke(worker, resource, reason)` takes one back.

@@ -5,7 +5,7 @@ description: "How work reaches main in the firm's git repositories: branches, re
 
 # Branches, review and main
 
-`main` is what the firm has accepted. The platform protects it: pushing `main`, branches under `main/`, or tags needs **admin** on the repository. A write grant pushes every other branch. The CEO holds admin; anyone else holds it only if the CEO grants it, for merging.
+`main` is what the firm has accepted. The platform protects it: pushing `main`, branches under `main/`, or tags needs **admin** on the repository. A write grant pushes every other branch. The CEO holds admin; anyone else holds it only if the CEO grants it, for merging. In a firm with a cluster, what reaches `main` for `prod` does so in a release (the releases skill), merged by the engineer it names.
 
 ## Who merges
 
