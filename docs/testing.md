@@ -52,7 +52,7 @@ Controls in the [security model](security.md#what-is-enforced-where) without a t
 
 ## Fuzzing
 
-The parsers that read what a guest sends (DNS queries, the TLS ClientHello, CONNECT and Host authorities, the control channel's lines, terminal frames, MCP lines) have fuzz targets in [fuzz/](../fuzz/README.md), run by hand with nightly and cargo-fuzz. A crash found there becomes a unit test next to the parser.
+The parsers that read what a guest sends (DNS queries, the TLS ClientHello, CONNECT and Host authorities, the control channel's lines, terminal frames, MCP lines), and the code that decides and changes what goes upstream (rule matching, the headers a request leaves with and the secrets added to them, the request log's redaction and decompression), have fuzz targets in [fuzz/](../fuzz/README.md), run by hand with nightly and cargo-fuzz. A crash found there becomes a unit test next to the parser.
 
 ## Manual scenarios
 

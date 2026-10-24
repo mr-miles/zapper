@@ -59,3 +59,24 @@ path = "fuzz_targets/mcp_line.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "headers"
+path = "fuzz_targets/headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_body"
+path = "fuzz_targets/log_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy"
+path = "fuzz_targets/policy.rs"
+test = false
+doc = false
+bench = false

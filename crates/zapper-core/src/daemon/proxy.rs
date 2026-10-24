@@ -789,9 +789,9 @@ where
 /// the secrets this host may receive. Returns the secrets used.
 /// Secrets added to a request: their names, and their values, which the
 /// request log replaces with `***` wherever they show up.
-struct Injected {
-    names: Vec<String>,
-    values: Vec<String>,
+pub(crate) struct Injected {
+    pub(crate) names: Vec<String>,
+    pub(crate) values: Vec<String>,
 }
 
 fn inject(
@@ -801,7 +801,17 @@ fn inject(
     effects: &NetEffects,
     headers: &mut hyper::HeaderMap,
 ) -> Result<Injected, String> {
-    let config = d.config.read().unwrap();
+    inject_with(&d.config.read().unwrap(), host, plaintext, effects, headers)
+}
+
+/// `inject` with the config given.
+pub(crate) fn inject_with(
+    config: &zapper_policy::Config,
+    host: &str,
+    plaintext: bool,
+    effects: &NetEffects,
+    headers: &mut hyper::HeaderMap,
+) -> Result<Injected, String> {
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
@@ -871,7 +881,12 @@ fn inject(
     })
 }
 
-fn clean_headers(headers: &mut hyper::HeaderMap, host: &str, port: u16, default_port: u16) {
+pub(crate) fn clean_headers(
+    headers: &mut hyper::HeaderMap,
+    host: &str,
+    port: u16,
+    default_port: u16,
+) {
     for h in HOP_HEADERS {
         headers.remove(h);
     }

@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use tokio::io::BufReader;
 use zapper_policy::proto::{Frame, GuestMsg, MAX_FRAME, MAX_LINE, MAX_MCP_LINE};
 
-use crate::daemon::{dns, gateway, proxy, session, tls};
+use crate::daemon::{dns, gateway, httplog, proxy, session, tls};
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
@@ -108,5 +108,205 @@ pub fn mcp_line(data: &[u8]) {
     while let Ok(Some(line)) = block_on(gateway::line(&mut r)) {
         assert!(line.len() <= MAX_MCP_LINE + 1);
         let _ = serde_json::from_slice::<serde_json::Value>(&line);
+    }
+}
+
+/// Secrets for the header targets: distinct values, each for some hosts.
+fn secrets_config() -> &'static zapper_policy::Config {
+    static C: std::sync::OnceLock<zapper_policy::Config> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        zapper_policy::Config::from_yaml(
+            "secrets:\n  a: { value: VALUEA7f3q, hosts: [api.example] }\n  ab: { value: VALUEAB9c1w, hosts: ['*.example'], plaintext: true }\n  c: { value: VALUEC2e8z, hosts: [other.test] }\n",
+        )
+        .unwrap()
+    })
+}
+
+const HOSTS: [&str; 4] = ["api.example", "x.api.example", "other.test", "evil.example"];
+
+/// Splits fuzz data into lines of `name: value`.
+fn header_lines(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    data.split(|b| *b == b'\n')
+        .filter_map(|l| {
+            let i = l.iter().position(|b| *b == b':')?;
+            Some((
+                l[..i].to_vec(),
+                l[i + 1..]
+                    .strip_prefix(b" ")
+                    .unwrap_or(&l[i + 1..])
+                    .to_vec(),
+            ))
+        })
+        .collect()
+}
+
+/// What goes upstream from a guest's request headers, once cleaned and
+/// given its secrets: Host is the checked host, no hop-by-hop header is
+/// left, and a secret's value is added only for a host it may go to, and
+/// over plain HTTP only with `plaintext`.
+///
+/// The first byte picks the host, plain HTTP, which secrets the rule adds
+/// and whether a `set_headers` template is used; the rest is headers.
+pub fn headers(data: &[u8]) {
+    let Some((&flags, rest)) = data.split_first() else {
+        return;
+    };
+    let host = HOSTS[(flags & 3) as usize];
+    let plaintext = flags & 4 != 0;
+    let names = ["a", "ab", "c"];
+    let effects = zapper_policy::NetEffects {
+        secrets: names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| flags & (8 << i) != 0)
+            .map(|(_, n)| n.to_string())
+            .collect(),
+        set_headers: if flags & 64 != 0 {
+            vec![(
+                "x-key".into(),
+                format!("k={{{{secret:{}}}}}", names[(flags >> 7) as usize % 3]),
+            )]
+        } else {
+            vec![]
+        },
+    };
+    let mut h = hyper::HeaderMap::new();
+    for (k, v) in header_lines(rest) {
+        if let (Ok(k), Ok(v)) = (
+            hyper::header::HeaderName::from_bytes(&k),
+            hyper::header::HeaderValue::from_bytes(&v),
+        ) {
+            h.append(k, v);
+        }
+    }
+    let count = |h: &hyper::HeaderMap, needle: &str| -> usize {
+        h.values()
+            .map(|v| {
+                String::from_utf8_lossy(v.as_bytes())
+                    .matches(needle)
+                    .count()
+            })
+            .sum()
+    };
+    let config = secrets_config();
+    let before: Vec<usize> = names
+        .iter()
+        .map(|n| count(&h, &config.secrets[*n].source.resolve().unwrap()))
+        .collect();
+    proxy::clean_headers(&mut h, host, 443, 443);
+    assert_eq!(h.get_all("host").iter().count(), 1);
+    assert_eq!(h["host"], host);
+    for hop in ["connection", "proxy-authorization", "keep-alive", "upgrade"] {
+        assert!(h.get(hop).is_none(), "{hop}");
+    }
+    if proxy::inject_with(config, host, plaintext, &effects, &mut h).is_err() {
+        return;
+    }
+    for (n, was) in names.iter().zip(before) {
+        let s = &config.secrets[*n];
+        let added = count(&h, &s.source.resolve().unwrap()) > was;
+        if added {
+            assert!(s.allows_host(host), "secret {n} added for {host}");
+            assert!(
+                !plaintext || s.plaintext,
+                "secret {n} added over plain HTTP"
+            );
+        }
+    }
+}
+
+/// The request log's view of a body and its headers: decoded as its
+/// content-encoding says, and never showing an added secret.
+///
+/// The first byte picks the encoding and the secret; the rest is the body.
+pub fn log_body(data: &[u8]) {
+    let Some((&flags, body)) = data.split_first() else {
+        return;
+    };
+    let encoding = ["", "gzip", "deflate", "br"][(flags & 3) as usize];
+    let secret = ["VALUEA7f3q", "abcd", "x-y_z0123456789"][(flags >> 2) as usize % 3].to_string();
+    let values = vec![secret.clone()];
+    let headers = vec![
+        ("content-encoding".to_string(), encoding.to_string()),
+        (
+            "authorization".to_string(),
+            String::from_utf8_lossy(body).into_owned(),
+        ),
+    ];
+    for (_, v) in httplog::redact_headers(&headers, &values) {
+        assert!(!v.contains(&secret), "a header shows the secret");
+    }
+    if let Some(out) = httplog::decode(body, encoding) {
+        assert!(out.len() <= 4 * httplog::BODY_CAP, "decoding is bounded");
+    }
+    let c = httplog::Captured {
+        data: body.to_vec(),
+        total: body.len() as u64 + (flags as u64 >> 5),
+    };
+    let v = httplog::body_json(&c, &headers, &values);
+    if let Some(t) = v["text"].as_str() {
+        assert!(!t.contains(&secret), "the text shows the secret");
+    }
+    if let Some(b) = v["base64"].as_str() {
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD.decode(b).unwrap();
+        assert!(
+            !raw.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "the bytes shown hold the secret"
+        );
+    }
+}
+
+/// A guest's request against rules with globs, ports, methods, paths and a
+/// final deny: the decision names a rule that matches, and nothing gets
+/// past the final rule.
+///
+/// The first bytes pick the port; the rest is `METHOD host path`.
+pub fn policy(data: &[u8]) {
+    static P: std::sync::OnceLock<(zapper_policy::Policy, zapper_policy::Policy)> =
+        std::sync::OnceLock::new();
+    let (global, profile) = P.get_or_init(|| {
+        let p = |y: &str| serde_yaml::from_str::<zapper_policy::Policy>(y).unwrap();
+        (
+            p("net:\n  - { id: g-final, action: deny, host: vault.example, final: true }\n  - { id: g-ask, action: ask, host: '*' }\n"),
+            p("net:\n  - { id: p-get, action: allow, host: '*.example', ports: [443], methods: [GET], path: '/docs/**' }\n  - { id: p-vault, action: allow, host: vault.example }\n  - { id: p-deny, action: deny, host: 'evil.*' }\n"),
+        )
+    });
+    let Some((port, rest)) = data.split_first_chunk::<2>() else {
+        return;
+    };
+    let Ok(text) = std::str::from_utf8(rest) else {
+        return;
+    };
+    let mut f = text.splitn(3, ' ');
+    let (Some(method), Some(host)) = (f.next(), f.next()) else {
+        return;
+    };
+    let req = zapper_policy::NetRequest {
+        host: host.to_string(),
+        port: u16::from_be_bytes(*port),
+        method: (!method.is_empty()).then(|| method.to_string()),
+        path: f.next().map(str::to_string),
+    };
+    let layers = [
+        (zapper_policy::Scope::Profile("p".into()), profile),
+        (zapper_policy::Scope::Global, global),
+    ];
+    let (d, _) = zapper_policy::evaluate_net(&layers, &req);
+    if zapper_policy::host_matches("vault.example", &req.host) {
+        assert_ne!(d.action, zapper_policy::Action::Allow, "past a final rule");
+    }
+    if let Some(id) = &d.rule {
+        let rule = global
+            .net
+            .iter()
+            .chain(&profile.net)
+            .find(|r| r.id.as_deref() == Some(id.as_str()))
+            .unwrap();
+        assert!(
+            rule.matches(&req),
+            "{id} decided a request it doesn't match"
+        );
+        assert_eq!(rule.action, d.action);
     }
 }

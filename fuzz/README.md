@@ -1,6 +1,6 @@
 # Fuzzing
 
-Fuzz targets for the parsers that read what a guest sends: they run on the host, in the daemon that holds the secrets, so a bug in one is a bug in the boundary. Each target calls an entry point in `zapper_core::fuzz` (feature `fuzz`), which runs the parser and checks what must hold whatever the input.
+Fuzz targets for the parsers that read what a guest sends, and the code around them that decides and changes what goes upstream: they run on the host, in the daemon that holds the secrets, so a bug in one is a bug in the boundary. Each target calls an entry point in `zapper_core::fuzz` (feature `fuzz`), which runs the parser and checks what must hold whatever the input.
 
 | Target | Reads |
 |---|---|
@@ -10,6 +10,9 @@ Fuzz targets for the parsers that read what a guest sends: they run on the host,
 | `guest_line` | The guest agent's control channel: bounded lines of JSON messages |
 | `frames` | Terminal frames, by the host's reader and the guest's codec |
 | `mcp_line` | The MCP gateway's lines |
+| `headers` | A request's headers on the way upstream: Host is the checked host, hop-by-hop headers are gone, and a secret is added only for a host it may go to, and over plain HTTP only with `plaintext` |
+| `log_body` | The request log's view of a body and headers: decompression is bounded, and an added secret is never shown, as text or bytes |
+| `policy` | A request against rules with globs, ports, methods, paths and a final deny: the deciding rule matches, and nothing gets past the final rule |
 
 Run by hand; it needs nightly and cargo-fuzz (`rustup toolchain install nightly`, `cargo install cargo-fuzz`). From this directory:
 
