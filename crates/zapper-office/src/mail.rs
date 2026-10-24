@@ -1086,7 +1086,7 @@ mod tests {
 
     fn office() -> (PostOffice, Journal, std::path::PathBuf) {
         let c = Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { r: { profile: w, skills: { work: x } } }\n    workers:\n      - { name: ceo, role: r }\n      - { name: cto, role: r, reports_to: ceo }\n      - { name: ada, role: r, reports_to: cto }\n      - { name: ken, role: r, reports_to: ceo }\n",
+            "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { r: { profile: w, agent: x } }\n    workers:\n      - { name: ceo, role: r }\n      - { name: cto, role: r, reports_to: ceo }\n      - { name: ada, role: r, reports_to: cto }\n      - { name: ken, role: r, reports_to: ceo }\n",
         )
         .unwrap();
         let dir =

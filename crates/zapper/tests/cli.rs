@@ -391,7 +391,7 @@ async fn serve_without_the_office_refuses_firms() {
     std::fs::write(
         t.startup(),
         std::fs::read_to_string(t.startup()).unwrap()
-            + "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+            + "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
     )
     .unwrap();
     let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
@@ -514,7 +514,8 @@ async fn init_writes_the_config_and_skills_once() {
     let written = std::fs::read_to_string(&config).unwrap();
     let example = include_str!("../../../config/zapper.yaml");
     assert!(written.contains("profiles:"), "{written}");
-    let skills = config.parent().unwrap().join("skills");
+    let base = config.parent().unwrap();
+    let skills = base.join("skills");
     if cfg!(feature = "office") || !example.contains("\nfirms:") {
         assert_eq!(written, example);
     } else {
@@ -526,10 +527,11 @@ async fn init_writes_the_config_and_skills_once() {
     }
     if cfg!(feature = "office") {
         assert!(
-            text.contains(&format!("wrote skills to {}", skills.display())),
+            text.contains(&format!("wrote agents and skills to {}", base.display())),
             "{text}"
         );
-        assert!(skills.join("ceo/SKILL.md").is_file());
+        assert!(skills.join("office-mail/SKILL.md").is_file());
+        assert!(base.join("agents/ceo/AGENT.md").is_file());
     } else {
         assert!(!skills.exists());
         assert_eq!(text.lines().count(), 1, "{text}");
@@ -542,7 +544,10 @@ async fn init_writes_the_config_and_skills_once() {
     let text = ok(run(&config, None, &["init"]).await);
     assert!(text.contains("exists; not touching it"), "{text}");
     if cfg!(feature = "office") {
-        assert!(text.contains("the default skills are all there"), "{text}");
+        assert!(
+            text.contains("the default agents and skills are all there"),
+            "{text}"
+        );
     }
     assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
 }
@@ -608,7 +613,7 @@ async fn check_reports_the_driver_and_the_daemon() {
 #[tokio::test]
 async fn check_notes_officers_without_a_budget() {
     let t = TestCore::new(
-        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    budget: { seed: 1000, security_share: 0 }\n    security: { officers: [sec] }\n    roles:\n      ceo: { profile: w, skills: { work: ceo } }\n      sec: { profile: w, skills: { work: security-review } }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: sec, role: sec, reports_to: ceo }\n",
+        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    budget: { seed: 1000, security_share: 0 }\n    security: { officers: [sec] }\n    roles:\n      ceo: { profile: w, agent: ceo }\n      sec: { profile: w, agent: security-officer }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: sec, role: sec, reports_to: ceo }\n",
     );
     let text = out(&run(&t.startup(), None, &["check"]).await);
     let notes = lines_of(&text, "note   firm acme");
@@ -624,19 +629,22 @@ async fn check_notes_officers_without_a_budget() {
 #[tokio::test]
 async fn check_reports_a_firms_missing_skills_until_init() {
     let t = TestCore::new(
-        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles:\n      ceo: { profile: w, skills: { work: ceo } }\n    workers:\n      - { name: ceo, role: ceo }\n",
+        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles:\n      ceo: { profile: w, agent: ceo }\n    workers:\n      - { name: ceo, role: ceo }\n",
     );
-    let skills = t.dir.join("skills");
+    let line = format!(
+        "firm acme: agents in {}, skills in {}",
+        t.dir.join("agents").display(),
+        t.dir.join("skills").display()
+    );
     let text = out(&run(&t.startup(), None, &["check"]).await);
-    let firm = lines_of(&text, "ERROR  firm acme");
     assert_eq!(
-        firm,
-        [format!("ERROR  firm acme: skills in {}", skills.display())],
+        lines_of(&text, "ERROR  firm acme"),
+        [format!("ERROR  {line}")],
         "{text}"
     );
     assert!(
         text.contains(
-            "fix: zapper init (writes the default skills), or add <name>/SKILL.md there for: ceo"
+            "fix: zapper init (writes the default agents and skills), or add them: agents/ceo"
         ),
         "{text}"
     );
@@ -645,7 +653,7 @@ async fn check_reports_a_firms_missing_skills_until_init() {
     let text = out(&run(&t.startup(), None, &["check"]).await);
     assert_eq!(
         lines_of(&text, "ok     firm acme"),
-        [format!("ok     firm acme: skills in {}", skills.display())],
+        [format!("ok     {line}")],
         "{text}"
     );
 }

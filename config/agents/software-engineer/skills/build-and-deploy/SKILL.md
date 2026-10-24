@@ -1,11 +1,9 @@
 ---
-name: software-engineer
-description: A member of technical staff's work (engineering and devops): build, deploy and test in dev on your own branch, ask for a release when it's done, deploy a release when assigned one, and report. Use it whenever you build, deploy or fix software.
+name: build-and-deploy
+description: "How engineers build and deploy in the firm's cluster: dev and prod, working with teammates, images, manifests, probes, ingress, rollouts and storage. Use it whenever you build, deploy or debug a workload."
 ---
 
-# Software engineer
-
-You design, build, deploy, test and operate what you're assigned. How you build is your choice, within the rules below.
+# Building and deploying
 
 ## Development and the release
 
@@ -29,35 +27,3 @@ You design, build, deploy, test and operate what you're assigned. How you build 
 - Check every rollout (`kubectl rollout status … --timeout=120s`); if it hangs: `get pods`, `describe`, `logs`, `get events`.
 - State that must survive restarts needs storage (a PVC with local-path, or a database). Say in your report what survives a restart.
 - `ImagePullBackOff` often means the cluster's pull is waiting for a security officer; Kubernetes retries once approved. Pin or vendor dependencies once fetched.
-
-## Testing
-
-Before asking for a release, test in `dev`, in the cluster:
-
-- `curl -i` every path the acceptance criteria name; `browse console` and `browse shot` at desktop and phone widths. `browse` loads only the product's own site: outside images and scripts (news thumbnails, CDNs) are skipped and listed, not requested; don't add `--all` for routine checks, since every outside host it loads is an access request the officers must decide.
-- Exercise each criterion as a user would; for multi-user features, several clients at once.
-- Restart a pod and check what should persist does. Check the logs.
-- Test with the teammates' pieces yours depends on.
-
-## Releases
-
-**Asking for one**: your report is the release request: branch and commit, what changed, how you tested it in `dev` against the criteria, and what the release needs (secrets, storage, migrations).
-
-**Deploying one**, when assigned: request git admin and cluster admin citing the assignment, for a few hours. Then:
-
-1. Merge exactly what it names into `main`, run the tests, push, and tag `release-<n>` (the next number).
-2. Deploy that commit to `prod` and check the rollout.
-3. Verify through the ingress: the criteria's paths at `http://apps.<domain>/` (the board sees the same through its port), `browse console` and `browse shot`. Functional checks only.
-4. Report the tag, what's live and what you verified. If it breaks something, roll back to the previous tag at once and say so.
-
-**After a release**, whenever you wake, check that prod still answers (`curl -s -o /dev/null -w '%{http_code}' http://apps.<domain>/` and the workloads in `prod`). If something you deployed is gone or failing, that is an incident: report it to your manager at once (what's down, since when, what you see), then restore it from the release tag; don't quietly redeploy.
-
-## Reporting
-
-Your report names the branch and short commits (for a release, the tag), how to verify against the criteria, what you tested, and known issues. Publish a `document` only for designs or runbooks others must read.
-
-## Do not
-
-- Touch `prod` or `apps.<domain>` without a release assignment, or push to `main` outside one.
-- Ask for a release without testing in `dev`.
-- Change or delete teammates' workloads or branches without telling them.

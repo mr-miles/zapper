@@ -48,11 +48,17 @@ pub struct Firm {
     /// The credentials subsystem: how long grants last, and the shared
     /// drive's spaces. Access itself is granted during a run, never by role.
     pub credentials: Credentials,
-    /// Directory of the workers' skills (`<name>/SKILL.md`), relative to the
-    /// config file; `skills` if unset. `zapper init` writes the defaults
-    /// there.
+    /// Directory of the skills any role may use (`<name>/SKILL.md`),
+    /// relative to the config file; `skills` if unset. `zapper init` writes
+    /// the defaults there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills_dir: Option<String>,
+    /// Directory of the agent definitions (`<agent>/AGENT.md`, and the
+    /// role's own skills in `<agent>/skills/<name>/SKILL.md`), relative to
+    /// the config file; `agents` if unset. `zapper init` writes the
+    /// defaults there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_dir: Option<String>,
     /// Names for hires whose hirer doesn't pick one, in order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
@@ -417,7 +423,11 @@ pub struct Role {
     /// Claude model; the profile's if unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub skills: RoleSkills,
+    /// The agent definition workers of this role are: `agents_dir/<agent>/`,
+    /// with its brief (`AGENT.md`) and the role's own skills. The role's
+    /// name if unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub avatar: Avatar,
     /// Default title of workers of this role.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,34 +450,10 @@ pub struct Role {
     pub contract_profile: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RoleSkills {
-    pub work: String,
-    pub communication: String,
-    pub publishing: String,
-}
-
-impl Default for RoleSkills {
-    fn default() -> Self {
-        RoleSkills {
-            work: String::new(),
-            communication: "office-mail".into(),
-            publishing: "office-publish".into(),
-        }
-    }
-}
-
-impl RoleSkills {
-    pub fn names(&self) -> Vec<&str> {
-        [
-            self.communication.as_str(),
-            self.work.as_str(),
-            self.publishing.as_str(),
-        ]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect()
+impl Role {
+    /// The agent definition's name: `agent`, else the role's own.
+    pub fn agent_name<'a>(&'a self, role: &'a str) -> &'a str {
+        self.agent.as_deref().unwrap_or(role)
     }
 }
 
@@ -884,15 +870,11 @@ until someone funds them, every access request and background check goes to the 
             }
         }
         for (rname, role) in &self.roles {
-            if role.skills.work.is_empty() {
-                err(format!("role {rname}: skills.work is empty"));
-            }
-            for s in role.skills.names() {
-                if !valid_worker_name(s) {
-                    err(format!(
-                        "role {rname}: skill name {s:?}: lowercase letters, digits and dashes"
-                    ));
-                }
+            let agent = role.agent_name(rname);
+            if !valid_worker_name(agent) {
+                err(format!(
+                    "role {rname}: agent {agent:?}: lowercase letters, digits and dashes"
+                ));
             }
             match config.resolve(&role.profile) {
                 Err(e) => err(format!("role {rname}: profile {}: {e:#}", role.profile)),
@@ -1060,7 +1042,7 @@ mod tests {
     fn unfunded_officers_are_a_warning() {
         let firm = |budget: &str, security: &str| -> Firm {
             serde_yaml::from_str(&format!(
-                "roles:\n  ceo: {{ profile: w, skills: {{ work: ceo }} }}\n  sec: {{ profile: w, skills: {{ work: security-review }}, officer: true }}\nworkers:\n  - {{ name: ceo, role: ceo }}\n  - {{ name: sec, role: sec, reports_to: ceo }}\nbudget: {{ {budget} }}\nsecurity: {{ officers: [{security}] }}\n"
+                "roles:\n  ceo: {{ profile: w, agent: ceo }}\n  sec: {{ profile: w, agent: security-officer, officer: true }}\nworkers:\n  - {{ name: ceo, role: ceo }}\n  - {{ name: sec, role: sec, reports_to: ceo }}\nbudget: {{ {budget} }}\nsecurity: {{ officers: [{security}] }}\n"
             ))
             .unwrap()
         };
@@ -1090,8 +1072,8 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
-      eng: { profile: w, skills: { work: software-engineer } }
+      ceo: { profile: w, agent: ceo }
+      eng: { profile: w, agent: software-engineer }
     workers:
       - { name: ceo, role: ceo }
       - { name: cto, role: eng, reports_to: ceo, title: CTO }
@@ -1290,10 +1272,8 @@ firms:
     fn hiring_config() {
         let with = |extra: &str| {
             BASE.replace(
-                "      eng: { profile: w, skills: { work: software-engineer } }",
-                &format!(
-                    "      eng: {{ profile: w, skills: {{ work: software-engineer }}{extra} }}"
-                ),
+                "      eng: { profile: w, agent: software-engineer }",
+                &format!("      eng: {{ profile: w, agent: software-engineer{extra} }}"),
             )
         };
         let e = firm(&with(", hires: [intern]")).unwrap_err().to_string();

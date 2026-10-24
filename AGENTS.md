@@ -110,7 +110,8 @@ crates/zapper-runs/      the files a firm's run leaves and what its journal says
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI) and the fake Claude and pi
 config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it);
-  skills/                  office workers' skills: built in, and read live through the acme firm's `skills_dir: skills`
+  agents/                  office roles' agent definitions: each AGENT.md, the brief in the role's preamble, and the role's own skills/
+  skills/                  office skills any role may use; both built in (`zapper init` writes them), read live by firms through `agents_dir` and `skills_dir`
   kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
 scripts/fetch-deps.sh    Firecracker and kernel download
 scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)

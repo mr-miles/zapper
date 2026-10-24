@@ -981,7 +981,7 @@ mod tests {
 
     fn firm(git: &str) -> crate::firm::Firm {
         let yaml = format!(
-            "profiles:\n  w: {{ agent: {{ kind: claude-code }} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, skills: {{ work: ceo }} }} }}\n    workers: [{{ name: ceo, role: ceo }}]\n{git}"
+            "profiles:\n  w: {{ agent: {{ kind: claude-code }} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, agent: ceo }} }}\n    workers: [{{ name: ceo, role: ceo }}]\n{git}"
         );
         crate::firm::get(&zapper_policy::Config::from_yaml(&yaml).unwrap(), "acme").unwrap()
     }

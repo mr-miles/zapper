@@ -1,6 +1,6 @@
 ---
 name: manager
-description: The work of anyone who hires and leads a team (the CEO, the CTO, the product manager, managers): split assignments, unblock, review, run the team's budget, hire, contract and let go, and report up. Use it whenever you manage people or a budget.
+description: "The work of anyone who hires and leads a team (the CEO, the CTO, the product manager, managers): split assignments, unblock, review, run the team's budget, hire, contract and let go, and report up. Use it whenever you manage people or a budget."
 ---
 
 # Manager
@@ -31,8 +31,7 @@ Every access request costs the asker a turn and you a decision, and a wrong one 
 
 ## Reviewing
 
-- Check each report against its criteria; try running software yourself. Accept briefly, or send back a numbered list with steps to reproduce.
-- A report that claims success without saying how it was verified: ask for the evidence.
+Check each report against its criteria before you accept it, by the reviewing-work skill.
 
 ## Budget and people
 
@@ -55,14 +54,7 @@ For bounded, specialist or one-off work:
 
 ## Releases
 
-If engineers report to you (you are the CTO, or the CEO leading engineering without one), you command releases to `prod`; nobody else does.
-
-- **A release request** is an engineer's report: branch, commit, what changed, how it was tested in `dev`. Send back what isn't ready.
-- **Batch sensibly**: release what's worth showing or fixing, with whatever else is ready; dependent pieces together. Each release costs turns: don't release every small change.
-- **Command it**: an `assignment` to one engineer, "Release <n>: …", naming exactly what to merge, what to check, and when. The engineer asks for git and cluster admin for it, citing the assignment; admin is the CEO's to grant.
-- **Check it** yourself at `http://apps.<domain>` before accepting.
-- **Tell the board**: an `fyi` to your manager (or the board, if you are the CEO), "Released release-<n>: …" with what's live and what doesn't work yet.
-- **Problems** go into the next release, or a rollback to the previous tag; never a patch in place.
+If engineers report to you (you are the CTO, or the CEO leading engineering without one), you command releases to `prod`, by the releases skill; nobody else does.
 
 ## Reporting up
 

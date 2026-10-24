@@ -48,7 +48,7 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
+      ceo: { profile: w, agent: ceo }
     workers:
       - { name: ceo, role: ceo }
     git: { repos: [api] }
@@ -95,8 +95,8 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
-      eng: { profile: w, skills: { work: software-engineer } }
+      ceo: { profile: w, agent: ceo }
+      eng: { profile: w, agent: software-engineer }
     workers:
       - { name: ceo, role: ceo }
       - { name: pat, role: eng, reports_to: ceo }

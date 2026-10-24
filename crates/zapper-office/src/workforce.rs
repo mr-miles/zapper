@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn observed_cost_by_role() {
         let c = zapper_policy::Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { boss: { profile: w, skills: { work: ceo } }, eng: { profile: w, skills: { work: x } } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: ada, role: eng, reports_to: ceo }\n      - { name: bo, role: eng, reports_to: ceo }\n",
+            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { boss: { profile: w, agent: ceo }, eng: { profile: w, agent: x } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: ada, role: eng, reports_to: ceo }\n      - { name: bo, role: eng, reports_to: ceo }\n",
         )
         .unwrap();
         let f = &crate::firm::get(&c, "acme").unwrap();

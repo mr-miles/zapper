@@ -107,22 +107,29 @@ function closeRunConfig() { CFG.run = null; $('cfg').classList.add('hidden'); }
 function renderRunConfig() {
   const box = $('cfg'), d = CFG.data;
   const head = el('div', { class: 'cfg-h' }, el('h2', { class: 'serif' }, 'Config of run ', el('span', { class: 'mono' }, CFG.run)),
-    el('span', { class: 'muted small' }, 'as it started: the whole config, secret values hidden, and the skills each role had'),
+    el('span', { class: 'muted small' }, 'as it started: the whole config, secret values hidden, and each role\'s brief and skills'),
     el('button', { class: 'btn ghost close', type: 'button', title: 'Close', 'aria-label': 'Close', onclick: closeRunConfig }, '✕'));
   if (!d) { box.replaceChildren(el('div', { class: 'cfg-card card' }, head, el('div', { class: 'muted' }, 'Loading…'))); return; }
   if (d.error) { box.replaceChildren(el('div', { class: 'cfg-card card' }, head, el('div', { class: 'empty' }, d.error))); return; }
   const skills = arr(d.skills);
+  const agents = new Map(arr(d.agents).map((a) => [str(a.role), a]));
   const item = (key, label, sub) => el('div', { class: 'cfg-i' + (CFG.sel === key ? ' sel' : ''), onclick: () => { CFG.sel = key; renderRunConfig(); } }, label, sub ? el('span', { class: 'muted small' }, sub) : '');
   const nav = [item('config', 'zapper.yaml', d.config == null ? 'not kept' : '')];
   let role = null;
   skills.forEach((x, i) => {
-    if (x.role !== role) { role = str(x.role); nav.push(el('div', { class: 'cfg-r muted small' }, role)); }
+    if (x.role !== role) {
+      role = str(x.role); nav.push(el('div', { class: 'cfg-r muted small' }, role));
+      if (agents.has(role)) nav.push(item('a' + role, 'AGENT.md', 'the brief'));
+    }
     nav.push(item('s' + i, str(x.skill), ''));
   });
   let main;
   if (CFG.sel === 'config') {
     main = d.config == null ? el('div', { class: 'empty' }, 'This run started before runs kept their config. Its skills are listed on the left.')
       : el('pre', { class: 'mono git-pre cfg-pre' }, str(d.config));
+  } else if (CFG.sel.startsWith('a')) {
+    const a = agents.get(CFG.sel.slice(1)) || {};
+    main = el('div', {}, el('div', { class: 'muted small', style: 'margin-bottom:8px' }, str(a.role) + ' / AGENT.md: the role\'s brief, in its workers\' preamble'), renderMarkdown(str(a.text)));
   } else {
     const x = skills[Number(CFG.sel.slice(1))] || {};
     main = el('div', {}, el('div', { class: 'muted small', style: 'margin-bottom:8px' }, str(x.role) + ' / ' + str(x.skill) + '/SKILL.md' + (arr(x.files).length ? ' · also ' + arr(x.files).map(str).join(', ') : '')),

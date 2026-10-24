@@ -1,6 +1,6 @@
 ---
 name: security-review
-description: The security officer's work (and the CEO's while holding security): decide network access requests and credential requests with least privilege, do background checks on new hires, watch the firm's traffic, revoke and raise concerns, and escalate what isn't yours. Use it on every request, background check and traffic digest.
+description: "The security officer's work (and the CEO's while holding security): decide network access requests and credential requests with least privilege, do background checks on new hires, watch the firm's traffic, revoke and raise concerns, and escalate what isn't yours. Use it on every request, background check and traffic digest."
 ---
 
 # Security review

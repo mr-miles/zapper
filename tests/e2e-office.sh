@@ -318,9 +318,9 @@ firms:
   acme:
     budget: { max_concurrent: 2 }
     roles:
-      ceo: { profile: worker, skills: { work: ceo }, fake: $T/fake/ceo.yaml, avatar: { figure: ceo } }
-      engineer: { profile: worker, skills: { work: software-engineer }, fake: $T/fake/eng.yaml, avatar: { figure: engineer, color: "#6A9BCC" } }
-      security: { profile: worker, skills: { work: security-review }, fake: $T/fake/sec.yaml, avatar: { figure: shield } }
+      ceo: { profile: worker, agent: ceo, fake: $T/fake/ceo.yaml, avatar: { figure: ceo } }
+      engineer: { profile: worker, agent: software-engineer, fake: $T/fake/eng.yaml, avatar: { figure: engineer, color: "#6A9BCC" } }
+      security: { profile: worker, agent: security-officer, fake: $T/fake/sec.yaml, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: ceo }
       - { name: ada, role: engineer, reports_to: ceo }
@@ -329,9 +329,9 @@ firms:
   corp:
     budget: { max_concurrent: 2, seed: 1000, quote_fee: 500, stall_after: 5s }
     roles:
-      boss: { profile: worker, skills: { work: ceo }, fake: $T/fake/corp-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
-      dev: { profile: worker, contract_profile: pi-worker, title: Developer, skills: { work: software-engineer }, fake: $T/fake/corp-dev.yaml, avatar: { figure: engineer } }
-      sec: { profile: worker, skills: { work: security-review }, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
+      boss: { profile: worker, agent: ceo, fake: $T/fake/corp-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
+      dev: { profile: worker, contract_profile: pi-worker, title: Developer, agent: software-engineer, fake: $T/fake/corp-dev.yaml, avatar: { figure: engineer } }
+      sec: { profile: worker, agent: security-officer, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: boss }
       - { name: sec-1, role: sec, reports_to: ceo }
@@ -339,10 +339,10 @@ firms:
   scen:
     budget: { max_concurrent: 3, seed: 1000, quote_fee: 500 }
     roles:
-      boss: { profile: worker, skills: { work: ceo }, fake: $T/fake/scen-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
-      dev: { profile: worker, title: Developer, skills: { work: software-engineer }, fake: $T/fake/scen-dev.yaml, avatar: { figure: engineer } }
-      intern: { profile: worker, skills: { work: software-engineer }, fake: $T/fake/none.yaml }
-      sec: { profile: worker, skills: { work: security-review }, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
+      boss: { profile: worker, agent: ceo, fake: $T/fake/scen-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
+      dev: { profile: worker, title: Developer, agent: software-engineer, fake: $T/fake/scen-dev.yaml, avatar: { figure: engineer } }
+      intern: { profile: worker, agent: software-engineer, fake: $T/fake/none.yaml }
+      sec: { profile: worker, agent: security-officer, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: boss }
       - { name: sec-1, role: sec, reports_to: ceo }
@@ -362,25 +362,25 @@ firms:
   solo:
     budget: { max_concurrent: 3, seed: 1000 }
     roles:
-      boss: { profile: worker, skills: { work: ceo }, fake: $T/fake/solo-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
-      dev: { profile: worker, skills: { work: software-engineer }, fake: $T/fake/solo-dev.yaml }
-      officer: { profile: worker, skills: { work: security-review }, fake: $T/fake/solo-sec.yaml, officer: true }
+      boss: { profile: worker, agent: ceo, fake: $T/fake/solo-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
+      dev: { profile: worker, agent: software-engineer, fake: $T/fake/solo-dev.yaml }
+      officer: { profile: worker, agent: security-officer, fake: $T/fake/solo-sec.yaml, officer: true }
     workers:
       - { name: ceo, role: boss }
     security: { officer_first: false, digest_every: { minutes: 60, requests: 0 } }
   first:
     budget: { max_concurrent: 1, seed: 1000, turn_timeout: 8s }
     roles:
-      boss: { profile: worker, skills: { work: ceo }, fake: $T/fake/first-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
-      dev: { profile: worker, skills: { work: software-engineer }, fake: $T/fake/none.yaml }
-      officer: { profile: worker, skills: { work: security-review }, fake: $T/fake/none.yaml, officer: true }
+      boss: { profile: worker, agent: ceo, fake: $T/fake/first-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
+      dev: { profile: worker, agent: software-engineer, fake: $T/fake/none.yaml }
+      officer: { profile: worker, agent: security-officer, fake: $T/fake/none.yaml, officer: true }
     workers:
       - { name: ceo, role: boss }
     security: { answer_within: 10s, digest_every: { minutes: 60, requests: 0 } }
   mixed:
     roles:
-      boss: { profile: worker, skills: { work: ceo }, fake: $T/fake/mixed-ceo.yaml }
-      dev: { profile: pi-worker, skills: { work: software-engineer }, fake: $T/fake/mixed-dev.yaml }
+      boss: { profile: worker, agent: ceo, fake: $T/fake/mixed-ceo.yaml }
+      dev: { profile: pi-worker, agent: software-engineer, fake: $T/fake/mixed-dev.yaml }
     workers:
       - { name: ceo, role: boss }
       - { name: pat, role: dev, reports_to: ceo }
@@ -391,8 +391,8 @@ firms:
     facilities: { cluster: { kind: k3s, profile: k3s } }
     landing: { name: "Lab <Inc.>", motto: "Building digital worlds!" }
     roles:
-      engineer: { profile: engineer, skills: { work: software-engineer }, fake: $T/fake/none.yaml }
-      analyst: { profile: worker, skills: { work: analyst }, fake: $T/fake/none.yaml }
+      engineer: { profile: engineer, agent: software-engineer, fake: $T/fake/none.yaml }
+      analyst: { profile: worker, agent: analyst, fake: $T/fake/none.yaml }
     workers:
       - { name: ada, role: engineer }
       - { name: ken, role: analyst, reports_to: ada }
@@ -423,11 +423,13 @@ expect "every worker has a session" "$st" "sec-1"
 refute "no worker failed" "$st" "error"
 ada=$("$Z" --json firm status acme | python3 -c 'import sys,json; print([w["session"] for w in json.load(sys.stdin)["run"]["workers"] if w["name"]=="ada"][0])')
 out=$("$Z" exec "$ada" -- sh -c 'ls ~/.claude/skills; cat ~/.claude/CLAUDE.md | head -3; touch ~/.claude/skills/x 2>&1; ls -ld ~/.claude | cut -d" " -f3' 2>&1)
-expect "skills are attached" "$out" "software-engineer"
+expect "skills are attached: the agent's own" "$out" "build-and-deploy"
+expect "and those its brief names" "$out" "checking-the-product"
 expect "every worker gets the resources training" "$out" "office-resources"
 expect "a worker without a drive grant can't publish" "$("$Z" exec "$ada" -- sh -c 'echo x > /tmp/x.md; office drive_publish --paths /tmp/x.md --title X --kind document --summary x' 2>&1)" "credentials_request"
 expect "the board grants access directly" "$("$Z" firm credentials acme grant ada drive:general write --expires 2h 2>&1)" '"level": "write"'
 expect "the preamble names the worker" "$out" "You are ada"
+expect "the preamble has the role's brief" "$("$Z" exec "$ada" -- cat /home/agent/.claude/CLAUDE.md 2>&1)" "## Your role"
 expect "skills are read-only" "$out" "Read-only file system"
 expect "~/.claude belongs to the worker" "$out" "agent"
 
@@ -665,7 +667,10 @@ expect "the terms are the board's" "$(echo "$st" | python3 -c 'import sys,json; 
 sceo=$(echo "$st" | python3 -c 'import sys,json; print([w["session"] for w in json.load(sys.stdin)["run"]["workers"] if w["name"]=="ceo"][0])')
 pre=$("$Z" exec "$sceo" -- cat /home/agent/.claude/CLAUDE.md 2>&1)
 expect "the CEO's preamble says they hold security" "$pre" "You hold security"
-expect "the CEO also has the manager and security skills" "$("$Z" exec "$sceo" -- ls /home/agent/.claude/skills 2>&1 | tr '\n' ' ')" "manager office-mail office-publish office-resources security-review"
+ceo_skills=$("$Z" exec "$sceo" -- ls /home/agent/.claude/skills 2>&1 | tr '\n' ' ')
+expect "the CEO also has the manager skill" "$ceo_skills" "manager office-mail office-publish office-resources"
+expect "and the security skill" "$ceo_skills" "security-review"
+expect "and the CEO's own" "$ceo_skills" "the-board"
 expect "the preamble has the charter" "$pre" "## The company's charter"
 expect "with the board's own articles" "$pre" "No paid services without the board's approval."
 expect "and the run's terms" "$pre" "at most 2 workers in a turn at once"
@@ -899,7 +904,7 @@ mwait_for() { i=0; while [ $i -lt "$2" ]; do mjournal 2>/dev/null | grep -q -- "
 mpat=$("$Z" --json firm status mixed | python3 -c 'import sys,json; print([w["session"] for w in json.load(sys.stdin)["run"]["workers"] if w["name"]=="pat"][0])')
 expect "pi reads the preamble from its agent directory" "$("$Z" exec "$mpat" -- cat /home/agent/.pi/agent/AGENTS.md 2>&1)" "pat"
 expect "and the office tools, declared to the model" "$("$Z" exec "$mpat" -- cat /home/agent/.pi/agent/mcp.json 2>&1)" '"exposure": "direct"'
-expect "and the role's skills" "$("$Z" exec "$mpat" -- ls /home/agent/.pi/agent/skills 2>&1)" "software-engineer"
+expect "and the role's skills" "$("$Z" exec "$mpat" -- ls /home/agent/.pi/agent/skills 2>&1)" "build-and-deploy"
 refute "nothing of Claude Code's" "$("$Z" exec "$mpat" -- ls -a /home/agent 2>&1)" ".claude.json"
 mwait_for 'board → ceo \[assignment\] "Go"' 30 && pass "the task arrives from the board as the first assignment" || fail "the task arrives from the board as the first assignment" "$(mjournal | grep -i mail | head -3)"
 mwait_for 'pat → ceo \[report\]' 90 && pass "a pi worker takes an assignment and reports" || fail "a pi worker takes an assignment and reports" "$(mjournal | tail -6)"

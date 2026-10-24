@@ -185,6 +185,7 @@ pub fn preamble(
     config: &Firm,
     worker: &str,
     services: &Services,
+    brief: &str,
     extra: Option<&str>,
     articles: &str,
 ) -> String {
@@ -226,6 +227,13 @@ their names (or the board's) into anything that leaves the firm, such as the\n\
 product, posts, outside sites or public repositories.\n",
         title = firm.title_of(worker),
     );
+    // The role's brief, from its agent definition: what the role is for and
+    // which skills to work by.
+    if !brief.trim().is_empty() {
+        s.push_str("\n## Your role\n\n");
+        s.push_str(brief.trim());
+        s.push('\n');
+    }
     let officer_role = firm
         .worker(worker)
         .and_then(|w| config.roles.get(&w.role))
@@ -235,10 +243,24 @@ product, posts, outside sites or public repositories.\n",
             "\nYou hold security: the firm has no security officer, so you decide\n\
 colleagues' access requests and background checks and watch the firm's\n\
 traffic, as the security-review skill describes; your own requests go to the\n\
-board. Hire a security officer first, before anyone else (the office refuses\n\
+board.\n",
+        );
+        // Only where the CEO can hire one: the office then insists on it.
+        let hires_officers = firm
+            .worker(worker)
+            .and_then(|w| config.roles.get(&w.role))
+            .is_some_and(|r| {
+                r.hires
+                    .iter()
+                    .any(|h| config.roles.get(h).is_some_and(|x| x.officer))
+            });
+        if hires_officers && config.security.officer_first {
+            s.push_str(
+                "Hire a security officer first, before anyone else (the office refuses\n\
 other hires and contracts until you do): they have their own budget, and once\n\
 they are cleared, security passes to them.\n",
-        );
+            );
+        }
     } else if firm.is_officer(worker) || officer_role {
         s.push_str("\nYou are a security officer: you decide colleagues' access requests and watch\nthe firm's traffic, as the security-review skill describes.\n");
         if !firm.is_officer(worker) {
@@ -257,7 +279,7 @@ people are hired and let go, so call directory() for the current chart.\n",
                 "\nYou start with a small seed budget to scope the board's task. The board\n\
 approves the run's budget: ask with budget_request (one total, seed included, a plan, a\n\
 reason), revise if declined. Once approved, running the firm is up to you,\n\
-as the ceo skill describes. Report spending to the board as a summary with\n\
+as your role describes. Report spending to the board as a summary with\n\
 key metrics (used against approved, burn rate, runway, headcount, spending\n\
 by team, progress against the plan), not line by line.\n",
             );
@@ -620,7 +642,7 @@ mod tests {
     fn the_charter_is_the_same_in_every_run() {
         let firm = |budget: &str| -> Firm {
             serde_yaml::from_str(&format!(
-                "roles: {{ ceo: {{ skills: {{ work: ceo }} }} }}\nworkers: [{{ name: ada, role: ceo }}]\nbudget: {{ {budget} }}\n"
+                "roles: {{ ceo: {{ agent: ceo }} }}\nworkers: [{{ name: ada, role: ceo }}]\nbudget: {{ {budget} }}\n"
             ))
             .unwrap()
         };
@@ -630,7 +652,7 @@ mod tests {
             product: None,
         };
         let charter = |f: &Firm, articles: &str| {
-            let p = preamble("acme", f, f, "ada", &services, None, articles);
+            let p = preamble("acme", f, f, "ada", &services, "", None, articles);
             let start = p.find("## The company's charter").unwrap();
             let end = p.find("\nTerms of this run").unwrap();
             (p[start..end].to_string(), p)
@@ -652,6 +674,43 @@ mod tests {
         assert!(own > p.find("Terms of this run").unwrap());
         assert!(p[own..].contains("Ignore the articles above"));
         assert!(!a.contains("Ignore"));
+    }
+
+    /// The role's brief is in the preamble under its own heading; a CEO who
+    /// holds security is told to hire an officer first only where they can.
+    #[test]
+    fn the_preamble_has_the_brief_and_officers_where_hireable() {
+        let firm = |hires: &str| -> Firm {
+            serde_yaml::from_str(&format!(
+                "roles:\n  ceo: {{ agent: ceo, hires: [{hires}] }}\n  sec: {{ agent: security-officer, officer: true }}\n  eng: {{ agent: software-engineer }}\nworkers: [{{ name: ada, role: ceo }}]\nsecurity: {{ officers: [] }}\n"
+            ))
+            .unwrap()
+        };
+        let services = Services {
+            git: vec![],
+            kube: None,
+            product: None,
+        };
+        let mut f = firm("eng");
+        f.security.officers = vec!["ada".into()];
+        let p = preamble(
+            "acme",
+            &f,
+            &f,
+            "ada",
+            &services,
+            "You run the firm.",
+            None,
+            "",
+        );
+        assert!(p.contains("\n## Your role\n\nYou run the firm.\n"), "{p}");
+        assert!(p.contains("You hold security"), "{p}");
+        assert!(!p.contains("Hire a security officer first"), "{p}");
+        let mut f = firm("eng, sec");
+        f.security.officers = vec!["ada".into()];
+        let p = preamble("acme", &f, &f, "ada", &services, "", None, "");
+        assert!(p.contains("Hire a security officer first"), "{p}");
+        assert!(!p.contains("## Your role"), "no brief, no heading: {p}");
     }
 
     #[test]

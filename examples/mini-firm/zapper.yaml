@@ -59,8 +59,10 @@ profiles:
 firms:
   mini:
     description: A CEO who contracts a writer
-    # The repository's skills: the playbooks workers read.
+    # The repository's skills: the playbooks any role may use.
     skills_dir: ../../config/skills
+    # The repository's agent definitions: each role's brief and own skills.
+    agents_dir: ../../config/agents
     # A run budget, in tokens: contracting needs one. The seed is what Ada
     # has before the board approves her request; a quote's 30k fee comes
     # out of it.
@@ -72,7 +74,7 @@ firms:
         profile: claude
         title: CEO
         model: claude-sonnet-5-5
-        skills: { work: ceo }
+        agent: ceo
         # Ada may hire or contract writers (and gets the manager skill).
         # No officer role here: with one, she would have to hire a security
         # officer before anyone else.
@@ -81,7 +83,7 @@ firms:
         profile: claude
         title: Writer
         model: claude-sonnet-5-5
-        skills: { work: researcher }
+        agent: researcher
     # The founder; Ben joins as a contractor during the run.
     workers:
       - { name: ada, role: ceo }

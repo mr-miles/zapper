@@ -1799,7 +1799,7 @@ mod tests {
     #[test]
     fn firms_and_the_office_go_together() {
         let firms = zapper_policy::Config::from_yaml(
-            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
         )
         .unwrap();
         let e = super::office::config(&firms).err().map(|e| e.to_string());

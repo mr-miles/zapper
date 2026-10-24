@@ -678,6 +678,7 @@ pub(crate) async fn boot_worker(
         &run.config,
         &w.name,
         &services,
+        &skills::brief(run, &w.role),
         run.prompts
             .get(&w.name)
             .cloned()
@@ -873,7 +874,7 @@ mod tests {
     #[test]
     fn start_options() {
         let c = zapper_policy::Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [sec] }, sec: { profile: w, skills: { work: security-review }, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n",
+            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, agent: ceo, hires: [sec] }, sec: { profile: w, agent: security-officer, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n",
         )
         .unwrap();
         let firm = crate::firm::get(&c, "acme").unwrap();
@@ -929,7 +930,7 @@ mod tests {
     #[test]
     fn start_scenarios() {
         let c = zapper_policy::Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, skills: { work: ceo }, hires: [eng] }, eng: { profile: w, skills: { work: software-engineer } } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n",
+            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, agent: ceo, hires: [eng] }, eng: { profile: w, agent: software-engineer } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n",
         )
         .unwrap();
         let firm = crate::firm::get(&c, "acme").unwrap();

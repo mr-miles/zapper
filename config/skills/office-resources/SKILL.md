@@ -1,6 +1,6 @@
 ---
 name: office-resources
-description: Onboarding for everyone in the firm: your machine, your budget, the charter, the firm's resources (git, the cluster's dev and prod, the shared drive's spaces, the product), how to get access to them and to outside sites, and how to work with each; for the CEO and security officers, how to decide access. Use it on your first wake and whenever your work touches a resource.
+description: "Onboarding for everyone in the firm: your machine, your budget, the charter, the firm's resources (git, the cluster's dev and prod, the shared drive's spaces, the product), how to get access to them and to outside sites, and how to work with each; for the CEO and security officers, how to decide access. Use it on your first wake and whenever your work touches a resource."
 ---
 
 # The firm and its resources

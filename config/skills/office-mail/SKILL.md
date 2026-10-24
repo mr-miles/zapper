@@ -1,6 +1,6 @@
 ---
 name: office-mail
-description: How work moves in the firm: mail, your desk, starting and finishing an assignment, questions, delegating, follow-ups. Use it on every wake and whenever you send, answer or delegate anything.
+description: "How work moves in the firm: mail, your desk, starting and finishing an assignment, questions, delegating, follow-ups. Use it on every wake and whenever you send, answer or delegate anything."
 ---
 
 # Office mail

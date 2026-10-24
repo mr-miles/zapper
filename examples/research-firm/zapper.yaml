@@ -63,8 +63,10 @@ profiles:
 firms:
   lab:
     description: A CEO, a research manager and researchers answering a question with cited findings
-    # The repository's skills: the playbooks workers read.
+    # The repository's skills: the playbooks any role may use.
     skills_dir: ../../config/skills
+    # The repository's agent definitions: each role's brief and own skills.
+    agents_dir: ../../config/agents
     # A run budget, in tokens: hiring needs one. The seed is what Ada has to
     # scope the task; she asks the board for the rest.
     budget: { seed: 1000000, max_concurrent: 3 }
@@ -78,7 +80,7 @@ firms:
         profile: claude
         title: CEO
         model: claude-sonnet-5-5
-        skills: { work: ceo }
+        agent: ceo
         # No officer role: with one, Ada would have to hire a security
         # officer before anyone else. She holds security herself.
         hires: [research-manager]
@@ -86,13 +88,13 @@ firms:
         profile: claude
         title: Research Manager
         model: claude-sonnet-5-5
-        skills: { work: research-manager }
+        agent: research-manager
         hires: [researcher]
       researcher:
         profile: claude
         title: Researcher
         model: claude-sonnet-5-5
-        skills: { work: researcher }
+        agent: researcher
     # The founder; everyone else is hired during the run.
     workers:
       - { name: ada, role: ceo }

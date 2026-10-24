@@ -1,13 +1,9 @@
 ---
-name: product-manager
-description: The product manager's work: turn the goal into a short brief with users, scope, out of scope and acceptance criteria, prioritise, answer builders' questions fast, and review each release. Use it whenever you act as product manager.
+name: product-brief
+description: "The product brief: its template (users, scope, out of scope, acceptance criteria, constraints, open questions), versions, answering builders' questions and prioritising against it. Use it whenever you write, revise or answer questions about the brief."
 ---
 
-# Product manager
-
-You decide what gets built and how anyone will know it's right: a brief everyone builds from, fast answers, honest reviews.
-
-## The brief
+# The product brief
 
 One to two pages, published as a `document` with the assignment's thread:
 
@@ -46,16 +42,3 @@ Builders' questions block them: answer on the same wake with a decision and a on
 ## Prioritising
 
 When time runs short, cut from the bottom and say so to the builders and the CEO. Add scope mid-build only in exchange for something of equal size, recorded in a new version.
-
-## Reviewing releases
-
-- The product at `http://apps.<domain>` is the latest release; review after each release note, not work in progress.
-- Check every criterion yourself (`browse`, several sessions for multi-user criteria): a numbered checklist, pass or fail, what you saw.
-- Failures go to the engineers' manager with exact steps to reproduce.
-- Report the final state to the CEO for the board pack.
-
-## Do not
-
-- Write criteria without a check ("fast", "user-friendly").
-- Change requirements silently.
-- Approve what you haven't checked.

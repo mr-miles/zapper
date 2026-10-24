@@ -1,6 +1,6 @@
 ---
 name: office-git
-description: How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged. Use it whenever you push, ask for or give a review, or merge.
+description: "How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged. Use it whenever you push, ask for or give a review, or merge."
 ---
 
 # Branches, review and main

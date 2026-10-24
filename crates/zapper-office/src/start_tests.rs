@@ -12,7 +12,7 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
+      ceo: { profile: w, agent: ceo }
     workers:
       - { name: ceo, role: ceo }
       - { name: ada, role: ceo, reports_to: ceo }
@@ -60,8 +60,8 @@ firms:
     budget: { seed: 100000, security_share: 0 }
     security: { officers: [sec] }
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
-      sec: { profile: w, skills: { work: security-review }, officer: true }
+      ceo: { profile: w, agent: ceo }
+      sec: { profile: w, agent: security-officer, officer: true }
     workers:
       - { name: ceo, role: ceo }
       - { name: sec, role: sec, reports_to: ceo }
