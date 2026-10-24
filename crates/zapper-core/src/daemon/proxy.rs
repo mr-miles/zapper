@@ -87,7 +87,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Resp
 }
 
 /// Splits `host:port`, `[v6]:port` or `host`.
-fn split_authority(a: &str, default_port: u16) -> Option<(String, u16)> {
+pub(crate) fn split_authority(a: &str, default_port: u16) -> Option<(String, u16)> {
     let (host, port) = if let Some(rest) = a.strip_prefix('[') {
         let (h, tail) = rest.split_once(']')?;
         (h, tail.strip_prefix(':'))
@@ -549,6 +549,22 @@ async fn peek<S: AsyncRead + Unpin>(io: &mut S) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether a passed-through stream's first bytes may go to `host`: not TLS,
+/// TLS without a server name, or a ClientHello naming `host`. A ClientHello
+/// that doesn't parse (malformed, cut short, or split across records, which
+/// servers accept) is refused: its server name can't be checked.
+pub(crate) fn server_name_matches(first: &[u8], host: &str) -> Result<(), String> {
+    match tls::client_hello_sni(first) {
+        Ok(None) => Ok(()),
+        Ok(Some(sni)) => match zapper_policy::names::hostname(&sni) {
+            Ok(n) if n == host => Ok(()),
+            Ok(n) => Err(format!("TLS server name {n} does not match the checked host")),
+            Err(_) => Err("TLS server name (invalid) does not match the checked host".into()),
+        },
+        Err(()) => Err("a TLS ClientHello that can't be read (malformed, cut short or split across records): its server name can't be checked".into()),
+    }
+}
+
 /// Passes a stream through. A TLS ClientHello must name the checked host, so
 /// an allowed host cannot front for another.
 async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
@@ -574,30 +590,22 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         vec![],
     );
     note_verdict(&rec, &v);
-    if let Ok(Some(sni)) = tls::client_hello_sni(&first) {
-        let sni = zapper_policy::names::hostname(&sni).map_err(|_| sni.clone());
-        if sni.as_deref() != Ok(endpoint.host.as_str()) {
-            let shown = match &sni {
-                Ok(n) => n.clone(),
-                Err(_) => "(invalid)".into(),
-            };
-            let error = format!("TLS server name {shown} does not match the checked host");
-            log(
-                d,
-                s,
-                NetLog {
-                    req: endpoint,
-                    verdict: Some(&v),
-                    inspected: false,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(error.clone()),
-                },
-            );
-            rec.lock().unwrap().action = Action::Deny;
-            note_failure(s, &rec, 403, Some(error));
-            return;
-        }
+    if let Err(error) = server_name_matches(&first, &endpoint.host) {
+        log(
+            d,
+            s,
+            NetLog {
+                req: endpoint,
+                verdict: Some(&v),
+                inspected: false,
+                status: None,
+                secrets: vec![],
+                error: Some(error.clone()),
+            },
+        );
+        rec.lock().unwrap().action = Action::Deny;
+        note_failure(s, &rec, 403, Some(error));
+        return;
     }
     let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
@@ -1225,9 +1233,48 @@ mod approval_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_headers, inject, split_authority};
+    use super::{clean_headers, inject, server_name_matches, split_authority};
     use crate::testing::TestCore;
     use zapper_policy::{placeholder, NetEffects};
+
+    /// A passed-through ClientHello must name the checked host; one whose
+    /// name can't be read is refused, a hello split across two records
+    /// included (servers accept it, so it would front for another host).
+    #[test]
+    fn a_tls_hello_names_the_checked_host_or_is_refused() {
+        let hello = |name: &str| {
+            let mut c = rustls::ClientConnection::new(
+                crate::daemon::tls::client_config(),
+                name.to_string().try_into().unwrap(),
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            c.write_tls(&mut out).unwrap();
+            out
+        };
+        let ok = hello("api.example");
+        assert_eq!(server_name_matches(&ok, "api.example"), Ok(()));
+        let e = server_name_matches(&hello("other.example"), "api.example").unwrap_err();
+        assert!(e.contains("other.example"), "{e}");
+        assert_eq!(
+            server_name_matches(b"SSH-2.0-OpenSSH", "api.example"),
+            Ok(())
+        );
+        // Cut short.
+        assert!(server_name_matches(&ok[..40], "api.example").is_err());
+        // The same handshake in two records, naming another host.
+        let other = hello("other.example");
+        let body = &other[5..];
+        let (a, b) = body.split_at(20);
+        let mut split = Vec::new();
+        for part in [a, b] {
+            split.extend_from_slice(&other[..3]);
+            split.extend_from_slice(&(part.len() as u16).to_be_bytes());
+            split.extend_from_slice(part);
+        }
+        let e = server_name_matches(&split, "api.example").unwrap_err();
+        assert!(e.contains("split across records"), "{e}");
+    }
 
     /// What goes upstream names the host that was checked, whatever Host
     /// the client sent, and carries no hop-by-hop headers.
