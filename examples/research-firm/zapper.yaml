@@ -1,0 +1,98 @@
+# A firm that researches: Ada, the CEO, gets a question from the board and
+# hires a research manager, who scopes it with web search, writes a
+# research plan naming the sources and the sites they're on, and hires
+# researchers to work through it. Each researcher asks for the plan's sites,
+# writes a pack of Markdown documents with references and suggests sources
+# the plan missed; the research manager decides on those, collates the packs
+# into one, reviews it and reports to Ada, who reports to you. Everyone is
+# Claude Code in a VM of their own. See README.md beside this file.
+#
+# A complete config, to run instead of config/zapper.yaml:
+#   zapper --config examples/research-firm/zapper.yaml serve
+# Relative paths resolve against this file's directory. Downloads, images,
+# state and the Claude token are the main config's, under your home.
+
+daemon:
+  firecracker: ~/.local/share/zapper/bin/firecracker
+  images: ~/.local/share/zapper/images
+  kernels: ~/.local/share/zapper/kernels
+  state: ~/.local/state/zapper
+  ui: 127.0.0.1:7878
+  ask_timeout_secs: 60
+  max_sessions: 16
+
+# Your Claude subscription's token, as config/zapper.yaml sets it up: from
+# `claude setup-token`, in a 0600 file. The VMs never see it.
+secrets:
+  claude:
+    file: ~/.config/zapper/claude-token
+    hosts: [api.anthropic.com]
+
+policy:
+  defaults: { net: deny, exec: allow }
+
+profiles:
+  # Claude Code (image: make image IMAGE=office). The Claude API is allowed
+  # with the token the host adds, and Claude Code's web search runs there,
+  # so searching needs no access. Fetching a page is asked about: in this
+  # firm Ada holds security and decides, against the research plan.
+  claude:
+    engine:
+      image: office
+      kernel: vmlinux-6.1
+      vcpus: 2
+      memory_mib: 4096
+      disk: 8GiB
+      network: nic
+    agent:
+      kind: claude-code
+      command: [claude]
+      user: agent
+      workdir: /work
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+        # The image's headless browser, for `browse`.
+        PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw }
+    policy:
+      net:
+        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+      defaults: { net: ask }
+
+firms:
+  lab:
+    description: A CEO, a research manager and researchers answering a question with cited findings
+    # The repository's skills: the playbooks workers read.
+    skills_dir: ../../config/skills
+    # A run budget, in tokens: hiring needs one. The seed is what Ada has to
+    # scope the task; she asks the board for the rest.
+    budget: { seed: 1000000, max_concurrent: 3 }
+    credentials:
+      # research: the plan and the packs; board: the board pack.
+      spaces: [general, research, board]
+    # Names for hires, in order, when the hirer doesn't pick one.
+    names: [rosa, theo, iris, noor]
+    roles:
+      ceo:
+        profile: claude
+        title: CEO
+        model: claude-sonnet-5-5
+        skills: { work: ceo }
+        # No officer role: with one, Ada would have to hire a security
+        # officer before anyone else. She holds security herself.
+        hires: [research-manager]
+      research-manager:
+        profile: claude
+        title: Research Manager
+        model: claude-sonnet-5-5
+        skills: { work: research-manager }
+        hires: [researcher]
+      researcher:
+        profile: claude
+        title: Researcher
+        model: claude-sonnet-5-5
+        skills: { work: researcher }
+    # The founder; everyone else is hired during the run.
+    workers:
+      - { name: ada, role: ceo }

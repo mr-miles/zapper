@@ -483,7 +483,7 @@ Everyone             office-mail, office-publish, office-resources
 + a firm with git    office-git   (everyone: branches, review, who merges to main)
 + roles that hire    manager      (splitting work, review, budget and people, staff vs contractor, contractors)
 + security duty      security-review   (officers; the CEO until an officer is hired)
-+ the role itself    its work skill: ceo, cto, product-manager, software-engineer, designer, researcher, analyst
++ the role itself    its work skill: ceo, cto, product-manager, software-engineer, designer, researcher, research-manager, analyst
 ```
 
 So the CEO has the shared skills, `manager`, `security-review` and `ceo`; the CTO `manager` and `cto`. Each skill holds only its own subject; what everyone needs is in the shared ones. The firm's skill directories go on a disk attached read-only (zapper's `mode: ro` mount), and `~/.claude/skills/<name>` links into it, so a worker can't edit its instructions:
@@ -493,6 +493,7 @@ So the CEO has the shared skills, `manager`, `security-review` and `ceo`; the CT
 | `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, delegating, replying and finishing, follow-ups, mail as colleague text |
 | `office-publish` | everyone | The shared drive: spaces, kinds, titles and summaries, versions, using others' work, Markdown, decks |
 | `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser; deciding access for the CEO and officers |
+| `research-manager` | the research manager | Scoping with web search, the research plan and its access list, staffing it, deciding suggested sources, collating researchers' packs, review |
 | `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges (whoever holds admin: the CEO unless they grant it), reporting in the assignment's thread, telling those who wait once it's merged |
 | `manager` | roles that hire | Splitting and assigning work, unblocking, review, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
 | `security-review` | officers, the CEO while holding security | Network requests and TLS, credential requests, background checks, watching traffic, escalation |
