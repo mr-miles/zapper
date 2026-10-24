@@ -14,6 +14,7 @@ zapper, the daemon, CLI and sandbox:
 - [API](api.md): the REST API on the unix socket, and the UI's API.
 - [Commands](commands.md): `zapper` commands and `make` targets.
 - [Testing](testing.md): unit and end-to-end tiers, the attack probe, manual scenarios, and which invariant each test covers.
+- [Proxy separation](proxy-separation.md) (design, proposed): guest input parsed by a process per session, without secrets of its own, so a parser bug costs one session at most.
 
 The Office, a company of AI workers built on zapper:
 
