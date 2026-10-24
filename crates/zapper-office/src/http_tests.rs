@@ -18,7 +18,7 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
+      ceo: { profile: w, agent: ceo }
     workers:
       - { name: ceo, role: ceo }
 ";

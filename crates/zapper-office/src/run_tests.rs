@@ -24,8 +24,8 @@ profiles:
 firms:
   acme:
     roles:
-      ceo: { profile: w, skills: { work: ceo } }
-      eng: { profile: w, skills: { work: software-engineer } }
+      ceo: { profile: w, agent: ceo }
+      eng: { profile: w, agent: software-engineer }
     workers:
       - { name: ceo, role: ceo }
       - { name: pat, role: eng, reports_to: ceo }
@@ -716,7 +716,7 @@ fn a_startup_config_with_a_broken_firm_doesnt_load() {
     std::fs::write(
         t.startup(),
         std::fs::read_to_string(t.startup()).unwrap()
-            + "firms:\n  acme:\n    roles: { ceo: { profile: nosuch, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+            + "firms:\n  acme:\n    roles: { ceo: { profile: nosuch, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
     )
     .unwrap();
     let e = match zapper_core::Core::start(t.startup()) {

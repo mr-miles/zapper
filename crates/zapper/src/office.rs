@@ -112,16 +112,23 @@ pub fn example() -> &'static str {
     head
 }
 
-/// `zapper init`: the workers' default skills next to the config.
+/// `zapper init`: the workers' default agents and skills next to the
+/// config.
 pub fn init(config_dir: &Path) -> Result<()> {
     #[cfg(feature = "office")]
     {
-        let dir = config_dir.join(zapper_office::skills::DEFAULT_DIR);
-        let written = zapper_office::skills::install(&dir)?;
+        let written = zapper_office::skills::install(config_dir)?;
         if written.is_empty() {
-            println!("{}: the default skills are all there", dir.display());
+            println!(
+                "{}: the default agents and skills are all there",
+                config_dir.display()
+            );
         } else {
-            println!("wrote skills to {}: {}", dir.display(), written.join(", "));
+            println!(
+                "wrote agents and skills to {}: {}",
+                config_dir.display(),
+                written.join(", ")
+            );
         }
     }
     #[cfg(not(feature = "office"))]
@@ -129,20 +136,23 @@ pub fn init(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `zapper check`: each firm's skills.
+/// `zapper check`: each firm's agents and skills.
 pub fn check(config: &Config, report: &mut impl FnMut(bool, &str, &str)) {
     #[cfg(feature = "office")]
     for (name, firm) in &zapper_office::firm::all(config) {
         for w in firm.warnings() {
             println!("note   firm {name}: {w}");
         }
-        let dir = zapper_office::skills::dir(firm);
         let missing = zapper_office::skills::missing(firm);
         report(
             missing.is_empty(),
-            &format!("firm {name}: skills in {}", dir.display()),
             &format!(
-                "zapper init (writes the default skills), or add <name>/SKILL.md there for: {}",
+                "firm {name}: agents in {}, skills in {}",
+                zapper_office::skills::agents_dir(firm).display(),
+                zapper_office::skills::dir(firm).display()
+            ),
+            &format!(
+                "zapper init (writes the default agents and skills), or add them: {}",
                 missing.join(", ")
             ),
         );

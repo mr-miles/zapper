@@ -1728,6 +1728,29 @@ mod tests {
         }
     }
 
+    /// `examples/research-firm`: Ada alone, who may hire a research
+    /// manager, who may hire researchers, and a prototype engineer; drive
+    /// spaces for the research and the board pack, a repository for
+    /// prototypes.
+    #[cfg(feature = "office")]
+    #[test]
+    fn the_research_firm_example_loads() {
+        let c = example("research-firm");
+        let lab = &zapper_office::firm::all(&c)["lab"];
+        let founders: Vec<&str> = lab.workers.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(founders, ["ada"]);
+        assert_eq!(
+            lab.roles["ceo"].hires,
+            ["research-manager", "prototype-engineer"]
+        );
+        assert_eq!(lab.roles["research-manager"].hires, ["researcher"]);
+        assert!(lab.budget.seed > 0);
+        assert_eq!(lab.git_repos(), ["prototypes"]);
+        for space in ["research", "board"] {
+            assert!(lab.credentials.spaces.iter().any(|s| s == space), "{space}");
+        }
+    }
+
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
     fn example_config_is_valid() {
@@ -1780,7 +1803,7 @@ mod tests {
     #[test]
     fn firms_and_the_office_go_together() {
         let firms = zapper_policy::Config::from_yaml(
-            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, skills: { work: ceo } } }\n    workers: [{ name: ceo, role: ceo }]\n",
+            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
         )
         .unwrap();
         let e = super::office::config(&firms).err().map(|e| e.to_string());

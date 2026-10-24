@@ -520,12 +520,9 @@ fn upload_name(name: &str) -> Result<String> {
 
 /// Stores files the board uploaded as one artifact by the board, visible to
 /// the firm, for attaching to mail.
-pub fn publish_board(
-    run: &Arc<FirmRun>,
-    files: Vec<(String, Vec<u8>)>,
-    title: &str,
-    thread: Option<String>,
-) -> Result<Value> {
+/// Whether files the board would attach can be: how many, how large
+/// together, and their names (one path component each, no two alike).
+pub fn check_board_files(files: &[(String, Vec<u8>)]) -> Result<()> {
     if files.is_empty() || files.len() > BOARD_UPLOAD_FILES {
         bail!("attach 1 to {BOARD_UPLOAD_FILES} files");
     }
@@ -537,12 +534,26 @@ pub fn publish_board(
         );
     }
     let mut names = std::collections::BTreeSet::new();
-    let mut entries = Vec::new();
-    for (name, data) in &files {
+    for (name, _) in files {
         let name = upload_name(name)?;
         if !names.insert(name.clone()) {
             bail!("two files are named {name}");
         }
+    }
+    Ok(())
+}
+
+pub fn publish_board(
+    run: &Arc<FirmRun>,
+    files: Vec<(String, Vec<u8>)>,
+    title: &str,
+    thread: Option<String>,
+) -> Result<Value> {
+    check_board_files(&files)?;
+    let total: usize = files.iter().map(|(_, d)| d.len()).sum();
+    let mut entries = Vec::new();
+    for (name, data) in &files {
+        let name = upload_name(name)?;
         let hash = hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref());
         let blob = run.dir.join("drive").join(&hash);
         if !blob.exists() {

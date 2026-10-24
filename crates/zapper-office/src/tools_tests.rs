@@ -27,9 +27,9 @@ firms:
     budget: { seed: 1000000, security_share: 0.2, quote_fee: 10000 }
     security: { officers: [sec] }
     roles:
-      ceo: { profile: w, skills: { work: ceo }, hires: [eng] }
-      eng: { profile: w, skills: { work: software-engineer } }
-      sec: { profile: w, skills: { work: security-review }, officer: true }
+      ceo: { profile: w, agent: ceo, hires: [eng] }
+      eng: { profile: w, agent: software-engineer }
+      sec: { profile: w, agent: security-officer, officer: true }
     workers:
       - { name: ceo, role: ceo }
       - { name: sec, role: sec, reports_to: ceo }

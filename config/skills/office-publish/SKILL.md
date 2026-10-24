@@ -1,6 +1,6 @@
 ---
 name: office-publish
-description: How to publish finished work to the shared drive and build on others' (spaces, kinds, titles, summaries, versions, attachments, Markdown, decks). Use it whenever you deliver a document, report, dataset or deck, or use one.
+description: "How to publish finished work to the shared drive and build on others' (spaces, kinds, titles, summaries, versions, attachments, Markdown, decks). Use it whenever you deliver a document, report, dataset or deck, or use one."
 ---
 
 # The shared drive

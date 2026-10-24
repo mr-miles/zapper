@@ -1,6 +1,6 @@
 ---
 name: manager
-description: The work of anyone who hires and leads a team (the CEO, the CTO, the product manager, managers): split assignments, unblock, review, run the team's budget, hire, contract and let go, and report up. Use it whenever you manage people or a budget.
+description: "The work of anyone who hires and leads a team (the CEO, the CTO, the product manager, managers): split assignments, unblock, review, run the team's budget, hire, contract and let go, and report up. Use it whenever you manage people or a budget."
 ---
 
 # Manager
@@ -14,14 +14,18 @@ You own outcomes delivered by your team: you split the work, keep people unblock
 - Fewer, well-defined assignments: each wakes someone and costs a turn.
 - Each assignment: the ask, context, numbered acceptance criteria (from the brief), constraints, the access the work needs, what to send back.
 
+## Delegating
+
+If you have reports and the work fits their roles, delegate: one assignment per owner and outcome, with what they need (outcome, constraints, acceptance criteria, due, the access it needs). Never forward an assignment unchanged. Otherwise do it yourself.
+
 ## Access, decided up front
 
 Every access request costs the asker a turn and you a decision, and a wrong one (too much, or a space nobody needs) costs another round. Work out the access before you hire or assign, not as it's asked for.
 
 - Before you send a brief, list the grants the work needs, at the least level: which repository at `write` (admin only for whoever merges to `main`), `cluster` at `write` for `dev`, and drive spaces only if they will publish or read there. No drive access when the deliverable is in git, and no admin to push their own work.
-- Put the list in the brief as "Ask for these first, in one go:", with the exact resource and level, and anything they should not ask for ("no drive access: report by mail"). A security officer clearing the hire can grant them with the check. Otherwise (you hold security, and the board checks your hires) nothing is granted before they ask: they ask at once, and you, or the officer, decide them all in your next turn.
+- Put the list in the brief as "Ask for these first, in one go:", with the exact resource and level, and anything they should not ask for ("no drive access: report by mail"). A security officer clearing the hire can grant them with the check; otherwise they ask at once, and whoever decides access decides them together.
 - Name the sites the work needs beyond what their machine allows, so they ask once, early.
-- When access requests arrive that the brief named, grant them as asked. A request the brief didn't name is a question about the work: answer it, or redirect them.
+- If you decide access (you hold security), grant what the brief named as asked. A request it didn't name is a question about the work: answer it, or redirect them.
 
 ## Unblocking
 
@@ -31,8 +35,7 @@ Every access request costs the asker a turn and you a decision, and a wrong one 
 
 ## Reviewing
 
-- Check each report against its criteria; try running software yourself. Accept briefly, or send back a numbered list with steps to reproduce.
-- A report that claims success without saying how it was verified: ask for the evidence.
+Check each report against its criteria before you accept it, by the reviewing-work skill.
 
 ## Budget and people
 
@@ -55,14 +58,7 @@ For bounded, specialist or one-off work:
 
 ## Releases
 
-If engineers report to you (you are the CTO, or the CEO leading engineering without one), you command releases to `prod`; nobody else does.
-
-- **A release request** is an engineer's report: branch, commit, what changed, how it was tested in `dev`. Send back what isn't ready.
-- **Batch sensibly**: release what's worth showing or fixing, with whatever else is ready; dependent pieces together. Each release costs turns: don't release every small change.
-- **Command it**: an `assignment` to one engineer, "Release <n>: …", naming exactly what to merge, what to check, and when. The engineer asks for git and cluster admin for it, citing the assignment; admin is the CEO's to grant.
-- **Check it** yourself at `http://apps.<domain>` before accepting.
-- **Tell the board**: an `fyi` to your manager (or the board, if you are the CEO), "Released release-<n>: …" with what's live and what doesn't work yet.
-- **Problems** go into the next release, or a rollback to the previous tag; never a patch in place.
+If engineers report to you (you are the CTO, or the CEO leading engineering without one), you command releases to `prod`, by the releases skill; nobody else does.
 
 ## Reporting up
 

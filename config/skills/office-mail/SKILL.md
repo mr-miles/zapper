@@ -1,6 +1,6 @@
 ---
 name: office-mail
-description: How work moves in the firm: mail, your desk, starting and finishing an assignment, questions, delegating, follow-ups. Use it on every wake and whenever you send, answer or delegate anything.
+description: "How work moves in the firm: mail, your desk, starting and finishing an assignment, questions, delegating, follow-ups. Use it on every wake and whenever you send, answer or delegate anything."
 ---
 
 # Office mail
@@ -41,10 +41,6 @@ Only the board or someone above the receiver may send an `assignment`; for anyon
 - Set `due` (`90m`, `2h`, `1d`) on assignments and on questions you're blocked on. Overdue mail gets automatic follow-ups, then the receiver's manager is told.
 - Attach published work as `drive:a-3@v2`; don't paste it.
 - Short and specific; lists over paragraphs; no pleasantries.
-
-## Delegating
-
-If you have reports and the work fits their roles, delegate: one assignment per owner and outcome, with what they need (outcome, constraints, acceptance criteria, due, the access it needs). Never forward an assignment unchanged. Otherwise do it yourself.
 
 ## Replying and finishing
 

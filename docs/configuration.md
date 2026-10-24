@@ -6,7 +6,7 @@
 
 The Office and the zapper daemon under it read one YAML file: `--config` or `$ZAPPER_CONFIG` if given; else `config/zapper.yaml` when run from a checkout's root (the [repository's config](../config/zapper.yaml), tracked); else `~/.config/zapper/zapper.yaml`, which `zapper init` creates from the same file and never overwrites.
 
-Relative paths in the config (`skills_dir`, secret files, mount hosts, daemon paths) resolve against the config file's directory, and `~/` against your home, so the config needs no absolute path and runs from a fresh clone. Generated files stay outside the repository: Firecracker, kernels, images and state under `~/.local`, the Claude token under `~/.config/zapper/`. The file is written back by `zapper config save`; a config holding secret values inline (`value:`) must be readable only by you.
+Relative paths in the config (`skills_dir`, `agents_dir`, secret files, mount hosts, daemon paths) resolve against the config file's directory, and `~/` against your home, so the config needs no absolute path and runs from a fresh clone. Generated files stay outside the repository: Firecracker, kernels, images and state under `~/.local`, the Claude token under `~/.config/zapper/`. The file is written back by `zapper config save`; a config holding secret values inline (`value:`) must be readable only by you.
 
 ## Running and startup config
 

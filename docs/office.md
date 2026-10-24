@@ -48,16 +48,16 @@ firms:
         profile: office                    # a zapper profile: image, network, secrets
         title: CEO
         model: claude-opus-5-5             # the others use the profile's claude-sonnet-5-5
-        skills: { work: ceo }              # communication: office-mail, publishing: office-publish by default
+        agent: ceo              # agents/ceo: its brief and own skills
         avatar: { figure: ceo, color: "#D97757" }
         hires: [cto, manager, product-manager, engineer, designer, researcher, analyst, security-officer]
       engineer:
         profile: office-engineer           # a bigger VM; git and the cluster come with grants, as for everyone
-        skills: { work: software-engineer }
+        agent: software-engineer
         avatar: { figure: engineer, color: "#6A9BCC" }
       security-officer:
         profile: office-security           # wide network; no secret but the Claude token
-        skills: { work: security-review }
+        agent: security-officer
         officer: true                      # hired, they take security over once cleared
         avatar: { figure: shield, color: "#788C5D" }
       # product-manager (hires designers, researchers, analysts), manager (hires engineers …), researcher, analyst …
@@ -73,13 +73,13 @@ firms:
 | `domain` | Names the firm's services; default `<firm>.internal` |
 | `budget` | `daily_turns`, `worker_daily_turns`, `daily_tokens` (0 is no limit), `max_concurrent`; days end at midnight UTC. `seed` (tokens, 0: none) gives the run a budget agreed with the board ([the workforce](#the-workforce-hiring-and-budgets)); `security_share` (0.2) is the officers' share of it (0 with officers leaves them unfunded, so their decisions go to the board until someone funds them: `zapper check` notes it, and the board is told when a run starts); `quote_fee` (30000) is what a contract offer gives the candidate for quoting; `turn_price` (10000) is what a turn costs in tokens on the firm's models until the CEO has measured their own, and prices the sizing in the CEO's `budget()` (set it for a firm on other models); `stall_after` (`10m`) is how long a worker may stay out of tokens with mail waiting before the CEO is reminded (the board is told at three times that); `turn_timeout` (`30m`) is how long one turn may run ([waking an idle worker](#waking-an-idle-worker)) |
 | `limits` | `thread_messages` (60), `mail_per_hour` (120), `fanout_per_hour` (10), `pair_per_10min` (30), `mail_per_run` (20000), `artifact_size` (50MiB), `drive_size` (2GiB) |
-| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `skills: {work, communication, publishing}`, `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first), `fake` (a fake Claude script, for tests) |
+| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first), `fake` (a fake Claude script, for tests) |
 | `workers` | The founders, who boot with the firm: `name`, `role`, `reports_to`, `title`, and `profile` to run one on another profile than the role's (another agent or model) |
 | `names` | Optional: names for hires whose hirer doesn't pick one, in order; without it, a random free name from a built-in list |
 | `security` | `officers`, `digest_every: {minutes, requests}`, `answer_within`, `officer_first` (default true: a firm whose CEO can hire a security officer hires or contracts nobody else before one) |
 | `git`, `facilities`, `credentials`, `product_port`, `dashboard_port`, `landing` | The firm's services ([below](#facilities-the-cluster-git-and-the-product)) |
 | `scenarios.<name>` | A preset the board picks when starting a run: `description`, `note` (a few words next to its name in Kickoff, like `unavailable on Claude`; only text), `articles` (added to the board's own), `hires` and `script` ([scenarios](#scenarios)) |
-| `skills_dir` | The directory of the workers' skills, `<name>/SKILL.md` each, relative to the config; `skills` if unset. `zapper init` writes the default skills there ([skills](#skills)) |
+| `skills_dir`, `agents_dir` | The directories of the skills any role may use (`<name>/SKILL.md`) and of the agent definitions (`<agent>/AGENT.md`, with the role's own skills in `<agent>/skills/`), relative to the config; `skills` and `agents` if unset. `zapper init` writes the defaults there ([agents and skills](#agents-and-skills)) |
 
 The office adds to each worker's profile at boot: the preamble (in `~/.claude/CLAUDE.md`, or `~/.pi/agent/AGENTS.md` for pi), the skills, the `office` MCP server, the model, and credentials for the firm's services. The profile still decides the image, the VM's size, the network rules and the secrets.
 
@@ -89,7 +89,7 @@ Only its skills and who it is. A worker boots with its skills and a short genera
 
 ### Validation
 
-Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; skills follow from the role ([skills](#skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The `firms` section is the office's: zapper-office parses and checks it with the rest of each change, so a config is validated as a whole like the rest of zapper's config. `zapper config show` prints it as written, without the defaults filled in.
+Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; every role's agent exists, and the skills it and its place need ([agents and skills](#agents-and-skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The `firms` section is the office's: zapper-office parses and checks it with the rest of each change, so a config is validated as a whole like the rest of zapper's config. `zapper config show` prints it as written, without the defaults filled in.
 
 The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network and exec rules still apply to running workers at once, as for any session.
 
@@ -474,31 +474,59 @@ Ports on the host:
 
 The product port is an HTTP proxy to the cluster's ingress that asks for `apps.<domain>`, as workers do, whatever address the browser used: an Ingress bound to that host and one on the default route both reach the board. It maps the name back to the board's address in what comes back: redirects (`Location` and the like, `https://` to `http://`), cookies' `Domain`, `Origin` and `Referer` on the way in, and absolute links in pages, styles and scripts up to 16 MiB (it asks for them uncompressed). WebSockets pass through. Connections to it aren't checked against firm policy, as the board's own, but each one is logged at debug level with its peer address (`RUST_LOG=zapper=debug`). On the LAN, anyone who can reach the host can use whatever the engineers deployed, so serve it there only on a network you trust; the host's firewall may also need to allow the port.
 
-## Skills
+## Agents and skills
 
-Each worker's skills follow from what their role does:
+A role's workers are an **agent definition**: a short brief that goes into their preamble, and skills they read when they need them. Two directories hold them:
+
+```
+agents/<agent>/AGENT.md              the role's brief, with front matter naming the skills it uses
+agents/<agent>/skills/<name>/SKILL.md   skills of that role only
+skills/<name>/SKILL.md               skills any role may use
+```
+
+A role names its agent with `agent:` (the role's own name if unset): the example firm's `engineer` role is `agent: software-engineer`. The brief is what the role is for and which skills to work by, a couple of hundred words at most, since the preamble carries it on every turn; the processes and templates are in the skills, which the agent reads when the work calls for one. An `AGENT.md`:
+
+```
+---
+name: researcher
+description: "A researcher: answers questions with evidence, as a pack of cited Markdown documents."
+skills: [research-sources]
+---
+
+You answer questions with evidence: …
+```
+
+Each worker's skills follow from their agent and their place in the firm:
 
 ```
 Everyone             office-mail, office-publish, office-resources
-+ a firm with git    office-git   (everyone: branches, review, who merges to main)
-+ roles that hire    manager      (splitting work, review, budget and people, staff vs contractor, contractors)
++ a firm with git    office-git        (branches, review, who merges to main)
++ roles that hire    manager           (splitting work, budget and people, contractors, reporting up)
 + security duty      security-review   (officers; the CEO until an officer is hired)
-+ the role itself    its work skill: ceo, cto, product-manager, software-engineer, designer, researcher, analyst
++ leading engineers  releases, checking-the-product   (roles that hire one whose agent uses releases)
++ the agent's        the skills its AGENT.md names, and its own skills/
 ```
 
-So the CEO has the shared skills, `manager`, `security-review` and `ceo`; the CTO `manager` and `cto`. Each skill holds only its own subject; what everyone needs is in the shared ones. The firm's skill directories go on a disk attached read-only (zapper's `mode: ro` mount), and `~/.claude/skills/<name>` links into it, so a worker can't edit its instructions:
+So the CEO has the shared skills, `manager`, `security-review`, `reviewing-work` from its brief, its own `budget`, `building-the-team` and `the-board`, and `releases` and `checking-the-product` when it hires engineers. At each `zapper firm up` the office copies each role's skills and brief into the run (`skills/<role>/`, `agents/<role>/`, shown in the run's config view), and attaches the skills read-only at `~/.claude/skills`, so a worker can't edit its instructions.
+
+The skills any role may use:
 
 | Skill | Who | Teaches |
 |---|---|---|
-| `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, delegating, replying and finishing, follow-ups, mail as colleague text |
+| `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, replying and finishing, follow-ups, mail as colleague text |
 | `office-publish` | everyone | The shared drive: spaces, kinds, titles and summaries, versions, using others' work, Markdown, decks |
-| `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser; deciding access for the CEO and officers |
-| `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges (whoever holds admin: the CEO unless they grant it), reporting in the assignment's thread, telling those who wait once it's merged |
-| `manager` | roles that hire | Splitting and assigning work, unblocking, review, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
-| `security-review` | officers, the CEO while holding security | Network requests and TLS, credential requests, background checks, watching traffic, escalation |
-| work skill | each role | The role's core function: `ceo`, `cto`, `product-manager`, `software-engineer`, `designer`, `researcher`, `analyst` |
+| `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser |
+| `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges, reporting in the assignment's thread, telling those who wait once it's merged |
+| `manager` | roles that hire | Splitting, delegating and assigning work, deciding access up front, unblocking, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
+| `security-review` | officers, and the CEO | Network requests and TLS, credential requests and grants, background checks, watching traffic, escalation |
+| `reviewing-work` | the CEO, CTO, managers, product manager, designer, research manager | Reviewing against what was asked, with evidence, one numbered list of findings; answering a review |
+| `checking-the-product` | engineers, the product manager, the designer, and whoever leads engineers | Checking through the interface: curl and the browser, desktop and phone widths, criteria pass or fail |
+| `releases` | engineers, and whoever leads them (the CTO, or the CEO without one) | Asking for, commanding, deploying and verifying a release to `prod`; rolling back; incidents |
+| `research-sources` | researchers, the research manager, analysts | Web search and fetching, judging and recording sources, facts apart from judgement, suggesting sources |
 
-A firm reads its skills from its `skills_dir`, `skills` next to the config unless set, at each `zapper firm up`, so an edit applies at the next one. In a checkout that is [config/skills/](../config/skills/); elsewhere, `zapper init` writes the default skills (built into zapper from config/skills/) to `~/.config/zapper/skills`, keeping any already there. There are no built-in fallbacks: a firm whose directory lacks a skill it needs doesn't start, and `zapper check` lists what is missing. Keep the frontmatter (`name`, `description`): Claude Code uses the description to decide when to read a skill.
+The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`) and `security-officer`.
+
+A firm reads its agents from its `agents_dir` and its skills from its `skills_dir`, `agents` and `skills` next to the config unless set, at each `zapper firm up`, so an edit applies at the next one. In a checkout they are [config/agents/](../config/agents/) and [config/skills/](../config/skills/); elsewhere, `zapper init` writes the defaults (built into zapper from config/) next to the config, `~/.config/zapper/agents` and `~/.config/zapper/skills`, keeping any file already there. There are no built-in fallbacks: a firm whose directories lack an agent or a skill it needs doesn't start, and `zapper check` lists what is missing. Keep the front matter (`name`, a quoted `description`): agents use the description to decide when to read a skill.
 
 ## Web UI
 
@@ -628,7 +656,7 @@ Schematic, flat and calm, in the spirit of Claude's design: warm off-white backg
 | Over budget | dimmed, a small gauge | the worker's or firm's budget is used up |
 | Error | dimmed, red dot | the agent process keeps failing, or the VM stopped |
 
-Badges sit on top of any state: unread mail (a count), an access request pending (a padlock), overdue threads (a clock).
+Badges sit on top of any state: unread mail (a count), an access request waiting for a decision (a padlock: a site, or a grant on git, the cluster or a drive space), overdue threads (a clock).
 
 `prefers-reduced-motion` turns the animations into static state icons.
 

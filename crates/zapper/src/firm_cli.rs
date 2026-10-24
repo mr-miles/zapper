@@ -52,6 +52,10 @@ pub enum FirmCmd {
         /// assignment once the firm is up: its first line is the subject.
         #[arg(long, value_name = "FILE")]
         task: Option<std::path::PathBuf>,
+        /// A file to attach to the task, on the shared drive; repeat for
+        /// more (up to 10, 5 MiB together).
+        #[arg(long = "attach", value_name = "FILE", requires = "task")]
+        attach: Vec<std::path::PathBuf>,
     },
     /// The firm's scenarios, with their hire slots and script.
     Scenarios {
@@ -698,7 +702,20 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             daily_turns,
             scenario,
             task,
+            attach,
         } => {
+            use base64::Engine as _;
+            let attachments = attach
+                .iter()
+                .map(|p| {
+                    let data = std::fs::read(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    Ok(json!({ "name": name, "data": base64::engine::general_purpose::STANDARD.encode(data) }))
+                })
+                .collect::<Result<Vec<_>>>()?;
             eprintln!("zapper: starting firm {firm}…");
             let read = |p: &Option<std::path::PathBuf>| -> Result<Option<String>> {
                 match p {
@@ -711,7 +728,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             let body = json!({
                 "company": company, "ceo": ceo, "seed": seed, "ceo_prompt": read(&ceo_prompt)?, "articles": read(&articles)?,
                 "security_share": security_share, "max_concurrent": max_concurrent, "daily_turns": daily_turns,
-                "scenario": scenario, "task": read(&task)?,
+                "scenario": scenario, "task": read(&task)?, "attachments": attachments,
             });
             let v = c
                 .json(

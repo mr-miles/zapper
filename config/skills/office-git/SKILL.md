@@ -1,11 +1,11 @@
 ---
 name: office-git
-description: How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged. Use it whenever you push, ask for or give a review, or merge.
+description: "How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged. Use it whenever you push, ask for or give a review, or merge."
 ---
 
 # Branches, review and main
 
-`main` is what the firm has accepted. The platform protects it: pushing `main`, branches under `main/`, or tags needs **admin** on the repository. A write grant pushes every other branch. The CEO holds admin; anyone else holds it only if the CEO grants it, for merging.
+`main` is what the firm has accepted. The platform protects it: pushing `main`, branches under `main/`, or tags needs **admin** on the repository. A write grant pushes every other branch. The CEO holds admin; anyone else holds it only if the CEO grants it, for merging. In a firm with a cluster, what reaches `main` for `prod` does so in a release (the releases skill), merged by the engineer it names.
 
 ## Who merges
 

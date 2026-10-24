@@ -72,8 +72,10 @@ profiles:
 firms:
   shop:
     description: A CEO, a product manager and engineers building a shopping list app
-    # The repository's skills: the playbooks workers read.
+    # The repository's skills: the playbooks any role may use.
     skills_dir: ../../config/skills
+    # The repository's agent definitions: each role's brief and own skills.
+    agents_dir: ../../config/agents
     # A run budget, in tokens: hiring needs one. The seed is what Ada has to
     # scope the task; she asks the board for the rest.
     budget: { seed: 1000000, max_concurrent: 3 }
@@ -89,7 +91,7 @@ firms:
         profile: claude
         title: CEO
         model: claude-sonnet-5-5
-        skills: { work: ceo }
+        agent: ceo
         # No officer role: with one, Ada would have to hire a security
         # officer before anyone else. She holds security herself.
         hires: [product-manager, engineer]
@@ -97,12 +99,12 @@ firms:
         profile: claude
         title: Product Manager
         model: claude-sonnet-5-5
-        skills: { work: product-manager }
+        agent: product-manager
       engineer:
         profile: claude-engineer
         title: Software Engineer
         model: claude-sonnet-5-5
-        skills: { work: software-engineer }
+        agent: software-engineer
     # The founder; everyone else is hired during the run.
     workers:
       - { name: ada, role: ceo }

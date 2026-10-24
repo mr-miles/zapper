@@ -142,7 +142,18 @@ pub fn run_config(dir: &std::path::Path) -> Value {
             skills.push(json!({ "role": role.file_name().to_string_lossy(), "skill": sk.file_name().to_string_lossy(), "text": text, "files": files }));
         }
     }
-    json!({ "config": config, "skills": skills })
+    // agents/<role>/AGENT.md: each role's brief, as the preamble had it.
+    let mut agents: Vec<Value> = std::fs::read_dir(dir.join("agents"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let text = std::fs::read(e.path().join("AGENT.md")).ok()?;
+            Some(json!({ "role": e.file_name().to_string_lossy(), "text": String::from_utf8_lossy(&text[..text.len().min(256 << 10)]) }))
+        })
+        .collect();
+    agents.sort_by(|a, b| a["role"].as_str().cmp(&b["role"].as_str()));
+    json!({ "config": config, "skills": skills, "agents": agents })
 }
 
 /// The board's first mail, for the list of runs: its subject and a preview,

@@ -183,20 +183,40 @@ function renderAccess(M) {
       el('tbody', {}, people.map((w) => el('tr', {}, el('td', {}, who(M, w.name)), resources.map((r) => cell(w, r))))))) : el('div', { class: 'empty card' }, 'Nobody yet.'),
     el('div', { class: 'muted small', style: 'margin-top:6px' }, 'Grants are decided by the security officer and the CEO (admin goes to the CEO); the CEO and the officers hold admin while they have the role. Everything else expires.'));
 }
+// A check the board has answered and whose decision hasn't come back yet:
+// its id, the button pressed and when; the reason typed, kept across
+// redraws.
+const CHECK_BUSY = new Map();
+const CHECK_NOTE = new Map();
 function renderChecks(M) {
   const box = $('sec-checks');
   if (!box) return;
+  CHECK_BUSY.lastM = M;
   const list = [...M.screenings.values()].sort((a, b) => (a.state === 'pending' ? 0 : 1) - (b.state === 'pending' ? 0 : 1) || b.ts - a.ts);
-  const sig = list.map((c) => c.id + c.state + (c.boardAsked ? '!' : '')).join(',') + '|' + canWrite();
+  // Decided, or no word for half a minute: the buttons come back.
+  for (const [id, b] of CHECK_BUSY) {
+    const c = M.screenings.get(id);
+    if (!c || c.state !== 'pending' || Date.now() - b.at > 30000) { CHECK_BUSY.delete(id); CHECK_NOTE.delete(id); }
+  }
+  const sig = list.map((c) => c.id + c.state + (c.boardAsked ? '!' : '') + (CHECK_BUSY.has(c.id) ? CHECK_BUSY.get(c.id).clear : '')).join(',') + '|' + canWrite();
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   if (!list.length) { box.replaceChildren(el('div', { class: 'empty card' }, 'No hires yet. Every new hire waits for a security officer\'s background check before they start.')); return; }
   box.replaceChildren(...list.map((c) => {
-    const note = el('input', { placeholder: 'Reason (required to object; the hirer reads it)', style: 'flex:1;min-width:220px', maxlength: 500 });
+    const busy = CHECK_BUSY.get(c.id);
+    const note = el('input', { placeholder: 'Reason (required to object; the hirer reads it)', style: 'flex:1;min-width:220px', maxlength: 500, value: CHECK_NOTE.get(c.id) || '', disabled: !!busy, oninput: (e) => CHECK_NOTE.set(c.id, e.target.value) });
+    const redraw = () => { box.dataset.sig = ''; renderChecks(CHECK_BUSY.lastM); };
     const act = (clear) => async () => {
-      try { await write('POST', F() + '/security/screenings/' + enc(c.id), { clear, note: note.value }); toast((clear ? 'Approved ' : 'Objected to ') + c.worker); box.dataset.sig = ''; loadFirm(); }
-      catch (e) { toast(e.message, true); }
+      if (CHECK_BUSY.has(c.id)) return;
+      CHECK_BUSY.set(c.id, { clear, at: Date.now() });
+      CHECK_NOTE.set(c.id, note.value);
+      redraw();
+      try { await write('POST', F() + '/security/screenings/' + enc(c.id), { clear, note: note.value }); toast((clear ? 'Approved ' : 'Objected to ') + c.worker); loadFirm(); }
+      catch (e) { CHECK_BUSY.delete(c.id); toast(e.message, true); redraw(); }
     };
+    // The button pressed spins until the decision comes back.
+    const button = (clear, cls, label) => el('button', { class: 'btn ' + cls, type: 'button', disabled: !!busy, 'aria-busy': busy && busy.clear === clear ? 'true' : null, onclick: act(clear) },
+      busy && busy.clear === clear ? el('span', { class: 'spinner', 'aria-hidden': 'true' }) : '', label);
     const pending = c.state === 'pending';
     return el('div', { class: 'card', style: 'margin-bottom:10px' + (pending ? ';border-left:3px solid var(--warn)' : '') },
       el('div', { style: 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap' },
@@ -208,8 +228,8 @@ function renderChecks(M) {
         el('div', { class: 'small' }, el('b', {}, 'Reason: '), c.reason),
         el('div', { class: 'small', style: 'margin-top:4px' }, el('b', {}, 'Brief: '), clip(c.brief, 1500))),
       pending && live() && canWrite() ? el('div', { class: 'bar', style: 'margin:10px 0 0' }, note,
-        el('button', { class: 'btn ok', type: 'button', onclick: act(true) }, 'Approve'),
-        el('button', { class: 'btn danger', type: 'button', onclick: act(false) }, 'Object')) : '');
+        button(true, 'ok', 'Approve'),
+        button(false, 'danger', 'Object')) : '');
   }));
 }
 

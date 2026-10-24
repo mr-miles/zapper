@@ -92,6 +92,7 @@ zapper firm up acme                               # a fresh, idle run (the clust
 zapper firm scenarios acme                        # simulations: hires with extra instructions, scripted board actions
 zapper firm up acme --scenario red-team           # play one (Kickoff lets the board change its hires and steps first)
 zapper firm up acme --task task.md                # with the board's task (first line the subject), sent to the CEO once it's up
+zapper firm up acme --task task.md --attach brief.pdf --attach data.csv   # files go with it, on the drive (up to 10, 5 MiB together)
 zapper firm up acme --articles law.md               # with the board's own articles; the CEO holds security until they hire an officer
 zapper mail send acme --to barbara --kind assignment --subject "…" --body "…"
 zapper firm journal acme -f                        # mail, states, turns, access requests, publishes
