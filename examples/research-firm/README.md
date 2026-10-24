@@ -41,6 +41,8 @@ Every line should be `ok` (or a `note`). With Ada, a research manager and two re
    zapper firm up lab --task examples/research-firm/task.md
    ```
 
+   To give the firm material to start from (notes, a spec, a paper), attach it: `--attach notes.md --attach spec.pdf`, up to 10 files and 5 MiB together. The files go on the shared drive, attached to Ada's task.
+
 3. Answer Ada, as the board:
 
    - **Her budget request** (`b-1`), in the Kickoff tab, or `zapper firm budget lab approve b-1`.

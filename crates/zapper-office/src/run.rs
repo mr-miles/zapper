@@ -169,6 +169,37 @@ pub struct StartOptions {
     /// The board's task for the CEO, sent as the run's first assignment
     /// once it is up: its first line is the subject, the rest the message.
     pub task: Option<String>,
+    /// Files the board attaches to the task: `{name, data}`, data in
+    /// base64. They go on the shared drive as one artifact by the board,
+    /// attached to the task's mail.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file the board attaches to its task.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub data: String,
+}
+
+/// The board's files, decoded and checked.
+fn task_files(opts: &StartOptions) -> Result<Vec<(String, Vec<u8>)>> {
+    use base64::Engine;
+    let files = opts
+        .attachments
+        .iter()
+        .map(|a| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(a.data.as_bytes())
+                .map_err(|_| anyhow!("{}: data is not base64", a.name))?;
+            Ok((a.name.clone(), data))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !files.is_empty() {
+        super::drive::check_board_files(&files)?;
+    }
+    Ok(files)
 }
 
 /// A task's subject (its first line) and message (the rest, or the subject
@@ -522,6 +553,11 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
             bail!("the task is too long: at most {} bytes", mail::MAX_BODY);
         }
     }
+    // Checked before anything boots: a bad attachment starts nothing.
+    let files = task_files(opts)?;
+    if !files.is_empty() && task.is_none() {
+        bail!("attachments go with the board's task: give one");
+    }
     if let Ok(r) = d.office().run(name) {
         if !r.ended() {
             bail!("firm {name} is already running (run {})", r.id);
@@ -568,11 +604,8 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
     tokio::spawn(ticker(d.clone(), run.clone()));
     tokio::spawn(booter(d.clone(), run.clone(), boot_rx));
     // The board's task, if it gave one: the CEO's first assignment.
-    if let (Some((subject, body)), Some(ceo)) = (task, run.chart().root().map(str::to_string)) {
-        if let Err(e) = board_send(
-            &run,
-            &json!({ "to": [ceo], "kind": "assignment", "subject": subject, "body": body }),
-        ) {
+    if let Some((subject, body)) = task {
+        if let Err(e) = send_task(&run, &subject, &body, files) {
             tracing::warn!(firm = %name, "the board's task: {e:#}");
             run.journal.append(
                 "op_error",
@@ -581,6 +614,31 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         }
     }
     Ok(run)
+}
+
+/// The board's task to the CEO, its files attached: they go on the drive
+/// first, as one artifact by the board.
+pub(crate) fn send_task(
+    run: &Arc<FirmRun>,
+    subject: &str,
+    body: &str,
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<mail::Sent> {
+    let ceo = run
+        .chart()
+        .root()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("the firm has no CEO"))?;
+    let attachments = if files.is_empty() {
+        vec![]
+    } else {
+        let v = super::drive::publish_board(run, files, &format!("{subject}: attachments"), None)?;
+        vec![v["ref"].as_str().unwrap_or_default().to_string()]
+    };
+    board_send(
+        run,
+        &json!({ "to": [ceo], "kind": "assignment", "subject": subject, "body": body, "attachments": attachments }),
+    )
 }
 
 /// Boots the VMs of workers hired during the run, and starts their foremen.

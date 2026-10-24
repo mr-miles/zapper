@@ -80,3 +80,81 @@ firms:
         .with(|po| po.inbox(crate::firm::BOARD, true, 10))
         .is_empty());
 }
+
+/// The board's files go with its task: checked before anything starts, then
+/// on the drive as the board's artifact, attached to the CEO's first mail.
+#[tokio::test]
+async fn a_task_carries_the_boards_files() {
+    let t = crate::test_core(FIRM);
+    let opts = |task: Option<&str>, files: serde_json::Value| -> crate::StartOptions {
+        serde_json::from_value(serde_json::json!({ "task": task, "attachments": files })).unwrap()
+    };
+    for (o, why) in [
+        (
+            opts(
+                None,
+                serde_json::json!([{ "name": "a.md", "data": "eA==" }]),
+            ),
+            "go with the board's task",
+        ),
+        (
+            opts(
+                Some("Go"),
+                serde_json::json!([{ "name": "a.md", "data": "not base64!" }]),
+            ),
+            "not base64",
+        ),
+        (
+            opts(
+                Some("Go"),
+                serde_json::json!([{ "name": "../x", "data": "eA==" }, { "name": "x", "data": "eA==" }]),
+            ),
+            "two files are named x",
+        ),
+    ] {
+        let e = crate::up_with(&t.core, "acme", &o)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains(why), "{e}");
+    }
+    assert!(t.core.sessions().is_empty(), "nothing started");
+
+    let run = crate::test_run(&t.core, "acme");
+    let sent = crate::run::send_task(
+        &run,
+        "Read these",
+        "The brief is attached.",
+        vec![("brief.md".into(), b"# Brief".to_vec())],
+    )
+    .unwrap();
+    let m = run
+        .post
+        .with(|po| po.messages.get(&sent.id).cloned())
+        .unwrap();
+    assert_eq!(
+        (m.from.as_str(), m.to.clone()),
+        ("board", vec!["ceo".to_string()])
+    );
+    assert_eq!(m.attachments.len(), 1, "{:?}", m.attachments);
+    let a = m.attachments[0]
+        .trim_start_matches("drive:")
+        .split('@')
+        .next()
+        .unwrap()
+        .to_string();
+    let art = run
+        .drive
+        .lock()
+        .unwrap()
+        .artifacts
+        .get(&a)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (art.author.as_str(), art.title.as_str()),
+        ("board", "Read these: attachments")
+    );
+    assert_eq!(art.versions[0].files[0].path, "brief.md");
+}

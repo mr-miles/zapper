@@ -72,7 +72,13 @@ pub fn read_routes() -> Router<Core> {
 /// and notes on runs.
 pub fn board_routes() -> Router<Core> {
     Router::new()
-        .route("/firms/{f}/up", post(up))
+        // The task's attachments ride in the body, base64 like an upload's.
+        .route(
+            "/firms/{f}/up",
+            post(up).layer(axum::extract::DefaultBodyLimit::max(
+                drive::BOARD_UPLOAD_MAX / 3 * 4 + (256 << 10),
+            )),
+        )
         .route("/firms/{f}/down", post(down))
         .route("/firms/{f}/pause", post(pause))
         .route("/firms/{f}/mail", post(send))
