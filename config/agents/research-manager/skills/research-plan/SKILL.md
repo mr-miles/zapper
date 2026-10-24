@@ -39,7 +39,7 @@ Method: what to read, compare or compute
 Every sub-question answered with cited findings, or marked unknown with why.
 ```
 
-Group sub-questions into strands that can run in parallel without the same sources. One researcher per strand; one strand is fine for a small question. Name every host a strand needs: security approves researchers' requests against this list, so a host on it is a quick yes and one off it is a question to you.
+Group sub-questions into strands that can run in parallel without the same sources. A strand that reading can't settle (does it build, does it run, how fast is it) is an engineer's, if your role hires one: its method is the prototype or experiment, its result the code in the firm's repository and a document in the pack saying what was tried, what happened and how to repeat it. One researcher per strand; one strand is fine for a small question. Name every host a strand needs: security approves researchers' requests against this list, so a host on it is a quick yes and one off it is a question to you.
 
 ## Staffing it
 

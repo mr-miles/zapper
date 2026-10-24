@@ -1,7 +1,8 @@
 # A firm that researches: Ada, the CEO, gets a question from the board and
 # hires a research manager, who scopes it with web search, writes a
 # research plan naming the sources and the sites they're on, and hires
-# researchers to work through it. Each researcher asks for the plan's sites,
+# researchers to work through it, and an engineer for what has to be built
+# or run to be answered. Each researcher asks for the plan's sites,
 # writes a pack of Markdown documents with references and suggests sources
 # the plan missed; the research manager decides on those, collates the packs
 # into one, reviews it and reports to Ada, who reports to you. Everyone is
@@ -58,11 +59,14 @@ profiles:
     policy:
       net:
         - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+        # The firm's repository comes with a grant (credentials_request),
+        # which allows it in the worker's own layer; never a network ask.
+        - { action: deny, host: git.lab.internal, comment: with a git grant only }
       defaults: { net: ask }
 
 firms:
   lab:
-    description: A CEO, a research manager and researchers answering a question with cited findings
+    description: A CEO, a research manager, researchers and an engineer answering a question with cited findings
     # The repository's skills: the playbooks any role may use.
     skills_dir: ../../config/skills
     # The repository's agent definitions: each role's brief and own skills.
@@ -70,6 +74,9 @@ firms:
     # A run budget, in tokens: hiring needs one. The seed is what Ada has to
     # scope the task; she asks the board for the rest.
     budget: { seed: 1000000, max_concurrent: 3 }
+    # A repository for the engineer's prototypes and experiments: code goes
+    # to git, never to the drive.
+    git: { repos: [prototypes] }
     credentials:
       # research: the plan and the packs; board: the board pack.
       spaces: [general, research, board]
@@ -89,12 +96,19 @@ firms:
         title: Research Manager
         model: claude-sonnet-5-5
         agent: research-manager
-        hires: [researcher]
+        hires: [researcher, engineer]
       researcher:
         profile: claude
         title: Researcher
         model: claude-sonnet-5-5
         agent: researcher
+      # Hands-on strands: build, run and measure what reading can't settle,
+      # with the code in the prototypes repository.
+      engineer:
+        profile: claude
+        title: Research Engineer
+        model: claude-sonnet-5-5
+        agent: software-engineer
     # The founder; everyone else is hired during the run.
     workers:
       - { name: ada, role: ceo }
