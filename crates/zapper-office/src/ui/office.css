@@ -571,3 +571,9 @@
     .node .rm-state { display: block; }
     aside.panel { transition: none; }
   }
+  /* A button whose action is on its way: a small ring before its label. */
+  .spinner { display:inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
+  .btn[aria-busy="true"]:disabled { opacity: 1; }
+
