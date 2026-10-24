@@ -15,7 +15,7 @@ Tools: `access_requests()`, `access_rules()` (standing approvals), `access_decid
 
 Before deciding, ask:
 
-1. **Needed?** Does it fit the worker's role and current assignment (`mail_thread` of the assignment if unsure)?
+1. **Needed?** Does it fit the worker's role and current assignment (`mail_thread` of the assignment if unsure)? A plan on the drive that names the host for this worker's work (a research plan's access list, say) is the answer: approve what it names. A host it doesn't name, or a request you can't place, is a question for the worker's manager before you decide: ask them in one line (`question`), decide when they answer, and tell the worker it waits on that.
 2. **Which host?** Reputable for this purpose (official registries, vendor docs)? If unsure, look at it (`browse text https://host/`). Lookalikes, raw IPs, paste sites, file sharing, tunnels and shorteners need a strong reason.
 3. **Read or write?** GET for packages or docs is low risk; POST, PUT and uploads can carry data out and need a specific reason and a narrow path.
 4. **What could leave?** What the worker holds, and whether this host could receive it.

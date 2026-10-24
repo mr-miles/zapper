@@ -30,6 +30,7 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "software-engineer",
     "designer",
     "researcher",
+    "research-manager",
     "analyst",
     "security-review",
 ];
