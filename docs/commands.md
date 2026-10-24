@@ -37,9 +37,9 @@ Setting up and running the daemon:
 
 | Command | Purpose |
 |---|---|
-| `zapper init` | Outside a checkout: write the repository's config to `~/.config/zapper/zapper.yaml` if it doesn't exist yet, and the default skills of The Office's workers to `~/.config/zapper/skills` (those already there stay; a zapper built without the office writes none) |
-| `zapper check` | Report missing prerequisites, each with the command that fixes it |
-| `zapper serve` | Run the daemon; prints the UI URL |
+| `zapper init [example\|empty]` | Write a starter config to `--config` (outside a checkout, `~/.config/zapper/zapper.yaml`) if it doesn't exist yet. `example` (the default): the repository's full config, and the default skills of The Office's workers to `~/.config/zapper/skills` (those already there stay; a zapper built without the office writes none). `empty`: only the daemon defaults `serve` needs — no profiles, policy or skills |
+| `zapper check` | Report missing prerequisites, each with the command that fixes it (a missing or invalid config among them) |
+| `zapper serve` | Run the daemon; prints the UI URL. Requires a config file at `--config` (or the default path); if none exists it errors and points at `zapper init` |
 
 The office ([office](office.md)), as the board:
 
