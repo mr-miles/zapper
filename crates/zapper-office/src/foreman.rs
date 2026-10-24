@@ -134,6 +134,16 @@ fn blocked(
     w: &WorkerRt,
     backoff_until: f64,
 ) -> Option<(WorkerState, Option<String>, u64)> {
+    blocked_by(run, w, backoff_until, zapper_core::record::healthy())
+}
+
+/// As `blocked`, given whether the record can be written.
+pub(crate) fn blocked_by(
+    run: &FirmRun,
+    w: &WorkerRt,
+    backoff_until: f64,
+    recordable: bool,
+) -> Option<(WorkerState, Option<String>, u64)> {
     let paused = *run.state.lock().unwrap() == RunState::Paused;
     let has_work = !w.queue.lock().unwrap().is_empty() || security::has_work(run, w);
     if paused || !has_work || now() < backoff_until {
@@ -148,7 +158,7 @@ fn blocked(
         return Some((st, detail, 5));
     }
     // No turns while the record can't be written: work isn't done unrecorded.
-    if !zapper_core::record::healthy() {
+    if !recordable {
         return Some((
             WorkerState::Error,
             Some("the record can't be written (is zapper-keeper running?)".into()),

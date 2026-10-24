@@ -91,9 +91,18 @@ fn run(name: &str, args: &[&str], stdin: Option<&str>) -> Result<()> {
 
 /// Builds the guest's network inside the current network namespace, which
 /// must be new and owned by the current user namespace.
-pub fn setup() -> Result<()> {
+/// `tap_user`: the namespace uid that will open the tap, when it isn't
+/// root.
+pub fn setup(tap_user: Option<u32>) -> Result<()> {
     run("ip", &["link", "set", "lo", "up"], None)?;
-    run("ip", &["tuntap", "add", TAP, "mode", "tap"], None)?;
+    match tap_user {
+        Some(u) => run(
+            "ip",
+            &["tuntap", "add", TAP, "mode", "tap", "user", &u.to_string()],
+            None,
+        )?,
+        None => run("ip", &["tuntap", "add", TAP, "mode", "tap"], None)?,
+    }
     run(
         "ip",
         &["addr", "add", &format!("{GATEWAY}/30"), "dev", TAP],

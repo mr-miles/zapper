@@ -113,6 +113,18 @@ r=/proc/$pid/root
 [ ! -e "$r$T/state/sessions/$id/audit.jsonl" ] && pass "the audit log is absent from the VMM's view" || fail "the audit log is absent from the VMM's view" "visible"
 [ -z "$(ls -A "$r$HOME" 2>/dev/null | grep -v '^\.local$')" ] && pass "the home directory holds only zapper's files" || fail "the home directory holds only zapper's files" "$(ls -A "$r$HOME")"
 touch "$r/probe" 2>/dev/null && fail "the VMM's root is read-only" "created $r/probe" || pass "the VMM's root is read-only"
+if "$Z" check 2>&1 | grep -q "uid of each session's own"; then
+  fcuid=$(ps -o uid= -p "$pid" | tr -d ' ')
+  [ -n "$fcuid" ] && [ "$fcuid" != "$(id -u)" ] && pass "Firecracker runs as a subordinate uid" || fail "Firecracker runs as a subordinate uid" "uid $fcuid, the daemon's $(id -u)"
+  "$Z" run --keep -C "$T/work" -- true > "$T/keep2.log" 2>&1
+  id2=$(grep -o 'session [a-z0-9]* kept' "$T/keep2.log" | cut -d' ' -f2)
+  pid2=$(pgrep -f "firecracker.*--id $id2" | head -1)
+  fcuid2=$(ps -o uid= -p "$pid2" | tr -d ' ')
+  [ -n "$fcuid2" ] && [ "$fcuid2" != "$fcuid" ] && pass "each session's Firecracker has a uid of its own" || fail "each session's Firecracker has a uid of its own" "$fcuid and $fcuid2"
+  "$Z" rm "$id2" > /dev/null
+else
+  echo "skip  Firecracker's own uid: no subordinate ids on this host (zapper check says why)"
+fi
 "$Z" rm "$id" > /dev/null
 [ -e "$T/state/sessions/$id/vm.json" ] && [ ! -e "$T/state/sessions/$id/vm" ] && pass "teardown keeps vm.json and removes the VMM directory" || fail "teardown keeps vm.json and removes the VMM directory" "$(ls -A "$T/state/sessions/$id")"
 

@@ -62,6 +62,12 @@ pub struct DaemonConfig {
     /// and The Office's workers. Off, zapper only sandboxes and monitors:
     /// it starts no agent on its own and gives none any input.
     pub driver: bool,
+    /// Each session's Firecracker runs as a uid of its own, from the daemon
+    /// user's ranges in /etc/subuid and /etc/subgid, mapped with newuidmap
+    /// and newgidmap (package uidmap), where the host has them; else, and
+    /// when off, as the daemon user.
+    #[serde(skip_serializing_if = "is_true")]
+    pub vmm_subids: bool,
 }
 
 /// Where the keeper listens and where its files are.
@@ -89,6 +95,7 @@ impl Default for DaemonConfig {
             private_networks: Vec::new(),
             keeper: None,
             driver: true,
+            vmm_subids: true,
         }
     }
 }
@@ -379,6 +386,10 @@ pub enum FsAccess {
 
 fn any() -> String {
     "*".into()
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 fn is_false(b: &bool) -> bool {

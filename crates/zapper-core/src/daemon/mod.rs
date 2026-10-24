@@ -9,7 +9,7 @@ pub mod addr;
 pub mod api_error;
 pub mod clients;
 pub mod deciders;
-mod dns;
+pub(crate) mod dns;
 pub mod driver;
 pub mod gateway;
 pub mod harness;
@@ -622,6 +622,9 @@ pub fn redact(mut c: Config) -> Config {
     }
     c
 }
+
+#[cfg(test)]
+mod limits_tests;
 
 #[cfg(test)]
 mod tests {

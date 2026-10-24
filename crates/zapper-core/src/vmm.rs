@@ -37,12 +37,16 @@ pub struct Args {
     pub kernel: PathBuf,
     pub initrd: PathBuf,
     pub nic: bool,
+    /// The daemon maps a subordinate uid into the namespace, which
+    /// Firecracker runs as (`crate::subids`); else the namespace's root is
+    /// the daemon user, and so is Firecracker.
+    pub sub: bool,
 }
 
 impl Args {
     /// Arguments after `__vmm`, in the order `to_args` writes them.
     fn parse(args: &[String]) -> Option<Args> {
-        let [dir, firecracker, config, id, kernel, initrd, net] = args else {
+        let [dir, firecracker, config, id, kernel, initrd, net, ids] = args else {
             return None;
         };
         Some(Args {
@@ -57,6 +61,11 @@ impl Args {
                 "none" => false,
                 _ => return None,
             },
+            sub: match ids.as_str() {
+                "sub" => true,
+                "own" => false,
+                _ => return None,
+            },
         })
     }
 
@@ -69,6 +78,7 @@ impl Args {
         v.push((&self.kernel).into());
         v.push((&self.initrd).into());
         v.push(if self.nic { "nic" } else { "none" }.into());
+        v.push(if self.sub { "sub" } else { "own" }.into());
         v
     }
 }
@@ -108,13 +118,31 @@ fn mount(
     check(r, &format!("mount {}", target.display()))
 }
 
-/// Enters new user, network and mount namespaces as their root.
-fn unshare() -> Result<()> {
+/// Enters new user, network and mount namespaces as their root: the
+/// daemon user. With `sub`, the daemon writes the id maps (it maps a
+/// subordinate id as well, which only its setuid helpers may), and this
+/// waits for them.
+fn unshare(sub: bool) -> Result<()> {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWNS;
     if unsafe { libc::unshare(flags) } != 0 {
         let e = io::Error::last_os_error();
         bail!("unshare(user, net, mount): {e} (unprivileged user namespaces disabled? see docs/network.md)");
+    }
+    if sub {
+        for _ in 0..2000 {
+            if !std::fs::read_to_string("/proc/self/uid_map")?
+                .trim()
+                .is_empty()
+                && !std::fs::read_to_string("/proc/self/gid_map")?
+                    .trim()
+                    .is_empty()
+            {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        bail!("the daemon didn't map this VMM's ids");
     }
     std::fs::write("/proc/self/setgroups", "deny").context("setgroups")?;
     std::fs::write("/proc/self/uid_map", format!("0 {uid} 1")).context("uid_map")?;
@@ -217,10 +245,34 @@ fn confine(a: &Args) -> Result<()> {
     Ok(())
 }
 
+/// The namespace's uid that Firecracker runs as with `sub`: the session's
+/// subordinate uid on the host. 0 is the daemon user.
+pub const SUB_UID: u32 = 1;
+
+/// Lets Firecracker, as `SUB_UID` in the daemon's group, use the session's
+/// VM directory: create its sockets there, use the disks, the config, the
+/// metrics and the daemon's listening sockets. Nothing outside it.
+fn share_with_firecracker(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o770))
+        .with_context(|| format!("{}", dir.display()))?;
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let p = e.path();
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.file_type().is_symlink() || meta.is_dir() {
+            continue;
+        }
+        let mode = meta.permissions().mode() & 0o7777;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode((mode | 0o660) & !0o007))
+            .with_context(|| format!("{}", p.display()))?;
+    }
+    Ok(())
+}
+
 /// `zapper __vmm --probe [nic]`: can this host build the namespaces, and
 /// with `nic` the guest's network?
 pub fn probe(nic: bool) -> i32 {
-    match unshare().and_then(|_| if nic { netns::setup() } else { Ok(()) }) {
+    match unshare(false).and_then(|_| if nic { netns::setup(None) } else { Ok(()) }) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{e:#}");
@@ -231,7 +283,7 @@ pub fn probe(nic: bool) -> i32 {
 
 pub fn main(args: &[String]) -> i32 {
     let Some(a) = Args::parse(args) else {
-        eprintln!("usage: zapper __vmm DIR FIRECRACKER CONFIG ID KERNEL INITRD nic|none");
+        eprintln!("usage: zapper __vmm DIR FIRECRACKER CONFIG ID KERNEL INITRD nic|none sub|own");
         return 2;
     };
     match run(&a) {
@@ -245,11 +297,16 @@ pub fn main(args: &[String]) -> i32 {
 
 fn run(a: &Args) -> Result<i32> {
     let parent = unsafe { libc::getppid() };
-    unshare()?;
+    unshare(a.sub)?;
     if a.nic {
-        netns::setup()?;
+        // Firecracker opens the tap as its own uid, without capabilities:
+        // the tap is that uid's.
+        netns::setup(a.sub.then_some(SUB_UID))?;
     }
     confine(a)?;
+    if a.sub {
+        share_with_firecracker(&a.dir)?;
+    }
     // Entering the user namespace changed credentials, which cleared the
     // parent-death signal the daemon set: set it again.
     unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
@@ -259,6 +316,7 @@ fn run(a: &Args) -> Result<i32> {
     if a.nic {
         netns::serve(&a.dir)?;
     }
+    let sub = a.sub;
     let status = unsafe {
         Command::new(&a.firecracker)
             .arg("--no-api")
@@ -267,7 +325,19 @@ fn run(a: &Args) -> Result<i32> {
             .args(["--level", "Warn", "--id", &a.id])
             .current_dir(&a.dir)
             .stdin(Stdio::null())
-            .pre_exec(|| {
+            .pre_exec(move || {
+                if sub {
+                    // The session's own uid, no capabilities; the daemon's
+                    // group, for the session's files and sockets.
+                    libc::umask(0o007);
+                    if libc::setresuid(SUB_UID, SUB_UID, SUB_UID) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                // After any change of uid, which clears it.
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 Ok(())
             })

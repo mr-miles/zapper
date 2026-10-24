@@ -1293,6 +1293,24 @@ async fn check(config_path: &Path) -> Result<i32> {
             );
         }
     }
+    // Firecracker's uid: a subordinate one per session, where the host has
+    // them.
+    if !d.vmm_subids {
+        println!("note   Firecracker runs as this user (daemon.vmm_subids is off)");
+    } else {
+        match zapper_core::subids::host() {
+            Ok(ids) => report(
+                true,
+                &format!(
+                    "Firecracker runs as a uid of each session's own ({}–{}, from /etc/subuid)",
+                    ids.uids.start,
+                    ids.uids.start + ids.uids.count.min(4096) - 1
+                ),
+                "",
+            ),
+            Err(why) => println!("note   Firecracker runs as this user: {why} (sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER, and sudo apt install uidmap, give each session its own)"),
+        }
+    }
     // The record's keeper, when configured: it must answer, and its
     // directory must be readable and not writable by us.
     match &d.keeper {

@@ -87,7 +87,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Resp
 }
 
 /// Splits `host:port`, `[v6]:port` or `host`.
-fn split_authority(a: &str, default_port: u16) -> Option<(String, u16)> {
+pub(crate) fn split_authority(a: &str, default_port: u16) -> Option<(String, u16)> {
     let (host, port) = if let Some(rest) = a.strip_prefix('[') {
         let (h, tail) = rest.split_once(']')?;
         (h, tail.strip_prefix(':'))
@@ -549,6 +549,22 @@ async fn peek<S: AsyncRead + Unpin>(io: &mut S) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether a passed-through stream's first bytes may go to `host`: not TLS,
+/// TLS without a server name, or a ClientHello naming `host`. A ClientHello
+/// that doesn't parse (malformed, cut short, or split across records, which
+/// servers accept) is refused: its server name can't be checked.
+pub(crate) fn server_name_matches(first: &[u8], host: &str) -> Result<(), String> {
+    match tls::client_hello_sni(first) {
+        Ok(None) => Ok(()),
+        Ok(Some(sni)) => match zapper_policy::names::hostname(&sni) {
+            Ok(n) if n == host => Ok(()),
+            Ok(n) => Err(format!("TLS server name {n} does not match the checked host")),
+            Err(_) => Err("TLS server name (invalid) does not match the checked host".into()),
+        },
+        Err(()) => Err("a TLS ClientHello that can't be read (malformed, cut short or split across records): its server name can't be checked".into()),
+    }
+}
+
 /// Passes a stream through. A TLS ClientHello must name the checked host, so
 /// an allowed host cannot front for another.
 async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
@@ -574,30 +590,22 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         vec![],
     );
     note_verdict(&rec, &v);
-    if let Ok(Some(sni)) = tls::client_hello_sni(&first) {
-        let sni = zapper_policy::names::hostname(&sni).map_err(|_| sni.clone());
-        if sni.as_deref() != Ok(endpoint.host.as_str()) {
-            let shown = match &sni {
-                Ok(n) => n.clone(),
-                Err(_) => "(invalid)".into(),
-            };
-            let error = format!("TLS server name {shown} does not match the checked host");
-            log(
-                d,
-                s,
-                NetLog {
-                    req: endpoint,
-                    verdict: Some(&v),
-                    inspected: false,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(error.clone()),
-                },
-            );
-            rec.lock().unwrap().action = Action::Deny;
-            note_failure(s, &rec, 403, Some(error));
-            return;
-        }
+    if let Err(error) = server_name_matches(&first, &endpoint.host) {
+        log(
+            d,
+            s,
+            NetLog {
+                req: endpoint,
+                verdict: Some(&v),
+                inspected: false,
+                status: None,
+                secrets: vec![],
+                error: Some(error.clone()),
+            },
+        );
+        rec.lock().unwrap().action = Action::Deny;
+        note_failure(s, &rec, 403, Some(error));
+        return;
     }
     let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
@@ -781,9 +789,9 @@ where
 /// the secrets this host may receive. Returns the secrets used.
 /// Secrets added to a request: their names, and their values, which the
 /// request log replaces with `***` wherever they show up.
-struct Injected {
-    names: Vec<String>,
-    values: Vec<String>,
+pub(crate) struct Injected {
+    pub(crate) names: Vec<String>,
+    pub(crate) values: Vec<String>,
 }
 
 fn inject(
@@ -793,7 +801,17 @@ fn inject(
     effects: &NetEffects,
     headers: &mut hyper::HeaderMap,
 ) -> Result<Injected, String> {
-    let config = d.config.read().unwrap();
+    inject_with(&d.config.read().unwrap(), host, plaintext, effects, headers)
+}
+
+/// `inject` with the config given.
+pub(crate) fn inject_with(
+    config: &zapper_policy::Config,
+    host: &str,
+    plaintext: bool,
+    effects: &NetEffects,
+    headers: &mut hyper::HeaderMap,
+) -> Result<Injected, String> {
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
@@ -863,7 +881,12 @@ fn inject(
     })
 }
 
-fn clean_headers(headers: &mut hyper::HeaderMap, host: &str, port: u16, default_port: u16) {
+pub(crate) fn clean_headers(
+    headers: &mut hyper::HeaderMap,
+    host: &str,
+    port: u16,
+    default_port: u16,
+) {
     for h in HOP_HEADERS {
         headers.remove(h);
     }
@@ -1225,7 +1248,110 @@ mod approval_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::split_authority;
+    use super::{clean_headers, inject, server_name_matches, split_authority};
+    use crate::testing::TestCore;
+    use zapper_policy::{placeholder, NetEffects};
+
+    /// A passed-through ClientHello must name the checked host; one whose
+    /// name can't be read is refused, a hello split across two records
+    /// included (servers accept it, so it would front for another host).
+    #[test]
+    fn a_tls_hello_names_the_checked_host_or_is_refused() {
+        let hello = |name: &str| {
+            let mut c = rustls::ClientConnection::new(
+                crate::daemon::tls::client_config(),
+                name.to_string().try_into().unwrap(),
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            c.write_tls(&mut out).unwrap();
+            out
+        };
+        let ok = hello("api.example");
+        assert_eq!(server_name_matches(&ok, "api.example"), Ok(()));
+        let e = server_name_matches(&hello("other.example"), "api.example").unwrap_err();
+        assert!(e.contains("other.example"), "{e}");
+        assert_eq!(
+            server_name_matches(b"SSH-2.0-OpenSSH", "api.example"),
+            Ok(())
+        );
+        // Cut short.
+        assert!(server_name_matches(&ok[..40], "api.example").is_err());
+        // The same handshake in two records, naming another host.
+        let other = hello("other.example");
+        let body = &other[5..];
+        let (a, b) = body.split_at(20);
+        let mut split = Vec::new();
+        for part in [a, b] {
+            split.extend_from_slice(&other[..3]);
+            split.extend_from_slice(&(part.len() as u16).to_be_bytes());
+            split.extend_from_slice(part);
+        }
+        let e = server_name_matches(&split, "api.example").unwrap_err();
+        assert!(e.contains("split across records"), "{e}");
+    }
+
+    /// What goes upstream names the host that was checked, whatever Host
+    /// the client sent, and carries no hop-by-hop headers.
+    #[test]
+    fn the_host_header_is_the_checked_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "evil.example".parse().unwrap());
+        headers.insert("proxy-authorization", "x".parse().unwrap());
+        headers.insert("connection", "keep-alive".parse().unwrap());
+        clean_headers(&mut headers, "api.example", 443, 443);
+        assert_eq!(headers["host"], "api.example");
+        assert!(headers.get("proxy-authorization").is_none());
+        assert!(headers.get("connection").is_none());
+        assert_eq!(headers.get_all("host").iter().count(), 1);
+        // Another port is named.
+        clean_headers(&mut headers, "api.example", 8443, 443);
+        assert_eq!(headers["host"], "api.example:8443");
+    }
+
+    /// A secret goes only to its own `hosts`, and over plain HTTP only with
+    /// `plaintext: true`, whichever rule asked for it.
+    #[test]
+    fn a_secret_goes_only_where_it_may() {
+        let t = TestCore::new(
+            "secrets:\n  s: { value: the-value, hosts: [api.example] }\n  lab: { value: lab-value, hosts: [lab.example], plaintext: true }\n",
+        );
+        let d = t.core.daemon();
+        let add = |name: &str, host: &str, plaintext: bool| {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", placeholder(name)).parse().unwrap(),
+            );
+            let effects = NetEffects {
+                secrets: vec![name.to_string()],
+                set_headers: vec![],
+            };
+            inject(d, host, plaintext, &effects, &mut headers).map(|i| (i.names, headers))
+        };
+        let (names, headers) = add("s", "api.example", false).unwrap();
+        assert_eq!(names, ["s"]);
+        assert_eq!(headers["authorization"], "Bearer the-value");
+        // A rule matching another host asks for it in vain.
+        let e = add("s", "evil.example", false).unwrap_err();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        // Plain HTTP, to its own host: refused without plaintext.
+        let e = add("s", "api.example", true).unwrap_err();
+        assert!(e.contains("plain HTTP"), "{e}");
+        let (_, headers) = add("lab", "lab.example", true).unwrap();
+        assert_eq!(headers["authorization"], "Bearer lab-value");
+        // set_headers is held to the same.
+        let mut headers = hyper::HeaderMap::new();
+        let effects = NetEffects {
+            secrets: vec![],
+            set_headers: vec![("x-key".into(), "{{secret:s}}".into())],
+        };
+        let e = inject(d, "evil.example", false, &effects, &mut headers)
+            .err()
+            .unwrap();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        assert!(headers.get("x-key").is_none());
+    }
 
     #[test]
     fn authorities() {

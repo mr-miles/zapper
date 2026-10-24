@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 # `Core::test_session` and `testing`, for other crates' tests.
 test-util = []
+# `fuzz`: entry points for the fuzz targets in fuzz/.
+fuzz = []
 
 [dependencies]
 zapper-policy = { path = "../zapper-policy" }

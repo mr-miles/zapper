@@ -46,6 +46,7 @@ firms:      name → org chart, budgets, officers, the firm's services  (office.
 | `ui` | `127.0.0.1:7878` | Address of the UI (state and approvals); empty turns the UI off. Loopback by default; another address serves it to the network, for a remote host ([a remote host](#a-remote-host)) |
 | `ask_timeout_secs` | `60` | How long an `ask` waits before it denies |
 | `max_sessions` | `16` | Sessions starting or running at the same time |
+| `vmm_subids` | `true` | Each session's Firecracker runs as a subordinate uid of its own, without capabilities, where the daemon user has ranges in `/etc/subuid` and `/etc/subgid` and the `uidmap` helpers are installed; else, or `false`, as the daemon user. `zapper check` says which |
 | `driver` | `true` | The driver: agents run headless and given tasks (`agent.driven`), and The Office's workers. `false`: zapper only sandboxes and monitors; it starts no agent on its own and gives none any input. A config with a driven profile or a firm is then refused, and turning it off in the running config is refused while driven sessions run |
 | `private_networks` | `[]` | CIDRs of private networks sessions may reach ([network](network.md#address-checks)) |
 | `keeper` | unset | `{socket, dir}`: the record kept by `zapper-keeper` as a separate user, append-only ([security: the record](security.md#the-record)); `scripts/install-keeper.sh` prints the values. Read at start: changing it needs a restart |

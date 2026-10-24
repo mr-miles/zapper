@@ -24,7 +24,7 @@ use zapper_policy::Action;
 type Body = BoxBody<Bytes, hyper::Error>;
 
 /// Bytes of each body kept per request.
-const BODY_CAP: usize = 64 << 10;
+pub(crate) const BODY_CAP: usize = 64 << 10;
 /// Records kept per session.
 const MAX_RECORDS: usize = 1000;
 /// Body bytes kept per session; the oldest bodies are dropped first.
@@ -226,7 +226,7 @@ fn summary(r: &Record) -> Value {
 }
 
 /// Replaces each added secret value with `***`.
-fn redact(text: &str, values: &[String]) -> String {
+pub(crate) fn redact(text: &str, values: &[String]) -> String {
     let mut out = text.to_string();
     for v in values.iter().filter(|v| v.len() >= 4) {
         out = out.replace(v.as_str(), "***");
@@ -234,7 +234,7 @@ fn redact(text: &str, values: &[String]) -> String {
     out
 }
 
-fn redact_headers(h: &[(String, String)], values: &[String]) -> Vec<(String, String)> {
+pub(crate) fn redact_headers(h: &[(String, String)], values: &[String]) -> Vec<(String, String)> {
     h.iter()
         .map(|(k, v)| (k.clone(), redact(v, values)))
         .collect()
@@ -243,7 +243,7 @@ fn redact_headers(h: &[(String, String)], values: &[String]) -> Vec<(String, Str
 /// A body for display: decoded per `content-encoding`, as text when it is
 /// UTF-8, base64 otherwise. Added secret values are shown as `***`; binary
 /// bodies holding one are not shown.
-fn body_json(c: &Captured, h: &[(String, String)], values: &[String]) -> Value {
+pub(crate) fn body_json(c: &Captured, h: &[(String, String)], values: &[String]) -> Value {
     use base64::Engine as _;
     let encoding = header(h, "content-encoding")
         .unwrap_or("")
@@ -270,7 +270,7 @@ fn body_json(c: &Captured, h: &[(String, String)], values: &[String]) -> Value {
 }
 
 /// Decodes as much of a (possibly truncated) compressed body as possible.
-fn decode(data: &[u8], encoding: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode(data: &[u8], encoding: &str) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let reader: Box<dyn Read> = match encoding {
         "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(data)),

@@ -1,0 +1,4 @@
+authorization: Bearer zapper-secret-a
+host: evil.example
+connection: keep-alive
+x-other: zapper-secret-ab

@@ -306,3 +306,27 @@ async fn a_rate_limited_turn_keeps_its_mail_for_later() {
     let queued = run.rt("pat").unwrap().queue.lock().unwrap().clone();
     assert_eq!(queued.len(), 1, "the mail waits for the next turn");
 }
+
+/// No turns while the record can't be written: with mail waiting, a
+/// worker shows the error and waits; once the record is back, nothing
+/// holds them. (The record's health is the daemon's, shared by every test
+/// in this process, so the gate is given it rather than it being broken.)
+#[tokio::test]
+async fn no_turns_while_the_record_cant_be_written() {
+    let (t, run) = run_with(FIRM);
+    mail_pat(&t, &run, "The plan").await;
+    let w = run.rt("pat").unwrap();
+    for _ in 0..200 {
+        if !w.queue.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (state, detail, _) = crate::foreman::blocked_by(&run, &w, 0.0, false).expect("held");
+    assert_eq!(state, WorkerState::Error);
+    assert!(detail.unwrap().contains("record can't be written"));
+    assert!(
+        crate::foreman::blocked_by(&run, &w, 0.0, true).is_none(),
+        "free once it's back"
+    );
+}

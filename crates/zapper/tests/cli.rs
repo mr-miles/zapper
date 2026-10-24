@@ -250,6 +250,118 @@ async fn serve_listens_on_its_socket() {
     serve.start_kill().unwrap();
 }
 
+/// One HTTP/1.1 request to 127.0.0.1:`port`: the status and the whole
+/// response.
+async fn http(port: u16, request: String) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    c.write_all(request.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).await.unwrap();
+    let status = out
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, out)
+}
+
+/// `zapper serve` with the UI listening beyond loopback, over TCP: it
+/// warns; any well-formed Host is let in with the token, which signs in
+/// once; without it nothing is served; a write needs X-Zapper-UI and an
+/// Origin naming the Host it was sent to.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ui_listening_on_the_network_end_to_end() {
+    let t = TestCore::new(CONFIG);
+    let startup = std::fs::read_to_string(t.startup())
+        .unwrap()
+        .replace("  ui: \"\"\n", "  ui: 0.0.0.0:0\n");
+    assert!(startup.contains("ui: 0.0.0.0:0"), "{startup}");
+    std::fs::write(t.startup(), startup).unwrap();
+    let log = t.dir.join("serve.log");
+    let mut serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("--config")
+        .arg(t.startup())
+        .arg("serve")
+        .env("ZAPPER_SOCKET", t.dir.join("api.sock"))
+        .env("HOME", &t.dir)
+        .stderr(std::fs::File::create(&log).unwrap())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let url_file = t.dir.join("state").join("ui-url");
+    let mut url = String::new();
+    for _ in 0..1200 {
+        if let Ok(u) = std::fs::read_to_string(&url_file) {
+            url = u.trim().to_string();
+            break;
+        }
+        if let Some(status) = serve.try_wait().unwrap() {
+            panic!("zapper serve exited: {status}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (_, rest) = url.split_once("://").expect("the UI's URL");
+    let (authority, query) = rest.split_once("/?token=").unwrap();
+    let port: u16 = authority.rsplit(':').next().unwrap().parse().unwrap();
+    let token = query.to_string();
+    // The URL is written once the UI's port is bound.
+    let host = format!("zapper.lan:{port}");
+    let req = |method: &str, path: &str, extra: &str| {
+        format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: 15\r\nContent-Type: application/json\r\n{extra}\r\n{{\"allow\":false}}")
+    };
+    let (status, _) = http(port, req("GET", "/api/status", "")).await;
+    assert_eq!(status, 401, "nothing without the token");
+    let warned = std::fs::read_to_string(&log).unwrap();
+    assert!(warned.contains("the UI (daemon.ui) listens on"), "{warned}");
+
+    let (status, signed) = http(port, req("GET", &format!("/?token={token}"), "")).await;
+    assert!((300..400).contains(&status), "{signed}");
+    let cookie = signed
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("set-cookie: ")
+                .or_else(|| l.strip_prefix("Set-Cookie: "))
+        })
+        .and_then(|c| c.split(';').next())
+        .expect("a cookie")
+        .to_string();
+    let with = |extra: &str| format!("Cookie: {cookie}\r\n{extra}");
+    let (status, body) = http(port, req("GET", "/api/status", &with(""))).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = http(
+        port,
+        format!("GET /api/status HTTP/1.1\r\nHost: bad host\r\nConnection: close\r\nCookie: {cookie}\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status, 403, "a malformed Host");
+
+    // Writes: marked, from the Host it was sent to, over http or https.
+    let post = |extra: &str| req("POST", "/api/approvals/nosuch", &with(extra));
+    let (status, _) = http(port, post(&format!("Origin: http://{host}\r\n"))).await;
+    assert_eq!(status, 403, "unmarked");
+    let (status, _) = http(
+        port,
+        post("X-Zapper-UI: 1\r\nOrigin: http://evil.example\r\n"),
+    )
+    .await;
+    assert_eq!(status, 403, "another origin");
+    for scheme in ["http", "https"] {
+        let (status, body) = http(
+            port,
+            post(&format!("X-Zapper-UI: 1\r\nOrigin: {scheme}://{host}\r\n")),
+        )
+        .await;
+        assert!(
+            status != 403 && status != 401,
+            "{scheme}: past the guard: {body}"
+        );
+    }
+    serve.start_kill().unwrap();
+}
+
 /// The board approves a background check or objects: one of the two, and
 /// `--clear`, the old name, still approves.
 #[cfg(feature = "office")]

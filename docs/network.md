@@ -76,7 +76,7 @@ For an allowed connection, the daemon:
 
 1. resolves the name on the host and checks the address ([address checks](#address-checks));
 2. connects to the address it checked;
-3. if the client starts with a TLS ClientHello, requires its server name to equal the decided name;
+3. if the client starts with a TLS ClientHello, requires its server name to equal the decided name, and refuses a ClientHello it can't read (malformed, cut short, or split across records), whose name it can't check;
 4. relays the bytes.
 
 If a rule for the host has `methods`, `path`, `secrets` or `set_headers`, the connection is inspected instead. For TLS, the daemon completes the handshake with a certificate from the session's CA, which the guest trusts. It then decides each request on its method and path, sets `Host` to the decided name, adds secrets, and forwards the request over a verified TLS connection. Plain HTTP is inspected the same way, without the TLS step.
