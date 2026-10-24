@@ -9,7 +9,7 @@ pub mod addr;
 pub mod api_error;
 pub mod clients;
 pub mod deciders;
-mod dns;
+pub(crate) mod dns;
 pub mod driver;
 pub mod gateway;
 pub mod harness;

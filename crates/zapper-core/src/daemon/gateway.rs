@@ -98,7 +98,9 @@ pub async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListene
 
 /// Reads one line, at most `MAX_MCP_LINE` bytes: `None` at the end, `Err`
 /// for a longer one.
-async fn line<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) async fn line<R: AsyncRead + Unpin>(
+    r: &mut BufReader<R>,
+) -> std::io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     let n = r
         .take(MAX_MCP_LINE as u64 + 1)

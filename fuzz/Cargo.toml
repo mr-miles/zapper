@@ -1,0 +1,61 @@
+[package]
+name = "zapper-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zapper-core = { path = "../crates/zapper-core", features = ["fuzz"] }
+
+# Not part of the main workspace: cargo-fuzz builds it with nightly.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "dns_query"
+path = "fuzz_targets/dns_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_hello"
+path = "fuzz_targets/tls_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authority"
+path = "fuzz_targets/authority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guest_line"
+path = "fuzz_targets/guest_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mcp_line"
+path = "fuzz_targets/mcp_line.rs"
+test = false
+doc = false
+bench = false

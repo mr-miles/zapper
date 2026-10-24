@@ -38,7 +38,7 @@ The invariants in [AGENTS.md](../AGENTS.md#working-on-the-repository) and where 
 | DNS queries and host names are validated; DNS resolves only what could be allowed and never makes up an answer | unit: DNS answers; e2e: NIC session (NXDOMAIN, refused names) | |
 | `proxy` secret values stay on the host and are added only where allowed | e2e: NIC session (the placeholder in the guest, the value in an allowed request), request log (an echoed secret is redacted); unit: refused for a host outside the secret's `hosts` and over plain HTTP without `plaintext: true`, placeholders and `set_headers` alike; a `guest` secret only in the profiles that use it | |
 | The proxy connects to the address it checked; loopback, link-local and host addresses are unreachable | unit: address checks; e2e: NIC session (raw IP), root in the guest (a real address) | |
-| Passthrough is bound to the TLS server name; inspection presents a per-session CA and overrides `Host` | unit: SNI parsing, certificate minting, the `Host` override; e2e: NIC session (a TLS name that differs is denied) | |
+| Passthrough is bound to the TLS server name; inspection presents a per-session CA and overrides `Host` | unit: SNI parsing, an unreadable ClientHello refused (one split across records too), certificate minting, the `Host` override; fuzz: `tls_hello`; e2e: NIC session (a TLS name that differs is denied) | |
 | One control connection; terminals only from CID 2 | e2e: attacks | |
 | Foreign-arch and x32 syscalls are killed | e2e: attacks | |
 | Input from the guest is bounded and rendered as text | unit: control lines, frames, connections through the proxy, approvals waiting, MCP connections; the pages' scripts parse no string as HTML and run none as code | |
@@ -49,6 +49,10 @@ The invariants in [AGENTS.md](../AGENTS.md#working-on-the-repository) and where 
 | With a keeper, the record is append-only through it | unit: the keeper's store (hash chains, checkpoints, recovery after a crash), no firm turns while the record can't be written; `zapper-keeper serve`: appends from the configured uid only, a line in its file before it is acknowledged | That the line is on the disk, not only in the file, when acknowledged: that takes a power cut |
 
 Controls in the [security model](security.md#what-is-enforced-where) without a test yet: VMs not reaching each other, facility ports accepting only the host's CID, the lifetime, CPU, memory and disk limits, the console cap, and `no_new_privs`.
+
+## Fuzzing
+
+The parsers that read what a guest sends (DNS queries, the TLS ClientHello, CONNECT and Host authorities, the control channel's lines, terminal frames, MCP lines) have fuzz targets in [fuzz/](../fuzz/README.md), run by hand with nightly and cargo-fuzz. A crash found there becomes a unit test next to the parser.
 
 ## Manual scenarios
 

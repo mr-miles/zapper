@@ -4,6 +4,8 @@
 //! `zapper` binary is the CLI over it.
 
 mod daemon;
+#[cfg(feature = "fuzz")]
+pub mod fuzz;
 mod interface;
 pub mod netns;
 #[cfg(any(test, feature = "test-util"))]
