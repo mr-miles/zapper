@@ -1,8 +1,9 @@
 # A firm that researches: Ada, the CEO, gets a question from the board and
 # hires a research manager, who scopes it with web search, writes a
 # research plan naming the sources and the sites they're on, and hires
-# researchers to work through it, and an engineer for what has to be built
-# or run to be answered. Each researcher asks for the plan's sites,
+# researchers to work through it. Once the board has the findings and asks
+# for a prototype, Ada commissions a prototype engineer to build it in the
+# firm's repository. Each researcher asks for the plan's sites,
 # writes a pack of Markdown documents with references and suggests sources
 # the plan missed; the research manager decides on those, collates the packs
 # into one, reviews it and reports to Ada, who reports to you. Everyone is
@@ -66,7 +67,7 @@ profiles:
 
 firms:
   lab:
-    description: A CEO, a research manager, researchers and an engineer answering a question with cited findings
+    description: A CEO, a research manager and researchers answering a question with cited findings, then a prototype engineer building from them
     # The repository's skills: the playbooks any role may use.
     skills_dir: ../../config/skills
     # The repository's agent definitions: each role's brief and own skills.
@@ -74,8 +75,7 @@ firms:
     # A run budget, in tokens: hiring needs one. The seed is what Ada has to
     # scope the task; she asks the board for the rest.
     budget: { seed: 1000000, max_concurrent: 3 }
-    # A repository for the engineer's prototypes and experiments: code goes
-    # to git, never to the drive.
+    # A repository for prototypes: code goes to git, never to the drive.
     git: { repos: [prototypes] }
     credentials:
       # research: the plan and the packs; board: the board pack.
@@ -90,25 +90,26 @@ firms:
         agent: ceo
         # No officer role: with one, Ada would have to hire a security
         # officer before anyone else. She holds security herself.
-        hires: [research-manager]
+        # A prototype comes after the research: once the board has the pack
+        # and asks for one, Ada commissions it.
+        hires: [research-manager, prototype-engineer]
       research-manager:
         profile: claude
         title: Research Manager
         model: claude-sonnet-5-5
         agent: research-manager
-        hires: [researcher, engineer]
+        hires: [researcher]
       researcher:
         profile: claude
         title: Researcher
         model: claude-sonnet-5-5
         agent: researcher
-      # Hands-on strands: build, run and measure what reading can't settle,
-      # with the code in the prototypes repository.
-      engineer:
+      # Builds the prototype the board commissions from the research, in the
+      # prototypes repository.
+      prototype-engineer:
         profile: claude
-        title: Research Engineer
+        title: Prototype Engineer
         model: claude-sonnet-5-5
-        agent: software-engineer
     # The founder; everyone else is hired during the run.
     workers:
       - { name: ada, role: ceo }

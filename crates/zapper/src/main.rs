@@ -1729,8 +1729,9 @@ mod tests {
     }
 
     /// `examples/research-firm`: Ada alone, who may hire a research
-    /// manager, who may hire researchers and an engineer; drive spaces for
-    /// the research and the board pack, a repository for prototypes.
+    /// manager, who may hire researchers, and a prototype engineer; drive
+    /// spaces for the research and the board pack, a repository for
+    /// prototypes.
     #[cfg(feature = "office")]
     #[test]
     fn the_research_firm_example_loads() {
@@ -1738,9 +1739,8 @@ mod tests {
         let lab = &zapper_office::firm::all(&c)["lab"];
         let founders: Vec<&str> = lab.workers.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(founders, ["ada"]);
-        assert_eq!(lab.roles["ceo"].hires, ["research-manager"]);
-        assert_eq!(lab.roles["research-manager"].hires, ["researcher", "engineer"]);
-        assert_eq!(lab.roles["engineer"].agent_name("engineer"), "software-engineer");
+        assert_eq!(lab.roles["ceo"].hires, ["research-manager", "prototype-engineer"]);
+        assert_eq!(lab.roles["research-manager"].hires, ["researcher"]);
         assert!(lab.budget.seed > 0);
         assert_eq!(lab.git_repos(), ["prototypes"]);
         for space in ["research", "board"] {

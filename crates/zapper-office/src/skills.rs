@@ -56,6 +56,8 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "agents/research-manager/AGENT.md",
     "agents/research-manager/skills/research-plan/SKILL.md",
     "agents/research-manager/skills/collating-packs/SKILL.md",
+    "agents/prototype-engineer/AGENT.md",
+    "agents/prototype-engineer/skills/prototyping/SKILL.md",
     "agents/analyst/AGENT.md",
     "agents/analyst/skills/analysis/SKILL.md",
     "agents/security-officer/AGENT.md",
