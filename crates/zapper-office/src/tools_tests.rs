@@ -163,6 +163,30 @@ async fn mail_is_read_by_whoever_reads_its_thread_or_message() {
     );
 }
 
+/// A message's body lives only in the journal; `mail_read` reads it back
+/// from there. If the journal write fails (a full disk), the body is gone, so
+/// `mail_send` must fail rather than deliver a message that reads back empty.
+#[tokio::test]
+async fn mail_send_fails_when_the_body_cannot_be_journaled() {
+    let (t, run) = run();
+    run.journal.fail_writes();
+    let err = refused(
+        &t,
+        &run,
+        "ceo",
+        "mail_send",
+        json!({ "to": "pat", "subject": "Kickoff", "body": "the real body", "kind": "fyi" }),
+    )
+    .await;
+    assert!(
+        err.contains("record"),
+        "says the record couldn't be written: {err}"
+    );
+    // Nothing was delivered: pat has no mail to read back empty.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({})).await;
+    assert!(inbox["note"].is_string(), "pat got no message: {inbox}");
+}
+
 #[tokio::test]
 async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     let (t, run) = run();
