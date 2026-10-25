@@ -23,6 +23,9 @@ pub struct Journal {
     file: Mutex<zapper_core::record::Writer>,
     offset: AtomicU64,
     seq: AtomicU64,
+    /// Tests only: make every write fail, to stand in for a full disk.
+    #[cfg(test)]
+    fail: std::sync::atomic::AtomicBool,
 }
 
 /// Where an entry is in its file.
@@ -30,6 +33,15 @@ pub struct Journal {
 pub struct At {
     pub offset: u64,
     pub len: u32,
+}
+
+impl At {
+    /// Whether the entry was actually written. A failed write (e.g. a full
+    /// disk) returns `len == 0`: there is nothing to read back, so a caller
+    /// that stores a payload here (a mail body) must not treat it as kept.
+    pub fn written(&self) -> bool {
+        self.len > 0
+    }
 }
 
 impl Journal {
@@ -52,7 +64,15 @@ impl Journal {
             file: Mutex::new(file),
             offset: AtomicU64::new(offset),
             seq: AtomicU64::new(last.unwrap_or(0) + 1),
+            #[cfg(test)]
+            fail: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Tests only: from now on every write fails, as if the disk were full.
+    #[cfg(test)]
+    pub(crate) fn fail_writes(&self) {
+        self.fail.store(true, Ordering::Relaxed);
     }
 
     /// Appends `{seq, ts, type, …fields}` and returns where it went.
@@ -70,6 +90,13 @@ impl Journal {
     /// it is an object without them.
     pub fn write(&self, mut entry: Value) -> At {
         let mut file = self.file.lock().unwrap();
+        #[cfg(test)]
+        if self.fail.load(Ordering::Relaxed) {
+            let offset = std::fs::metadata(&self.path)
+                .map(|m| m.len())
+                .unwrap_or_else(|_| self.offset.load(Ordering::Relaxed));
+            return At { offset, len: 0 };
+        }
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         if let Some(o) = entry.as_object_mut() {
             o.insert("seq".into(), json!(seq));
@@ -80,16 +107,20 @@ impl Journal {
             line = json!({ "seq": seq, "ts": now(), "type": "truncated", "bytes": line.len() })
                 .to_string();
         }
-        // Offsets count only what was written.
+        // Where this line lands: the real end of the file. A read trusts this
+        // offset, so it must come from the file itself, not a running count
+        // that assumes every write was whole. A partial write (a full disk)
+        // leaves bytes the count never saw, and counting past them would
+        // desync every later read — which is what emptied message bodies.
+        let offset = std::fs::metadata(&self.path)
+            .map(|m| m.len())
+            .unwrap_or_else(|_| self.offset.load(Ordering::Relaxed));
         if let Err(e) = file.line(line.as_bytes()) {
             tracing::warn!("journal {}: {e:#}", self.path.display());
-            return At {
-                offset: self.offset.load(Ordering::Relaxed),
-                len: 0,
-            };
+            return At { offset, len: 0 };
         }
         let len = line.len() as u64 + 1;
-        let offset = self.offset.fetch_add(len, Ordering::Relaxed);
+        self.offset.store(offset + len, Ordering::Relaxed);
         At {
             offset,
             len: len as u32,
@@ -137,6 +168,42 @@ mod tests {
             j.read(d).unwrap()["seq"],
             4,
             "a reopened journal continues its sequence"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A full disk leaves a partial line behind: `write` wrote some bytes and
+    /// then failed (no newline), so the file is longer than the journal's own
+    /// bookkeeping thinks. A later append must still be found by the offset it
+    /// returns — the stray bytes must not desync every read after them, which
+    /// is what emptied message bodies in a run whose disk had filled.
+    #[test]
+    fn a_partial_write_does_not_desync_later_reads() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "zapper-journal-{}",
+            zapper_core::util::random_id(6)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("j.jsonl");
+        let j = Journal::create(&path).unwrap();
+        let first = j.append("mail", json!({ "id": "m-1", "body": "first" }));
+        assert_eq!(j.read(first).unwrap()["body"], "first");
+
+        // The aftermath of a failed write on a full disk: a fragment of a line,
+        // no trailing newline, that the journal never accounted for.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"seq\":99")
+            .unwrap();
+
+        let second = j.append("mail", json!({ "id": "m-2", "body": "second" }));
+        assert_eq!(
+            j.read(second).unwrap()["body"],
+            "second",
+            "a stray partial write must not desync later reads"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

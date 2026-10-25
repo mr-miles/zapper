@@ -133,6 +133,7 @@ make test-e2e      # ends with "all e2e checks passed"
 - **The daemon is one process that holds the secrets and runs the proxy.** It parses HTTP, TLS, JSON and frames from the guest with memory-safe libraries, and a bug in that code would be a bug in the boundary.
 - **Rate and volume limits** for network traffic are planned: see [the README](../README.md#next).
 - **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed.
+- **A firm tool's effect can outlive a failed record write.** The "no turns while the record can't be written" gate ([the record](#the-record)) is checked when a turn starts, but a worker's tool call appends to the journal *during* the turn. If that append fails (a full disk), the in-memory effect — a funding, a hire, an access decision — has already happened, while the event is missing from the journal the record, replay and the board pack are rebuilt from. So a run can act on a state the record doesn't show. `mail_send` is the exception: a message body lives only in the journal, so a failed write there fails the send rather than deliver a message that reads back empty. Making every state-changing tool fail the same way (append before the effect, or roll back) is not yet done.
 
 Network-specific limitations are on the [network](network.md#limitations) page.
 

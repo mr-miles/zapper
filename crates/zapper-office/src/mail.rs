@@ -655,6 +655,13 @@ impl PostOffice {
                 "context": d.context, "body": d.body,
             }),
         );
+        // The body lives only in the journal; mail_read reads it back from
+        // `at`. If the write didn't land (a full disk), the body is gone, so
+        // don't deliver a message that can never be read — fail, and let the
+        // record-health gate hold the firm until the record can be written.
+        if !at.written() {
+            bail!("the record can't be written, so the message was not sent; it will go through once the record can be written again");
+        }
         let meta = Meta {
             id: id.clone(),
             thread: thread.clone(),
