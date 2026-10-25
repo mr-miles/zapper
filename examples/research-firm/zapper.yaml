@@ -92,7 +92,9 @@ firms:
         # officer before anyone else. She holds security herself.
         # A prototype comes after the research: once the board has the pack
         # and asks for one, Ada commissions it.
-        hires: [research-manager, prototype-engineer]
+        # A process lead runs the retrospective at the end, before the team
+        # is released; the board runs the process-review skill itself.
+        hires: [research-manager, prototype-engineer, process-improvement]
       research-manager:
         profile: claude
         title: Research Manager
@@ -109,6 +111,13 @@ firms:
       prototype-engineer:
         profile: claude
         title: Prototype Engineer
+        model: claude-sonnet-5-5
+      # Runs the firm's retrospective: asks everyone what worked and what
+      # didn't, de-duplicates and votes it with them, and reports the
+      # improvements the firm chose. Mail and the drive only.
+      process-improvement:
+        profile: claude
+        title: Process Lead
         model: claude-sonnet-5-5
     # The founder; everyone else is hired during the run.
     workers:

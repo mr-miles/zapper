@@ -16,7 +16,7 @@ The office runs on zapper, which provides the sandbox: each worker is a zapper s
 |---|---|
 | Firm | One org chart and everything it produces. Defined under `firms:` in the config. Several can exist; usually one runs. |
 | Worker | One named member of the firm, one VM, one agent (Claude Code or pi). Names are unique in the firm and are its mail address (`barbara`, `dennis`, `ada`, `radia`). |
-| Role | A template for workers: skills, profile, model, avatar. `ceo`, `cto`, `product-manager`, `manager`, `engineer`, `designer`, `researcher`, `analyst`, `security-officer`, or one defined in the config. |
+| Role | A template for workers: skills, profile, model, avatar. `ceo`, `cto`, `product-manager`, `manager`, `engineer`, `designer`, `researcher`, `analyst`, `process-improvement`, `security-officer`, or one defined in the config. |
 | Board | The operator. Not a VM; an address (`board`) that can mail anyone and receives reports. |
 | Mail | A message from one address to others, in a thread, with optional attachments from the shared drive. |
 | Desk | A worker's open work: threads assigned to it, threads where it waits for a reply, pending access requests. |
@@ -524,7 +524,9 @@ The skills any role may use:
 | `releases` | engineers, and whoever leads them (the CTO, or the CEO without one) | Asking for, commanding, deploying and verifying a release to `prod`; rolling back; incidents |
 | `research-sources` | researchers, the research manager, analysts | Web search and fetching, judging and recording sources, facts apart from judgement, suggesting sources |
 
-The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`) and `security-officer`.
+The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`), `process-improvement` (`retrospective`) and `security-officer`.
+
+The `process-improvement` agent (title "Process Lead") runs the firm's **retrospective**: it asks every worker what worked and what didn't, de-duplicates the answers with them, puts the merged list to a vote, and reports the improvements the firm itself chose — all over mail and the drive. That is the half of process improvement a worker can do from inside the firm. The other half, reading the run's transcripts and stats for avoidable mistakes, waiting and missing information, is the board's, from outside the VMs, by the [process-review](../skills/process-review/SKILL.md) operating skill — a worker can't reach the record.
 
 A firm reads its agents from its `agents_dir` and its skills from its `skills_dir`, `agents` and `skills` next to the config unless set, at each `zapper firm up`, so an edit applies at the next one. In a checkout they are [config/agents/](../config/agents/) and [config/skills/](../config/skills/); elsewhere, `zapper init` writes the defaults (built into zapper from config/) next to the config, `~/.config/zapper/agents` and `~/.config/zapper/skills`, keeping any file already there. There are no built-in fallbacks: a firm whose directories lack an agent or a skill it needs doesn't start, and `zapper check` lists what is missing. Keep the front matter (`name`, a quoted `description`): agents use the description to decide when to read a skill.
 

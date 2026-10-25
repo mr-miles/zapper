@@ -1729,9 +1729,9 @@ mod tests {
     }
 
     /// `examples/research-firm`: Ada alone, who may hire a research
-    /// manager, who may hire researchers, and a prototype engineer; drive
-    /// spaces for the research and the board pack, a repository for
-    /// prototypes.
+    /// manager, who may hire researchers, a prototype engineer, and a
+    /// process lead; drive spaces for the research and the board pack, a
+    /// repository for prototypes.
     #[cfg(feature = "office")]
     #[test]
     fn the_research_firm_example_loads() {
@@ -1741,7 +1741,11 @@ mod tests {
         assert_eq!(founders, ["ada"]);
         assert_eq!(
             lab.roles["ceo"].hires,
-            ["research-manager", "prototype-engineer"]
+            [
+                "research-manager",
+                "prototype-engineer",
+                "process-improvement"
+            ]
         );
         assert_eq!(lab.roles["research-manager"].hires, ["researcher"]);
         assert!(lab.budget.seed > 0);
