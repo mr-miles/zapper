@@ -453,6 +453,7 @@ static TOOLS: &[Tool] = &[
             let id = c.args.req("plan")?;
             authorize_plan(c, &id)?;
             if c.run.plans.lock().unwrap().pause(&id) {
+                c.run.journal_plan(&id);
                 Ok(json!({ "plan": id, "status": "paused" }))
             } else {
                 bail!("plan {id} is not active")
@@ -495,6 +496,7 @@ static TOOLS: &[Tool] = &[
             let id = c.args.req("plan")?;
             authorize_plan(c, &id)?;
             c.run.plans.lock().unwrap().close(&id).map_err(|e| anyhow!("{e}"))?;
+            c.run.journal_plan(&id);
             Ok(json!({ "plan": id, "status": "closed" }))
         }),
     },

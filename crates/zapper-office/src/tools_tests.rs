@@ -777,6 +777,42 @@ async fn continuity_breaks_when_the_bound_worker_is_terminated_between_stages() 
     );
 }
 
+/// The office journals a plan as snapshots so the UI (live and replay) can show
+/// it and tie each assignment back to its plan: the snapshot carries the plan's
+/// status and stages, and each sent child's thread — what the UI keys the
+/// "part of a plan" badge off.
+#[tokio::test]
+async fn a_plan_is_journalled_as_snapshots_for_the_ui() {
+    let (t, run) = run();
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "b": { "name": "pat" } },
+            "stages": [[ { "slot": "b", "subject": "Build", "body": "build it" } ]],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    let thread = plan["children"][0].as_str().unwrap().to_string();
+    let snaps: Vec<Value> = journal(&run)
+        .into_iter()
+        .filter(|e| e["type"] == "plan" && e["event"] == "snapshot")
+        .collect();
+    let last = snaps.last().expect("a plan snapshot was journalled");
+    assert_eq!(last["plan"]["id"], id.as_str());
+    assert_eq!(last["plan"]["status"], "active");
+    assert_eq!(last["plan"]["source"], "t-obj");
+    let kids = last["plan"]["stages"][0]["children"].as_array().unwrap();
+    assert!(
+        kids.iter().any(|c| c["thread"] == thread.as_str()),
+        "the child's thread is in the snapshot, so the UI can tag it: {last}"
+    );
+}
+
 /// A later stage names a worker who has since left the firm. When that stage is
 /// released (on the event path, no planner in the loop) the office can't staff
 /// the named slot, so it reports the gap in bulk and tells the owner — the

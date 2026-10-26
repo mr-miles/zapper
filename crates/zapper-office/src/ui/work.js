@@ -149,7 +149,7 @@ function updateWork() {
 function ticketCard(M, k, now) {
   const age = k.end ? 'took ' + fmtDur(k.end - k.created) : (k.status === 'todo' ? 'waiting ' : 'open ') + fmtDur(now - k.created);
   return el('div', { class: 'tk' + (k.overdue ? ' late' : '') + (k.working ? ' live' : ''), title: 'Open the thread', onclick: () => openThread(k.thread, k.message) },
-    el('div', { class: 'tk-s' }, k.working ? el('span', { class: 'dot pulse', title: k.owner + ' is working on it now' }) : '', clip(k.subject, 90)),
+    el('div', { class: 'tk-s' }, k.working ? el('span', { class: 'dot pulse', title: k.owner + ' is working on it now' }) : '', clip(k.subject, 90), planBadge(M, k.thread)),
     el('div', { class: 'tk-m' }, miniAvatar(k.owner), el('b', {}, k.owner), el('span', { class: 'muted' }, '← ' + (k.by === BOARD ? boardName() : k.by))),
     el('div', { class: 'tk-m muted small' },
       el('span', {}, age),

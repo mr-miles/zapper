@@ -543,7 +543,18 @@ impl FirmRun {
             }
         }
         let threads = self.plans.lock().unwrap().stage_threads(plan, stage);
+        self.journal_plan(plan);
         (threads, problems)
+    }
+
+    /// Record the whole plan to the journal so the office UI — live and in
+    /// replay — can show it and tie each assignment back to its plan. Called
+    /// after every change to a plan.
+    pub(crate) fn journal_plan(&self, id: &str) {
+        if let Some(plan) = self.plans.lock().unwrap().snapshot(id) {
+            self.journal
+                .append("plan", json!({ "event": "snapshot", "plan": plan }));
+        }
     }
 
     /// Resolve a plan slot to a worker and say how its child reaches them,
@@ -656,8 +667,16 @@ impl FirmRun {
     /// A closing reply landed on `thread`; if it is a plan child, advance the
     /// plan, releasing the next stage when the current one is complete.
     pub(crate) fn on_plan_child_closed(&self, thread: &str) {
-        let advance = self.plans.lock().unwrap().complete(thread);
+        let (advance, id) = {
+            let mut plans = self.plans.lock().unwrap();
+            (plans.complete(thread), plans.plan_of_thread(thread))
+        };
         self.apply_plan_advance(advance);
+        // Snapshot the settled state (covers a child done without a stage
+        // change, which `apply_plan_advance` wouldn't journal on its own).
+        if let Some(id) = id {
+            self.journal_plan(&id);
+        }
     }
 
     /// A worker left the firm (`let_go`): hand any plan they owned to `manager`
@@ -686,6 +705,7 @@ impl FirmRun {
                 json!({ "event": "departure", "plan": plan, "stage": stage, "worker": worker,
                         "reassigned": change.reassigned, "reopened": change.reopened, "owner": owner }),
             );
+            self.journal_plan(plan);
             // One notice to the (new) owner, naming whichever of the two things
             // the departure did to the plan.
             let mut body = format!("[Automatic notice] {worker} left the firm. ");
@@ -877,6 +897,7 @@ pub const ASSETS: &[(&str, &str)] = &[
     ("kickoff.js", include_str!("ui/kickoff.js")),
     ("runs.js", include_str!("ui/runs.js")),
     ("work.js", include_str!("ui/work.js")),
+    ("plans.js", include_str!("ui/plans.js")),
     ("stats.js", include_str!("ui/stats.js")),
     ("header.js", include_str!("ui/header.js")),
     ("main.js", include_str!("ui/main.js")),

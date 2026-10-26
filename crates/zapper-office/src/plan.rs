@@ -252,6 +252,19 @@ impl Plans {
         self.plans.get(plan)
     }
 
+    /// The whole plan as JSON, for the journal — the UI (live and replay)
+    /// rebuilds plans from these snapshots.
+    pub fn snapshot(&self, plan: &str) -> Option<serde_json::Value> {
+        self.plans
+            .get(plan)
+            .and_then(|p| serde_json::to_value(p).ok())
+    }
+
+    /// The plan a child's thread belongs to, if any.
+    pub fn plan_of_thread(&self, thread: &str) -> Option<String> {
+        self.by_thread.get(thread).cloned()
+    }
+
     pub fn owner_of(&self, plan: &str) -> Option<&str> {
         self.plans.get(plan).map(|p| p.owner.as_str())
     }

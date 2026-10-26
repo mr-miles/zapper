@@ -3,7 +3,7 @@
 
 // ────────────────────────────── state ──────────────────────────────
 
-const TABS = [['kickoff', 'Kickoff'], ['overview', 'Organization'], ['people', 'People'], ['work', 'Work'], ['messages', 'Messages'], ['security', 'Security'], ['drive', 'Shared drive'], ['git', 'Git'], ['vms', 'VMs'], ['stats', 'Statistics'], ['runs', 'Runs']];
+const TABS = [['kickoff', 'Kickoff'], ['overview', 'Organization'], ['people', 'People'], ['work', 'Work'], ['plans', 'Plans'], ['messages', 'Messages'], ['security', 'Security'], ['drive', 'Shared drive'], ['git', 'Git'], ['vms', 'VMs'], ['stats', 'Statistics'], ['runs', 'Runs']];
 const S = {
   firms: [], firm: null, info: null, tab: 'overview',
   mode: 'live',          // 'live' or 'replay'
@@ -51,6 +51,9 @@ function newModel() {
     contracts: new Map(),
     // Credentials: grants by worker and resource, and requests.
     grants: new Map(), credReqs: new Map(), grantLog: [],
+    // Staged plans, by id, from their journal snapshots: team, stages and
+    // bindings, so the Work/Messages tabs can tag a thread as a plan's child.
+    plans: new Map(),
   };
 }
 function setChart(M, chart) {
@@ -371,6 +374,18 @@ function apply(M, e) {
     // they wait for it to go idle.
     case 'objective': M.closeWaiter = e.event === 'waiting' ? str(e.worker) : null; break;
     case 'op_error': M.opErrors.push({ worker: str(e.worker), op: str(e.op), error: str(e.error), ts }); break;
+    // Staged plans. A snapshot carries the whole plan after each change; a
+    // stage_stuck names the children a release could not staff (kept on the
+    // plan until the next snapshot clears them).
+    case 'plan': {
+      if (e.event === 'snapshot' && e.plan && typeof e.plan.id === 'string') {
+        M.plans.set(e.plan.id, { ...e.plan, problems: [], ts });
+      } else if (e.event === 'stage_stuck') {
+        const p = M.plans.get(str(e.plan));
+        if (p) p.problems = arr(e.problems).map((x) => ({ slot: str(x.slot), error: str(x.error) }));
+      }
+      break;
+    }
   }
 }
 
@@ -396,9 +411,32 @@ function waitPill(obs, now) {
   const who = [...new Set(open.map((o) => nameOf(o.debtor)))].join(', ');
   return pill(late ? 'overdue' : 'waiting', (late ? 'overdue: ' : 'waiting for ') + clip(who, 40));
 }
+// The plan a thread is a child of, if any: scan each plan's stages for a
+// child whose assignment is this thread. Plans are few, so this is cheap.
+function planOfThread(M, thread) {
+  if (!M || !thread) return null;
+  for (const p of M.plans.values()) {
+    const stages = arr(p.stages);
+    for (let i = 0; i < stages.length; i++) {
+      for (const c of arr(stages[i].children)) {
+        if (c && c.thread === thread) return { plan: p.id, stage: i, slot: c.spec && c.spec.slot };
+      }
+    }
+  }
+  return null;
+}
+// A pill marking a thread as a plan's child, linking to the Plans tab.
+function planBadge(M, thread) {
+  const p = planOfThread(M, thread);
+  if (!p) return null;
+  const label = 'plan ' + str(p.plan).replace(/^plan-/, '#') + (p.stage != null ? ' · stage ' + (p.stage + 1) : '');
+  return el('span', { class: 'pill plan', title: 'Part of ' + p.plan + (p.slot ? ' — slot ' + p.slot : '') + '. Open the Plans tab.',
+    onclick: (ev) => { ev.stopPropagation(); if (typeof PLANS !== 'undefined') PLANS.sel = p.plan; showTab('plans'); } }, label);
+}
 function threadPill(M, t, now) {
-  if (t.paused) return pill('paused', 'paused');
-  return waitPill(t.obl.map((k) => M.obl.get(k)), now);
+  const plan = planBadge(M, t.id);
+  const state = t.paused ? pill('paused', 'paused') : waitPill(t.obl.map((k) => M.obl.get(k)), now);
+  return [plan, state].filter(Boolean);
 }
 function desk(M, name, now) {
   const owes = [], waits = [];
