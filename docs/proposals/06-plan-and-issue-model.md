@@ -15,7 +15,7 @@ Work moves by **mail**: an `assignment` (`mail_send`) creates a thread and an ob
 | **Plan** | `issue_plan_decompositions`: a source ticket + `requested_children` → `child_issue_ids` | a phase / change bundle |
 | **Hold** | `issue_tree_holds`: a hold on the subtree with a `release_policy` | gated progression |
 | **Slot** *(Office-only)* | — resolves to a concrete `assignee_agent_id` | an executor assignment |
-| **Completion contract** *(optional)* | `completion_contracts`: `risk`, `acceptance`, `completion_authority`, `incomplete_criteria_policy`, hashed | oracle + risk + gate + attestation |
+| **Completion contract** *(optional, deferred — see Scope)* | `completion_contracts`: `risk`, `acceptance`, `completion_authority`, `incomplete_criteria_policy`, hashed | oracle + risk + gate + attestation |
 | **Assessment** | `work_assessments`: a verdict against the contract, with a digest | review / evidence |
 
 **Hierarchy** already exists as `context` (a single-parent tree driving roll-up); the only possible change is letting it be *declared* up front, not only auto-derived. **Ordering** is stored as `blocks` edges though the planner writes stages — the stage-list is the readable, parent-owned surface, so a cross-subtree dependency later is just another `blocks` row.
@@ -24,7 +24,7 @@ Work moves by **mail**: an `assignment` (`mail_send`) creates a thread and an ob
 
 A `plan` is authored and materialised in one atomic call (validate the whole plan or reject none), because a ticket must exist *before* it is delivered. It names a **team of slots** (`{role | name, budget?, release_when_done?}`), a **source** ticket (the current task by default), and **ordered stages** of child specs — the fields `mail_send` already takes (`slot`, `subject`, `body`, `due`, `cc`, `attachments`), with each child's `blocked_by` lowered from the stage order.
 
-It creates every child under the source, wires the `blocks` edges, records the decomposition, holds the subtree with a release policy that frees each stage as its blockers are accepted, and binds or defers each slot; stage 0 is activated and the rest held. `mail_send` stays as the degenerate one-ticket plan. When a workflow profile turns governance on ([proposal 05](05-legion-ascended-mapping.md)) a child may carry a **completion contract**; otherwise acceptance is the ordinary `reviewing-work` close.
+It creates every child under the source, wires the `blocks` edges, records the decomposition, holds the subtree with a release policy that frees each stage as its blockers are accepted, and binds or defers each slot; stage 0 is activated and the rest held. `mail_send` stays as the degenerate one-ticket plan. Governance (a per-child **completion contract**, under a proposal 05 workflow profile) is deferred; acceptance here is the ordinary `reviewing-work` close.
 
 ## Slots and staffing
 
@@ -79,7 +79,8 @@ Most of the weight is the held-ticket state and the release-on-accept effect —
 
 1. **Minimal:** `plan` creates children + `blocks` edges + a tree-hold, releasing each stage to **existing** workers on accept; no slots, contracts or provisioning.
 2. **Slots and just-in-time staffing:** role/name slots, bind-on-release, `release_when_done`, contracts.
-3. **Governance:** optional completion contracts and assessments, under a workflow profile.
+
+Governance — optional completion contracts and assessments — is **deferred**: it is proposal 05's workflow-profile layer, laid on this model later, not part of this proposal. The `completion_contract` and `assessment` objects appear above only to fix the shape they will take, so adopting them later is additive.
 
 ## Open questions
 
