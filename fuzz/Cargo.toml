@@ -80,3 +80,10 @@ path = "fuzz_targets/policy.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http2_uri"
+path = "fuzz_targets/http2_uri.rs"
+test = false
+doc = false
+bench = false

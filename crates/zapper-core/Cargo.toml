@@ -23,7 +23,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "server", "service"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

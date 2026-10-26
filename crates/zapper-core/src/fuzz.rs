@@ -310,3 +310,29 @@ pub fn policy(data: &[u8]) {
         assert_eq!(rule.action, d.action);
     }
 }
+
+/// The upstream request URI the inspecting proxy builds (`proxy::upstream_uri`):
+/// it must never panic, and for HTTP/2 the authority is always the checked
+/// host — a request path can never smuggle one in.
+pub fn http2_uri(data: &[u8]) {
+    let mut it = data.splitn(3, |&b| b == 0);
+    let raw = String::from_utf8_lossy(it.next().unwrap_or(b"")).into_owned();
+    let port = it
+        .next()
+        .and_then(|p| std::str::from_utf8(p).ok())
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(443);
+    let path = String::from_utf8_lossy(it.next().unwrap_or(b"")).into_owned();
+    // Whatever the bytes, neither form may panic.
+    let _ = proxy::upstream_uri(&raw, port, &path, false);
+    let _ = proxy::upstream_uri(&raw, port, &path, true);
+    // Production always passes a validated host; for one, the HTTP/2 authority
+    // is exactly that host (IPv6 literals aside, which bracket in the URI).
+    if let Ok(host) = zapper_policy::names::host(&raw) {
+        if !host.contains(':') {
+            if let Some(auth) = proxy::upstream_uri(&host, port, &path, true).authority() {
+                assert_eq!(auth.host(), host, "path smuggled an authority: {path:?}");
+            }
+        }
+    }
+}

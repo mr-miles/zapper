@@ -19,11 +19,10 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::client::conn::http1::SendRequest;
 use hyper::header::{HeaderName, HeaderValue, HOST};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -64,6 +63,12 @@ fn http1() -> hyper::server::conn::http1::Builder {
     b.timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(60))
         .max_buf_size(256 * 1024);
+    b
+}
+
+fn http2() -> hyper::server::conn::http2::Builder<TokioExecutor> {
+    let mut b = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+    b.timer(TokioTimer::new());
     b
 }
 
@@ -699,7 +704,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
 }
 
-type Upstream = Arc<tokio::sync::Mutex<Option<SendRequest<Body>>>>;
+/// The upstream side of an inspected connection: a reusable client speaking
+/// whichever protocol the real server negotiated by ALPN.
+enum Sender {
+    H1(hyper::client::conn::http1::SendRequest<Body>),
+    H2(hyper::client::conn::http2::SendRequest<Body>),
+}
+
+type Upstream = Arc<tokio::sync::Mutex<Option<Sender>>>;
 
 async fn mitm<S>(d: Arc<Daemon>, s: Arc<Session>, io: S, host: String, port: u16, addr: Target)
 where
@@ -771,6 +783,7 @@ where
             return;
         }
     }
+    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
     let upstream: Upstream = Default::default();
     let svc = service_fn(move |req| {
         let (d, s, host, upstream, addr) = (
@@ -782,7 +795,13 @@ where
         );
         async move { Ok::<_, Infallible>(inspected(d, s, req, host, port, addr, upstream).await) }
     });
-    let _ = http1().serve_connection(TokioIo::new(tls), svc).await;
+    let io = TokioIo::new(tls);
+    // Serve the guest in whichever protocol it negotiated by ALPN.
+    if h2 {
+        let _ = http2().serve_connection(io, svc).await;
+    } else {
+        let _ = http1().serve_connection(io, svc).await;
+    }
 }
 
 /// Replaces secret placeholders in headers and applies `set_headers`, for
@@ -902,6 +921,35 @@ pub(crate) fn clean_headers(
     );
 }
 
+/// The request URI to send upstream. HTTP/1 keeps the origin-form path the
+/// guest sent; HTTP/2 needs an absolute URI so hyper can set `:authority` and
+/// `:scheme`. `host` is the already-validated checked host and `path` the
+/// already-parsed path-and-query, so neither can smuggle an authority.
+pub(crate) fn upstream_uri(host: &str, port: u16, path: &str, h2: bool) -> hyper::Uri {
+    if !h2 {
+        return path.parse().unwrap_or_default();
+    }
+    // An IPv6 literal must be bracketed in an authority.
+    let h = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let authority = if port == 443 {
+        h
+    } else {
+        format!("{h}:{port}")
+    };
+    // Assemble through the builder so the authority is set independently of
+    // the path: a path (even a malformed one) can never bleed into it.
+    hyper::Uri::builder()
+        .scheme("https")
+        .authority(authority)
+        .path_and_query(if path.is_empty() { "/" } else { path })
+        .build()
+        .unwrap_or_default()
+}
+
 async fn inspected(
     d: Arc<Daemon>,
     s: Arc<Session>,
@@ -976,19 +1024,10 @@ async fn inspected(
             return text(StatusCode::FORBIDDEN, e);
         }
     };
-    parts.uri = path.parse().unwrap_or_default();
-    parts.version = hyper::Version::HTTP_11;
-    let body = httplog::Tee::wrap(
-        body.boxed(),
-        rec.clone(),
-        s.requests.clone(),
-        httplog::Side::Request,
-    );
-    let out = Request::from_parts(parts, body);
-
     let mut guard = upstream.lock().await;
     let ready = match guard.as_mut() {
-        Some(sender) => sender.ready().await.is_ok(),
+        Some(Sender::H1(sender)) => sender.ready().await.is_ok(),
+        Some(Sender::H2(sender)) => sender.ready().await.is_ok(),
         None => false,
     };
     if !ready {
@@ -1012,8 +1051,42 @@ async fn inspected(
             }
         }
     }
-    let result = guard.as_mut().unwrap().send_request(out).await;
-    drop(guard);
+    // The upstream's negotiated protocol decides how we shape the request:
+    // HTTP/2 needs an absolute URI (for `:authority`/`:scheme`); HTTP/1 keeps
+    // the origin-form path. The Host header set by `clean_headers` stays and
+    // agrees with the authority.
+    let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
+    parts.uri = upstream_uri(&host, port, &path, is_h2);
+    parts.version = if is_h2 {
+        hyper::Version::HTTP_2
+    } else {
+        hyper::Version::HTTP_11
+    };
+    let body = httplog::Tee::wrap(
+        body.boxed(),
+        rec.clone(),
+        s.requests.clone(),
+        httplog::Side::Request,
+    );
+    let out = Request::from_parts(parts, body);
+    // HTTP/2 multiplexes: clone the sender and release the lock so concurrent
+    // streams on this guest connection run in parallel. HTTP/1 is serial, so
+    // we hold the one sender across the send.
+    let result = if is_h2 {
+        let mut sender = match guard.as_mut() {
+            Some(Sender::H2(s)) => s.clone(),
+            _ => unreachable!(),
+        };
+        drop(guard);
+        sender.send_request(out).await
+    } else {
+        let r = match guard.as_mut() {
+            Some(Sender::H1(s)) => s.send_request(out).await,
+            _ => unreachable!(),
+        };
+        drop(guard);
+        r
+    };
     match result {
         Ok(resp) => {
             log(
@@ -1049,7 +1122,7 @@ async fn inspected(
     }
 }
 
-async fn open_tls(host: &str, addr: &Target) -> Result<SendRequest<Body>, String> {
+async fn open_tls(host: &str, addr: &Target) -> Result<Sender, String> {
     let Target::Addr(addr) = addr else {
         return Err(format!(
             "{host} is a service; rules with methods, paths or secrets don't apply to it"
@@ -1064,11 +1137,22 @@ async fn open_tls(host: &str, addr: &Target) -> Result<SendRequest<Body>, String
         .connect(name, tcp)
         .await
         .map_err(|e| format!("TLS to {host}: {e}"))?;
-    let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(conn);
-    Ok(sender)
+    // Speak whatever the server negotiated by ALPN.
+    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
+    if h2 {
+        let (sender, conn) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+                .await
+                .map_err(|e| e.to_string())?;
+        tokio::spawn(conn);
+        Ok(Sender::H2(sender))
+    } else {
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::spawn(conn);
+        Ok(Sender::H1(sender))
+    }
 }
 
 async fn plain(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
@@ -1247,6 +1331,9 @@ async fn forward_plain(
 mod approval_tests;
 
 #[cfg(test)]
+mod h2_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{clean_headers, inject, server_name_matches, split_authority};
     use crate::testing::TestCore;
@@ -1370,6 +1457,36 @@ mod tests {
         assert_eq!(
             split_authority("example.com.:443", 443),
             Some(("example.com".into(), 443))
+        );
+    }
+
+    /// Upstream URIs: HTTP/1 keeps the origin-form path; HTTP/2 is absolute,
+    /// and the authority is always the checked host — a path cannot smuggle
+    /// one in, because the scheme and authority are prefixed before it.
+    #[test]
+    fn upstream_uri_shape() {
+        use super::upstream_uri;
+        assert_eq!(
+            upstream_uri("api.example", 443, "/a/b?q=1", false).to_string(),
+            "/a/b?q=1"
+        );
+        assert_eq!(
+            upstream_uri("api.example", 443, "/a/b?q=1", true).to_string(),
+            "https://api.example/a/b?q=1"
+        );
+        // A non-default port is named in the authority.
+        assert_eq!(
+            upstream_uri("api.example", 8443, "/x", true).to_string(),
+            "https://api.example:8443/x"
+        );
+        // Even a path that looks like it carries an authority stays the path.
+        let u = upstream_uri("api.example", 443, "//evil.example/x", true);
+        assert_eq!(u.authority().unwrap().host(), "api.example");
+        assert_eq!(u.path(), "//evil.example/x");
+        // An IPv6 literal is bracketed in the authority.
+        assert_eq!(
+            upstream_uri("::1", 8443, "/x", true).to_string(),
+            "https://[::1]:8443/x"
         );
     }
 }
