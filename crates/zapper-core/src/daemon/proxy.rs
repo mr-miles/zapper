@@ -35,7 +35,9 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{cassandra, httplog, mongodb, pgwire, redis, services, spec, tls, Daemon, EventBody};
+use super::{
+    cassandra, httplog, mongodb, mysql, pgwire, redis, services, spec, tls, Daemon, EventBody,
+};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -769,6 +771,7 @@ async fn relay_database<S>(
         NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Mysql => mysql_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
         other => Err(format!("{other} relay is not implemented yet")),
     };
@@ -914,6 +917,94 @@ where
         &scram_nonce(),
     )
     .await?;
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: vec![],
+    })
+}
+
+/// MySQL/MariaDB: the server speaks first, so the proxy plays a server to the
+/// guest (Initial Handshake → read its response → OK) and a client to the real
+/// server, authenticating with the host-held credential and upgrading the
+/// server leg to TLS mid-handshake unless the secret is plaintext. The guest's
+/// credentials are ignored; it is told OK once the server leg authenticates.
+async fn mysql_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    mut server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use rand::Rng;
+    let mut guest = guest_leg(s, guest, first, host).await?;
+
+    // Guest leg: present as a server advertising mysql_native_password, no TLS.
+    let mut scramble = [0u8; 20];
+    rand::thread_rng().fill(&mut scramble);
+    guest
+        .write_all(&mysql::packet(
+            0,
+            &mysql::initial_handshake(&scramble, "mysql_native_password"),
+        ))
+        .await
+        .map_err(|e| format!("sending the guest handshake: {e}"))?;
+    let mut gbuf = Vec::new();
+    let (_seq, gresp) = mysql::read_packet(&mut guest, &mut gbuf).await?;
+    if mysql::response_wants_ssl(&gresp) {
+        return Err("the guest asked for TLS to MySQL; use a plaintext local leg".into());
+    }
+
+    // Server leg: read the server's Initial Handshake and authenticate.
+    let mut sbuf = Vec::new();
+    let (_s0, initial) = mysql::read_packet(&mut server, &mut sbuf).await?;
+    let hs = mysql::parse_initial(&initial)?;
+    let db = cred.database.as_deref();
+    let auth = mysql::auth_response(&hs.plugin, &cred.password, &hs.scramble);
+    let mut server: Box<dyn services::Io> = if cred.plaintext {
+        server
+            .write_all(&mysql::packet(
+                1,
+                &mysql::handshake_response(false, &cred.user, &auth, db, &hs.plugin),
+            ))
+            .await
+            .map_err(|e| format!("sending the handshake response: {e}"))?;
+        Box::new(server)
+    } else {
+        if hs.capabilities & mysql::CLIENT_SSL == 0 {
+            return Err("server does not offer TLS and the dbauth secret is not plaintext".into());
+        }
+        // Mid-handshake upgrade: SSLRequest, TLS, then the response over TLS.
+        server
+            .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
+            .await
+            .map_err(|e| format!("sending SSLRequest: {e}"))?;
+        let name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| format!("{host}: {e}"))?;
+        let tls = TlsConnector::from(tls::client_config())
+            .connect(name, server)
+            .await
+            .map_err(|e| format!("TLS to {host}: {e}"))?;
+        let mut b: Box<dyn services::Io> = Box::new(tls);
+        b.write_all(&mysql::packet(
+            2,
+            &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
+        ))
+        .await
+        .map_err(|e| format!("sending the handshake response: {e}"))?;
+        b
+    };
+    mysql::complete_auth(&mut server, &mut sbuf, &cred.password, !cred.plaintext).await?;
+
+    // Tell the guest it is logged in (its response was sequence 1).
+    guest
+        .write_all(&mysql::packet(2, &mysql::ok_packet()))
+        .await
+        .map_err(|e| format!("sending OK to the guest: {e}"))?;
     Ok(Relayed {
         guest,
         server,
