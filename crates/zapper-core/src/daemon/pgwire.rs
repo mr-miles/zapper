@@ -17,6 +17,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// `Int32(80877103)`.
 pub const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
+/// The 8-byte `GSSENCRequest` a client (libpq 12+) may send before the
+/// `SSLRequest`: `Int32(8)` then `Int32(80877104)`.
+pub const GSSENC_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x30];
+
+/// Whether `buf` begins with a Postgres `GSSENCRequest`.
+pub fn is_gssenc_request(buf: &[u8]) -> bool {
+    buf.len() >= 8 && buf[..8] == GSSENC_REQUEST
+}
+
 /// `AuthenticationOk` — the one message the proxy fabricates for the guest, in
 /// place of the real auth challenge. The server's own post-auth messages
 /// (`ParameterStatus`, `BackendKeyData`, `ReadyForQuery`) are relayed after it.
@@ -438,32 +447,25 @@ async fn read_one<S: AsyncRead + Unpin>(
     }
 }
 
-/// Reads the guest's opening: an optional `SSLRequest` — to which it replies
-/// `N` (TLS declined), steering the guest to a plaintext local leg that
-/// carries no secret — then the `StartupMessage`. `first` is bytes already
-/// peeked from the guest. Errors on a close before a complete startup, or one
-/// implausibly large.
-pub async fn read_guest_startup<G: AsyncRead + AsyncWrite + Unpin>(
-    guest: &mut G,
-    first: Vec<u8>,
+/// Reads a complete `StartupMessage` from `stream`, starting from `prefix`
+/// (bytes already read). Any `SSLRequest`/`GSSENCRequest` preamble must have
+/// been consumed by the caller (the relay handles it, since terminating guest
+/// TLS needs the session CA). Errors on a close before a complete startup, or
+/// one implausibly large.
+pub async fn read_startup<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    prefix: Vec<u8>,
 ) -> Result<Startup, String> {
-    let mut buf = first;
+    let mut buf = prefix;
     let mut chunk = [0u8; 4096];
     loop {
-        if is_ssl_request(&buf) {
-            guest
-                .write_all(b"N")
-                .await
-                .map_err(|e| format!("declining the guest's SSLRequest: {e}"))?;
-            buf.drain(..SSL_REQUEST.len());
-        }
         if let Some(startup) = parse_startup(&buf) {
             return Ok(startup);
         }
         if buf.len() > MAX_HANDSHAKE_MSG {
             return Err("guest startup message too large".into());
         }
-        let n = guest
+        let n = stream
             .read(&mut chunk)
             .await
             .map_err(|e| format!("reading the guest startup: {e}"))?;

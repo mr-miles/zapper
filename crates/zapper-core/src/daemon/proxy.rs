@@ -774,7 +774,7 @@ async fn relay_database<S>(
 
     let host = endpoint.host.as_str();
     let outcome = match proto {
-        NetProtocol::Postgres => pg_exchange(guest, first, server, host, &cred).await,
+        NetProtocol::Postgres => pg_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
@@ -817,11 +817,15 @@ async fn relay_database<S>(
     httplog::finish(&s.requests, &rec);
 }
 
-/// Postgres: decline the guest's SSLRequest (plaintext local leg), read its
-/// startup, authenticate to the server over SCRAM, and hand back the
-/// `AuthenticationOk` plus the server's pipelined post-auth bytes for the guest.
+/// Postgres: read the guest's startup — terminating its TLS with the session
+/// CA when it asks for it (the guest already trusts our root, so sslmode
+/// require/verify work; verify-full too, since we issue a per-host leaf) and
+/// declining a GSSAPI-encryption preamble — authenticate to the server over
+/// SCRAM, and hand back the `AuthenticationOk` plus the server's pipelined
+/// post-auth bytes for the guest.
 async fn pg_exchange<S>(
-    mut guest: S,
+    s: &Arc<Session>,
+    guest: S,
     first: Vec<u8>,
     server: TcpStream,
     host: &str,
@@ -830,7 +834,7 @@ async fn pg_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let startup = pgwire::read_guest_startup(&mut guest, first).await?;
+    let (guest, startup) = pg_guest_startup(s, guest, first, host).await?;
     // The secret defines the user; the database is pinned, else the guest's.
     let database = cred.database.clone().or(startup.database);
     let mut server = pg_server_leg(server, host, cred.plaintext).await?;
@@ -845,10 +849,67 @@ where
     let mut to_guest = pgwire::AUTH_OK.to_vec();
     to_guest.extend_from_slice(&leftover);
     Ok(Relayed {
-        guest: Box::new(guest),
+        guest,
         server,
         to_guest,
     })
+}
+
+/// Handles the guest's Postgres opening: declines a `GSSENCRequest` (`N`),
+/// accepts an `SSLRequest` (`S`) and terminates TLS with the per-session CA,
+/// then reads the `StartupMessage`. A plaintext `StartupMessage`
+/// (`sslmode=disable`) is read as-is. Returns the (possibly TLS-wrapped) guest
+/// stream and the parsed startup.
+async fn pg_guest_startup<S>(
+    s: &Arc<Session>,
+    mut guest: S,
+    mut buf: Vec<u8>,
+    host: &str,
+) -> Result<(Box<dyn services::Io>, pgwire::Startup), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut chunk = [0u8; 4096];
+    loop {
+        if buf.len() >= 8 {
+            if pgwire::is_gssenc_request(&buf) {
+                guest
+                    .write_all(b"N")
+                    .await
+                    .map_err(|e| format!("declining the guest's GSSAPI request: {e}"))?;
+                buf.drain(..8);
+                continue;
+            }
+            if pgwire::is_ssl_request(&buf) {
+                guest
+                    .write_all(b"S")
+                    .await
+                    .map_err(|e| format!("accepting the guest's SSLRequest: {e}"))?;
+                buf.drain(..8);
+                let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+                let tls = TlsAcceptor::from(config)
+                    .accept(Prefixed::new(buf, guest))
+                    .await
+                    .map_err(|e| format!("TLS from guest: {e}"))?;
+                let mut tls: Box<dyn services::Io> = Box::new(tls);
+                let startup = pgwire::read_startup(&mut tls, Vec::new()).await?;
+                return Ok((tls, startup));
+            }
+            // Not a preamble: a plaintext StartupMessage (sslmode=disable).
+            break;
+        }
+        let n = guest
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("reading the guest preamble: {e}"))?;
+        if n == 0 {
+            return Err("guest closed before sending a startup".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let mut guest: Box<dyn services::Io> = Box::new(Prefixed::new(buf, guest));
+    let startup = pgwire::read_startup(&mut guest, Vec::new()).await?;
+    Ok((guest, startup))
 }
 
 /// Redis/Valkey: the guest holds no password and never authenticates; the proxy
@@ -1038,19 +1099,40 @@ where
 {
     let mut guest = guest_leg(s, guest, first, host).await?;
 
-    // Guest leg: PRELOGIN → decline encryption → read (ignore) its LOGIN7.
+    // Guest leg: read its PRELOGIN. If it wants encryption, terminate the
+    // TLS-in-PRELOGIN handshake with the session CA (the guest trusts our
+    // root); otherwise take a plaintext login leg. Then read (ignore) LOGIN7.
     let mut gbuf = Vec::new();
-    let (gtyp, _gs, _pre) = tds::read_packet(&mut guest, &mut gbuf).await?;
+    let (gtyp, _gs, pre) = tds::read_packet(&mut guest, &mut gbuf).await?;
     if gtyp != tds::PKT_PRELOGIN {
         return Err("the guest did not open with a TDS PRELOGIN".into());
     }
+    let guest_wants_tls = matches!(
+        tds::prelogin_encryption(&pre).unwrap_or(tds::ENCRYPT_NOT_SUP),
+        tds::ENCRYPT_ON | tds::ENCRYPT_REQ
+    );
+    let reply_enc = if guest_wants_tls {
+        tds::ENCRYPT_ON
+    } else {
+        tds::ENCRYPT_NOT_SUP
+    };
     guest
-        .write_all(&tds::frame(
-            tds::PKT_RESPONSE,
-            &tds::prelogin(tds::ENCRYPT_NOT_SUP),
-        ))
+        .write_all(&tds::frame(tds::PKT_RESPONSE, &tds::prelogin(reply_enc)))
         .await
         .map_err(|e| format!("sending PRELOGIN to the guest: {e}"))?;
+    let mut guest: Box<dyn services::Io> = if guest_wants_tls {
+        let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let wrapper = tds::TdsTls::new(guest, handshaking.clone());
+        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let tls = TlsAcceptor::from(config)
+            .accept(wrapper)
+            .await
+            .map_err(|e| format!("TLS from guest: {e}"))?;
+        handshaking.store(false, Ordering::Relaxed);
+        Box::new(tls)
+    } else {
+        guest
+    };
     let _ = tds::read_message(&mut guest, &mut gbuf).await?; // LOGIN7, ignored
 
     // Server leg: negotiate PRELOGIN, then TLS-in-PRELOGIN unless plaintext.
