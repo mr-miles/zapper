@@ -75,13 +75,55 @@ Two shapes, not mutually exclusive:
 
 The repo's legacy "49 personas / 33 skills" surface is optional and CLI-ignored, so this proposal maps the **core model** rather than importing personas 1:1; cherry-pick a persona only where a gate (for example an independent security reviewer) wants a role the firm does not already have.
 
+## Artifact store and typing
+
+Legion bundles specs, oracles, taskgraphs and evidence into the code repository (`.legion/project`), as [OpenSpec](https://github.com/Fission-AI/OpenSpec) bundles specs and changes into `openspec/`. For a firm that spans repositories this is the wrong shape: cross-repository changes have no single home, evidence bloats git history, the governance lifecycle entangles with branch/merge mechanics, and repository write implies governance write. Keep the format, invert the storage. (OpenSpec detail here is from secondary sources — confirm against its repo.)
+
+- **Specs and oracles** — an **OpenSpec-compatible** Markdown dialect (RFC 2119 `MUST/SHOULD/MAY`, `GIVEN/WHEN/THEN` scenarios, the delta / `propose → apply → archive` shape), so agents already fluent in it work and `openspec validate` can lint the artifacts — but stored as `spec` and `oracle` artifact kinds in the firm's **shared drive**, not in the code repository.
+- **Evidence and attestation** — new typed artifact kinds the drive and keeper already have the machinery for: content-addressed by sha256 ([`drive.rs`](../../crates/zapper-office/src/drive.rs)), hash-chained and re-verifiable ([the record](../security.md#the-record)), attested by a worker/approver identity under grant-gated, officer-owned authority ([`access.rs`](../../crates/zapper-office/src/access.rs)) — so "nobody attests their own evidence" falls out of the same rule as "nobody decides their own access request".
+- **Reference out, not bundle in** — a store artifact names the repositories and commits it governs by `repo@sha` (and the tickets it came from), rather than living inside one repo. One store per firm/portfolio points at many repositories: this is [proposal 01](01-persistent-outputs.md)'s durable, central drive used as the governance store.
+
+This leaves a three-layer split, with the code repository holding none of the governance:
+
+| Layer | Lives in |
+|---|---|
+| Code | the git repository (or repositories) |
+| Workplans / taskgraph / task contracts | zapper **assignments + threads + desk**, where a "task" is a delegation tree ([`mail.rs`](../../crates/zapper-office/src/mail.rs) `task_threads`, [`drive.js`](../../crates/zapper-office/src/ui/drive.js)) — it plays the taskgraph's *role* (ownership, decomposition, due dates, open/closed lifecycle) but not its *shape* (see note). Legion writes these as repo files; the firm does not |
+| Spec + oracle + evidence + attestation + verdicts | the **central store** (drive + keeper): OpenSpec-format for spec/oracle, the firm's extension for the rest |
+
+Store entries bind the three by referencing `repo@sha` and ticket ids. So **workplans stay tickets, code stays in the repo, and only the durable governance artifacts are typed and stored** — cleaner than bundling, and mostly machinery the firm already has. The residual OpenSpec question is not *whether* to reuse its format (yes) but whether the server-side validator embeds the Node tool or ports its checks into the daemon (see below — the validator must be shared with the agents' self-lint).
+
+One caveat on the middle row: zapper's assignments are not a taskgraph, only its role. A "task" is a *tree* of delegated assignments (parent → children by thread `context`), prose rather than typed, with ownership, due dates and an open/closed lifecycle but **no first-class dependency edges, no typed task contract, and no typed link to an oracle** — ordering between sibling tasks is coordinated through mail and `waiting`, not modelled. For most firm work that is enough and is the right place to leave it. If a phase needs real taskgraph fidelity (a DAG with dependencies and per-task oracle links and verdicts), that is a deliberate addition — either type the assignments into task contracts, or keep tasks light and only type the durable governance (spec/oracle/evidence/attestation), letting the existing coordination layer carry decomposition. The proposal assumes the latter unless a tier demands otherwise.
+
+## An MCP interface to the store
+
+Agents reach the store the way they reach mail and the drive today: office MCP tools, served per-VM over the gateway and recorded as `mcp` events ([`ops.rs`](../../crates/zapper-office/src/ops.rs), [`gateway.rs`](../../crates/zapper-core/src/daemon/gateway.rs)). The rule, as everywhere in zapper, is that **the guard is on the host, not in the agent**: an agent proposes; the daemon validates and decides.
+
+| Tool | Does | Enforcement |
+|---|---|---|
+| `store_validate(kind, doc)` | Lint/validate a document against its schema — read-only, no write | Convenience only; runs the *same* validator the write path uses |
+| `store_put(kind, doc)` | Create or revise a `spec`/`oracle`/`evidence` draft | **Re-validates server-side** (schema + referential integrity: refs resolve, ids stable, hashes re-verify) and rejects the whole write with a structured error list if invalid — a document the agent *thinks* is valid cannot land unless it is |
+| `attest(change, requirement, evidence, note)` | Assert that hash-pinned evidence satisfies a requirement | Checks the attester is allowed and **is not the author**, that the evidence resolves and re-verifies, and records it |
+| `gate_status(change)` | Read the derived verdicts (satisfied / unsatisfied / unevaluable) and what each gate still needs | Verdicts are **derived server-side** from evidence + attestations + risk tier; an agent cannot assert "done" |
+| `archive(change)` | The controlled `applied → archived` transition that folds the spec deltas into the live spec | A single **atomic, idempotent, recorded** transition the daemon performs under preconditions (state is approved/applied, every required gate satisfied or waived); the agent never writes files or moves state itself, so it cannot archive early or corrupt the step |
+| `waive(gate, reason)` | Record an audited "not applicable" | Approver/officer only; a reason is required; recorded |
+
+Three properties do the work the question asks for:
+
+- **Self-lint that cannot drift from enforcement.** `store_validate` and `store_put` call **one validator**; the lint is advisory, the write re-runs it authoritatively. Agents can check themselves freely, and an invalid document is still refused on write — the agent's judgement is never the gate. (This is why the validator must be shared: a separate linter would drift and give a false pass.)
+- **A host-enforced state machine.** Documents move `draft → proposed → approved → applied → archived`; each tool is a transition with preconditions checked on the host, exactly as the office already refuses to `close` while work is open ([`mail.rs:577`](../../crates/zapper-office/src/mail.rs)). The agent can request transitions, not skip or forge them.
+- **Atomic, immutable, recorded writes.** Artifacts are content-addressed and immutable — revisions are new versions, as the drive already works — so `archive` is all-or-nothing and idempotent (re-archiving is a no-op, not corruption) and lands on the keeper's chain. A half-written transition can't exist because the record appends atomically.
+
+Concretely this is a new set of office tools plus a shared validator and a small state machine — new logic, not new transport: it reuses the MCP gateway, the drive for content, the keeper for hashing and attestation, and grants for authority.
+
 ## Recommendation
 
-Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, and route Legion's reflection commands through the existing **process-improvement** role. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
+Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, store the governance centrally (one store across repositories, not bundled into each repo) and serve it through **MCP tools with host-side validation and a controlled archive transition** so agents can self-lint but can neither push invalid documents nor corrupt archiving, and route Legion's reflection commands through the existing **process-improvement** role. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
 
 ## Open questions
 
 - **Where does `risk` come from** — stated by the board/CEO per phase, or derived from the surface and protected paths an assignment touches (Legion derives it)?
 - **Who owns the oracle.** The product-manager writes acceptance criteria today; an R2+ oracle wants an owner distinct from the implementer, as Legion insists.
 - **Double approval.** The firm already has asks/grants and the board; adding Legion-style approvers must not create two overlapping approval systems — decide which decision each owns.
-- **Typed artifacts.** How far to go towards Legion's typed spec/oracle/evidence schemas versus the firm's current prose-plus-attachment artifacts.
+- **Typed artifacts and the store.** Addressed above (OpenSpec-compatible spec/oracle, zapper-store evidence/attestation, served via MCP). The residual is the shared validator: embed the OpenSpec Node tool, or port its checks into the daemon so self-lint and the write path cannot drift.
+- **Taskgraph fidelity.** zapper's assignments play the taskgraph's role but are a prose tree, not a typed DAG with dependency edges and oracle links. Decide per tier whether that is enough or whether some phases need true task contracts — and if so, whether to type the assignments or keep tasks light and type only the governance.
