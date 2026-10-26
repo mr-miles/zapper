@@ -5,7 +5,9 @@
 //! name bound to the `CONNECT` host, or, when a rule needs to see requests,
 //! terminated with the session CA so every request is checked on its own and
 //! secrets can be injected. Plain `http://` requests are checked per request;
-//! secrets are never injected into them.
+//! a secret is injected into one only if it is marked `plaintext: true`, since
+//! anything on the path can read a plaintext request — a secret without that
+//! flag is refused rather than sent in the clear.
 
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
@@ -1332,6 +1334,9 @@ mod approval_tests;
 
 #[cfg(test)]
 mod h2_tests;
+
+#[cfg(test)]
+mod hardening_tests;
 
 #[cfg(test)]
 mod tests {
