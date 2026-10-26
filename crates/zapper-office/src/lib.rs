@@ -491,6 +491,55 @@ impl FirmRun {
         }
     }
 
+    /// Check a plan is within `owner`'s authority before it starts or resumes,
+    /// and reject the whole plan if not (proposal 06: validate the whole plan
+    /// or none). The statically-knowable gaps live here; a role slot with no
+    /// budget that no free worker can fill is a capacity matter, left to the
+    /// best-effort release. Lists every offending slot so they fix them at once:
+    ///
+    /// - a named slot must name a worker that exists and is below the owner
+    ///   (a plan's children are assignments from the owner; authority flows
+    ///   down the chart), and
+    /// - a role slot must name a role the firm has, and — when it carries a
+    ///   budget to hire one — a role the owner's role may hire (else the budget
+    ///   can never be spent).
+    pub(crate) fn check_plan_authority(
+        &self,
+        owner: &str,
+        team: &BTreeMap<String, plan::SlotDef>,
+    ) -> Result<()> {
+        let chart = self.chart();
+        let can_hire = chart
+            .worker(owner)
+            .and_then(|w| self.config.roles.get(&w.role))
+            .map(|r| r.hires.clone())
+            .unwrap_or_default();
+        let mut bad = Vec::new();
+        for (id, def) in team {
+            if let Some(name) = &def.name {
+                if chart.worker(name).is_none() {
+                    bad.push(format!("{id}: no worker named {name}"));
+                } else if owner != BOARD && !chart.is_above(owner, name) {
+                    bad.push(format!(
+                        "{id}: {name} is not below you — you can only name your own reports"
+                    ));
+                }
+            } else if let Some(role) = &def.role {
+                if !self.config.roles.contains_key(role) {
+                    bad.push(format!("{id}: no role {role}"));
+                } else if def.budget.is_some() && owner != BOARD && !can_hire.contains(role) {
+                    bad.push(format!(
+                        "{id}: your role can't hire a {role}, so a budget to hire one can't be spent — name a worker, or drop the budget"
+                    ));
+                }
+            }
+        }
+        if !bad.is_empty() {
+            bail!("this plan has slots you can't run:\n- {}", bad.join("\n- "));
+        }
+        Ok(())
+    }
+
     /// Release a plan stage, best-effort: send every child it can staff from
     /// the plan's owner, parented under the plan's source task, and collect the
     /// ones it can't as problems rather than stopping at the first. Each child's
@@ -582,8 +631,16 @@ impl FirmRun {
             .slot_def(plan, slot)
             .ok_or_else(|| anyhow!("plan {plan}: no slot {slot}"))?;
         if let Some(name) = def.name {
-            if self.chart().worker(&name).is_none() {
+            let chart = self.chart();
+            if chart.worker(&name).is_none() {
                 bail!("slot {slot}: no worker named {name}");
+            }
+            // A plan's children are assignments from its owner, and authority
+            // flows down the chart: you can only name a worker below you. (The
+            // send would refuse it anyway; catch it here with a clear reason
+            // and without binding the slot to someone you can't assign.)
+            if owner != BOARD && !chart.is_above(owner, &name) {
+                bail!("slot {slot}: you can only name a worker below you on the chart; {name} is not one of yours");
             }
             self.plans.lock().unwrap().bind_slot(plan, slot, &name);
             return Ok(Dispatch::Mail(name));

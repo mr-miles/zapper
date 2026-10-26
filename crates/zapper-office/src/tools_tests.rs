@@ -674,6 +674,130 @@ async fn a_stage_reports_every_unstaffable_slot_not_just_the_first() {
     );
 }
 
+// A firm where a manager (dana) leads an engineer (pat) but dana's role can't
+// hire, for the two authority edges below.
+const FIRM_LEAD: &str = "
+profiles:
+  w:
+    agent: { kind: claude-code }
+    policy:
+      net:
+        - { action: allow, host: registry.npmjs.org, ports: [443] }
+firms:
+  acme:
+    budget: { seed: 1000000, security_share: 0.2, quote_fee: 10000 }
+    security: { officers: [sec] }
+    roles:
+      ceo: { profile: w, agent: ceo, hires: [lead] }
+      lead: { profile: w, agent: software-engineer }
+      eng: { profile: w, agent: software-engineer }
+      sec: { profile: w, agent: security-officer, officer: true }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: sec, role: sec, reports_to: ceo }
+      - { name: dana, role: lead, reports_to: ceo }
+      - { name: pat, role: eng, reports_to: dana }
+";
+
+/// A plan is refused whole if it holds a slot the planner can't run: a role
+/// slot with a budget to hire a role their role can't hire. Authority is known
+/// up front, so it is rejected at the start, not reported at release.
+#[tokio::test]
+async fn a_plan_a_planner_cannot_hire_for_is_refused() {
+    let t = crate::test_core(FIRM_LEAD);
+    let run = test_run(&t.core, "acme");
+    // dana may plan (they lead pat) but `lead` can't hire: a budgeted engineer
+    // slot is beyond their authority, so the whole plan is refused.
+    let err = refused(
+        &t,
+        &run,
+        "dana",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "busy": { "role": "eng" }, "new": { "role": "eng", "budget": "2M" } },
+            "stages": [[
+                { "slot": "busy", "subject": "Hold", "body": "hold" },
+                { "slot": "new", "subject": "Build", "body": "build" },
+            ]],
+        }),
+    )
+    .await;
+    assert!(
+        err.contains("new:") && err.contains("can't hire"),
+        "names the slot and why: {err}"
+    );
+    // Nothing was created or sent: no plan took effect.
+    assert_eq!(
+        ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await["unread"],
+        json!(0)
+    );
+}
+
+/// A plan's children are assignments from its owner, so authority flows down:
+/// a named slot must name a worker below the owner. A plan that names someone
+/// not below the planner is refused whole — dana may name pat (their report)
+/// but not the CEO above them.
+#[tokio::test]
+async fn a_plan_naming_a_worker_not_below_the_planner_is_refused() {
+    let t = crate::test_core(FIRM_LEAD);
+    let run = test_run(&t.core, "acme");
+    let err = refused(
+        &t,
+        &run,
+        "dana",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "mine": { "name": "pat" }, "boss": { "name": "ceo" } },
+            "stages": [[
+                { "slot": "mine", "subject": "Do", "body": "do it" },
+                { "slot": "boss", "subject": "Approve", "body": "approve it" },
+            ]],
+        }),
+    )
+    .await;
+    assert!(
+        err.contains("boss:") && err.contains("not below you"),
+        "names the slot and why: {err}"
+    );
+    // The whole plan was rejected, so the valid slot wasn't staffed either.
+    assert_eq!(
+        ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await["unread"],
+        json!(0)
+    );
+}
+
+/// The gate isn't over-broad: a planner may lay out a plan within their
+/// authority — their own reports by name, and roles they rely on filling from
+/// the chart without a budget — and it runs.
+#[tokio::test]
+async fn a_planner_may_plan_within_their_authority() {
+    let t = crate::test_core(FIRM_LEAD);
+    let run = test_run(&t.core, "acme");
+    let plan = ok(
+        &t,
+        &run,
+        "dana",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "mine": { "name": "pat" } },
+            "stages": [[ { "slot": "mine", "subject": "Do", "body": "do it" } ]],
+        }),
+    )
+    .await;
+    assert_eq!(plan["children"].as_array().map(Vec::len), Some(1), "{plan}");
+    assert!(plan.get("problems").is_none(), "{plan}");
+    assert_eq!(
+        run.plans
+            .lock()
+            .unwrap()
+            .binding(plan["plan"].as_str().unwrap(), "mine"),
+        Some("pat".into())
+    );
+}
+
 /// Continuity reuses a role slot's worker across stages — but if that worker is
 /// terminated between stages, the later stage's child reopens and re-staffs
 /// onto someone else. The departed worker is not resurrected via the binding.
@@ -830,8 +954,7 @@ async fn plan_snapshots_track_pause_resume_and_completion() {
     let status = || {
         journal(&run)
             .into_iter()
-            .filter(|e| e["type"] == "plan" && e["event"] == "snapshot")
-            .last()
+            .rfind(|e| e["type"] == "plan" && e["event"] == "snapshot")
             .and_then(|e| e["plan"]["status"].as_str().map(|s| s.to_string()))
     };
     let plan = ok(
@@ -883,15 +1006,17 @@ async fn plan_snapshots_track_pause_resume_and_completion() {
     );
 }
 
-/// A later stage names a worker who has since left the firm. When that stage is
-/// released (on the event path, no planner in the loop) the office can't staff
-/// the named slot, so it reports the gap in bulk and tells the owner — the
-/// long-running plan holds rather than hanging or erroring.
+/// A worker named in a later stage leaves the firm *after* the plan starts
+/// (so it passed the start-time check). When that stage is released (on the
+/// event path, no planner in the loop) the office can't staff the named slot,
+/// so it reports the gap in bulk and tells the owner — the long-running plan
+/// holds rather than hanging or erroring.
 #[tokio::test]
 async fn a_later_stage_whose_named_worker_left_reports_the_gap() {
     let (t, run) = run();
     approved(&t, &run).await;
-    // Robin exists, then leaves the firm before the stage that names them.
+    // Robin exists and is below the CEO when the plan is laid out, so it is
+    // valid to name them for a later stage.
     ok(
         &t,
         &run,
@@ -900,16 +1025,7 @@ async fn a_later_stage_whose_named_worker_left_reports_the_gap() {
         json!({ "role": "eng", "name": "robin", "budget": "1M", "subject": "Join", "brief": "Start.", "reason": "capacity" }),
     )
     .await;
-    ok(
-        &t,
-        &run,
-        "ceo",
-        "release",
-        json!({ "worker": "robin", "reason": "plans changed" }),
-    )
-    .await;
-
-    // Stage 0 goes to pat; stage 1 names the departed robin.
+    // Stage 0 goes to pat; stage 1 names robin.
     let plan = ok(
         &t,
         &run,
@@ -927,6 +1043,16 @@ async fn a_later_stage_whose_named_worker_left_reports_the_gap() {
     .await;
     let id = plan["plan"].as_str().unwrap().to_string();
     assert!(plan.get("problems").is_none(), "stage 0 was fine: {plan}");
+
+    // Robin now leaves — after the plan started, before their stage is reached.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "release",
+        json!({ "worker": "robin", "reason": "plans changed" }),
+    )
+    .await;
 
     // pat completes stage 0, which releases stage 1 — where robin is gone.
     let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;

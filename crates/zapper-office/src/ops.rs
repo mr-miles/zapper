@@ -433,6 +433,9 @@ static TOOLS: &[Tool] = &[
             if stages.is_empty() {
                 bail!("the plan has no stages");
             }
+            // Reject the whole plan up front if it names anyone below nobody,
+            // or funds a hire the planner's role can't make (proposal 06).
+            c.run.check_plan_authority(c.me, &team)?;
             let id = c.run.plans.lock().unwrap().create(c.me, &source, team, stages);
             // Best-effort: send every stage-0 child that can be staffed now,
             // and report the rest (e.g. a role slot needing a budget) in bulk.
@@ -469,6 +472,19 @@ static TOOLS: &[Tool] = &[
         run: Run::Sync(|c| {
             let id = c.args.req("plan")?;
             authorize_plan(c, &id)?;
+            // Don't push a plan forward if it holds slots its owner can't run
+            // (the same gate as starting it), checked against the owner the
+            // children are sent from — which a departure may have reassigned.
+            if let Some((owner, team)) = c
+                .run
+                .plans
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|p| (p.owner.clone(), p.team.clone()))
+            {
+                c.run.check_plan_authority(&owner, &team)?;
+            }
             let advance = c.run.plans.lock().unwrap().resume(&id);
             // A resume that finished a held stage releases the next one itself;
             // otherwise retry the active stage's still-pending children here.
