@@ -27,6 +27,7 @@ pub mod services;
 pub mod session;
 mod spec;
 mod summary;
+pub(crate) mod tds;
 pub mod tls;
 pub mod vm;
 

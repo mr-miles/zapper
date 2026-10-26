@@ -36,7 +36,7 @@ use zapper_policy::{
 use super::deciders::Referral;
 use super::session::Session;
 use super::{
-    cassandra, httplog, mongodb, mysql, pgwire, redis, services, spec, tls, Daemon, EventBody,
+    cassandra, httplog, mongodb, mysql, pgwire, redis, services, spec, tds, tls, Daemon, EventBody,
 };
 
 type Body = BoxBody<Bytes, hyper::Error>;
@@ -772,8 +772,8 @@ async fn relay_database<S>(
         NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mysql => mysql_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Tds => tds_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
-        other => Err(format!("{other} relay is not implemented yet")),
     };
     let Relayed {
         mut guest,
@@ -1009,6 +1009,99 @@ where
         guest,
         server,
         to_guest: vec![],
+    })
+}
+
+/// MS SQL Server (TDS), SQL authentication only: answer the guest's PRELOGIN
+/// with ENCRYPT_NOT_SUP (plaintext login leg), read and ignore its LOGIN7, log
+/// in to the real server with the host-held credential — tunnelling TLS in
+/// PRELOGIN packets when the server wants encryption — then forward the
+/// server's login response to the guest and splice.
+async fn tds_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    mut server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut guest = guest_leg(s, guest, first, host).await?;
+
+    // Guest leg: PRELOGIN → decline encryption → read (ignore) its LOGIN7.
+    let mut gbuf = Vec::new();
+    let (gtyp, _gs, _pre) = tds::read_packet(&mut guest, &mut gbuf).await?;
+    if gtyp != tds::PKT_PRELOGIN {
+        return Err("the guest did not open with a TDS PRELOGIN".into());
+    }
+    guest
+        .write_all(&tds::frame(
+            tds::PKT_RESPONSE,
+            &tds::prelogin(tds::ENCRYPT_NOT_SUP),
+        ))
+        .await
+        .map_err(|e| format!("sending PRELOGIN to the guest: {e}"))?;
+    let _ = tds::read_message(&mut guest, &mut gbuf).await?; // LOGIN7, ignored
+
+    // Server leg: negotiate PRELOGIN, then TLS-in-PRELOGIN unless plaintext.
+    let mut sbuf = Vec::new();
+    let want = if cred.plaintext {
+        tds::ENCRYPT_NOT_SUP
+    } else {
+        tds::ENCRYPT_ON
+    };
+    server
+        .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(want)))
+        .await
+        .map_err(|e| format!("sending PRELOGIN: {e}"))?;
+    let (_t, _s, preresp) = tds::read_packet(&mut server, &mut sbuf).await?;
+    let server_enc =
+        tds::prelogin_encryption(&preresp).ok_or("server PRELOGIN had no ENCRYPTION option")?;
+
+    let mut server: Box<dyn services::Io> = if cred.plaintext {
+        if !matches!(server_enc, tds::ENCRYPT_OFF | tds::ENCRYPT_NOT_SUP) {
+            return Err("server requires TLS but the dbauth secret is plaintext".into());
+        }
+        Box::new(server)
+    } else {
+        if !matches!(
+            server_enc,
+            tds::ENCRYPT_ON | tds::ENCRYPT_REQ | tds::ENCRYPT_OFF
+        ) {
+            return Err(
+                "server does not support TLS and the dbauth secret is not plaintext".into(),
+            );
+        }
+        // Tunnel the TLS handshake in PRELOGIN packets, then pass through.
+        let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let wrapper = tds::TdsTls::new(server, handshaking.clone());
+        let name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|e| format!("{host}: {e}"))?;
+        let tls = TlsConnector::from(tls::client_config())
+            .connect(name, wrapper)
+            .await
+            .map_err(|e| format!("TLS to {host}: {e}"))?;
+        handshaking.store(false, Ordering::Relaxed);
+        Box::new(tls)
+    };
+
+    // LOGIN7 with the host-held credential; a server rejection fails closed.
+    server
+        .write_all(&tds::frame(
+            tds::PKT_LOGIN7,
+            &tds::login7(&cred.user, &cred.password, cred.database.as_deref(), host),
+        ))
+        .await
+        .map_err(|e| format!("sending LOGIN7: {e}"))?;
+    let (_rt, resp) = tds::read_message(&mut server, &mut sbuf).await?;
+    tds::login_result(&resp)?;
+
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: tds::frame(tds::PKT_RESPONSE, &resp),
     })
 }
 
