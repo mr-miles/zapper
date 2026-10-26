@@ -30,12 +30,12 @@ use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, Action, AnyRule, Decision, Kind,
-    NetEffects, NetRequest, NetRule,
+    NetEffects, NetProtocol, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, services, spec, tls, Daemon, EventBody};
+use super::{httplog, pgwire, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -512,6 +512,9 @@ async fn stream<S>(
     };
     let is_tls = first.first() == Some(&0x16);
     match verdict {
+        Some(v) if v.effects.protocol == NetProtocol::Postgres => {
+            pg_relay(&d, &s, io, first, &endpoint, &addr, v).await
+        }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
         None if is_tls => {
             mitm(
@@ -655,6 +658,186 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     httplog::finish(&s.requests, &rec);
+}
+
+/// The database auth-terminating relay (proposal 07): the guest connects with
+/// no password; the proxy presents it as authenticated, authenticates to the
+/// real server with the host-held `dbauth` secret, then splices the session.
+/// Only the startup/auth handshake is parsed — never the query stream.
+async fn pg_relay<S>(
+    d: &Daemon,
+    s: &Arc<Session>,
+    mut guest: S,
+    first: Vec<u8>,
+    endpoint: &NetRequest,
+    addr: &Target,
+    v: Verdict,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let rec = s.requests.lock().unwrap().start(
+        "postgres",
+        "CONNECT",
+        &endpoint.host,
+        endpoint.port,
+        None,
+        vec![],
+    );
+    note_verdict(&rec, &v);
+    let fail = |status, error: String| {
+        log(
+            d,
+            s,
+            NetLog {
+                req: endpoint,
+                verdict: Some(&v),
+                inspected: false,
+                status: None,
+                secrets: vec![],
+                error: Some(error.clone()),
+            },
+        );
+        note_failure(s, &rec, status, Some(error));
+    };
+
+    // The relay only serves a real network address, never a daemon service.
+    let Target::Addr(server_addr) = addr else {
+        return fail(
+            403,
+            format!(
+                "{} is a service; a postgres rule can't relay to it",
+                endpoint.host
+            ),
+        );
+    };
+
+    // The rule names exactly one dbauth secret (the config validates this);
+    // read its user, optional pinned database, plaintext flag and source.
+    let name = v.effects.secrets.first().cloned();
+    let resolved = {
+        let c = d.config.read().unwrap();
+        name.as_ref().and_then(|n| c.secrets.get(n)).map(|sec| {
+            (
+                sec.user.clone(),
+                sec.database.clone(),
+                sec.plaintext,
+                sec.source.clone(),
+            )
+        })
+    };
+    let Some((user, database_pin, plaintext, source)) = resolved else {
+        return fail(500, "postgres rule has no dbauth secret".into());
+    };
+    let Some(user) = user else {
+        return fail(500, "dbauth secret has no user".into());
+    };
+
+    // 1. Answer an optional SSLRequest with 'N' to steer the guest to a
+    //    plaintext local leg (it carries no secret), then read the startup.
+    let startup = match pgwire::read_guest_startup(&mut guest, first).await {
+        Ok(st) => st,
+        Err(e) => return fail(400, e),
+    };
+    // The secret defines the user; the database is pinned, else the guest's.
+    let database = database_pin.or(startup.database);
+
+    // 2. Resolve the host-held credential (never seen by the guest).
+    let password = match source.resolve() {
+        Ok(p) => p,
+        Err(e) => return fail(500, format!("resolving dbauth secret: {e:#}")),
+    };
+
+    // 3. Open the server leg and require TLS unless the secret is plaintext.
+    let server = match dial(*server_addr).await {
+        Ok(c) => c,
+        Err(e) => return fail(502, format!("connecting to {}: {e}", endpoint.host)),
+    };
+    let mut server = match pg_server_leg(server, &endpoint.host, plaintext).await {
+        Ok(srv) => srv,
+        Err(e) => return fail(502, e),
+    };
+
+    // 4. Authenticate to the server with the credential (SCRAM-SHA-256).
+    let leftover = match pgwire::authenticate_server(
+        &mut server,
+        &user,
+        database.as_deref(),
+        &password,
+        &scram_nonce(),
+    )
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => return fail(502, format!("authenticating to {}: {e}", endpoint.host)),
+    };
+
+    // 5. Present the guest as authenticated and relay the rest, byte for byte.
+    log(
+        d,
+        s,
+        NetLog {
+            req: endpoint,
+            verdict: Some(&v),
+            inspected: false,
+            status: None,
+            secrets: name.into_iter().collect(),
+            error: None,
+        },
+    );
+    httplog::mark_ttfb(&rec);
+    if guest.write_all(&pgwire::AUTH_OK).await.is_ok() && guest.write_all(&leftover).await.is_ok() {
+        if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut guest, &mut server).await {
+            let mut r = rec.lock().unwrap();
+            r.req_body.total = up;
+            r.resp_body.total = down + leftover.len() as u64;
+        }
+    }
+    httplog::finish(&s.requests, &rec);
+}
+
+/// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the
+/// server's one-byte reply, either runs TLS (`S`) with real certificate
+/// validation or — only if the secret is `plaintext` — continues in the clear
+/// (`N`). A server that refuses TLS when the secret is not plaintext fails
+/// closed, so the credential is never sent over an unprotected link.
+async fn pg_server_leg(
+    mut tcp: TcpStream,
+    host: &str,
+    plaintext: bool,
+) -> Result<Box<dyn services::Io>, String> {
+    tcp.write_all(&pgwire::SSL_REQUEST)
+        .await
+        .map_err(|e| format!("requesting server TLS: {e}"))?;
+    let mut reply = [0u8; 1];
+    tcp.read_exact(&mut reply)
+        .await
+        .map_err(|e| format!("reading the server's TLS reply: {e}"))?;
+    match reply[0] {
+        b'S' => {
+            let name = rustls::pki_types::ServerName::try_from(host.to_string())
+                .map_err(|e| format!("{host}: {e}"))?;
+            let tls = TlsConnector::from(tls::client_config())
+                .connect(name, tcp)
+                .await
+                .map_err(|e| format!("TLS to {host}: {e}"))?;
+            Ok(Box::new(tls))
+        }
+        b'N' if plaintext => Ok(Box::new(tcp)),
+        b'N' => Err(format!(
+            "{host} refused TLS and the dbauth secret is not marked plaintext"
+        )),
+        other => Err(format!("{host} gave an unexpected TLS reply {other:#x}")),
+    }
+}
+
+/// A fresh SCRAM client nonce: printable, comma-free ASCII (RFC 5802).
+fn scram_nonce() -> String {
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect()
 }
 
 /// A stream that first replays bytes already read from it.
@@ -1419,6 +1602,7 @@ mod tests {
             let effects = NetEffects {
                 secrets: vec![name.to_string()],
                 set_headers: vec![],
+                ..Default::default()
             };
             inject(d, host, plaintext, &effects, &mut headers).map(|i| (i.names, headers))
         };
@@ -1438,6 +1622,7 @@ mod tests {
         let effects = NetEffects {
             secrets: vec![],
             set_headers: vec![("x-key".into(), "{{secret:s}}".into())],
+            ..Default::default()
         };
         let e = inject(d, "evil.example", false, &effects, &mut headers)
             .err()

@@ -182,6 +182,7 @@ pub fn headers(data: &[u8]) {
         } else {
             vec![]
         },
+        protocol: Default::default(),
     };
     let mut h = hyper::HeaderMap::new();
     for (k, v) in header_lines(rest) {

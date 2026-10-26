@@ -1,16 +1,17 @@
-//! Postgres v3 wire pieces for database credential injection (proposal 07),
-//! spike: enough of the frontend/backend framing to drive an auth-terminating
-//! relay — detect the `SSLRequest`, read the `StartupMessage`, frame typed
-//! messages (to find where the server reaches `ReadyForQuery`), the
-//! `AuthenticationOk` the proxy sends the guest, and the server-side
-//! SCRAM-SHA-256 exchange ([`scram`]) the proxy runs with the host-held
-//! password. It does NOT parse queries; after auth the relay splices bytes.
+//! Postgres v3 wire pieces for database credential injection (proposal 07):
+//! enough of the frontend/backend framing to drive the auth-terminating relay
+//! in `proxy::pg_relay` — detect the `SSLRequest`, read the guest's
+//! `StartupMessage`, frame typed messages, send the `AuthenticationOk` the
+//! proxy fabricates for the guest, and run the server-side SCRAM-SHA-256
+//! exchange ([`scram`], [`authenticate_server`]) with the host-held password.
+//! It does NOT parse queries; after auth the relay splices bytes.
 //!
-//! Spike: the parsers, builders and the SCRAM client here are tested (SCRAM
-//! against the RFC 7677 vector) and the startup parser is fuzzed, but nothing
-//! is wired into the proxy yet (that dispatch, plus a real-database e2e, are
-//! the next steps — see `docs/proposals/07-db-credential-injection.md`).
-#![allow(dead_code)]
+//! The parsers and the SCRAM exchange are tested (SCRAM against the RFC 7677
+//! vector and a full handshake over an in-memory server) and the startup
+//! parser is fuzzed. A real-Postgres e2e is the remaining step — see
+//! `docs/proposals/07-db-credential-injection.md`.
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// The 8-byte `SSLRequest` a client sends before TLS: `Int32(8)` then
 /// `Int32(80877103)`.
@@ -331,6 +332,203 @@ fn frame(typ: u8, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Builds the v3 `StartupMessage` the proxy sends the real server: `Int32`
+/// length, the 3.0 protocol, then `user` (and `database`, if pinned) as
+/// NUL-terminated key/value pairs, ending with an empty key. Inverse of
+/// [`parse_startup`].
+pub fn startup_message(user: &str, database: Option<&str>) -> Vec<u8> {
+    let mut rest = PROTOCOL_V3.to_be_bytes().to_vec();
+    let mut kv = |k: &str, v: &str| {
+        rest.extend_from_slice(k.as_bytes());
+        rest.push(0);
+        rest.extend_from_slice(v.as_bytes());
+        rest.push(0);
+    };
+    kv("user", user);
+    if let Some(db) = database {
+        kv("database", db);
+    }
+    rest.push(0); // terminating empty key
+    let mut out = ((rest.len() + 4) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(&rest);
+    out
+}
+
+/// Summarises an `ErrorResponse` (`E`) body — code/value pairs, each a `Byte1`
+/// field then a C string, ending with a zero byte — into its SQLSTATE and
+/// message for a denial the guest can read.
+fn error_response(body: &[u8]) -> String {
+    let (mut code, mut msg) = (None, None);
+    let mut b = body;
+    while let Some((&field, rest)) = b.split_first() {
+        if field == 0 {
+            break;
+        }
+        let Some((val, after)) = cstr(rest) else {
+            break;
+        };
+        let val = String::from_utf8_lossy(val).into_owned();
+        match field {
+            b'C' => code = Some(val),
+            b'M' => msg = Some(val),
+            _ => {}
+        }
+        b = after;
+    }
+    match (code, msg) {
+        (Some(c), Some(m)) => format!("server error {c}: {m}"),
+        (_, Some(m)) => format!("server error: {m}"),
+        _ => "server reported an error".into(),
+    }
+}
+
+/// The largest buffered handshake message we tolerate from the server before
+/// `AuthenticationOk`: generous for a SASL exchange, bounded so a hostile or
+/// broken server can't make us buffer without end.
+const MAX_HANDSHAKE_MSG: usize = 64 * 1024;
+
+/// Reads one complete typed message from `server`, buffering partial reads in
+/// `buf` and draining what it consumes. Returns `(type, body)`.
+async fn read_one<S: AsyncRead + Unpin>(
+    server: &mut S,
+    buf: &mut Vec<u8>,
+) -> Result<(u8, Vec<u8>), String> {
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some((typ, body, consumed)) = message(buf) {
+            let out = (typ, body.to_vec());
+            buf.drain(..consumed);
+            return Ok(out);
+        }
+        if buf.len() > MAX_HANDSHAKE_MSG {
+            return Err("server handshake message too large".into());
+        }
+        let n = server
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("reading from server: {e}"))?;
+        if n == 0 {
+            return Err("server closed during authentication".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Reads the guest's opening: an optional `SSLRequest` — to which it replies
+/// `N` (TLS declined), steering the guest to a plaintext local leg that
+/// carries no secret — then the `StartupMessage`. `first` is bytes already
+/// peeked from the guest. Errors on a close before a complete startup, or one
+/// implausibly large.
+pub async fn read_guest_startup<G: AsyncRead + AsyncWrite + Unpin>(
+    guest: &mut G,
+    first: Vec<u8>,
+) -> Result<Startup, String> {
+    let mut buf = first;
+    let mut chunk = [0u8; 4096];
+    loop {
+        if is_ssl_request(&buf) {
+            guest
+                .write_all(b"N")
+                .await
+                .map_err(|e| format!("declining the guest's SSLRequest: {e}"))?;
+            buf.drain(..SSL_REQUEST.len());
+        }
+        if let Some(startup) = parse_startup(&buf) {
+            return Ok(startup);
+        }
+        if buf.len() > MAX_HANDSHAKE_MSG {
+            return Err("guest startup message too large".into());
+        }
+        let n = guest
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("reading the guest startup: {e}"))?;
+        if n == 0 {
+            return Err("guest closed before sending a startup message".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Drives the proxy's side of the Postgres startup+auth against the real
+/// server: sends the `StartupMessage` for `user`/`database`, completes
+/// SCRAM-SHA-256 with the host-held `password` (`nonce` is a fresh client
+/// nonce), and returns once the server sends `AuthenticationOk`. Any bytes read
+/// past it (the server's `ParameterStatus`/`BackendKeyData`/`ReadyForQuery`,
+/// which may arrive in the same packet) are returned so the relay can forward
+/// them to the guest. Errors on an unsupported auth method, an `ErrorResponse`,
+/// or a SCRAM exchange that does not verify — the relay then fails closed.
+pub async fn authenticate_server<S: AsyncRead + AsyncWrite + Unpin>(
+    server: &mut S,
+    user: &str,
+    database: Option<&str>,
+    password: &str,
+    nonce: &str,
+) -> Result<Vec<u8>, String> {
+    server
+        .write_all(&startup_message(user, database))
+        .await
+        .map_err(|e| format!("sending startup: {e}"))?;
+    let mut buf = Vec::new();
+    let mut client: Option<scram::Client> = None;
+    let mut fin: Option<scram::Final> = None;
+    loop {
+        let (typ, body) = read_one(server, &mut buf).await?;
+        match typ {
+            b'R' => match parse_auth(&body).ok_or("malformed authentication message")? {
+                Auth::Ok => return Ok(buf),
+                Auth::Sasl { mechanisms } => {
+                    if !mechanisms.contains(&"SCRAM-SHA-256") {
+                        return Err(format!(
+                            "server offers no SCRAM-SHA-256 (only {mechanisms:?})"
+                        ));
+                    }
+                    // Postgres authenticates the startup user; the SCRAM
+                    // username is empty, as libpq sends it.
+                    let c = scram::Client::new("", password, nonce);
+                    server
+                        .write_all(&sasl_initial_response(
+                            "SCRAM-SHA-256",
+                            c.client_first().as_bytes(),
+                        ))
+                        .await
+                        .map_err(|e| format!("sending SASL initial response: {e}"))?;
+                    client = Some(c);
+                }
+                Auth::SaslContinue(server_first) => {
+                    let c = client
+                        .as_ref()
+                        .ok_or("server sent SASLContinue out of order")?;
+                    let f = c.client_final(server_first)?;
+                    server
+                        .write_all(&sasl_response(f.message.as_bytes()))
+                        .await
+                        .map_err(|e| format!("sending SASL response: {e}"))?;
+                    fin = Some(f);
+                }
+                Auth::SaslFinal(server_final) => {
+                    let f = fin.as_ref().ok_or("server sent SASLFinal out of order")?;
+                    scram::Client::verify_server_final(f, server_final)?;
+                }
+                Auth::Other(n) => {
+                    return Err(format!(
+                        "server wants authentication method {n}; only SCRAM-SHA-256 is supported"
+                    ))
+                }
+            },
+            b'E' => return Err(error_response(&body)),
+            // NoticeResponse and NegotiateProtocolVersion may precede auth.
+            b'N' | b'v' => {}
+            other => {
+                return Err(format!(
+                    "unexpected message {:?} during authentication",
+                    other as char
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +692,152 @@ mod tests {
         assert!(c
             .client_final(b"r=clientnonceX,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=lots")
             .is_err());
+    }
+
+    #[test]
+    fn startup_message_round_trips_through_parse_startup() {
+        let p = parse_startup(&startup_message("app_ro", Some("app"))).unwrap();
+        assert_eq!(p.user, "app_ro");
+        assert_eq!(p.database.as_deref(), Some("app"));
+        // Without a database, only the user is set.
+        let p = parse_startup(&startup_message("u", None)).unwrap();
+        assert_eq!((p.user.as_str(), p.database), ("u", None));
+    }
+
+    // --- the server half of SCRAM-SHA-256, only for the duplex handshake tests
+    // below; it mirrors scram::Client's private crypto with `ring` directly. ---
+    use base64::Engine as _;
+    use ring::{digest, hmac as rhmac, pbkdf2};
+    use std::num::NonZeroU32;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn tb64() -> base64::engine::general_purpose::GeneralPurpose {
+        base64::engine::general_purpose::STANDARD
+    }
+    fn thmac(key: &[u8], msg: &[u8]) -> [u8; 32] {
+        rhmac::sign(&rhmac::Key::new(rhmac::HMAC_SHA256, key), msg)
+            .as_ref()
+            .try_into()
+            .unwrap()
+    }
+    fn tsha(data: &[u8]) -> [u8; 32] {
+        digest::digest(&digest::SHA256, data)
+            .as_ref()
+            .try_into()
+            .unwrap()
+    }
+
+    /// A minimal Postgres server that requires SCRAM-SHA-256 with `password`.
+    /// On success it sends `AuthenticationOk` then a `ReadyForQuery` (the
+    /// "leftover" the relay should forward); on a bad proof it sends an
+    /// `ErrorResponse`, as a real server does.
+    async fn fake_scram_server<S: AsyncRead + AsyncWrite + Unpin>(mut c: S, password: &str) {
+        // Consume the client's StartupMessage (Int32 len, then len-4 bytes).
+        let mut hdr = [0u8; 4];
+        c.read_exact(&mut hdr).await.unwrap();
+        let mut rest = vec![0u8; u32::from_be_bytes(hdr) as usize - 4];
+        c.read_exact(&mut rest).await.unwrap();
+
+        let mut sasl = vec![0, 0, 0, 10];
+        sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
+        c.write_all(&frame(b'R', &sasl)).await.unwrap();
+
+        // SASLInitialResponse 'p': mechanism C string, Int32 len, client-first.
+        let mut buf = Vec::new();
+        let (t, body) = read_one(&mut c, &mut buf).await.unwrap();
+        assert_eq!(t, b'p');
+        let (_mech, after) = cstr(&body).unwrap();
+        let n = u32::from_be_bytes(after[0..4].try_into().unwrap()) as usize;
+        let client_first = std::str::from_utf8(&after[4..4 + n]).unwrap();
+        let client_first_bare = client_first.strip_prefix("n,,").unwrap().to_string();
+        let client_nonce = client_first_bare.split("r=").nth(1).unwrap().to_string();
+
+        let server_nonce = format!("{client_nonce}fakeserverpart");
+        let salt = b"saltsaltsaltsalt";
+        let iters = 4096u32;
+        let server_first = format!("r={server_nonce},s={},i={iters}", tb64().encode(salt));
+        let mut cont = vec![0, 0, 0, 11];
+        cont.extend_from_slice(server_first.as_bytes());
+        c.write_all(&frame(b'R', &cont)).await.unwrap();
+
+        // SASLResponse 'p': the client-final with its proof.
+        let (t, body) = read_one(&mut c, &mut buf).await.unwrap();
+        assert_eq!(t, b'p');
+        let client_final = std::str::from_utf8(&body).unwrap();
+        let proof = tb64()
+            .decode(client_final.split(",p=").nth(1).unwrap())
+            .unwrap();
+
+        let mut salted = [0u8; 32];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            NonZeroU32::new(iters).unwrap(),
+            salt,
+            password.as_bytes(),
+            &mut salted,
+        );
+        let client_key = thmac(&salted, b"Client Key");
+        let stored_key = tsha(&client_key);
+        let client_final_bare = format!("c=biws,r={server_nonce}");
+        let auth_message = format!("{client_first_bare},{server_first},{client_final_bare}");
+        let client_sig = thmac(&stored_key, auth_message.as_bytes());
+        // Recover ClientKey from the proof and check it against StoredKey.
+        let recovered: Vec<u8> = proof
+            .iter()
+            .zip(client_sig.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+        if tsha(&recovered) != stored_key {
+            let mut e = Vec::new();
+            for (f, v) in [
+                (b'S', "FATAL"),
+                (b'C', "28P01"),
+                (b'M', "password authentication failed"),
+            ] {
+                e.push(f);
+                e.extend_from_slice(v.as_bytes());
+                e.push(0);
+            }
+            e.push(0);
+            let _ = c.write_all(&frame(b'E', &e)).await;
+            return;
+        }
+        let server_key = thmac(&salted, b"Server Key");
+        let server_sig = thmac(&server_key, auth_message.as_bytes());
+        let mut sf = vec![0, 0, 0, 12];
+        sf.extend_from_slice(format!("v={}", tb64().encode(server_sig)).as_bytes());
+        c.write_all(&frame(b'R', &sf)).await.unwrap();
+        c.write_all(&frame(b'R', &[0, 0, 0, 0])).await.unwrap(); // AuthenticationOk
+        c.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await.unwrap(); // ReadyForQuery
+    }
+
+    #[tokio::test]
+    async fn authenticate_server_completes_scram_and_forwards_the_leftover() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let srv = tokio::spawn(async move { fake_scram_server(server, "pencil").await });
+        let leftover = authenticate_server(
+            &mut client,
+            "app_ro",
+            Some("app"),
+            "pencil",
+            "clientnonce123",
+        )
+        .await
+        .unwrap();
+        // The ReadyForQuery the server pipelined after AuthenticationOk comes
+        // back to be relayed to the guest.
+        assert_eq!(leftover, vec![b'Z', 0, 0, 0, 5, b'I']);
+        srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_server_fails_closed_on_a_wrong_password() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let srv = tokio::spawn(async move { fake_scram_server(server, "the-real-pw").await });
+        let err = authenticate_server(&mut client, "u", None, "wrong-pw", "clientnonce123")
+            .await
+            .unwrap_err();
+        assert!(err.contains("28P01"), "got: {err}");
+        srv.await.unwrap();
     }
 }

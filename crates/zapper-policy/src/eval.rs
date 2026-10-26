@@ -44,6 +44,9 @@ pub struct Decision {
 pub struct NetEffects {
     pub secrets: Vec<String>,
     pub set_headers: Vec<(String, String)>,
+    /// The matched rule's protocol: `postgres` routes the connection to the
+    /// database auth-relay instead of the HTTP/tunnel path.
+    pub protocol: crate::config::NetProtocol,
 }
 
 fn host_glob(pattern: &str) -> Result<GlobMatcher> {
@@ -214,6 +217,7 @@ pub fn evaluate_net(layers: &Layers<'_>, req: &NetRequest) -> (Decision, NetEffe
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            protocol: r.protocol,
         },
         _ => NetEffects::default(),
     };
