@@ -35,7 +35,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, pgwire, services, spec, tls, Daemon, EventBody};
+use super::{httplog, pgwire, redis, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -512,8 +512,8 @@ async fn stream<S>(
     };
     let is_tls = first.first() == Some(&0x16);
     match verdict {
-        Some(v) if v.effects.protocol == NetProtocol::Postgres => {
-            pg_relay(&d, &s, io, first, &endpoint, &addr, v).await
+        Some(v) if v.effects.protocol != NetProtocol::Tcp => {
+            relay_database(&d, &s, io, first, &endpoint, &addr, v).await
         }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
         None if is_tls => {
@@ -660,14 +660,56 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     httplog::finish(&s.requests, &rec);
 }
 
+/// A `dbauth` credential resolved from the config: the user the proxy
+/// authenticates as, a pinned database (else the guest's), the host-held
+/// password, and whether a non-TLS server leg is permitted.
+struct DbCred {
+    user: String,
+    database: Option<String>,
+    password: String,
+    plaintext: bool,
+}
+
+/// The outcome of a database handshake: the two authenticated streams, and the
+/// bytes to send the guest before splicing — whatever presents it as logged in
+/// (an `AuthenticationOk`, a fabricated `READY`/OK packet, the server's
+/// pipelined post-auth bytes).
+struct Relayed {
+    guest: Box<dyn services::Io>,
+    server: Box<dyn services::Io>,
+    to_guest: Vec<u8>,
+}
+
+/// Resolves the one `dbauth` secret a database rule names (the config validates
+/// there is exactly one with a user).
+fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
+    let c = d.config.read().unwrap();
+    let sec = name
+        .and_then(|n| c.secrets.get(n))
+        .ok_or("database rule has no dbauth secret")?;
+    let user = sec.user.clone().ok_or("dbauth secret has no user")?;
+    let password = sec
+        .source
+        .resolve()
+        .map_err(|e| format!("resolving dbauth secret: {e:#}"))?;
+    Ok(DbCred {
+        user,
+        database: sec.database.clone(),
+        password,
+        plaintext: sec.plaintext,
+    })
+}
+
 /// The database auth-terminating relay (proposal 07): the guest connects with
 /// no password; the proxy presents it as authenticated, authenticates to the
 /// real server with the host-held `dbauth` secret, then splices the session.
-/// Only the startup/auth handshake is parsed — never the query stream.
-async fn pg_relay<S>(
+/// Only the startup/auth handshake is parsed — never the query stream. The
+/// per-protocol `*_exchange` does the handshake; this driver is the shared
+/// plumbing (record, secret, dial, logging, splice).
+async fn relay_database<S>(
     d: &Daemon,
     s: &Arc<Session>,
-    mut guest: S,
+    guest: S,
     first: Vec<u8>,
     endpoint: &NetRequest,
     addr: &Target,
@@ -675,8 +717,9 @@ async fn pg_relay<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let proto = v.effects.protocol;
     let rec = s.requests.lock().unwrap().start(
-        "postgres",
+        proto.scheme(),
         "CONNECT",
         &endpoint.host,
         endpoint.port,
@@ -705,73 +748,39 @@ async fn pg_relay<S>(
         return fail(
             403,
             format!(
-                "{} is a service; a postgres rule can't relay to it",
+                "{} is a service; a {proto} rule can't relay to it",
                 endpoint.host
             ),
         );
     };
-
-    // The rule names exactly one dbauth secret (the config validates this);
-    // read its user, optional pinned database, plaintext flag and source.
     let name = v.effects.secrets.first().cloned();
-    let resolved = {
-        let c = d.config.read().unwrap();
-        name.as_ref().and_then(|n| c.secrets.get(n)).map(|sec| {
-            (
-                sec.user.clone(),
-                sec.database.clone(),
-                sec.plaintext,
-                sec.source.clone(),
-            )
-        })
+    let cred = match db_cred(d, name.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return fail(500, e),
     };
-    let Some((user, database_pin, plaintext, source)) = resolved else {
-        return fail(500, "postgres rule has no dbauth secret".into());
-    };
-    let Some(user) = user else {
-        return fail(500, "dbauth secret has no user".into());
-    };
-
-    // 1. Answer an optional SSLRequest with 'N' to steer the guest to a
-    //    plaintext local leg (it carries no secret), then read the startup.
-    let startup = match pgwire::read_guest_startup(&mut guest, first).await {
-        Ok(st) => st,
-        Err(e) => return fail(400, e),
-    };
-    // The secret defines the user; the database is pinned, else the guest's.
-    let database = database_pin.or(startup.database);
-
-    // 2. Resolve the host-held credential (never seen by the guest).
-    let password = match source.resolve() {
-        Ok(p) => p,
-        Err(e) => return fail(500, format!("resolving dbauth secret: {e:#}")),
-    };
-
-    // 3. Open the server leg and require TLS unless the secret is plaintext.
     let server = match dial(*server_addr).await {
         Ok(c) => c,
         Err(e) => return fail(502, format!("connecting to {}: {e}", endpoint.host)),
     };
-    let mut server = match pg_server_leg(server, &endpoint.host, plaintext).await {
-        Ok(srv) => srv,
-        Err(e) => return fail(502, e),
+
+    let host = endpoint.host.as_str();
+    let outcome = match proto {
+        NetProtocol::Postgres => pg_exchange(guest, first, server, host, &cred).await,
+        NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
+        other => Err(format!("{other} relay is not implemented yet")),
+    };
+    let Relayed {
+        mut guest,
+        mut server,
+        to_guest,
+    } = match outcome {
+        Ok(r) => r,
+        Err(e) => return fail(502, format!("relaying to {host}: {e}")),
     };
 
-    // 4. Authenticate to the server with the credential (SCRAM-SHA-256).
-    let leftover = match pgwire::authenticate_server(
-        &mut server,
-        &user,
-        database.as_deref(),
-        &password,
-        &scram_nonce(),
-    )
-    .await
-    {
-        Ok(l) => l,
-        Err(e) => return fail(502, format!("authenticating to {}: {e}", endpoint.host)),
-    };
-
-    // 5. Present the guest as authenticated and relay the rest, byte for byte.
+    // The handshake carried the secret; present the guest as authenticated and
+    // splice the rest byte for byte.
     log(
         d,
         s,
@@ -785,14 +794,117 @@ async fn pg_relay<S>(
         },
     );
     httplog::mark_ttfb(&rec);
-    if guest.write_all(&pgwire::AUTH_OK).await.is_ok() && guest.write_all(&leftover).await.is_ok() {
+    if guest.write_all(&to_guest).await.is_ok() {
         if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut guest, &mut server).await {
             let mut r = rec.lock().unwrap();
             r.req_body.total = up;
-            r.resp_body.total = down + leftover.len() as u64;
+            r.resp_body.total = down + to_guest.len() as u64;
         }
     }
     httplog::finish(&s.requests, &rec);
+}
+
+/// Postgres: decline the guest's SSLRequest (plaintext local leg), read its
+/// startup, authenticate to the server over SCRAM, and hand back the
+/// `AuthenticationOk` plus the server's pipelined post-auth bytes for the guest.
+async fn pg_exchange<S>(
+    mut guest: S,
+    first: Vec<u8>,
+    server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let startup = pgwire::read_guest_startup(&mut guest, first).await?;
+    // The secret defines the user; the database is pinned, else the guest's.
+    let database = cred.database.clone().or(startup.database);
+    let mut server = pg_server_leg(server, host, cred.plaintext).await?;
+    let leftover = pgwire::authenticate_server(
+        &mut server,
+        &cred.user,
+        database.as_deref(),
+        &cred.password,
+        &scram_nonce(),
+    )
+    .await?;
+    let mut to_guest = pgwire::AUTH_OK.to_vec();
+    to_guest.extend_from_slice(&leftover);
+    Ok(Relayed {
+        guest: Box::new(guest),
+        server,
+        to_guest,
+    })
+}
+
+/// Redis/Valkey: the guest holds no password and never authenticates; the proxy
+/// issues one `AUTH` on the server leg with the host-held credential, then
+/// splices. The guest's commands run on that pre-authenticated connection.
+async fn redis_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let guest = guest_leg(s, guest, first, host).await?;
+    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    redis::authenticate(&mut server, &cred.user, &cred.password).await?;
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: vec![],
+    })
+}
+
+/// The guest leg for a database whose TLS (if any) is a normal ClientHello:
+/// terminate it with the per-session CA when the guest insists on TLS,
+/// otherwise take the plaintext bytes as they are. Either carries no secret.
+async fn guest_leg<S>(
+    s: &Arc<Session>,
+    io: S,
+    first: Vec<u8>,
+    host: &str,
+) -> Result<Box<dyn services::Io>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if first.first() == Some(&0x16) {
+        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let tls = TlsAcceptor::from(config)
+            .accept(Prefixed::new(first, io))
+            .await
+            .map_err(|e| format!("TLS from guest: {e}"))?;
+        Ok(Box::new(tls))
+    } else {
+        Ok(Box::new(Prefixed::new(first, io)))
+    }
+}
+
+/// The server leg for a database whose TLS is a normal ClientHello: real TLS
+/// with certificate validation, or — only if the secret is `plaintext` — the
+/// connection in the clear. A server that won't do TLS when the secret is not
+/// plaintext fails closed in the handshake, so the credential is never exposed.
+async fn tls_server_leg(
+    tcp: TcpStream,
+    host: &str,
+    plaintext: bool,
+) -> Result<Box<dyn services::Io>, String> {
+    if plaintext {
+        return Ok(Box::new(tcp));
+    }
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host}: {e}"))?;
+    let tls = TlsConnector::from(tls::client_config())
+        .connect(name, tcp)
+        .await
+        .map_err(|e| format!("TLS to {host}: {e}"))?;
+    Ok(Box::new(tls))
 }
 
 /// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the

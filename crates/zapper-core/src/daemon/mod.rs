@@ -18,6 +18,7 @@ pub(crate) mod nic;
 pub(crate) mod pgwire;
 pub(crate) mod proxy;
 pub mod record;
+pub(crate) mod redis;
 pub mod registry;
 pub mod services;
 pub mod session;

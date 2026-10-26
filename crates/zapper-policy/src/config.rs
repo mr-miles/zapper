@@ -153,7 +153,7 @@ pub enum SecretMode {
     /// the client-side auth (presenting the guest as authenticated) and itself
     /// authenticates to the real server with this host-held credential, then
     /// relays the session. Bound to `hosts` + `user` (+ optional `database`);
-    /// reached by a `protocol: postgres` net rule. Proposal 07.
+    /// reached by a database `protocol:` net rule. Proposal 07.
     DbAuth,
 }
 
@@ -164,20 +164,44 @@ impl SecretMode {
 }
 
 /// The wire protocol a net rule governs. `tcp` (the default) is today's
-/// behaviour — HTTP inspection or a plain tunnel. `postgres` routes an allowed
-/// connection to the database auth-relay, which injects the rule's `dbauth`
-/// secret instead of taking the HTTP path (proposal 07).
+/// behaviour — HTTP inspection or a plain tunnel. Every other value routes an
+/// allowed connection to that database's auth-relay, which injects the rule's
+/// `dbauth` secret instead of taking the HTTP path (proposal 07).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetProtocol {
     #[default]
     Tcp,
     Postgres,
+    Mysql,
+    Mongodb,
+    Redis,
+    Cassandra,
+    Tds,
 }
 
 impl NetProtocol {
     fn is_tcp(&self) -> bool {
         *self == NetProtocol::Tcp
+    }
+
+    /// The protocol's name as a static string (for request-log schemes etc.).
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            NetProtocol::Tcp => "tcp",
+            NetProtocol::Postgres => "postgres",
+            NetProtocol::Mysql => "mysql",
+            NetProtocol::Mongodb => "mongodb",
+            NetProtocol::Redis => "redis",
+            NetProtocol::Cassandra => "cassandra",
+            NetProtocol::Tds => "tds",
+        }
+    }
+}
+
+impl fmt::Display for NetProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.scheme())
     }
 }
 
@@ -904,26 +928,26 @@ impl Config {
                     }
                 }
                 let dbauth = |n: &str| matches!(self.secrets.get(n), Some(s) if s.mode == SecretMode::DbAuth);
-                match r.protocol {
-                    NetProtocol::Postgres => {
+                match r.db_relay() {
+                    Some(proto) => {
                         // The relay injects exactly one database credential and
                         // never parses HTTP, so method/path/header matching and
                         // any secret but a single dbauth one are nonsense here.
                         if r.secrets.len() != 1 || !r.secrets.iter().all(|s| dbauth(s)) {
                             errors.push(format!(
-                                "{scope}: rule {id}: a postgres rule names exactly one dbauth secret"
+                                "{scope}: rule {id}: a {proto} rule names exactly one dbauth secret"
                             ));
                         }
                         if !r.methods.is_empty() || r.path.is_some() || !r.set_headers.is_empty() {
                             errors.push(format!(
-                                "{scope}: rule {id}: a postgres rule can't carry HTTP method, path or header matching"
+                                "{scope}: rule {id}: a {proto} rule can't carry HTTP method, path or header matching"
                             ));
                         }
                     }
-                    NetProtocol::Tcp => {
+                    None => {
                         if r.secrets.iter().any(|s| dbauth(s)) {
                             errors.push(format!(
-                                "{scope}: rule {id}: a dbauth secret needs protocol: postgres"
+                                "{scope}: rule {id}: a dbauth secret needs a database protocol (e.g. protocol: postgres)"
                             ));
                         }
                     }
@@ -1160,7 +1184,7 @@ policy:\n  net:\n    - { host: db.internal, ports: [5432], protocol: postgres, s
         let tcp = "\
 secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: u }\n\
 policy:\n  net:\n    - { host: db.internal, secrets: [db], action: allow }\n";
-        assert!(err(tcp).contains("a dbauth secret needs protocol: postgres"));
+        assert!(err(tcp).contains("a dbauth secret needs a database protocol"));
         // A postgres rule can't carry HTTP matching.
         let http = "\
 secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: u }\n\
