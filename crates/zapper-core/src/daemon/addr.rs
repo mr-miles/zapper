@@ -62,12 +62,17 @@ pub struct AddressPolicy {
 }
 
 fn is_private(ip: IpAddr) -> bool {
-    const RANGES: [&str; 7] = [
+    const RANGES: [&str; 8] = [
         "10.0.0.0/8",
         "172.16.0.0/12",
         "192.168.0.0/16",
         "100.64.0.0/10",
+        // Benchmarking ranges, also the DNS resolver's synthetic pools: a
+        // synthetic address stands for a name within one session and must
+        // never be reachable as a real destination (v4 `198.18.0.0/15`,
+        // v6 `2001:2::/48`, both RFC benchmarking).
         "198.18.0.0/15",
+        "2001:2::/48",
         "fc00::/7",
         "fec0::/10",
     ];
@@ -177,5 +182,25 @@ mod tests {
         assert!(check("10.107.111.20").is_ok());
         assert!(check("2606:4700::1111").is_ok());
         assert!(check("fd00::1").is_err());
+        // The synthetic DNS pools are never reachable as real destinations,
+        // v6 (2001:2::/48) like v4 (198.18.0.0/15).
+        assert!(check("198.18.0.1").is_err());
+        assert!(check("2001:2::1").is_err());
+        // A different 2001:... address is ordinary public space.
+        assert!(check("2001:4860:4860::8888").is_ok());
+    }
+
+    /// A synthetic pool stays blocked even if someone lists it in
+    /// `private_networks`? No — like the v4 benchmarking range, it is
+    /// overridable; it just never routes anywhere. What matters is the
+    /// default-closed behaviour above.
+    #[test]
+    fn synthetic_pools_are_private_by_default() {
+        let p = AddressPolicy {
+            host_addrs: vec![],
+            private_allowed: vec![],
+        };
+        assert!(p.check("198.18.7.7".parse().unwrap()).is_err());
+        assert!(p.check("2001:2::dead".parse().unwrap()).is_err());
     }
 }

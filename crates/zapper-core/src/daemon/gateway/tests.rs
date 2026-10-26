@@ -378,3 +378,82 @@ async fn a_connection_that_names_no_server_just_ends() {
     drop(guest);
     super::connection(t.core.daemon(), &s, host).await.unwrap();
 }
+
+/// An overlong *first* line (the server name) ends the connection with no
+/// reply — it fails closed, like an overlong line mid-stream.
+#[tokio::test]
+async fn an_overlong_server_name_line_ends_the_connection() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    t.core
+        .add_mcp_server("echo", BTreeMap::new(), Arc::new(Echo::default()))
+        .unwrap();
+    let (host, guest) = UnixStream::pair().unwrap();
+    let (d, sc) = (t.core.daemon().clone(), s.clone());
+    let served = tokio::spawn(async move { super::connection(&d, &sc, host).await });
+    let (r, mut w) = tokio::io::split(guest);
+    // More than MAX_MCP_LINE bytes with no newline: the name line can't be read.
+    let long = "x".repeat(zapper_policy::proto::MAX_MCP_LINE + 1);
+    let _ = w.write_all(long.as_bytes()).await;
+    let _ = w.flush().await;
+    // No reply, and the connection ends with an error (not a silent accept).
+    let mut l = String::new();
+    assert_eq!(BufReader::new(r).read_line(&mut l).await.unwrap(), 0, "{l}");
+    assert!(served.await.unwrap().is_err(), "the name line was rejected");
+}
+
+/// A valid-JSON message that is not an object (a scalar or array) draws no
+/// reply and no event, and does not break the connection.
+#[tokio::test]
+async fn a_non_object_message_is_ignored_without_breaking_the_connection() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    t.core
+        .add_mcp_server("echo", BTreeMap::new(), Arc::new(Echo::default()))
+        .unwrap();
+    let mut c = Conn::open(&t, &s);
+    c.send("echo").await;
+    for scalar in ["123", "\"hi\"", "[1,2]", "null"] {
+        c.send(scalar).await;
+    }
+    // The connection still answers a well-formed request afterwards.
+    assert_eq!(c.ask(1, "ping", json!({})).await["result"], json!({}));
+    // None of the scalars was a tool call, so there are no events.
+    assert!(calls(&t, &s).is_empty(), "{:?}", calls(&t, &s));
+}
+
+/// Removing a server takes effect on a live connection at once: the next
+/// call no longer reaches it.
+#[tokio::test]
+async fn a_removed_server_stops_serving_a_live_connection() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let id = t
+        .core
+        .add_mcp_server("echo", BTreeMap::new(), Arc::new(Echo::default()))
+        .unwrap();
+    let mut c = Conn::open(&t, &s);
+    c.send("echo").await;
+    assert_eq!(c.ask(1, "ping", json!({})).await["result"], json!({}));
+    assert!(t.core.remove_mcp_server(id));
+    let r = c.ask(2, "ping", json!({})).await;
+    assert_eq!(r["error"]["message"], "no MCP server echo for this session");
+}
+
+/// `initialize` without a requested protocol version gets the server default.
+#[tokio::test]
+async fn initialize_without_a_version_gets_the_default() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    t.core
+        .add_mcp_server("echo", BTreeMap::new(), Arc::new(Echo::default()))
+        .unwrap();
+    let mut c = Conn::open(&t, &s);
+    c.send("echo").await;
+    let init = c.ask(1, "initialize", json!({})).await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(
+        init["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+}
