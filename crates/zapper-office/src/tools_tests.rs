@@ -594,6 +594,15 @@ async fn releasing_a_plan_worker_reopens_the_slot_and_resume_restaffs() {
         1,
         "their in-flight child is pending again"
     );
+    // The departure was journalled as a fresh snapshot for the UI: the slot is
+    // no longer bound in it.
+    assert!(
+        journal(&run).into_iter().any(|e| e["type"] == "plan"
+            && e["event"] == "snapshot"
+            && e["plan"]["id"] == id.as_str()
+            && e["plan"]["bindings"].get("second").is_none()),
+        "a snapshot after the departure shows the slot reopened"
+    );
 
     // Hire a replacement engineer, then resume: the slot re-staffs onto them.
     ok(
@@ -810,6 +819,67 @@ async fn a_plan_is_journalled_as_snapshots_for_the_ui() {
     assert!(
         kids.iter().any(|c| c["thread"] == thread.as_str()),
         "the child's thread is in the snapshot, so the UI can tag it: {last}"
+    );
+}
+
+/// Snapshots track a plan through its life: pause, resume and completion each
+/// journal the new status, so the UI reflects every state change.
+#[tokio::test]
+async fn plan_snapshots_track_pause_resume_and_completion() {
+    let (t, run) = run();
+    let status = || {
+        journal(&run)
+            .into_iter()
+            .filter(|e| e["type"] == "plan" && e["event"] == "snapshot")
+            .last()
+            .and_then(|e| e["plan"]["status"].as_str().map(|s| s.to_string()))
+    };
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "a": { "name": "pat" } },
+            "stages": [
+                [ { "slot": "a", "subject": "Build", "body": "build" } ],
+                [ { "slot": "a", "subject": "Review", "body": "review" } ],
+            ],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    assert_eq!(status().as_deref(), Some("active"), "created active");
+    ok(&t, &run, "ceo", "plan_pause", json!({ "plan": id })).await;
+    assert_eq!(status().as_deref(), Some("paused"), "pause journalled");
+    ok(&t, &run, "ceo", "plan_resume", json!({ "plan": id })).await;
+    assert_eq!(status().as_deref(), Some("active"), "resume journalled");
+    // Complete both stages; the plan closes itself after the last.
+    for subject in ["Build", "Review"] {
+        let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+        let msg = inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["subject"].as_str() == Some(subject))
+            .unwrap_or_else(|| panic!("pat has no {subject}: {inbox}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        ok(
+            &t,
+            &run,
+            "pat",
+            "mail_reply",
+            json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+        )
+        .await;
+    }
+    assert_eq!(
+        status().as_deref(),
+        Some("closed"),
+        "completion journalled a closed snapshot"
     );
 }
 
