@@ -178,7 +178,7 @@ The taskgraph is the one place to resist over-typing: zapper's tickets should ke
 - **Hierarchy — already exists as `context`.** A thread carries `context` (a single parent thread), set automatically to the thread its sender was working in, and `task_threads` ([`mail.rs`](../../crates/zapper-office/src/mail.rs)) already walks it to roll a task up for grouping and the objective's close. So the decomposition tree and its roll-up are built; the only addition worth considering is making `context` *declarable* (not only auto-derived) for up-front planning and re-parenting. A separate `child_of` field would duplicate it.
 - **Ordering — an ordered list of stages on the parent (the one new field).** The parent ticket carries `stages: [[id, …], …]` — ordered, each stage a set that runs in parallel. It is readable (the whole plan sits in one place), it matches authority (ordering is a planning decision owned by the parent's owner, not declared piecemeal by children), it is naturally scoped (it references only its own children), and list-of-stages expresses sequence plus fan-out, which covers most plans — Legion's phase flow included. The office releases stage N+1 only when every ticket in stage N is *accepted* (the review close, not a bare report).
 
-Cross-subtree dependencies — a ticket depending on one outside its parent's stage list, a true DAG diamond — are deliberately **out of scope for now**: the stage list covers sequence and parallelism within a decomposition, which is the common case, and a general dependency-edge mechanism (an optional `not_before` by id) can be added later if a workflow needs it.
+Cross-subtree dependencies — a ticket depending on one outside its parent's stage list, a true DAG diamond — are deliberately **out of scope for now**: the stage list covers sequence and parallelism within a decomposition, which is the common case, and a general dependency-edge mechanism (an optional `not_before` by id) can be added later if a workflow needs it. Note the stage list is only the *authoring* surface: stored, it lowers to Paperclip-style `blocks` relations (see *Shaping the plan on Paperclip and Legion* below), so the ordering is edge-shaped underneath even though the planner writes only stages, and a later cross-subtree dependency is just another `blocks` row.
 
 This reproduces the common taskgraph shape — decomposition, ordering, parallelism — with content left prose, so typed contracts and oracle links stay in the governance layer, separate from the ticket graph.
 
@@ -207,6 +207,29 @@ A general **`distinct_from: [ticket-ids]`** exclusion — an assignee that must 
 The engine pieces this needs: a **deferred/blocked assignment state** (created, not delivered, not waking its worker until released), a **staged-release scheduler** (release stage N+1 when stage N is accepted, reusing the existing accept signal and wake), **slot binding** (bind a slot to a worker at first use, reuse it, release after its last stage, distinct slots to distinct workers), **atomic batch validation**, and desk/UI visibility of the plan. Everything else — creating assignments, `context`, obligations, acceptance, waking — already exists.
 
 A **planning skill** teaches the manager / CEO / product manager to decompose the task into a team of slots and ordered stages with per-ticket acceptance criteria and call `plan` once, to reuse a slot where knowledge should carry and use distinct slots where duties must be separated, to keep stages minimal, and that later stages auto-release on acceptance so they must not be chased by hand.
+
+## Shaping the plan on Paperclip and Legion
+
+Two forward constraints make the small `plan` changes worth modelling deliberately: the result should be **swappable for Paperclip** (so a firm can later run Paperclip's orchestrator over zapper's sandbox, [proposal 02](02-paperclip-integration.md)), and it should **cover what Legion requires** in these areas (so Legion's skills and roles can be reused unchanged). Both are met by shaping the Office's plan/ticket model on Paperclip's schema (read at `df5a78c`), which already persists the Legion-shaped pieces. The agent's experience barely changes; what changes is the *stored shape*.
+
+| Office element | Model it as (Paperclip table) | Covers (Legion) |
+|---|---|---|
+| Ticket | an `issue`: `parent_id` (= `context`), `assignee_agent_id` (= the slot's bound worker), `status`, `priority`, `review_policy` | a task |
+| Ordering | `issue_relations` rows, `type: "blocks"` — the stage-list is authoring sugar that compiles to blocks-edges | the taskgraph's edges |
+| A plan | an `issue_plan_decomposition`: a source ticket + `requested_children` specs → `child_issue_ids`, with a status | a phase / change bundle |
+| Staged release | an `issue_tree_hold` on the plan's subtree with a `release_policy` (free the next blocks-frontier as its blockers are accepted) | gated progression |
+| Per-ticket governance | an optional `completion_contract`: `risk`, `acceptance` (the check), `completion_authority`, `incomplete_criteria_policy`, hash-pinned | oracle + risk tier + gate + attestation |
+| Review outcome | a `work_assessment`: the verdict against the contract, with an input digest | review / evidence |
+
+The small deltas to the Office, then:
+
+1. **Store ordering as `blocks` relations, not only a stage-list.** The planner still writes stages (readable, parent-owned); `plan` lowers them to blocks-edges between child tickets. The stored ordering is then Paperclip's shape, and Legion's DAG maps onto it directly.
+2. **Make `plan` emit a decomposition.** The call records a decomposition (source ticket, the child specs requested, the child ids created) and creates the children under the source — the shape of `issue_plan_decompositions`.
+3. **Model staged/blocked release as a tree-hold**, not an ad-hoc per-ticket flag: a hold on the plan's subtree whose release policy frees each blocks-frontier as its blockers are accepted — `issue_tree_holds`.
+4. **Allow an optional `completion_contract` per ticket** — `{risk, acceptance, completion_authority, incomplete_criteria_policy}`, hash-pinned — carried only when the workflow profile turns governance on (off by default). This one object gives Legion its oracle/risk/gate and matches Paperclip's contract field-for-field.
+5. **A review records an assessment** against that contract (accept/reject, reason, digest) — the Office's reviewing-work close in `work_assessments` shape.
+
+Slots stay an Office **authoring** convenience with no Paperclip counterpart: they resolve to a concrete `assignee_agent_id` per ticket, so on a swap they simply dissolve into assignments (continuity = the same agent id, separation = different ids), and `release_when_done` maps to Paperclip's agent `lifecycle_state`/holds. The skills — a `planning` skill and an `acceptance`/oracle skill — are written in Legion's vocabulary (spec, oracle, risk, task) so Legion's own skills and roles drop in later. So "replace the Office's plan engine with Paperclip" becomes a field remap, not a redesign, and "use Legion's planner/reviewer skills against the Office" works because the artifacts they expect are the ones the Office now stores.
 
 ## How far config-only gets you
 
