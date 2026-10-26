@@ -7,6 +7,7 @@
 
 pub mod addr;
 pub mod api_error;
+pub(crate) mod cassandra;
 pub mod clients;
 pub mod deciders;
 pub(crate) mod dns;

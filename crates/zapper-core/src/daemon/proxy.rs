@@ -35,7 +35,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, pgwire, redis, services, spec, tls, Daemon, EventBody};
+use super::{cassandra, httplog, pgwire, redis, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -767,6 +767,7 @@ async fn relay_database<S>(
     let outcome = match proto {
         NetProtocol::Postgres => pg_exchange(guest, first, server, host, &cred).await,
         NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
         other => Err(format!("{other} relay is not implemented yet")),
     };
@@ -855,6 +856,30 @@ where
     let guest = guest_leg(s, guest, first, host).await?;
     let mut server = tls_server_leg(server, host, cred.plaintext).await?;
     redis::authenticate(&mut server, &cred.user, &cred.password).await?;
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: vec![],
+    })
+}
+
+/// Cassandra (CQL): relay the guest's OPTIONS/STARTUP to the server and, when
+/// the server demands auth, answer it with SASL/PLAIN using the host-held
+/// credential, then fabricate a READY for the guest. Then splice.
+async fn cassandra_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut guest = guest_leg(s, guest, first, host).await?;
+    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    cassandra::handshake(&mut guest, &mut server, &cred.user, &cred.password).await?;
     Ok(Relayed {
         guest,
         server,
