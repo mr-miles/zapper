@@ -116,9 +116,26 @@ Three properties do the work the question asks for:
 
 Concretely this is a new set of office tools plus a shared validator and a small state machine — new logic, not new transport: it reuses the MCP gateway, the drive for content, the keeper for hashing and attestation, and grants for authority.
 
+### Read as files, write as MCP
+
+Repo-local OpenSpec earns its keep one way the proposal must not lose: the agent can `grep`/`rg` the docs, read them, and pipe them into its own scripts — workflows it is well trained in. That is a *read* concern, and reads cannot corrupt the store or the archive step, so serve them as files even though writes go through MCP:
+
+- **A read-only, grant-scoped mirror of the store inside each VM** — e.g. `/store`, materialised by the daemon and kept fresh, holding only the spaces this worker may read. The agent greps and scripts against it exactly like repo-local OpenSpec. This is the mechanism the firm already uses for the read-only skills mount (`~/.claude/skills`, "so a worker can't edit its instructions", [office.md](../office.md#agents-and-skills)) and the read-only host source (`/run/sandbox/source`); a store mount is the same pattern.
+- **All writes and transitions go through the MCP tools.** The agent authors a spec/oracle as a file in its own workspace — grep and edit it freely — then submits it; it never writes into `/store`, which is read-only and enforced as such.
+
+A central mirror is in fact *better* for grep than repo-local bundling in the multi-repo case: all repositories' governance sits in one tree, so a cross-repository `rg` just works, which scattered per-repo files cannot give. If git ergonomics are wanted specifically, the same content can be served as a read-only git mirror at `git.<firm>.internal/store.git` (the firm already serves git); it is a projection, never authoritative.
+
+**No in-VM CLI**, to keep the sandbox surface minimal. A `store` binary is not shipped; three things already cover what it would have done:
+
+- **Reads and search** — standard `grep`/`rg` over the read-only mount; no new binary.
+- **Writes** — the MCP tools, which the model calls natively, so a governance write is a deliberate, recorded, validated tool call rather than a side effect in a shell script.
+- **Lint and validate** — the read-only `store_validate` MCP tool is the linter; the agent iterates against it, and `store_put` re-validates server-side regardless, so skipping the self-lint still cannot push an invalid document.
+
+A **skill** carries the rest: the OpenSpec-compatible format and the workflow (author a file → `store_validate` → `store_put` → `attest` → `archive`), pointing the agent at `/store` to read. So **skill + MCP validation + server-side enforcement replace the CLI**, and the only thing given up — writing to the store from inside an agent-authored shell script — is something governance wants to forbid anyway.
+
 ## Recommendation
 
-Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, store the governance centrally (one store across repositories, not bundled into each repo) and serve it through **MCP tools with host-side validation and a controlled archive transition** so agents can self-lint but can neither push invalid documents nor corrupt archiving, and route Legion's reflection commands through the existing **process-improvement** role. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
+Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, store the governance centrally (one store across repositories, not bundled into each repo), serve it as a **read-only mount for grep and scripts with writes through MCP tools** (host-side validation, a controlled archive transition, and no in-VM CLI — skill plus validation carry authoring) so agents can self-lint but can neither push invalid documents nor corrupt archiving, and route Legion's reflection commands through the existing **process-improvement** role. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
 
 ## Open questions
 
