@@ -107,10 +107,14 @@ pub fn auth_response(plugin: &str, password: &str, salt: &[u8]) -> Vec<u8> {
 }
 
 /// A server's Initial Handshake packet (protocol 10), as the proxy sends the
-/// guest and as the test's fake server sends the proxy.
+/// guest and as the test's fake server sends the proxy. `CLIENT_SSL` is
+/// advertised so a TLS-capable client can request encryption.
 pub fn initial_handshake(scramble: &[u8; 20], plugin: &str) -> Vec<u8> {
-    let caps =
-        CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
+    let caps = CLIENT_LONG_PASSWORD
+        | CLIENT_PROTOCOL_41
+        | CLIENT_SECURE_CONNECTION
+        | CLIENT_PLUGIN_AUTH
+        | CLIENT_SSL;
     let mut p = vec![10];
     p.extend_from_slice(b"8.0.0-zapper-relay\0");
     p.extend_from_slice(&1u32.to_le_bytes()); // connection id
@@ -236,14 +240,16 @@ pub fn handshake_response(
     p
 }
 
-/// Whether a guest's handshake response asked for TLS (CLIENT_SSL in its
-/// capability flags). The relay steers the guest to a plaintext local leg, so
-/// this is refused.
-pub fn response_wants_ssl(response: &[u8]) -> bool {
-    response
-        .get(0..4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & CLIENT_SSL != 0)
-        .unwrap_or(false)
+/// Whether a client's first packet is an SSLRequest — the 32-byte
+/// handshake-response prefix (capabilities, max packet, charset, reserved) with
+/// `CLIENT_SSL` set and no username following, i.e. the client wants to upgrade
+/// to TLS before sending its real handshake response.
+pub fn is_ssl_request(packet: &[u8]) -> bool {
+    packet.len() == 32
+        && packet
+            .get(0..4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & CLIENT_SSL != 0)
+            .unwrap_or(false)
 }
 
 /// Parses an ERR packet (`0xff`, `Int16` code, `#`+SQLSTATE, message).
@@ -332,6 +338,25 @@ mod tests {
         assert_eq!(hs.scramble, scramble.to_vec());
         assert_eq!(hs.plugin, "caching_sha2_password");
         assert!(hs.capabilities & CLIENT_PLUGIN_AUTH != 0);
+    }
+
+    #[test]
+    fn detects_an_ssl_request_packet() {
+        // 32-byte prefix with CLIENT_SSL set and no username → SSLRequest.
+        assert!(is_ssl_request(&ssl_request(false)));
+        // A full handshake response (has a username) is not one.
+        assert!(!is_ssl_request(&handshake_response(
+            true,
+            "user",
+            b"",
+            None,
+            "mysql_native_password"
+        )));
+        // The same 32 bytes without CLIENT_SSL is not one either.
+        let mut no_ssl = ssl_request(false);
+        let caps = u32::from_le_bytes(no_ssl[0..4].try_into().unwrap()) & !CLIENT_SSL;
+        no_ssl[0..4].copy_from_slice(&caps.to_le_bytes());
+        assert!(!is_ssl_request(&no_ssl));
     }
 
     #[test]

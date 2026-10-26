@@ -834,10 +834,10 @@ async fn pg_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (guest, startup) = pg_guest_startup(s, guest, first, host).await?;
+    let (guest, guest_tls, startup) = pg_guest_startup(s, guest, first, host).await?;
     // The secret defines the user; the database is pinned, else the guest's.
     let database = cred.database.clone().or(startup.database);
-    let mut server = pg_server_leg(server, host, cred.plaintext).await?;
+    let mut server = pg_server_leg(server, host, guest_tls, cred.plaintext).await?;
     let leftover = pgwire::authenticate_server(
         &mut server,
         &cred.user,
@@ -865,7 +865,7 @@ async fn pg_guest_startup<S>(
     mut guest: S,
     mut buf: Vec<u8>,
     host: &str,
-) -> Result<(Box<dyn services::Io>, pgwire::Startup), String>
+) -> Result<(Box<dyn services::Io>, bool, pgwire::Startup), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -893,7 +893,7 @@ where
                     .map_err(|e| format!("TLS from guest: {e}"))?;
                 let mut tls: Box<dyn services::Io> = Box::new(tls);
                 let startup = pgwire::read_startup(&mut tls, Vec::new()).await?;
-                return Ok((tls, startup));
+                return Ok((tls, true, startup));
             }
             // Not a preamble: a plaintext StartupMessage (sslmode=disable).
             break;
@@ -909,7 +909,7 @@ where
     }
     let mut guest: Box<dyn services::Io> = Box::new(Prefixed::new(buf, guest));
     let startup = pgwire::read_startup(&mut guest, Vec::new()).await?;
-    Ok((guest, startup))
+    Ok((guest, false, startup))
 }
 
 /// Redis/Valkey: the guest holds no password and never authenticates; the proxy
@@ -926,8 +926,8 @@ async fn redis_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let guest = guest_leg(s, guest, first, host).await?;
-    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
+    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
     redis::authenticate(&mut server, &cred.user, &cred.password).await?;
     Ok(Relayed {
         guest,
@@ -950,8 +950,8 @@ async fn cassandra_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut guest = guest_leg(s, guest, first, host).await?;
-    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    let (mut guest, guest_tls) = guest_leg(s, guest, first, host).await?;
+    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
     cassandra::handshake(&mut guest, &mut server, &cred.user, &cred.password).await?;
     Ok(Relayed {
         guest,
@@ -975,8 +975,8 @@ async fn mongodb_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let guest = guest_leg(s, guest, first, host).await?;
-    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
+    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
     let auth_db = cred.database.as_deref().unwrap_or("admin");
     mongodb::authenticate(
         &mut server,
@@ -1010,9 +1010,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use rand::Rng;
-    let mut guest = guest_leg(s, guest, first, host).await?;
+    // MySQL's server speaks first, so the peeked `first` is empty; treat the
+    // guest as a plaintext stream to start.
+    let mut guest: Box<dyn services::Io> = Box::new(Prefixed::new(first, guest));
 
-    // Guest leg: present as a server advertising mysql_native_password, no TLS.
+    // Guest leg: present as a server offering mysql_native_password and TLS.
     let mut scramble = [0u8; 20];
     rand::thread_rng().fill(&mut scramble);
     guest
@@ -1023,29 +1025,32 @@ where
         .await
         .map_err(|e| format!("sending the guest handshake: {e}"))?;
     let mut gbuf = Vec::new();
-    let (_seq, gresp) = mysql::read_packet(&mut guest, &mut gbuf).await?;
-    if mysql::response_wants_ssl(&gresp) {
-        return Err("the guest asked for TLS to MySQL; use a plaintext local leg".into());
-    }
+    let (gseq, gpkt) = mysql::read_packet(&mut guest, &mut gbuf).await?;
+    // A TLS client first sends a 32-byte SSLRequest packet; terminate TLS with
+    // the session CA, then read its real handshake response over TLS.
+    let (mut guest, guest_tls, resp_seq) = if mysql::is_ssl_request(&gpkt) {
+        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let tls = TlsAcceptor::from(config)
+            .accept(Prefixed::new(std::mem::take(&mut gbuf), guest))
+            .await
+            .map_err(|e| format!("TLS from guest: {e}"))?;
+        let mut tls: Box<dyn services::Io> = Box::new(tls);
+        let (seq, _real) = mysql::read_packet(&mut tls, &mut Vec::new()).await?;
+        (tls, true, seq)
+    } else {
+        (guest, false, gseq)
+    };
 
-    // Server leg: read the server's Initial Handshake and authenticate.
+    // Server leg: read the server's Initial Handshake and authenticate,
+    // mirroring the guest's transport.
     let mut sbuf = Vec::new();
     let (_s0, initial) = mysql::read_packet(&mut server, &mut sbuf).await?;
     let hs = mysql::parse_initial(&initial)?;
     let db = cred.database.as_deref();
     let auth = mysql::auth_response(&hs.plugin, &cred.password, &hs.scramble);
-    let mut server: Box<dyn services::Io> = if cred.plaintext {
-        server
-            .write_all(&mysql::packet(
-                1,
-                &mysql::handshake_response(false, &cred.user, &auth, db, &hs.plugin),
-            ))
-            .await
-            .map_err(|e| format!("sending the handshake response: {e}"))?;
-        Box::new(server)
-    } else {
+    let mut server: Box<dyn services::Io> = if guest_tls {
         if hs.capabilities & mysql::CLIENT_SSL == 0 {
-            return Err("server does not offer TLS and the dbauth secret is not plaintext".into());
+            return Err("the client requested TLS but the server does not offer it".into());
         }
         // Mid-handshake upgrade: SSLRequest, TLS, then the response over TLS.
         server
@@ -1066,12 +1071,22 @@ where
         .await
         .map_err(|e| format!("sending the handshake response: {e}"))?;
         b
+    } else {
+        credential_leg_ok(false, cred.plaintext, host)?;
+        server
+            .write_all(&mysql::packet(
+                1,
+                &mysql::handshake_response(false, &cred.user, &auth, db, &hs.plugin),
+            ))
+            .await
+            .map_err(|e| format!("sending the handshake response: {e}"))?;
+        Box::new(server)
     };
-    mysql::complete_auth(&mut server, &mut sbuf, &cred.password, !cred.plaintext).await?;
+    mysql::complete_auth(&mut server, &mut sbuf, &cred.password, guest_tls).await?;
 
-    // Tell the guest it is logged in (its response was sequence 1).
+    // Tell the guest it is logged in (OK follows its handshake response).
     guest
-        .write_all(&mysql::packet(2, &mysql::ok_packet()))
+        .write_all(&mysql::packet(resp_seq + 1, &mysql::ok_packet()))
         .await
         .map_err(|e| format!("sending OK to the guest: {e}"))?;
     Ok(Relayed {
@@ -1097,7 +1112,9 @@ async fn tds_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut guest = guest_leg(s, guest, first, host).await?;
+    // TDS always opens with a plaintext PRELOGIN (never a bare ClientHello),
+    // so guest_leg stays plaintext; TLS is negotiated in PRELOGIN below.
+    let (mut guest, _) = guest_leg(s, guest, first, host).await?;
 
     // Guest leg: read its PRELOGIN. If it wants encryption, terminate the
     // TLS-in-PRELOGIN handshake with the session CA (the guest trusts our
@@ -1135,12 +1152,14 @@ where
     };
     let _ = tds::read_message(&mut guest, &mut gbuf).await?; // LOGIN7, ignored
 
-    // Server leg: negotiate PRELOGIN, then TLS-in-PRELOGIN unless plaintext.
+    // Server leg: mirror the client — request encryption only if the guest
+    // used it. (TDS declares the client's intent in PRELOGIN before the server
+    // replies, so this is the one knob.)
     let mut sbuf = Vec::new();
-    let want = if cred.plaintext {
-        tds::ENCRYPT_NOT_SUP
-    } else {
+    let want = if guest_wants_tls {
         tds::ENCRYPT_ON
+    } else {
+        tds::ENCRYPT_NOT_SUP
     };
     server
         .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(want)))
@@ -1150,19 +1169,9 @@ where
     let server_enc =
         tds::prelogin_encryption(&preresp).ok_or("server PRELOGIN had no ENCRYPTION option")?;
 
-    let mut server: Box<dyn services::Io> = if cred.plaintext {
-        if !matches!(server_enc, tds::ENCRYPT_OFF | tds::ENCRYPT_NOT_SUP) {
-            return Err("server requires TLS but the dbauth secret is plaintext".into());
-        }
-        Box::new(server)
-    } else {
-        if !matches!(
-            server_enc,
-            tds::ENCRYPT_ON | tds::ENCRYPT_REQ | tds::ENCRYPT_OFF
-        ) {
-            return Err(
-                "server does not support TLS and the dbauth secret is not plaintext".into(),
-            );
+    let mut server: Box<dyn services::Io> = if guest_wants_tls {
+        if server_enc == tds::ENCRYPT_NOT_SUP {
+            return Err("the client requested TLS but the server does not support it".into());
         }
         // Tunnel the TLS handshake in PRELOGIN packets, then pass through.
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1175,6 +1184,14 @@ where
             .map_err(|e| format!("TLS to {host}: {e}"))?;
         handshaking.store(false, Ordering::Relaxed);
         Box::new(tls)
+    } else {
+        // The client connected plaintext; a server that requires encryption
+        // (anything but OFF/NOT_SUP) can't be served without it.
+        if !matches!(server_enc, tds::ENCRYPT_OFF | tds::ENCRYPT_NOT_SUP) {
+            return Err("server requires TLS but the client connected without it".into());
+        }
+        credential_leg_ok(false, cred.plaintext, host)?;
+        Box::new(server)
     };
 
     // LOGIN7 with the host-held credential; a server rejection fails closed.
@@ -1210,8 +1227,8 @@ async fn kafka_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let guest = guest_leg(s, guest, first, host).await?;
-    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
+    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
     kafka::authenticate(
         &mut server,
         &cred.mechanism,
@@ -1227,15 +1244,30 @@ where
     })
 }
 
+/// The credential may reach the server over a non-TLS leg only if the secret
+/// is marked `plaintext`; otherwise fail closed. The proxy mirrors the client's
+/// transport rather than forcing TLS, so a non-TLS server leg happens when the
+/// guest itself connected without TLS.
+fn credential_leg_ok(server_tls: bool, plaintext: bool, host: &str) -> Result<(), String> {
+    if server_tls || plaintext {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to send the credential to {host} over a non-TLS connection: the client did not use TLS and the secret is not marked plaintext"
+        ))
+    }
+}
+
 /// The guest leg for a database whose TLS (if any) is a normal ClientHello:
-/// terminate it with the per-session CA when the guest insists on TLS,
-/// otherwise take the plaintext bytes as they are. Either carries no secret.
+/// terminate it with the per-session CA when the guest uses TLS, otherwise take
+/// the plaintext bytes as they are. Either carries no secret. Returns the
+/// stream and whether the guest used TLS (which the server leg mirrors).
 async fn guest_leg<S>(
     s: &Arc<Session>,
     io: S,
     first: Vec<u8>,
     host: &str,
-) -> Result<Box<dyn services::Io>, String>
+) -> Result<(Box<dyn services::Io>, bool), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -1245,22 +1277,24 @@ where
             .accept(Prefixed::new(first, io))
             .await
             .map_err(|e| format!("TLS from guest: {e}"))?;
-        Ok(Box::new(tls))
+        Ok((Box::new(tls), true))
     } else {
-        Ok(Box::new(Prefixed::new(first, io)))
+        Ok((Box::new(Prefixed::new(first, io)), false))
     }
 }
 
-/// The server leg for a database whose TLS is a normal ClientHello: real TLS
-/// with certificate validation, or — only if the secret is `plaintext` — the
-/// connection in the clear. A server that won't do TLS when the secret is not
-/// plaintext fails closed in the handshake, so the credential is never exposed.
-async fn tls_server_leg(
+/// The server leg for a database whose TLS is a normal ClientHello: mirror the
+/// client — real TLS (with certificate validation) when the guest used TLS,
+/// otherwise the connection in the clear, which the credential guard allows
+/// only for a `plaintext` secret.
+async fn server_leg(
     tcp: TcpStream,
     host: &str,
+    use_tls: bool,
     plaintext: bool,
 ) -> Result<Box<dyn services::Io>, String> {
-    if plaintext {
+    if !use_tls {
+        credential_leg_ok(false, plaintext, host)?;
         return Ok(Box::new(tcp));
     }
     let name = rustls::pki_types::ServerName::try_from(host.to_string())
@@ -1273,15 +1307,21 @@ async fn tls_server_leg(
 }
 
 /// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the
-/// server's one-byte reply, either runs TLS (`S`) with real certificate
-/// validation or — only if the secret is `plaintext` — continues in the clear
-/// (`N`). A server that refuses TLS when the secret is not plaintext fails
-/// closed, so the credential is never sent over an unprotected link.
+/// server's one-byte reply, either runs TLS (`S`) or — only if the secret is
+/// `plaintext` — continues in the clear (`N`). The proxy mirrors the client:
+/// it offers the server TLS only when the guest used TLS; when the guest was
+/// plaintext it connects in the clear (no SSLRequest), which the credential
+/// guard allows only for a `plaintext` secret.
 async fn pg_server_leg(
     mut tcp: TcpStream,
     host: &str,
+    use_tls: bool,
     plaintext: bool,
 ) -> Result<Box<dyn services::Io>, String> {
+    if !use_tls {
+        credential_leg_ok(false, plaintext, host)?;
+        return Ok(Box::new(tcp));
+    }
     tcp.write_all(&pgwire::SSL_REQUEST)
         .await
         .map_err(|e| format!("requesting server TLS: {e}"))?;
@@ -1299,10 +1339,12 @@ async fn pg_server_leg(
                 .map_err(|e| format!("TLS to {host}: {e}"))?;
             Ok(Box::new(tls))
         }
-        b'N' if plaintext => Ok(Box::new(tcp)),
-        b'N' => Err(format!(
-            "{host} refused TLS and the dbauth secret is not marked plaintext"
-        )),
+        // The guest used TLS but the server offers none: only a plaintext
+        // secret permits sending the credential in the clear.
+        b'N' => {
+            credential_leg_ok(false, plaintext, host)?;
+            Ok(Box::new(tcp))
+        }
         other => Err(format!("{host} gave an unexpected TLS reply {other:#x}")),
     }
 }
