@@ -87,3 +87,10 @@ path = "fuzz_targets/http2_uri.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pg_startup"
+path = "fuzz_targets/pg_startup.rs"
+test = false
+doc = false
+bench = false

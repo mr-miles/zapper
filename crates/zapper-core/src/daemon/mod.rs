@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod harness;
 pub mod httplog;
 pub(crate) mod nic;
+pub(crate) mod pgwire;
 pub(crate) mod proxy;
 pub mod record;
 pub mod registry;

@@ -349,3 +349,20 @@ pub fn http2_uri(data: &[u8]) {
         }
     }
 }
+
+/// The Postgres wire pieces used by database credential injection
+/// (`proxy::pgwire`): the SSLRequest/startup parsers and the message framer
+/// must never panic or read out of bounds on arbitrary bytes.
+pub fn pg_startup(data: &[u8]) {
+    use crate::daemon::pgwire;
+    let _ = pgwire::is_ssl_request(data);
+    let _ = pgwire::parse_startup(data);
+    // Frame typed messages; each reported length stays within the buffer and
+    // always advances, so the walk terminates.
+    let mut rest = data;
+    while let Some((_typ, body, consumed)) = pgwire::message(rest) {
+        assert!(consumed <= rest.len() && consumed >= 5);
+        assert_eq!(body.len() + 5, consumed);
+        rest = &rest[consumed..];
+    }
+}
