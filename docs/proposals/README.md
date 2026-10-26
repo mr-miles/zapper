@@ -11,6 +11,7 @@ Drafted 2026-10-25 on branch `feat/require-config` (01–04); proposal 05 added 
 | [03 — Interactive agent dialog](03-interactive-dialog.md) | Give an agent a chat-like way to talk to the operator for exploratory work, instead of clunky async mail. |
 | [04 — The verifiable record](04-verifiable-record.md) | Keep the bespoke keeper, or re-base the tamper-evident record on transparency-log standards (C2SP `tlog-tiles`, signed checkpoints, witnesses) and crates like `siglog`; where a Rust library helps and where it doesn't. |
 | [05 — Legion Ascended mapping](05-legion-ascended-mapping.md) | Map Legion Ascended's governed `start→ship` workflow (oracles, evidence, risk-tiered gates, approvals, attestation) onto The Office's roles and record, and borrow its risk-tier → gate policy as per-assignment governance. |
+| [06 — Plan and issue model](06-plan-and-issue-model.md) | Small additions to the Office's ticket model and a `plan` tool for multi-step plans (decomposition, `blocks` ordering, staged release, slots, optional completion contracts), modelled on Paperclip's schema (so it can be swapped for Paperclip) and covering Legion's needs (so its skills/roles reuse). |
 
 ## Caveat on Paperclip
 
