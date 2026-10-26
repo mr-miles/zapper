@@ -173,6 +173,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
                 ports: vec![req.port],
                 methods: vec![],
                 path: None,
+                protocol: Default::default(),
                 secrets: vec![],
                 set_headers: Default::default(),
                 final_: false,

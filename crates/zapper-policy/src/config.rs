@@ -112,10 +112,21 @@ pub struct Secret {
     /// for `proxy` secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
-    /// Also inject into plain `http://` requests. Off by default: anything
-    /// on the path can read them. For lab-internal services only.
+    /// Also send the secret over a non-TLS connection. Off by default:
+    /// anything on the path can read it. For lab-internal services only. For a
+    /// `proxy` secret this governs plain `http://`; for a `dbauth` secret it
+    /// governs the proxy→server leg (the guest→proxy leg carries no secret).
     #[serde(default, skip_serializing_if = "is_false")]
     pub plaintext: bool,
+    /// For a `dbauth` secret: the database user the proxy authenticates as. The
+    /// secret defines the user; the guest's requested user is ignored. Required
+    /// for `dbauth`, unused by other modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// For a `dbauth` secret: the database to pin the guest to. `None` honours
+    /// the database the guest named in its startup. Unused by other modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 impl Secret {
@@ -138,11 +149,35 @@ pub enum SecretMode {
     /// signing keys (S3), client certificates, kubeconfigs. Scope them and
     /// make them expire.
     Guest,
+    /// The guest connects to a database with no password; the proxy terminates
+    /// the client-side auth (presenting the guest as authenticated) and itself
+    /// authenticates to the real server with this host-held credential, then
+    /// relays the session. Bound to `hosts` + `user` (+ optional `database`);
+    /// reached by a `protocol: postgres` net rule. Proposal 07.
+    DbAuth,
 }
 
 impl SecretMode {
     fn is_proxy(&self) -> bool {
         *self == SecretMode::Proxy
+    }
+}
+
+/// The wire protocol a net rule governs. `tcp` (the default) is today's
+/// behaviour — HTTP inspection or a plain tunnel. `postgres` routes an allowed
+/// connection to the database auth-relay, which injects the rule's `dbauth`
+/// secret instead of taking the HTTP path (proposal 07).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetProtocol {
+    #[default]
+    Tcp,
+    Postgres,
+}
+
+impl NetProtocol {
+    fn is_tcp(&self) -> bool {
+        *self == NetProtocol::Tcp
     }
 }
 
@@ -318,6 +353,11 @@ pub struct NetRule {
     /// URL path glob (no query string). Setting it makes the proxy inspect TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The wire protocol. `postgres` routes an allowed connection to the
+    /// database auth-relay and injects the named `dbauth` secret, instead of
+    /// the HTTP path. Default `tcp`.
+    #[serde(default, skip_serializing_if = "NetProtocol::is_tcp")]
+    pub protocol: NetProtocol,
     /// Secrets whose placeholders are replaced with their values in the
     /// headers of requests this rule allows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,11 +374,23 @@ pub struct NetRule {
 
 impl NetRule {
     /// Whether matching or applying this rule needs the decrypted HTTP request.
+    /// A `postgres` rule is never HTTP-inspected — it goes to the auth-relay
+    /// ([`db_relay`](Self::db_relay)) instead, even though it names a secret.
     pub fn needs_inspection(&self) -> bool {
-        !self.methods.is_empty()
-            || self.path.is_some()
-            || !self.secrets.is_empty()
-            || !self.set_headers.is_empty()
+        self.protocol == NetProtocol::Tcp
+            && (!self.methods.is_empty()
+                || self.path.is_some()
+                || !self.secrets.is_empty()
+                || !self.set_headers.is_empty())
+    }
+
+    /// The database protocol whose auth-relay this rule routes to, if any.
+    /// `None` for an ordinary `tcp` rule (HTTP inspection or a plain tunnel).
+    pub fn db_relay(&self) -> Option<NetProtocol> {
+        match self.protocol {
+            NetProtocol::Tcp => None,
+            p => Some(p),
+        }
     }
 }
 
@@ -844,21 +896,62 @@ impl Config {
                 errors.push(format!("{scope}: {e}"));
             }
             for r in &policy.net {
+                let id = r.id.as_deref().unwrap_or("?");
                 let refs = r.set_headers.values().flat_map(|v| crate::secret_refs(v));
                 for s in r.secrets.iter().cloned().chain(refs) {
                     if !self.secrets.contains_key(&s) {
-                        errors.push(format!(
-                            "{scope}: rule {} uses unknown secret {s}",
-                            r.id.as_deref().unwrap_or("?")
-                        ));
+                        errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
+                    }
+                }
+                let dbauth = |n: &str| matches!(self.secrets.get(n), Some(s) if s.mode == SecretMode::DbAuth);
+                match r.protocol {
+                    NetProtocol::Postgres => {
+                        // The relay injects exactly one database credential and
+                        // never parses HTTP, so method/path/header matching and
+                        // any secret but a single dbauth one are nonsense here.
+                        if r.secrets.len() != 1 || !r.secrets.iter().all(|s| dbauth(s)) {
+                            errors.push(format!(
+                                "{scope}: rule {id}: a postgres rule names exactly one dbauth secret"
+                            ));
+                        }
+                        if !r.methods.is_empty() || r.path.is_some() || !r.set_headers.is_empty() {
+                            errors.push(format!(
+                                "{scope}: rule {id}: a postgres rule can't carry HTTP method, path or header matching"
+                            ));
+                        }
+                    }
+                    NetProtocol::Tcp => {
+                        if r.secrets.iter().any(|s| dbauth(s)) {
+                            errors.push(format!(
+                                "{scope}: rule {id}: a dbauth secret needs protocol: postgres"
+                            ));
+                        }
                     }
                 }
             }
         }
         for (name, s) in &self.secrets {
-            if s.mode == SecretMode::Proxy && s.hosts.is_empty() {
-                errors.push(format!(
+            match s.mode {
+                SecretMode::Proxy if s.hosts.is_empty() => errors.push(format!(
                     "secret {name}: a proxy secret needs hosts it may be sent to"
+                )),
+                SecretMode::DbAuth => {
+                    if s.hosts.is_empty() {
+                        errors.push(format!(
+                            "secret {name}: a dbauth secret needs hosts (the database it may authenticate to)"
+                        ));
+                    }
+                    if s.user.is_none() {
+                        errors.push(format!(
+                            "secret {name}: a dbauth secret needs a user to authenticate as"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            if s.mode != SecretMode::DbAuth && (s.user.is_some() || s.database.is_some()) {
+                errors.push(format!(
+                    "secret {name}: user/database apply only to a dbauth secret"
                 ));
             }
         }
@@ -1029,6 +1122,50 @@ mod tests {
                 "{port}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn dbauth_secrets_and_postgres_rules_are_validated() {
+        use super::Config;
+        let err = |y: &str| {
+            Config::from_yaml(y)
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default()
+        };
+        // A well-formed dbauth secret reached by a postgres rule is accepted.
+        let good = "\
+secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: app_ro, database: app }\n\
+policy:\n  net:\n    - { host: db.internal, ports: [5432], protocol: postgres, secrets: [db], action: allow }\n";
+        Config::from_yaml(good).unwrap();
+
+        // A dbauth secret needs hosts and a user.
+        assert!(
+            err("secrets:\n  db: { value: pw, mode: dbauth, user: u }\n")
+                .contains("a dbauth secret needs hosts")
+        );
+        assert!(
+            err("secrets:\n  db: { value: pw, mode: dbauth, hosts: [h] }\n")
+                .contains("a dbauth secret needs a user")
+        );
+        // user/database are rejected on a non-dbauth secret.
+        assert!(err("secrets:\n  t: { value: x, hosts: [h], user: u }\n")
+            .contains("apply only to a dbauth secret"));
+        // A postgres rule must name exactly one dbauth secret...
+        assert!(err(&format!(
+            "{good}    - {{ host: h, protocol: postgres, action: allow }}\n"
+        ))
+        .contains("names exactly one dbauth secret"));
+        // ...and a dbauth secret can't be used by a plain tcp rule.
+        let tcp = "\
+secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: u }\n\
+policy:\n  net:\n    - { host: db.internal, secrets: [db], action: allow }\n";
+        assert!(err(tcp).contains("a dbauth secret needs protocol: postgres"));
+        // A postgres rule can't carry HTTP matching.
+        let http = "\
+secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: u }\n\
+policy:\n  net:\n    - { host: db.internal, protocol: postgres, secrets: [db], path: /x, action: allow }\n";
+        assert!(err(http).contains("can't carry HTTP method, path or header"));
     }
 
     #[test]

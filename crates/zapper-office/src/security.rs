@@ -924,6 +924,7 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
         ports: vec![r.port],
         methods: methods.iter().map(|m| m.to_ascii_uppercase()).collect(),
         path,
+        protocol: Default::default(),
         secrets: vec![],
         set_headers: Default::default(),
         final_: false,
