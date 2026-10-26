@@ -12,6 +12,7 @@ Drafted 2026-10-25 on branch `feat/require-config` (01–04); proposal 05 added 
 | [04 — The verifiable record](04-verifiable-record.md) | Keep the bespoke keeper, or re-base the tamper-evident record on transparency-log standards (C2SP `tlog-tiles`, signed checkpoints, witnesses) and crates like `siglog`; where a Rust library helps and where it doesn't. |
 | [05 — Legion Ascended mapping](05-legion-ascended-mapping.md) | Map Legion Ascended's governed `start→ship` workflow (oracles, evidence, risk-tiered gates, approvals, attestation) onto The Office's roles and record, and borrow its risk-tier → gate policy as per-assignment governance. |
 | [06 — Plan and issue model](06-plan-and-issue-model.md) | Small additions to the Office's ticket model and a `plan` tool for multi-step plans (decomposition, `blocks` ordering, staged release, slots, optional completion contracts), modelled on Paperclip's schema (so it can be swapped for Paperclip) and covering Legion's needs (so its skills/roles reuse). |
+| [07 — Database credential injection](07-db-credential-injection.md) | Extend the proxy's host-held-secret model to databases: an agent uses a database without holding its password — the proxy authenticates to the real DB with a host-held (optionally short-lived) credential and relays, as an auth-terminating relay. Query audit/gating out of scope (the DB does its own; authorisation is DB-native roles scoped to the injected credential). |
 
 ## Caveat on Paperclip
 
