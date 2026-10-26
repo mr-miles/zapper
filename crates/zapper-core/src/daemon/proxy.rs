@@ -36,7 +36,8 @@ use zapper_policy::{
 use super::deciders::Referral;
 use super::session::Session;
 use super::{
-    cassandra, httplog, mongodb, mysql, pgwire, redis, services, spec, tds, tls, Daemon, EventBody,
+    cassandra, httplog, kafka, mongodb, mysql, pgwire, redis, services, spec, tds, tls, Daemon,
+    EventBody,
 };
 
 type Body = BoxBody<Bytes, hyper::Error>;
@@ -670,6 +671,8 @@ struct DbCred {
     database: Option<String>,
     password: String,
     plaintext: bool,
+    /// The SASL mechanism, for Kafka; ignored by the other protocols.
+    mechanism: String,
 }
 
 /// The outcome of a database handshake: the two authenticated streams, and the
@@ -699,6 +702,10 @@ fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
         database: sec.database.clone(),
         password,
         plaintext: sec.plaintext,
+        mechanism: sec
+            .mechanism
+            .clone()
+            .unwrap_or_else(|| "SCRAM-SHA-256".into()),
     })
 }
 
@@ -773,6 +780,7 @@ async fn relay_database<S>(
         NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mysql => mysql_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tds => tds_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Kafka => kafka_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
     };
     let Relayed {
@@ -1102,6 +1110,38 @@ where
         guest,
         server,
         to_guest: tds::frame(tds::PKT_RESPONSE, &resp),
+    })
+}
+
+/// Kafka: the guest holds no credential and connects as a plaintext Kafka
+/// client; the proxy authenticates the server leg with SASL (the secret's
+/// mechanism), then splices. The guest's requests run on the authenticated
+/// connection.
+async fn kafka_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let guest = guest_leg(s, guest, first, host).await?;
+    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    kafka::authenticate(
+        &mut server,
+        &cred.mechanism,
+        &cred.user,
+        &cred.password,
+        &scram_nonce(),
+    )
+    .await?;
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: vec![],
     })
 }
 

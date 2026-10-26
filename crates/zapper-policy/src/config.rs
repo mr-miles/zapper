@@ -127,7 +127,15 @@ pub struct Secret {
     /// the database the guest named in its startup. Unused by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// For a `dbauth` secret used by Kafka: the SASL mechanism —
+    /// `SCRAM-SHA-256` (the default), `PLAIN`, or `OAUTHBEARER` (the secret's
+    /// value is the bearer token). Ignored by the other protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<String>,
 }
+
+/// The SASL mechanisms the Kafka relay can speak.
+pub const KAFKA_MECHANISMS: [&str; 3] = ["SCRAM-SHA-256", "PLAIN", "OAUTHBEARER"];
 
 impl Secret {
     pub fn allows_host(&self, host: &str) -> bool {
@@ -178,6 +186,7 @@ pub enum NetProtocol {
     Redis,
     Cassandra,
     Tds,
+    Kafka,
 }
 
 impl NetProtocol {
@@ -195,6 +204,7 @@ impl NetProtocol {
             NetProtocol::Redis => "redis",
             NetProtocol::Cassandra => "cassandra",
             NetProtocol::Tds => "tds",
+            NetProtocol::Kafka => "kafka",
         }
     }
 }
@@ -970,12 +980,22 @@ impl Config {
                             "secret {name}: a dbauth secret needs a user to authenticate as"
                         ));
                     }
+                    if let Some(m) = &s.mechanism {
+                        if !KAFKA_MECHANISMS.contains(&m.as_str()) {
+                            errors.push(format!(
+                                "secret {name}: unknown SASL mechanism {m:?} (one of {})",
+                                KAFKA_MECHANISMS.join(", ")
+                            ));
+                        }
+                    }
                 }
                 _ => {}
             }
-            if s.mode != SecretMode::DbAuth && (s.user.is_some() || s.database.is_some()) {
+            if s.mode != SecretMode::DbAuth
+                && (s.user.is_some() || s.database.is_some() || s.mechanism.is_some())
+            {
                 errors.push(format!(
-                    "secret {name}: user/database apply only to a dbauth secret"
+                    "secret {name}: user/database/mechanism apply only to a dbauth secret"
                 ));
             }
         }
