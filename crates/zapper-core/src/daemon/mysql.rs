@@ -11,7 +11,7 @@
 //! All integers are little-endian. Only the handshake is modelled.
 
 use ring::digest;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
@@ -37,29 +37,20 @@ pub async fn read_packet<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<(u8, Vec<u8>), String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if buf.len() >= 4 {
-            let len = (buf[0] as usize) | (buf[1] as usize) << 8 | (buf[2] as usize) << 16;
-            if len > MAX_PACKET as usize {
-                return Err("MySQL packet too large".into());
-            }
-            if buf.len() >= 4 + len {
-                let seq = buf[3];
-                let payload = buf[4..4 + len].to_vec();
-                buf.drain(..4 + len);
-                return Ok((seq, payload));
-            }
+    super::dbwire::read_framed(s, buf, 4 + MAX_PACKET as usize, |b| {
+        if b.len() < 4 {
+            return Ok(None);
         }
-        let n = s
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading MySQL packet: {e}"))?;
-        if n == 0 {
-            return Err("connection closed during the MySQL handshake".into());
+        let len = (b[0] as usize) | (b[1] as usize) << 8 | (b[2] as usize) << 16;
+        if len > MAX_PACKET as usize {
+            return Err("MySQL packet too large".into());
         }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+        if b.len() < 4 + len {
+            return Ok(None);
+        }
+        Ok(Some(((b[3], b[4..4 + len].to_vec()), 4 + len)))
+    })
+    .await
 }
 
 fn sha1(d: &[u8]) -> Vec<u8> {

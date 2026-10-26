@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub const PKT_LOGIN7: u8 = 0x10;
 pub const PKT_RESPONSE: u8 = 0x04;
@@ -47,29 +47,20 @@ pub async fn read_packet<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<(u8, u8, Vec<u8>), String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if buf.len() >= HEADER {
-            let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-            if !(HEADER..=MAX_PACKET).contains(&len) {
-                return Err("implausible TDS packet length".into());
-            }
-            if buf.len() >= len {
-                let (typ, status) = (buf[0], buf[1]);
-                let payload = buf[HEADER..len].to_vec();
-                buf.drain(..len);
-                return Ok((typ, status, payload));
-            }
+    super::dbwire::read_framed(s, buf, MAX_PACKET, |b| {
+        if b.len() < HEADER {
+            return Ok(None);
         }
-        let n = s
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading TDS packet: {e}"))?;
-        if n == 0 {
-            return Err("connection closed during the TDS handshake".into());
+        let len = u16::from_be_bytes([b[2], b[3]]) as usize;
+        if !(HEADER..=MAX_PACKET).contains(&len) {
+            return Err("implausible TDS packet length".into());
         }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+        if b.len() < len {
+            return Ok(None);
+        }
+        Ok(Some(((b[0], b[1], b[HEADER..len].to_vec()), len)))
+    })
+    .await
 }
 
 /// Reads a whole TDS message (concatenating packets until the EOM status bit),
@@ -406,7 +397,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for TdsTls<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn packet_round_trips_and_reads_a_message() {

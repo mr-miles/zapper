@@ -7,7 +7,7 @@
 //! Only the handful of BSON types the SASL commands use are modelled, and all
 //! integers are little-endian (MongoDB wire + BSON).
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use super::pgwire::scram;
 
@@ -186,35 +186,26 @@ pub(crate) async fn read_reply<S: AsyncRead + Unpin>(
     server: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Reply, String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if buf.len() >= 4 {
-            let total = i32le(buf).unwrap() as usize;
-            if !(16..=MAX_MSG).contains(&total) {
-                return Err("implausible MongoDB message length".into());
-            }
-            if buf.len() >= total {
-                let msg = &buf[..total];
-                if i32le(&msg[12..16]) != Some(OP_MSG) {
-                    return Err("server sent a non-OP_MSG reply".into());
-                }
-                // flagBits at [16..20], section kind at [20], body doc at [21..].
-                let doc = msg.get(21..total).ok_or("truncated OP_MSG body")?;
-                let fields = walk(doc).ok_or("malformed BSON in reply")?;
-                let out = Reply { fields };
-                buf.drain(..total);
-                return Ok(out);
-            }
+    super::dbwire::read_framed(server, buf, MAX_MSG, |b| {
+        if b.len() < 4 {
+            return Ok(None);
         }
-        let n = server
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading from server: {e}"))?;
-        if n == 0 {
-            return Err("server closed during authentication".into());
+        let total = i32le(b).unwrap() as usize;
+        if !(16..=MAX_MSG).contains(&total) {
+            return Err("implausible MongoDB message length".into());
         }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+        if b.len() < total {
+            return Ok(None);
+        }
+        if i32le(&b[12..16]) != Some(OP_MSG) {
+            return Err("server sent a non-OP_MSG reply".into());
+        }
+        // flagBits at [16..20], section kind at [20], body doc at [21..].
+        let doc = b.get(21..total).ok_or("truncated OP_MSG body")?;
+        let fields = walk(doc).ok_or("malformed BSON in reply")?;
+        Ok(Some((Reply { fields }, total)))
+    })
+    .await
 }
 
 /// Authenticates the server leg over SCRAM-SHA-256 against `auth_db`, with a
@@ -301,9 +292,6 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
-    use ring::{digest, hmac as rhmac, pbkdf2};
-    use std::num::NonZeroU32;
 
     #[test]
     fn bson_builds_and_walks() {
@@ -355,41 +343,19 @@ mod tests {
         assert!(reply.is_ok());
     }
 
-    // Server-side SCRAM crypto for the handshake test (mirrors scram::Client).
-    fn tb64() -> base64::engine::general_purpose::GeneralPurpose {
-        base64::engine::general_purpose::STANDARD
-    }
-    fn thmac(key: &[u8], msg: &[u8]) -> [u8; 32] {
-        rhmac::sign(&rhmac::Key::new(rhmac::HMAC_SHA256, key), msg)
-            .as_ref()
-            .try_into()
-            .unwrap()
-    }
-    fn tsha(d: &[u8]) -> [u8; 32] {
-        digest::digest(&digest::SHA256, d)
-            .as_ref()
-            .try_into()
-            .unwrap()
-    }
-
     /// A fake Mongo server that completes SCRAM-SHA-256 for `password` over two
     /// OP_MSG round trips, setting `done: true`.
     async fn fake_mongo<S: AsyncRead + AsyncWrite + Unpin>(mut c: S, password: &str) {
+        use super::super::dbwire::scram_test;
         let mut buf = Vec::new();
         // saslStart → read client-first from the payload.
         let start = read_reply(&mut c, &mut buf).await.unwrap();
         let client_first = String::from_utf8(start.binary("payload").unwrap()).unwrap();
-        let bare = client_first.strip_prefix("n,,").unwrap().to_string();
-        let client_nonce = bare.split("r=").nth(1).unwrap().to_string();
+        let server = scram_test::Server::new(password, &client_first);
 
-        let server_nonce = format!("{client_nonce}mongofake");
-        let salt = b"mongosaltmongosa";
-        let iters = 4096u32;
-        let server_first = format!("r={server_nonce},s={},i={iters}", tb64().encode(salt));
         let reply1 = Doc::new()
             .int32("conversationId", 1)
-            .binary("payload", server_first.as_bytes())
-            .int32("done", 0) // use int as a stand-in; client reads bool `done`, absent → false
+            .binary("payload", server.server_first().as_bytes())
             .int32("ok", 1)
             .finish();
         c.write_all(&op_msg(100, &reply1)).await.unwrap();
@@ -397,31 +363,9 @@ mod tests {
         // saslContinue → verify the client proof.
         let cont = read_reply(&mut c, &mut buf).await.unwrap();
         let client_final = String::from_utf8(cont.binary("payload").unwrap()).unwrap();
-        let proof = tb64()
-            .decode(client_final.split(",p=").nth(1).unwrap())
-            .unwrap();
-        let mut salted = [0u8; 32];
-        pbkdf2::derive(
-            pbkdf2::PBKDF2_HMAC_SHA256,
-            NonZeroU32::new(iters).unwrap(),
-            salt,
-            password.as_bytes(),
-            &mut salted,
-        );
-        let client_key = thmac(&salted, b"Client Key");
-        let stored_key = tsha(&client_key);
-        let client_final_bare = format!("c=biws,r={server_nonce}");
-        let auth_message = format!("{bare},{server_first},{client_final_bare}");
-        let client_sig = thmac(&stored_key, auth_message.as_bytes());
-        let recovered: Vec<u8> = proof
-            .iter()
-            .zip(client_sig.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
-        assert_eq!(tsha(&recovered), stored_key, "client proof verifies");
-        let server_key = thmac(&salted, b"Server Key");
-        let server_sig = thmac(&server_key, auth_message.as_bytes());
-        let server_final = format!("v={}", tb64().encode(server_sig));
+        let server_final = server
+            .server_final(&client_final)
+            .expect("client proof verifies");
 
         // done:true via a real BSON bool (0x08).
         let mut body = Vec::new();

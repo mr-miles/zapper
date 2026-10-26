@@ -10,7 +10,7 @@
 //! Only the handshake is modelled, and frame compression is refused (the guest
 //! asking for it is rejected), so bodies are always plaintext here.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 // Opcodes (a response sets the frame version's high bit; the opcode is the same
 // numeric space for both directions).
@@ -55,34 +55,27 @@ pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Frame, String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if buf.len() >= HEADER {
-            let len = u32::from_be_bytes(buf[5..9].try_into().unwrap()) as usize;
-            if len > MAX_BODY {
-                return Err("CQL handshake frame too large".into());
-            }
-            if buf.len() >= HEADER + len {
-                let frame = Frame {
-                    version: buf[0],
-                    flags: buf[1],
-                    stream: i16::from_be_bytes(buf[2..4].try_into().unwrap()),
-                    opcode: buf[4],
-                    body: buf[HEADER..HEADER + len].to_vec(),
-                };
-                buf.drain(..HEADER + len);
-                return Ok(frame);
-            }
+    super::dbwire::read_framed(s, buf, HEADER + MAX_BODY, |b| {
+        if b.len() < HEADER {
+            return Ok(None);
         }
-        let n = s
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading CQL frame: {e}"))?;
-        if n == 0 {
-            return Err("connection closed during the CQL handshake".into());
+        let len = u32::from_be_bytes(b[5..9].try_into().unwrap()) as usize;
+        if len > MAX_BODY {
+            return Err("CQL handshake frame too large".into());
         }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+        if b.len() < HEADER + len {
+            return Ok(None);
+        }
+        let frame = Frame {
+            version: b[0],
+            flags: b[1],
+            stream: i16::from_be_bytes(b[2..4].try_into().unwrap()),
+            opcode: b[4],
+            body: b[HEADER..HEADER + len].to_vec(),
+        };
+        Ok(Some((frame, HEADER + len)))
+    })
+    .await
 }
 
 fn read_short(b: &[u8], off: usize) -> Option<u16> {

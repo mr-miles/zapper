@@ -1057,13 +1057,7 @@ where
             .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
             .await
             .map_err(|e| format!("sending SSLRequest: {e}"))?;
-        let name = rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| format!("{host}: {e}"))?;
-        let tls = TlsConnector::from(tls::client_config())
-            .connect(name, server)
-            .await
-            .map_err(|e| format!("TLS to {host}: {e}"))?;
-        let mut b: Box<dyn services::Io> = Box::new(tls);
+        let mut b: Box<dyn services::Io> = Box::new(connect_server_tls(server, host).await?);
         b.write_all(&mysql::packet(
             2,
             &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
@@ -1072,7 +1066,7 @@ where
         .map_err(|e| format!("sending the handshake response: {e}"))?;
         b
     } else {
-        credential_leg_ok(false, cred.plaintext, host)?;
+        plaintext_leg_ok(cred.plaintext, host)?;
         server
             .write_all(&mysql::packet(
                 1,
@@ -1176,12 +1170,7 @@ where
         // Tunnel the TLS handshake in PRELOGIN packets, then pass through.
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let wrapper = tds::TdsTls::new(server, handshaking.clone());
-        let name = rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| format!("{host}: {e}"))?;
-        let tls = TlsConnector::from(tls::client_config())
-            .connect(name, wrapper)
-            .await
-            .map_err(|e| format!("TLS to {host}: {e}"))?;
+        let tls = connect_server_tls(wrapper, host).await?;
         handshaking.store(false, Ordering::Relaxed);
         Box::new(tls)
     } else {
@@ -1190,7 +1179,7 @@ where
         if !matches!(server_enc, tds::ENCRYPT_OFF | tds::ENCRYPT_NOT_SUP) {
             return Err("server requires TLS but the client connected without it".into());
         }
-        credential_leg_ok(false, cred.plaintext, host)?;
+        plaintext_leg_ok(cred.plaintext, host)?;
         Box::new(server)
     };
 
@@ -1244,18 +1233,34 @@ where
     })
 }
 
-/// The credential may reach the server over a non-TLS leg only if the secret
-/// is marked `plaintext`; otherwise fail closed. The proxy mirrors the client's
-/// transport rather than forcing TLS, so a non-TLS server leg happens when the
-/// guest itself connected without TLS.
-fn credential_leg_ok(server_tls: bool, plaintext: bool, host: &str) -> Result<(), String> {
-    if server_tls || plaintext {
+/// Guards a non-TLS server leg: the credential may be sent in the clear only if
+/// the secret is marked `plaintext`, otherwise fail closed. Called once a leg is
+/// known to be plaintext — which, since the proxy mirrors the client rather than
+/// forcing TLS, happens when the guest itself connected without TLS.
+fn plaintext_leg_ok(plaintext: bool, host: &str) -> Result<(), String> {
+    if plaintext {
         Ok(())
     } else {
         Err(format!(
             "refusing to send the credential to {host} over a non-TLS connection: the client did not use TLS and the secret is not marked plaintext"
         ))
     }
+}
+
+/// Connects the server leg over TLS with real certificate validation.
+async fn connect_server_tls<S>(
+    stream: S,
+    host: &str,
+) -> Result<tokio_rustls::client::TlsStream<S>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host}: {e}"))?;
+    TlsConnector::from(tls::client_config())
+        .connect(name, stream)
+        .await
+        .map_err(|e| format!("TLS to {host}: {e}"))
 }
 
 /// The guest leg for a database whose TLS (if any) is a normal ClientHello:
@@ -1294,16 +1299,10 @@ async fn server_leg(
     plaintext: bool,
 ) -> Result<Box<dyn services::Io>, String> {
     if !use_tls {
-        credential_leg_ok(false, plaintext, host)?;
+        plaintext_leg_ok(plaintext, host)?;
         return Ok(Box::new(tcp));
     }
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    let tls = TlsConnector::from(tls::client_config())
-        .connect(name, tcp)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))?;
-    Ok(Box::new(tls))
+    Ok(Box::new(connect_server_tls(tcp, host).await?))
 }
 
 /// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the
@@ -1319,7 +1318,7 @@ async fn pg_server_leg(
     plaintext: bool,
 ) -> Result<Box<dyn services::Io>, String> {
     if !use_tls {
-        credential_leg_ok(false, plaintext, host)?;
+        plaintext_leg_ok(plaintext, host)?;
         return Ok(Box::new(tcp));
     }
     tcp.write_all(&pgwire::SSL_REQUEST)
@@ -1330,19 +1329,11 @@ async fn pg_server_leg(
         .await
         .map_err(|e| format!("reading the server's TLS reply: {e}"))?;
     match reply[0] {
-        b'S' => {
-            let name = rustls::pki_types::ServerName::try_from(host.to_string())
-                .map_err(|e| format!("{host}: {e}"))?;
-            let tls = TlsConnector::from(tls::client_config())
-                .connect(name, tcp)
-                .await
-                .map_err(|e| format!("TLS to {host}: {e}"))?;
-            Ok(Box::new(tls))
-        }
+        b'S' => Ok(Box::new(connect_server_tls(tcp, host).await?)),
         // The guest used TLS but the server offers none: only a plaintext
         // secret permits sending the credential in the clear.
         b'N' => {
-            credential_leg_ok(false, plaintext, host)?;
+            plaintext_leg_ok(plaintext, host)?;
             Ok(Box::new(tcp))
         }
         other => Err(format!("{host} gave an unexpected TLS reply {other:#x}")),

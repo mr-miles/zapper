@@ -426,25 +426,10 @@ async fn read_one<S: AsyncRead + Unpin>(
     server: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<(u8, Vec<u8>), String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if let Some((typ, body, consumed)) = message(buf) {
-            let out = (typ, body.to_vec());
-            buf.drain(..consumed);
-            return Ok(out);
-        }
-        if buf.len() > MAX_HANDSHAKE_MSG {
-            return Err("server handshake message too large".into());
-        }
-        let n = server
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading from server: {e}"))?;
-        if n == 0 {
-            return Err("server closed during authentication".into());
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+    super::dbwire::read_framed(server, buf, MAX_HANDSHAKE_MSG, |b| {
+        Ok(message(b).map(|(typ, body, consumed)| ((typ, body.to_vec()), consumed)))
+    })
+    .await
 }
 
 /// Reads a complete `StartupMessage` from `stream`, starting from `prefix`
@@ -782,27 +767,13 @@ mod tests {
         assert_eq!((p.user.as_str(), p.database), ("u", None));
     }
 
-    // --- the server half of SCRAM-SHA-256, only for the duplex handshake tests
-    // below; it mirrors scram::Client's private crypto with `ring` directly. ---
     use base64::Engine as _;
-    use ring::{digest, hmac as rhmac, pbkdf2};
-    use std::num::NonZeroU32;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::super::dbwire::scram_test;
 
     fn tb64() -> base64::engine::general_purpose::GeneralPurpose {
         base64::engine::general_purpose::STANDARD
-    }
-    fn thmac(key: &[u8], msg: &[u8]) -> [u8; 32] {
-        rhmac::sign(&rhmac::Key::new(rhmac::HMAC_SHA256, key), msg)
-            .as_ref()
-            .try_into()
-            .unwrap()
-    }
-    fn tsha(data: &[u8]) -> [u8; 32] {
-        digest::digest(&digest::SHA256, data)
-            .as_ref()
-            .try_into()
-            .unwrap()
     }
 
     /// A minimal Postgres server that requires SCRAM-SHA-256 with `password`.
@@ -827,63 +798,36 @@ mod tests {
         let (_mech, after) = cstr(&body).unwrap();
         let n = u32::from_be_bytes(after[0..4].try_into().unwrap()) as usize;
         let client_first = std::str::from_utf8(&after[4..4 + n]).unwrap();
-        let client_first_bare = client_first.strip_prefix("n,,").unwrap().to_string();
-        let client_nonce = client_first_bare.split("r=").nth(1).unwrap().to_string();
+        let server = scram_test::Server::new(password, client_first);
 
-        let server_nonce = format!("{client_nonce}fakeserverpart");
-        let salt = b"saltsaltsaltsalt";
-        let iters = 4096u32;
-        let server_first = format!("r={server_nonce},s={},i={iters}", tb64().encode(salt));
         let mut cont = vec![0, 0, 0, 11];
-        cont.extend_from_slice(server_first.as_bytes());
+        cont.extend_from_slice(server.server_first().as_bytes());
         c.write_all(&frame(b'R', &cont)).await.unwrap();
 
         // SASLResponse 'p': the client-final with its proof.
         let (t, body) = read_one(&mut c, &mut buf).await.unwrap();
         assert_eq!(t, b'p');
         let client_final = std::str::from_utf8(&body).unwrap();
-        let proof = tb64()
-            .decode(client_final.split(",p=").nth(1).unwrap())
-            .unwrap();
-
-        let mut salted = [0u8; 32];
-        pbkdf2::derive(
-            pbkdf2::PBKDF2_HMAC_SHA256,
-            NonZeroU32::new(iters).unwrap(),
-            salt,
-            password.as_bytes(),
-            &mut salted,
-        );
-        let client_key = thmac(&salted, b"Client Key");
-        let stored_key = tsha(&client_key);
-        let client_final_bare = format!("c=biws,r={server_nonce}");
-        let auth_message = format!("{client_first_bare},{server_first},{client_final_bare}");
-        let client_sig = thmac(&stored_key, auth_message.as_bytes());
-        // Recover ClientKey from the proof and check it against StoredKey.
-        let recovered: Vec<u8> = proof
-            .iter()
-            .zip(client_sig.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
-        if tsha(&recovered) != stored_key {
-            let mut e = Vec::new();
-            for (f, v) in [
-                (b'S', "FATAL"),
-                (b'C', "28P01"),
-                (b'M', "password authentication failed"),
-            ] {
-                e.push(f);
-                e.extend_from_slice(v.as_bytes());
+        let server_final = match server.server_final(client_final) {
+            Ok(v) => v,
+            Err(()) => {
+                let mut e = Vec::new();
+                for (f, v) in [
+                    (b'S', "FATAL"),
+                    (b'C', "28P01"),
+                    (b'M', "password authentication failed"),
+                ] {
+                    e.push(f);
+                    e.extend_from_slice(v.as_bytes());
+                    e.push(0);
+                }
                 e.push(0);
+                let _ = c.write_all(&frame(b'E', &e)).await;
+                return;
             }
-            e.push(0);
-            let _ = c.write_all(&frame(b'E', &e)).await;
-            return;
-        }
-        let server_key = thmac(&salted, b"Server Key");
-        let server_sig = thmac(&server_key, auth_message.as_bytes());
+        };
         let mut sf = vec![0, 0, 0, 12];
-        sf.extend_from_slice(format!("v={}", tb64().encode(server_sig)).as_bytes());
+        sf.extend_from_slice(server_final.as_bytes());
         c.write_all(&frame(b'R', &sf)).await.unwrap();
         c.write_all(&frame(b'R', &[0, 0, 0, 0])).await.unwrap(); // AuthenticationOk
         c.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await.unwrap(); // ReadyForQuery

@@ -9,7 +9,7 @@
 //! `SaslAuthenticate` v1 request/response headers are used, so there are no
 //! tagged fields to encode.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use super::pgwire::scram;
 
@@ -47,29 +47,22 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let mut chunk = [0u8; 4096];
-    loop {
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes(buf[0..4].try_into().unwrap());
-            if !(4..=MAX_RESPONSE as i32).contains(&size) {
-                return Err("implausible Kafka response size".into());
-            }
-            let size = size as usize;
-            if buf.len() >= 4 + size {
-                let body = buf[8..4 + size].to_vec(); // skip size + correlation id
-                buf.drain(..4 + size);
-                return Ok(body);
-            }
+    super::dbwire::read_framed(s, buf, 4 + MAX_RESPONSE, |b| {
+        if b.len() < 4 {
+            return Ok(None);
         }
-        let n = s
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("reading from broker: {e}"))?;
-        if n == 0 {
-            return Err("broker closed during authentication".into());
+        let size = i32::from_be_bytes(b[0..4].try_into().unwrap());
+        if !(4..=MAX_RESPONSE as i32).contains(&size) {
+            return Err("implausible Kafka response size".into());
         }
-        buf.extend_from_slice(&chunk[..n]);
-    }
+        let size = size as usize;
+        if b.len() < 4 + size {
+            return Ok(None);
+        }
+        // Body is the bytes after the size and the correlation id.
+        Ok(Some((b[8..4 + size].to_vec(), 4 + size)))
+    })
+    .await
 }
 
 fn get_i16(b: &[u8], off: usize) -> Option<i16> {
@@ -206,9 +199,7 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
-    use ring::{digest, hmac as rhmac, pbkdf2};
-    use std::num::NonZeroU32;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn tokens_have_the_sasl_shapes() {
@@ -296,25 +287,9 @@ mod tests {
         srv.await.unwrap();
     }
 
-    // Server-side SCRAM crypto for the handshake test.
-    fn tb64() -> base64::engine::general_purpose::GeneralPurpose {
-        base64::engine::general_purpose::STANDARD
-    }
-    fn thmac(key: &[u8], msg: &[u8]) -> [u8; 32] {
-        rhmac::sign(&rhmac::Key::new(rhmac::HMAC_SHA256, key), msg)
-            .as_ref()
-            .try_into()
-            .unwrap()
-    }
-    fn tsha(d: &[u8]) -> [u8; 32] {
-        digest::digest(&digest::SHA256, d)
-            .as_ref()
-            .try_into()
-            .unwrap()
-    }
-
     #[tokio::test]
     async fn scram_authentication_completes_over_sasl_authenticate() {
+        use super::super::dbwire::scram_test;
         let (mut client, server) = tokio::io::duplex(8192);
         let password = "pencil";
         let srv = tokio::spawn(async move {
@@ -329,45 +304,16 @@ mod tests {
             // client-first
             let (_api, corr, body) = read_request(&mut server, &mut buf).await;
             let client_first = String::from_utf8(get_bytes(&body, 0).unwrap()).unwrap();
-            let bare = client_first.strip_prefix("n,,").unwrap().to_string();
-            let client_nonce = bare.split("r=").nth(1).unwrap().to_string();
-            let server_nonce = format!("{client_nonce}kafkafake");
-            let salt = b"kafkasaltkafkasa";
-            let iters = 4096u32;
-            let server_first = format!("r={server_nonce},s={},i={iters}", tb64().encode(salt));
+            let scram = scram_test::Server::new(password, &client_first);
             server
-                .write_all(&response(corr, &auth_ok(server_first.as_bytes())))
+                .write_all(&response(corr, &auth_ok(scram.server_first().as_bytes())))
                 .await
                 .unwrap();
 
             // client-final
             let (_api, corr, body) = read_request(&mut server, &mut buf).await;
             let client_final = String::from_utf8(get_bytes(&body, 0).unwrap()).unwrap();
-            let proof = tb64()
-                .decode(client_final.split(",p=").nth(1).unwrap())
-                .unwrap();
-            let mut salted = [0u8; 32];
-            pbkdf2::derive(
-                pbkdf2::PBKDF2_HMAC_SHA256,
-                NonZeroU32::new(iters).unwrap(),
-                salt,
-                password.as_bytes(),
-                &mut salted,
-            );
-            let client_key = thmac(&salted, b"Client Key");
-            let stored_key = tsha(&client_key);
-            let client_final_bare = format!("c=biws,r={server_nonce}");
-            let auth_message = format!("{bare},{server_first},{client_final_bare}");
-            let client_sig = thmac(&stored_key, auth_message.as_bytes());
-            let recovered: Vec<u8> = proof
-                .iter()
-                .zip(client_sig.iter())
-                .map(|(a, b)| a ^ b)
-                .collect();
-            assert_eq!(tsha(&recovered), stored_key, "proof verifies");
-            let server_key = thmac(&salted, b"Server Key");
-            let server_sig = thmac(&server_key, auth_message.as_bytes());
-            let server_final = format!("v={}", tb64().encode(server_sig));
+            let server_final = scram.server_final(&client_final).expect("proof verifies");
             server
                 .write_all(&response(corr, &auth_ok(server_final.as_bytes())))
                 .await
