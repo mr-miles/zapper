@@ -65,7 +65,7 @@ for b in "$HERE"/bin/*; do
 done
 
 install -d -m 0700 "$CONF"
-"$PREFIX/bin/zapper" --config "$CONF/zapper.yaml" init
+"$PREFIX/bin/zapper" init --config "$CONF/zapper.yaml"
 
 "$HERE/scripts/fetch-deps.sh"
 
