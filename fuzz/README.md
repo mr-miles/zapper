@@ -11,6 +11,7 @@ Fuzz targets for the parsers that read what a guest sends, and the code around t
 | `frames` | Terminal frames, by the host's reader and the guest's codec |
 | `mcp_line` | The MCP gateway's lines |
 | `headers` | A request's headers on the way upstream: Host is the checked host, hop-by-hop headers are gone, and a secret is added only for a host it may go to, and over plain HTTP only with `plaintext` |
+| `http2_uri` | The upstream request URI built for an inspected request: it never panics, and for HTTP/2 the authority is always the checked host, never one smuggled through the path |
 | `log_body` | The request log's view of a body and headers: decompression is bounded, and an added secret is never shown, as text or bytes |
 | `policy` | A request against rules with globs, ports, methods, paths and a final deny: the deciding rule matches, and nothing gets past the final rule |
 

@@ -76,7 +76,10 @@ impl SessionCa {
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
             .with_single_cert(chain, key)?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // Offer HTTP/2 and HTTP/1.1; the guest's client picks. h2 lets us
+        // inspect gRPC and other HTTP/2 traffic rather than forcing a
+        // downgrade.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let config = Arc::new(config);
         self.leaves.lock().unwrap().insert(host, config.clone());
         Ok(config)
@@ -96,7 +99,9 @@ pub fn client_config() -> Arc<ClientConfig> {
             .expect("protocol versions")
             .with_root_certificates(roots)
             .with_no_client_auth();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // Offer HTTP/2 and HTTP/1.1 upstream; we speak to the real server in
+        // whatever it negotiates, independently of the guest-facing protocol.
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Arc::new(config)
     })
     .clone()
@@ -185,6 +190,19 @@ mod tests {
         assert!(ca.pem.starts_with("-----BEGIN CERTIFICATE-----"));
         ca.server_config("api.example.com").unwrap();
         ca.server_config("10.0.0.1").unwrap();
+    }
+
+    /// Both the guest-facing and upstream configs offer HTTP/2 and HTTP/1.1,
+    /// so inspected connections can speak either, h2 preferred.
+    #[test]
+    fn alpn_offers_h2_then_http11() {
+        let ca = SessionCa::new("t").unwrap();
+        let sc = ca.server_config("api.example").unwrap();
+        assert_eq!(sc.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            client_config().alpn_protocols,
+            [b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 | Group | Checks |
 |---|---|
-| NIC session | Runs as uid 1000 with `eth0` and without proxy variables. The workdir is copied in, and `fs: hidden` hides `.env`. A `proxy` secret appears as its placeholder and a `guest` secret as its value. DNS answers an allowed name with a synthetic address, gives NXDOMAIN for an allowed name that doesn't exist, and refuses names no rule allows. An allowed TLS connection succeeds, and an allowed request gets its secret. POST to a GET-only host, a port without a rule, a raw IP, and a TLS name that differs from the dialled name are denied. An exec rule denies `perl`, and a denied first command prints the reason and exits 126. The exit code reaches the CLI. |
+| NIC session | Runs as uid 1000 with `eth0` and without proxy variables. The workdir is copied in, and `fs: hidden` hides `.env`. A `proxy` secret appears as its placeholder and a `guest` secret as its value. DNS answers an allowed name with a synthetic address, gives NXDOMAIN for an allowed name that doesn't exist, and refuses names no rule allows. An allowed TLS connection succeeds, and an allowed request gets its secret. An HTTP/2 request negotiates h2 through the inspecting proxy and still gets its secret injected (the path gRPC rides). POST to a GET-only host, a port without a rule, a raw IP, and a TLS name that differs from the dialled name are denied. An exec rule denies `perl`, and a denied first command prints the reason and exits 126. The exit code reaches the CLI. |
 | Root in the guest | With another DNS server configured, names are still answered by policy. A connection to a real address is denied, and other ports on the gateway are closed. |
 | VMM confinement | A running VMM has its own root. The config file, the audit log and the daemon user's home directory (apart from zapper's own files) are absent from its view, and its root is read-only. Teardown keeps `vm.json` and removes `vm/`. |
 | vsock session | Loopback only, with proxy variables. An allowed connection succeeds through the proxy, and a direct connection fails. |
@@ -39,6 +39,7 @@ The invariants in [AGENTS.md](../AGENTS.md#working-on-the-repository) and where 
 | `proxy` secret values stay on the host and are added only where allowed | e2e: NIC session (the placeholder in the guest, the value in an allowed request), request log (an echoed secret is redacted); unit: refused for a host outside the secret's `hosts` and over plain HTTP without `plaintext: true`, placeholders and `set_headers` alike; a `guest` secret only in the profiles that use it | |
 | The proxy connects to the address it checked; loopback, link-local and host addresses are unreachable | unit: address checks; e2e: NIC session (raw IP), root in the guest (a real address) | |
 | Passthrough is bound to the TLS server name; inspection presents a per-session CA and overrides `Host` | unit: SNI parsing, an unreadable ClientHello refused (one split across records too), certificate minting, the `Host` override; fuzz: `tls_hello`; e2e: NIC session (a TLS name that differs is denied) | |
+| Inspection serves HTTP/2 or HTTP/1.1 by ALPN, pins the authority to the checked host, and injects the same over either | unit: the ALPN offer (h2 then http/1.1), the upstream URI shaping (origin-form for h1, absolute for h2, the authority never taken from the path), and an h2 request served, decided and injected in-process; fuzz: `http2_uri`; e2e: NIC session (HTTP/2 negotiated and the secret injected over it) | A real upstream HTTP/2 server round-trip is only in e2e, not in-process |
 | One control connection; terminals only from CID 2 | e2e: attacks | |
 | Foreign-arch and x32 syscalls are killed | e2e: attacks | |
 | Input from the guest is bounded and rendered as text | unit: control lines, frames, connections through the proxy, approvals waiting, MCP connections; the pages' scripts parse no string as HTML and run none as code | |
@@ -52,7 +53,7 @@ Controls in the [security model](security.md#what-is-enforced-where) without a t
 
 ## Fuzzing
 
-The parsers that read what a guest sends (DNS queries, the TLS ClientHello, CONNECT and Host authorities, the control channel's lines, terminal frames, MCP lines), and the code that decides and changes what goes upstream (rule matching, the headers a request leaves with and the secrets added to them, the request log's redaction and decompression), have fuzz targets in [fuzz/](../fuzz/README.md), run by hand with nightly and cargo-fuzz. A crash found there becomes a unit test next to the parser.
+The parsers that read what a guest sends (DNS queries, the TLS ClientHello, CONNECT and Host authorities, the control channel's lines, terminal frames, MCP lines), and the code that decides and changes what goes upstream (rule matching, the headers a request leaves with and the secrets added to them, the upstream request URI whose authority stays the checked host, the request log's redaction and decompression), have fuzz targets in [fuzz/](../fuzz/README.md), run by hand with nightly and cargo-fuzz. A crash found there becomes a unit test next to the parser.
 
 ## Manual scenarios
 
