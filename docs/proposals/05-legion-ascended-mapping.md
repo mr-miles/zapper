@@ -133,9 +133,47 @@ A central mirror is in fact *better* for grep than repo-local bundling in the mu
 
 A **skill** carries the rest: the OpenSpec-compatible format and the workflow (author a file → `store_validate` → `store_put` → `attest` → `archive`), pointing the agent at `/store` to read. So **skill + MCP validation + server-side enforcement replace the CLI**, and the only thing given up — writing to the store from inside an agent-authored shell script — is something governance wants to forbid anyway.
 
+## Per-project and per-workflow governance
+
+Legion is built for software, so its schema, spec and ticket formats are rigorous throughout. A firm may do anything — research, analysis, design, operations — and may not want that formality, particularly around tickets. So rigor must be a **dial, not a firm-wide law**, set the way zapper already layers everything. Legion's own R0–R3 tiers are the precedent (R0 is already "minimal"); this extends the dial down to "no typed spec at all" and makes the schemas themselves swap by project.
+
+Bundle the stack into a named **workflow profile** — which artifact kinds exist and their schemas (as data, a `schemas_dir` read like `skills_dir` / `agents_dir`), which risk tiers and gates apply, and which skills attach:
+
+```yaml
+workflow_profile:
+  software:                        # Legion-style
+    artifacts: { spec: openspec, oracle: openspec, evidence: typed, attestation: typed }
+    risk_tiers: [R0, R1, R2, R3]   # R2 default
+    tickets: prose                 # assignments stay prose even here
+    skills: [spec-authoring, shipping-gates]
+  research:                        # light
+    artifacts: { findings: pack }  # a brief and cited findings; no oracle
+    risk_tiers: [none, light]
+    tickets: prose
+    skills: [research-sources]
+  freeform: {}                     # today's behaviour: untyped drive, prose assignments
+```
+
+**No profile means exactly today's behaviour** — free-prose assignments, an untyped drive, review on request — so the rigor is strictly additive and opt-in.
+
+Select it at the three layers the firm already has:
+
+- **Per firm (project):** `firms.<name>.workflow: software` in the config is the default; a research firm sets `research` or omits it.
+- **At kickoff (per run):** the board picks a profile on the start form as it picks a scenario today; the chosen profile's rules fold into the run's **charter** ([office.md](../office.md#the-charter)), so every role reads the governance level in its preamble.
+- **Per phase (per assignment):** the CEO or product manager tags a workstream with a profile (or just a risk tier), so a software firm's one-off research spike drops to `research`, and a research firm's ship-critical component rises to `software`.
+
+Enforcement stays uniform: the store's MCP tools validate against **whatever schema the active profile declares, or pass through untyped if none** — the validator is generic, the profile is the data it checks against, so the same tools serve a rigid and a loose firm alike.
+
+Keep the axes independent, especially tickets:
+
+- **Governance axis** (spec / oracle / evidence / attestation / gates): off → full, per profile.
+- **Ticket-typing axis** (assignments: prose → typed task contracts): **default off, rarely on.** Even the `software` profile above keeps `tickets: prose`, because zapper's assignments are a prose delegation tree and forcing them into typed task contracts was the weakest part of the mapping. A workflow turns ticket-typing on only when a phase genuinely needs a dependency DAG. So adopting the governance rigor never imposes rigor on tickets: a firm can run fully typed specs with entirely free-prose assignments.
+
+So whether a layer applies is config / kickoff / a per-phase tag; what the schemas are is `schemas_dir` data the profile names; how to work under it is the skills the profile attaches; and enforcement is the generic store validator plus the risk-tier gate map, both parameterised by the active profile — config, data and skills, not a new engine.
+
 ## Recommendation
 
-Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, store the governance centrally (one store across repositories, not bundled into each repo), serve it as a **read-only mount for grep and scripts with writes through MCP tools** (host-side validation, a controlled archive transition, and no in-VM CLI — skill plus validation carry authoring) so agents can self-lint but can neither push invalid documents nor corrupt archiving, and route Legion's reflection commands through the existing **process-improvement** role. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
+Do **(A) first**: it is a small, enforceable change that gives the firm Legion's main strength — evidence-backed, risk-tiered gating with explicit approval — while keeping the roles, mail and containment the Office already has. Reuse the **keeper** for attestation (it is Legion's hash-pinning, already built), make the **oracle** an approved drive artifact so review has something typed to check against, store the governance centrally (one store across repositories, not bundled into each repo), serve it as a **read-only mount for grep and scripts with writes through MCP tools** (host-side validation, a controlled archive transition, and no in-VM CLI — skill plus validation carry authoring) so agents can self-lint but can neither push invalid documents nor corrupt archiving, and route Legion's reflection commands through the existing **process-improvement** role. Make the whole stack a selectable **workflow profile** that defaults to off (today's behaviour), so software firms get the rigor and other firms opt in per project or per phase, with ticket-typing left off even when governance is on. Treat **(B)** as a later option for a firm whose whole purpose is governed delivery.
 
 ## Open questions
 
@@ -144,3 +182,4 @@ Do **(A) first**: it is a small, enforceable change that gives the firm Legion's
 - **Double approval.** The firm already has asks/grants and the board; adding Legion-style approvers must not create two overlapping approval systems — decide which decision each owns.
 - **Typed artifacts and the store.** Addressed above (OpenSpec-compatible spec/oracle, zapper-store evidence/attestation, served via MCP). The residual is the shared validator: embed the OpenSpec Node tool, or port its checks into the daemon so self-lint and the write path cannot drift.
 - **Taskgraph fidelity.** zapper's assignments play the taskgraph's role but are a prose tree, not a typed DAG with dependency edges and oracle links. Decide per tier whether that is enough or whether some phases need true task contracts — and if so, whether to type the assignments or keep tasks light and type only the governance.
+- **Profile definition and precedence.** Where workflow profiles live (a `workflows_dir` read like `skills_dir`), and the precedence when a per-phase tag, a kickoff choice and a firm default disagree (most-specific wins, presumably) — and whether a phase may freely mix axes (typed spec, prose tickets, light gates).
