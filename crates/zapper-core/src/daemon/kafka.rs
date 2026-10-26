@@ -178,8 +178,13 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
                 .map_err(|e| format!("sending SASL OAUTHBEARER: {e}"))?;
             auth_bytes(&read_response(server, &mut buf).await?)?;
         }
-        "SCRAM-SHA-256" => {
-            let client = scram::Client::new(user, password, nonce);
+        "SCRAM-SHA-256" | "SCRAM-SHA-512" => {
+            let hash = if mechanism == "SCRAM-SHA-512" {
+                scram::Hash::Sha512
+            } else {
+                scram::Hash::Sha256
+            };
+            let client = scram::Client::with_hash(hash, user, password, nonce);
             server
                 .write_all(&send_auth(1, client.client_first().into_bytes()))
                 .await

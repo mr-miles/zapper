@@ -128,14 +128,15 @@ pub struct Secret {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
     /// For a `dbauth` secret used by Kafka: the SASL mechanism —
-    /// `SCRAM-SHA-256` (the default), `PLAIN`, or `OAUTHBEARER` (the secret's
-    /// value is the bearer token). Ignored by the other protocols.
+    /// `SCRAM-SHA-256` (the default), `SCRAM-SHA-512`, `PLAIN`, or
+    /// `OAUTHBEARER` (the secret's value is the bearer token). Ignored by the
+    /// other protocols.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mechanism: Option<String>,
 }
 
 /// The SASL mechanisms the Kafka relay can speak.
-pub const KAFKA_MECHANISMS: [&str; 3] = ["SCRAM-SHA-256", "PLAIN", "OAUTHBEARER"];
+pub const KAFKA_MECHANISMS: [&str; 4] = ["SCRAM-SHA-256", "SCRAM-SHA-512", "PLAIN", "OAUTHBEARER"];
 
 impl Secret {
     pub fn allows_host(&self, host: &str) -> bool {

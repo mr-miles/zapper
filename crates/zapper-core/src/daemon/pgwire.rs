@@ -148,40 +148,62 @@ pub fn parse_auth(body: &[u8]) -> Option<Auth<'_>> {
     })
 }
 
-/// SCRAM-SHA-256 client exchange (RFC 5802 / RFC 7677), as the proxy
-/// authenticates to the real server with the host-held password. Pure — no I/O
-/// and the nonce is supplied, so it is unit-tested against the RFC 7677 vector;
-/// the relay drives it over the server leg and generates a random nonce.
+/// SCRAM client exchange (RFC 5802 / RFC 7677), as the proxy authenticates to
+/// the real server with the host-held password. Supports SCRAM-SHA-256 and
+/// SCRAM-SHA-512. Pure — no I/O and the nonce is supplied, so it is unit-tested
+/// against the RFC 7677 vector; the relay drives it over the server leg and
+/// generates a random nonce.
 pub mod scram {
     use base64::Engine;
     use ring::{digest, hmac, pbkdf2};
     use std::num::NonZeroU32;
 
-    const SHA256_LEN: usize = 32;
     /// `base64("n,,")` — the GS2 channel-binding header for "no binding", which
     /// is what `c=` carries in the client-final message.
     const GS2_HEADER_B64: &str = "biws";
 
+    /// The hash a SCRAM mechanism is built on.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Hash {
+        Sha256,
+        Sha512,
+    }
+
+    impl Hash {
+        fn digest(self, data: &[u8]) -> Vec<u8> {
+            let alg = match self {
+                Hash::Sha256 => &digest::SHA256,
+                Hash::Sha512 => &digest::SHA512,
+            };
+            digest::digest(alg, data).as_ref().to_vec()
+        }
+        fn hmac(self, key: &[u8], msg: &[u8]) -> Vec<u8> {
+            let alg = match self {
+                Hash::Sha256 => hmac::HMAC_SHA256,
+                Hash::Sha512 => hmac::HMAC_SHA512,
+            };
+            hmac::sign(&hmac::Key::new(alg, key), msg).as_ref().to_vec()
+        }
+        fn pbkdf2(self, iters: NonZeroU32, salt: &[u8], password: &[u8]) -> Vec<u8> {
+            let (alg, len) = match self {
+                Hash::Sha256 => (pbkdf2::PBKDF2_HMAC_SHA256, 32),
+                Hash::Sha512 => (pbkdf2::PBKDF2_HMAC_SHA512, 64),
+            };
+            let mut out = vec![0u8; len];
+            pbkdf2::derive(alg, iters, salt, password, &mut out);
+            out
+        }
+    }
+
     fn b64() -> base64::engine::general_purpose::GeneralPurpose {
         base64::engine::general_purpose::STANDARD
-    }
-
-    fn hmac(key: &[u8], msg: &[u8]) -> [u8; SHA256_LEN] {
-        let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), msg);
-        tag.as_ref().try_into().expect("HMAC-SHA256 is 32 bytes")
-    }
-
-    fn sha256(data: &[u8]) -> [u8; SHA256_LEN] {
-        digest::digest(&digest::SHA256, data)
-            .as_ref()
-            .try_into()
-            .expect("SHA-256 is 32 bytes")
     }
 
     /// A SCRAM exchange in progress: built with the client-first message, then
     /// advanced with the server-first message to produce the client-final
     /// message and the server signature to verify.
     pub struct Client {
+        hash: Hash,
         password: String,
         client_nonce: String,
         /// `n=<user>,r=<client-nonce>` — the client-first-bare, which the
@@ -203,7 +225,14 @@ pub mod scram {
         /// startup user, so the relay passes `""`, as libpq does); `nonce` is a
         /// fresh random client nonce.
         pub fn new(user: &str, password: &str, nonce: &str) -> Self {
+            Self::with_hash(Hash::Sha256, user, password, nonce)
+        }
+
+        /// As [`new`](Self::new) but choosing the hash (SCRAM-SHA-256 or
+        /// SCRAM-SHA-512).
+        pub fn with_hash(hash: Hash, user: &str, password: &str, nonce: &str) -> Self {
             Self {
+                hash,
                 password: password.to_string(),
                 client_nonce: nonce.to_string(),
                 client_first_bare: format!("n={user},r={nonce}"),
@@ -256,27 +285,22 @@ pub mod scram {
                 .decode(salt_b64)
                 .map_err(|_| "salt is not valid base64")?;
 
-            let mut salted = [0u8; SHA256_LEN];
-            pbkdf2::derive(
-                pbkdf2::PBKDF2_HMAC_SHA256,
-                iterations,
-                &salt,
-                self.password.as_bytes(),
-                &mut salted,
-            );
-            let client_key = hmac(&salted, b"Client Key");
-            let stored_key = sha256(&client_key);
-            let server_key = hmac(&salted, b"Server Key");
+            let salted = self
+                .hash
+                .pbkdf2(iterations, &salt, self.password.as_bytes());
+            let client_key = self.hash.hmac(&salted, b"Client Key");
+            let stored_key = self.hash.digest(&client_key);
+            let server_key = self.hash.hmac(&salted, b"Server Key");
 
             let client_final_bare = format!("c={GS2_HEADER_B64},r={nonce}");
             let auth_message = format!("{},{sf},{client_final_bare}", self.client_first_bare);
-            let client_sig = hmac(&stored_key, auth_message.as_bytes());
+            let client_sig = self.hash.hmac(&stored_key, auth_message.as_bytes());
             let proof: Vec<u8> = client_key
                 .iter()
                 .zip(client_sig.iter())
                 .map(|(a, b)| a ^ b)
                 .collect();
-            let server_sig = hmac(&server_key, auth_message.as_bytes());
+            let server_sig = self.hash.hmac(&server_key, auth_message.as_bytes());
 
             Ok(Final {
                 message: format!("{client_final_bare},p={}", b64().encode(proof)),
@@ -673,6 +697,58 @@ mod tests {
         assert!(scram::Client::verify_server_final(&fin, ok.as_bytes()).is_ok());
         assert!(scram::Client::verify_server_final(&fin, b"v=AAAA").is_err());
         assert!(scram::Client::verify_server_final(&fin, b"e=other-error").is_err());
+    }
+
+    #[test]
+    fn scram_sha512_round_trips_self_consistently() {
+        use ring::{digest, hmac as rh, pbkdf2};
+        use std::num::NonZeroU32;
+        let (password, client_nonce) = ("pencil", "clientnonce");
+        let c = scram::Client::with_hash(scram::Hash::Sha512, "user", password, client_nonce);
+        assert_eq!(c.client_first(), "n,,n=user,r=clientnonce");
+
+        let salt = b"0123456789abcdef";
+        let iters = 4096u32;
+        let server_nonce = format!("{client_nonce}server512");
+        let server_first = format!("r={server_nonce},s={},i={iters}", tb64().encode(salt));
+        let fin = c.client_final(server_first.as_bytes()).unwrap();
+
+        // Recompute the server side with SHA-512 and check both directions.
+        let hmac512 = |k: &[u8], m: &[u8]| {
+            rh::sign(&rh::Key::new(rh::HMAC_SHA512, k), m)
+                .as_ref()
+                .to_vec()
+        };
+        let sha512 = |d: &[u8]| digest::digest(&digest::SHA512, d).as_ref().to_vec();
+        let mut salted = vec![0u8; 64];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA512,
+            NonZeroU32::new(iters).unwrap(),
+            salt,
+            password.as_bytes(),
+            &mut salted,
+        );
+        let client_key = hmac512(&salted, b"Client Key");
+        let stored_key = sha512(&client_key);
+        let server_key = hmac512(&salted, b"Server Key");
+        let client_final_bare = format!("c=biws,r={server_nonce}");
+        let auth = format!("n=user,r={client_nonce},{server_first},{client_final_bare}");
+        let proof = tb64()
+            .decode(fin.message.split(",p=").nth(1).unwrap())
+            .unwrap();
+        let client_sig = hmac512(&stored_key, auth.as_bytes());
+        let recovered: Vec<u8> = proof.iter().zip(&client_sig).map(|(a, b)| a ^ b).collect();
+        assert_eq!(
+            sha512(&recovered),
+            stored_key,
+            "proof recovers the stored key"
+        );
+        assert_eq!(
+            fin.server_signature,
+            tb64().encode(hmac512(&server_key, auth.as_bytes()))
+        );
+        let ok = format!("v={}", fin.server_signature);
+        assert!(scram::Client::verify_server_final(&fin, ok.as_bytes()).is_ok());
     }
 
     #[test]
