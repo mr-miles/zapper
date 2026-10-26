@@ -144,6 +144,7 @@ make test-e2e                 # the NIC, root and vsock groups in docs/testing.m
 ## Limitations
 
 - TCP and DNS are the only traffic that leaves a NIC session. QUIC clients fall back to TCP. IPv6 is captured and policy-checked exactly like IPv4 (a synthetic `2001:2::/48` address per name, the same redirect and address checks) when the guest kernel has IPv6; without it the datapath is IPv4-only.
+- WebSockets **transit** but are not **inspected**. Over a passthrough connection (an allowed host with no inspecting rule) the `Upgrade` handshake, the `101` and the frames flow through the byte tunnel like any other protocol, SNI-pinned. On an inspected connection they do not work: `clean_headers` strips the `upgrade`/`connection` hop headers, the MITM serve is not `.with_upgrades()`, and the upstream client does not relay the switch — so a rule that inspects a `wss://` endpoint breaks its upgrade, and a secret cannot be injected into a WebSocket handshake. Inspecting or injecting into WebSockets would need upgrade-aware MITM (handle `Upgrade`/`101`, keep those headers, splice the switched stream); until then, allow such hosts as passthrough.
 - A program that connects to an address without looking up a name is decided on that address. Its TLS server name then has to equal the address.
 - A server-first protocol such as SSH waits up to 300 ms for its first bytes, while the daemon checks whether the client is starting TLS.
 - A NIC adds about 0.4 s to session start, for the namespace and its nftables rules.
