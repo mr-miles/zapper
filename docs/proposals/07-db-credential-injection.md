@@ -20,10 +20,27 @@ So the only protocol work is the startup/auth handshake, never SQL.
 
 Prefer **guest↔proxy plaintext, proxy↔server TLS**. The guest↔proxy leg is captured inside the VM boundary (it never leaves the host) and carries **no secret** (the guest has no password), so it needs neither TLS nor a per-session CA; the proxy↔server leg uses real TLS with the real credential. That sidesteps MITM on the guest side entirely. If the guest insists on TLS to the "database" (`sslmode=require`), the proxy terminates it with the per-session CA (the guest must trust it), and `sslmode=verify-full` against the real server's certificate still breaks it — the same cert-pinning limit as HTTPS. So steer the guest to a plaintext local leg.
 
+## Which databases, and what needs special treatment
+
+The hard part per database is the **TLS negotiation** (several databases do not start with a TLS ClientHello) and the **auth exchange**; once past auth the relay is protocol-agnostic byte-splicing.
+
+| Database | TLS negotiation | Auth | First-cut difficulty |
+|---|---|---|---|
+| **PostgreSQL** | plaintext `SSLRequest` preamble, then TLS | SCRAM-SHA-256 (md5 legacy) | **Reference — do first** |
+| **MySQL / MariaDB** | TLS upgrade *mid-handshake* (server greeting → client sets `CLIENT_SSL` → TLS → auth) | `caching_sha2_password` (8.0 default) / `mysql_native_password`; caching_sha2 over a non-TLS leg needs an RSA public-key exchange | Harder: mid-handshake TLS + the caching_sha2 RSA dance + auth-switch |
+| **MS SQL Server (TDS)** | TLS handshake **tunnelled inside TDS PRELOGIN packets** | SQL auth (tractable) or Windows/Kerberos/NTLM (hard) | Hard: must wrap the TLS handshake in TDS framing; restrict to SQL auth |
+| **MongoDB** | standard TLS | SASL (SCRAM-SHA-256/1) over `OP_MSG` | Moderate: normal TLS, but a full wire-protocol + SASL framer |
+| **Redis / Valkey** | standard TLS (or plaintext) | `AUTH` / `HELLO AUTH` command | Easiest: the "credential" is just an `AUTH` the proxy issues |
+| **Cassandra (CQL)** | standard TLS | SASL/PLAIN via `AUTHENTICATE`/`AUTH_RESPONSE` | Moderate |
+| **Oracle (TNS/TTC)** | proprietary negotiation | proprietary | Defer — out of scope for a first cut |
+
+The databases needing genuinely *special* treatment are the ones whose TLS is not "ClientHello first": **Postgres** (`SSLRequest`), **MySQL** (mid-handshake upgrade), and **TDS** (TLS-in-TDS). The rest are "standard TLS, then a SASL/`AUTH` exchange" and differ only in framing. Each still needs its own auth implementation, so add them one at a time behind the same relay; Postgres first.
+
 ## The secret model
 
 - A new secret kind: a database credential bound to `(host, user, database)`, injected by **completing the server-side auth** rather than by setting a header — a `DbAuth` mode alongside the HTTP `proxy` mode in the secret model (`crates/zapper-policy/src/config.rs`). A net rule for the database `host:port` names the protocol + the secret, which makes the connection inspected (routed to the auth-relay instead of tunnelled).
 - It composes with the minted/dynamic secret source from [proposal 01](01-persistent-outputs.md): the credential can be **short-lived** — RDS IAM auth tokens, Vault dynamic database roles — minted host-side, rotated, and never in the guest.
+- The existing **`plaintext` flag** (today it gates injecting a `proxy` secret over plain HTTP) carries straight over, now governing the **server leg**: the real credential may be sent to the database over a **non-TLS** connection only if `plaintext: true` (anything on the path can read it — lab/internal only); otherwise TLS to the server is required and the connection **fails closed** if the server won't negotiate it. The guest↔proxy leg carries no secret (the guest has no password), so it is unaffected — which is exactly why the plaintext guest leg is safe. This keeps the HTTP invariant intact: *"the proxy adds a secret only when the connection uses TLS or the secret sets `plaintext: true`."*
 
 ## Authorisation stays in the database
 
