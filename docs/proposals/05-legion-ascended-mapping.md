@@ -171,6 +171,25 @@ Keep the axes independent, especially tickets:
 
 So whether a layer applies is config / kickoff / a per-phase tag; what the schemas are is `schemas_dir` data the profile names; how to work under it is the skills the profile attaches; and enforcement is the generic store validator plus the risk-tier gate map, both parameterised by the active profile — config, data and skills, not a new engine.
 
+## Tickets, stages and the taskgraph
+
+The taskgraph is the one place to resist over-typing: zapper's tickets should keep prose content and gain only the *structure* a taskgraph needs, all optional (default absent = today's free delegation). Two pieces:
+
+- **Hierarchy — already exists as `context`.** A thread carries `context` (a single parent thread), set automatically to the thread its sender was working in, and `task_threads` ([`mail.rs`](../../crates/zapper-office/src/mail.rs)) already walks it to roll a task up for grouping and the objective's close. So the decomposition tree and its roll-up are built; the only addition worth considering is making `context` *declarable* (not only auto-derived) for up-front planning and re-parenting. A separate `child_of` field would duplicate it.
+- **Ordering — an ordered list of stages on the parent (the one new field).** The parent ticket carries `stages: [[id, …], …]` — ordered, each stage a set that runs in parallel. It is readable (the whole plan sits in one place), it matches authority (ordering is a planning decision owned by the parent's owner, not declared piecemeal by children), it is naturally scoped (it references only its own children), and list-of-stages expresses sequence plus fan-out, which covers most plans — Legion's phase flow included. The office releases stage N+1 only when every ticket in stage N is *accepted* (the review close, not a bare report).
+
+Cross-subtree dependencies — a ticket depending on one outside its parent's stage list, a true DAG diamond — are deliberately **out of scope for now**: the stage list covers sequence and parallelism within a decomposition, which is the common case, and a general dependency-edge mechanism (an optional `not_before` by id) can be added later if a workflow needs it.
+
+This reproduces the common taskgraph shape — decomposition, ordering, parallelism — with content left prose, so typed contracts and oracle links stay in the governance layer, separate from the ticket graph.
+
+### Authoring a plan
+
+An agent lays out the whole plan in one atomic call rather than drip-sending assignments, because a ticket must be able to exist *before* it is delivered — later stages are created blocked, not pushed to their workers yet. A **`plan` MCP tool** takes the parent (its current task by default) and the ordered stages, each stage a list of assignment specs (`to`, `subject`, `body`, `due`); the office validates the whole plan (recipients assignable under the chart, each child in one stage, within limits), creates every child with `context` set, activates stage 0 (delivers and wakes those recipients), and holds the rest blocked. As each stage is accepted it releases the next and wakes those workers; the planner is not in the loop for the hand-offs. `mail_send(assignment)` stays for one-off delegation — it is the degenerate one-ticket, one-stage plan.
+
+The engine pieces this needs: a **deferred/blocked assignment state** (created, not delivered, not waking its worker until released), a **staged-release scheduler** (release stage N+1 when stage N is accepted, reusing the existing accept signal and wake), **atomic batch validation**, and desk/UI visibility of the plan. Everything else — creating assignments, `context`, obligations, acceptance, waking — already exists.
+
+A **planning skill** teaches the manager / CEO / product manager to decompose the task into stages with per-ticket acceptance criteria and call `plan` once, to keep stages minimal, and that later stages auto-release on acceptance so they must not be chased by hand.
+
 ## How far config-only gets you
 
 Much of this proposal needs code (the store, the MCP tools, typed validation, risk-tier verdicts). But a useful subset is reachable **today with config alone** — a firm definition, roles ([`config/agents/`](../../config/agents/)) and skills ([`config/skills/`](../../config/skills/)) — because the dividing line is *soft* versus *hard* enforcement: skills and the charter can instruct the workflow, but only the office can refuse. The verdict: config-only buys a convincing Legion-*shaped* firm and most of the *process*; code buys the *guarantees*.
@@ -202,5 +221,5 @@ Do **(A) first**: it is a small, enforceable change that gives the firm Legion's
 - **Who owns the oracle.** The product-manager writes acceptance criteria today; an R2+ oracle wants an owner distinct from the implementer, as Legion insists.
 - **Double approval.** The firm already has asks/grants and the board; adding Legion-style approvers must not create two overlapping approval systems — decide which decision each owns.
 - **Typed artifacts and the store.** Addressed above (OpenSpec-compatible spec/oracle, zapper-store evidence/attestation, served via MCP). The residual is the shared validator: embed the OpenSpec Node tool, or port its checks into the daemon so self-lint and the write path cannot drift.
-- **Taskgraph fidelity.** zapper's assignments play the taskgraph's role but are a prose tree, not a typed DAG with dependency edges and oracle links. Decide per tier whether that is enough or whether some phases need true task contracts — and if so, whether to type the assignments or keep tasks light and type only the governance.
+- **Taskgraph fidelity.** Addressed above ("Tickets, stages and the taskgraph"): `context` for the tree, an ordered stage-list on the parent for ordering (released on acceptance), authored by a `plan` tool, content left prose. Residual: whether to make `context` declarable; the cost of the deferred/blocked assignment state in the foreman; and whether cross-subtree dependency edges (`not_before`) are ever needed — out of scope for now.
 - **Profile definition and precedence.** Where workflow profiles live (a `workflows_dir` read like `skills_dir`), and the precedence when a per-phase tag, a kickoff choice and a firm default disagree (most-specific wins, presumably) — and whether a phase may freely mix axes (typed spec, prose tickets, light gates).
