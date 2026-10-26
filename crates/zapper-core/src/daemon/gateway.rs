@@ -132,7 +132,6 @@ where
         return Ok(());
     };
     let name = String::from_utf8_lossy(&first).trim().to_string();
-    let server = d.gateway.server(s, &name);
     loop {
         let msg = match line(&mut r).await {
             Ok(Some(l)) => l,
@@ -147,6 +146,10 @@ where
         if msg.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
+        // Resolved per message, not once: a server removed mid-connection
+        // stops serving at once, rather than lingering until the guest
+        // reconnects.
+        let server = d.gateway.server(s, &name);
         let reply = match serde_json::from_slice::<Value>(&msg) {
             Err(e) => Some(error(Value::Null, -32700, format!("bad request: {e}"))),
             Ok(m) => {

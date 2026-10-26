@@ -50,6 +50,34 @@ async fn ask6(t: &TestCore, s: &Arc<Session>, name: &str) -> Result<Ipv6Addr, u8
 }
 
 const REFUSED: u8 = 5;
+const SERVFAIL: u8 = 2;
+const NXDOMAIN: u8 = 3;
+
+/// Registers `db.internal` as a service for `s` so its name resolves without
+/// a real host lookup, and returns the session.
+async fn with_db_service(config: &str) -> (TestCore, Arc<Session>) {
+    let t = TestCore::new(config);
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "db.internal".into(),
+            port: 5432,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Session {
+                id: "abcdef".into(),
+                port: 5432,
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    (t, s)
+}
 
 #[tokio::test]
 async fn a_name_no_rule_allows_is_refused() {
@@ -94,28 +122,10 @@ async fn a_service_resolves_only_for_the_sessions_it_picks() {
 
 #[tokio::test]
 async fn a_and_aaaa_get_synthetic_addresses_of_their_family() {
-    let t = TestCore::new(
+    let (t, s) = with_db_service(
         "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.internal }\n",
-    );
-    let s = t
-        .core
-        .test_session(
-            NewSession::plain("web".into(), t.workdir(), Default::default()),
-            true,
-        )
-        .unwrap();
-    t.core
-        .add_service(crate::ServiceSpec {
-            name: "db.internal".into(),
-            port: 5432,
-            sessions: Default::default(),
-            target: crate::ServiceTarget::Session {
-                id: "abcdef".into(),
-                port: 5432,
-            },
-            owner: "test".into(),
-        })
-        .unwrap();
+    )
+    .await;
     // A gives a 198.18.0.0/15 address, AAAA a 2001:2::/48 one, for one name.
     let v4 = ask(&t, &s, "db.internal").await.unwrap();
     assert_eq!(&v4.octets()[..2], &[198, 18], "{v4} is in 198.18.0.0/15");
@@ -125,4 +135,62 @@ async fn a_and_aaaa_get_synthetic_addresses_of_their_family() {
         &[0x2001, 0x2],
         "{v6} is in 2001:2::/48"
     );
+}
+
+#[tokio::test]
+async fn a_flood_of_queries_fails_closed_with_servfail() {
+    let t = TestCore::new("profiles:\n  web: {}\n");
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    // The per-session rate limiter must start refusing (SERVFAIL) under a
+    // flood rather than resolving without bound. (A name no rule allows is
+    // REFUSED, but the rate check comes first, so it still spends a token.)
+    let mut saw_servfail = false;
+    for _ in 0..200 {
+        if ask(&t, &s, "example.com").await == Err(SERVFAIL) {
+            saw_servfail = true;
+            break;
+        }
+    }
+    assert!(saw_servfail, "a flood must hit the rate limit and SERVFAIL");
+}
+
+#[tokio::test]
+async fn a_non_address_query_for_an_allowed_name_is_nodata() {
+    let (t, s) = with_db_service(
+        "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.internal }\n",
+    )
+    .await;
+    // An MX query (type 15) for a name that resolves gets NOERROR with no
+    // answer record — a synthetic address is only ever an A or AAAA.
+    let r = query_dns(t.core.daemon(), &s, &query_type("db.internal", 15))
+        .await
+        .unwrap();
+    assert_eq!(r[3] & 0x0f, 0, "NOERROR");
+    assert_eq!((r[6], r[7]), (0, 0), "no answer record (NODATA)");
+}
+
+#[tokio::test]
+async fn an_allowed_name_in_a_zone_that_nothing_serves_is_nxdomain() {
+    // A zone answers from the daemon, never the host's resolver: a name under
+    // it that no service serves is NXDOMAIN, not a leaked host lookup.
+    let t = TestCore::new(
+        "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: \"*.acme.internal\" }\n",
+    );
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    t.core
+        .add_zone("acme.internal", Default::default(), "test")
+        .unwrap();
+    assert_eq!(ask(&t, &s, "nothere.acme.internal").await, Err(NXDOMAIN));
 }
