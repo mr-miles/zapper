@@ -16,6 +16,7 @@ pub(crate) mod http;
 pub(crate) mod journal;
 pub(crate) mod mail;
 pub(crate) mod ops;
+pub(crate) mod plan;
 pub(crate) mod product;
 pub(crate) mod prompts;
 pub(crate) mod scenario;
@@ -231,6 +232,8 @@ pub(crate) struct FirmRun {
     pub facility: facility::Facilities,
     /// The office's tools' registration in the gateway.
     pub tools: Mutex<Option<u64>>,
+    /// Staged plans a worker authored with `plan`, released stage by stage.
+    pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,
 }
 
@@ -422,8 +425,12 @@ impl FirmRun {
                 anyhow::bail!("the board's objective can't close while your team is still busy: {}. The firm pauses when it closes and their work would stop half done. End your turn: the post office tells you as soon as they are all idle, and then you close", busy.join(", "));
             }
         }
+        let closing = d.close;
         let sent = self.post.send(&self.journal, d, now())?;
         self.deliver(&sent);
+        if closing {
+            self.on_plan_child_closed(&sent.thread);
+        }
         if sent.objective_done {
             // The board's task is delivered: the simulation holds until the
             // board decides what comes next.
@@ -439,6 +446,71 @@ impl FirmRun {
                 w.queue.lock().unwrap().push(sent.id.clone());
                 w.wake.notify_one();
             }
+        }
+    }
+
+    /// Send a plan stage's children as assignments from the plan's owner,
+    /// parented under the plan's source task; return their thread ids in spec
+    /// order. Each is an ordinary assignment, so authority is enforced in
+    /// `send` as for any delegation.
+    pub(crate) fn plan_send_stage(
+        &self,
+        owner: &str,
+        source: &str,
+        specs: &[plan::ChildSpec],
+    ) -> Result<Vec<String>> {
+        let mut threads = Vec::with_capacity(specs.len());
+        for s in specs {
+            let mut d = Draft::new(
+                owner,
+                vec![s.to.clone()],
+                &s.subject,
+                &s.body,
+                Kind::Assignment,
+            );
+            d.due = s.due;
+            d.context = Some(source.to_string());
+            threads.push(self.send(d)?.thread);
+        }
+        Ok(threads)
+    }
+
+    /// A closing reply landed on `thread`; if it is a plan child, advance the
+    /// plan, releasing the next stage when the current one is complete.
+    pub(crate) fn on_plan_child_closed(&self, thread: &str) {
+        let advance = self.plans.lock().unwrap().complete(thread);
+        self.apply_plan_advance(advance);
+    }
+
+    /// Act on a plan state change: release the next stage (send and bind its
+    /// children) or record completion.
+    pub(crate) fn apply_plan_advance(&self, advance: plan::Advance) {
+        match advance {
+            plan::Advance::Release { plan, stage, specs } => {
+                let Some((owner, source)) = self
+                    .plans
+                    .lock()
+                    .unwrap()
+                    .get(&plan)
+                    .map(|p| (p.owner.clone(), p.source.clone()))
+                else {
+                    return;
+                };
+                match self.plan_send_stage(&owner, &source, &specs) {
+                    Ok(threads) => self.plans.lock().unwrap().bind(&plan, stage, threads),
+                    Err(e) => {
+                        self.journal.append(
+                            "plan",
+                            json!({ "event": "release_failed", "plan": plan, "stage": stage, "error": format!("{e:#}") }),
+                        );
+                    }
+                }
+            }
+            plan::Advance::Completed { plan } => {
+                self.journal
+                    .append("plan", json!({ "event": "completed", "plan": plan }));
+            }
+            plan::Advance::None => {}
         }
     }
 

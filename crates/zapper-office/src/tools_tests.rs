@@ -187,6 +187,50 @@ async fn mail_send_fails_when_the_body_cannot_be_journaled() {
     assert!(inbox["note"].is_string(), "pat got no message: {inbox}");
 }
 
+/// A plan delivers stage 0 at once and holds the next stage until the first
+/// completes, then releases it — the office driving it, no planner in the loop.
+#[tokio::test]
+async fn a_plan_releases_its_next_stage_on_completion() {
+    let (t, run) = run();
+    let unread = |who: &'static str| {
+        let (t, run) = (&t, &run);
+        async move { ok(t, run, who, "mail_inbox", json!({ "unread": true })).await["unread"].clone() }
+    };
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-objective",
+            "stages": [
+                [ { "to": "pat", "subject": "Build", "body": "build it" } ],
+                [ { "to": "sec", "subject": "Review", "body": "review it" } ],
+            ],
+        }),
+    )
+    .await;
+    assert!(plan["plan"].is_string(), "{plan}");
+    // Stage 0 went to pat; stage 1 is held from sec.
+    assert_eq!(unread("pat").await, json!(1));
+    assert_eq!(unread("sec").await, json!(0));
+
+    // pat completes its assignment.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    let msg = inbox["messages"][0]["id"].as_str().unwrap().to_string();
+    ok(
+        &t,
+        &run,
+        "pat",
+        "mail_reply",
+        json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+    )
+    .await;
+
+    // Stage 1 is now released to sec.
+    assert_eq!(unread("sec").await, json!(1));
+}
+
 #[tokio::test]
 async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     let (t, run) = run();

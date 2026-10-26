@@ -360,6 +360,106 @@ static TOOLS: &[Tool] = &[
         }),
     },
     Tool {
+        name: "plan",
+        shown: |p| p.root || p.manages || p.hires,
+        description: "Lay out a multi-step plan under a task: ordered stages of child assignments, released stage by stage as each stage's children are reported done. Stage 0 starts at once; a later stage is created only when the stage before it completes. mail_send is the one-off, one-stage case.",
+        props: || json!({
+            "source": s("The task thread the children belong to (e.g. t-12); defaults to the task you are working on"),
+            "stages": { "type": "array", "description": "Ordered stages; each stage is an array of child assignments {to, subject, body, due} that run in parallel", "items": { "type": "array", "items": { "type": "object", "properties": { "to": s("A worker below you in the chart"), "subject": s("The ask"), "body": s("Markdown: the ask, context, what done looks like"), "due": s("Like 2h, 1d") }, "required": ["to", "body"] } } }
+        }),
+        required: &["stages"],
+        run: Run::Sync(|c| {
+            let source = c
+                .args
+                .opt("source")
+                .or_else(|| c.w.context.lock().unwrap().clone())
+                .ok_or_else(|| anyhow!("give a source task thread, or call plan from within a task"))?;
+            let stages_v = c
+                .args
+                .raw("stages")
+                .as_array()
+                .ok_or_else(|| anyhow!("stages must be an array of stages"))?;
+            let mut stages: Vec<Vec<crate::plan::ChildSpec>> = Vec::new();
+            for st in stages_v {
+                let arr = st
+                    .as_array()
+                    .ok_or_else(|| anyhow!("each stage is an array of child assignments"))?;
+                let mut specs = Vec::new();
+                for ch in arr {
+                    let to = req_str(ch, "to")?;
+                    let subject = opt_str(ch, "subject").unwrap_or_default();
+                    let body = opt_str(ch, "body").unwrap_or_default();
+                    if subject.trim().is_empty() && body.trim().is_empty() {
+                        bail!("each child needs a subject or a body");
+                    }
+                    specs.push(crate::plan::ChildSpec { to, subject, body, due: parse_due(&ch["due"])? });
+                }
+                if specs.is_empty() {
+                    bail!("a stage has no children");
+                }
+                stages.push(specs);
+            }
+            if stages.is_empty() {
+                bail!("the plan has no stages");
+            }
+            let chart = c.run.chart();
+            for st in &stages {
+                for sp in st {
+                    if !chart.is_above(c.me, &sp.to) {
+                        bail!("{} can't assign to {}: only their managers can", c.me, sp.to);
+                    }
+                }
+            }
+            let (id, stage0) = c.run.plans.lock().unwrap().create(c.me, &source, stages);
+            let threads = c.run.plan_send_stage(c.me, &source, &stage0)?;
+            c.run.plans.lock().unwrap().bind(&id, 0, threads.clone());
+            Ok(json!({ "plan": id, "source": source, "children": threads }))
+        }),
+    },
+    Tool {
+        name: "plan_pause",
+        shown: |p| p.root || p.manages || p.hires,
+        description: "Pause a plan you own: the office stops releasing its stages (any in-flight work finishes). Resume or close it later.",
+        props: || json!({ "plan": s("Plan id, e.g. plan-1") }),
+        required: &["plan"],
+        run: Run::Sync(|c| {
+            let id = c.args.req("plan")?;
+            authorize_plan(c, &id)?;
+            if c.run.plans.lock().unwrap().pause(&id) {
+                Ok(json!({ "plan": id, "status": "paused" }))
+            } else {
+                bail!("plan {id} is not active")
+            }
+        }),
+    },
+    Tool {
+        name: "plan_resume",
+        shown: |p| p.root || p.manages || p.hires,
+        description: "Resume a plan you paused; if its current stage already finished, the next stage is released now.",
+        props: || json!({ "plan": s("Plan id, e.g. plan-1") }),
+        required: &["plan"],
+        run: Run::Sync(|c| {
+            let id = c.args.req("plan")?;
+            authorize_plan(c, &id)?;
+            let advance = c.run.plans.lock().unwrap().resume(&id);
+            c.run.apply_plan_advance(advance);
+            Ok(json!({ "plan": id, "status": "active" }))
+        }),
+    },
+    Tool {
+        name: "plan_close",
+        shown: |p| p.root || p.manages || p.hires,
+        description: "Close a plan you own and no longer want finished. Allowed only when it is paused and nothing is in progress, so it never cuts off a working agent. Completed plans close themselves.",
+        props: || json!({ "plan": s("Plan id, e.g. plan-1") }),
+        required: &["plan"],
+        run: Run::Sync(|c| {
+            let id = c.args.req("plan")?;
+            authorize_plan(c, &id)?;
+            c.run.plans.lock().unwrap().close(&id).map_err(|e| anyhow!("{e}"))?;
+            Ok(json!({ "plan": id, "status": "closed" }))
+        }),
+    },
+    Tool {
         name: "directory",
         shown: |_| true,
         description: "The org chart: names, titles, roles, managers, reports, security officers, and who is busy.",
@@ -1028,6 +1128,23 @@ fn attachments(v: &Value) -> Result<Vec<String>> {
             }
         })
         .collect())
+}
+
+/// A plan is controlled only by its owner or someone above them in the chart.
+fn authorize_plan(c: &Call, plan: &str) -> Result<()> {
+    let owner = c
+        .run
+        .plans
+        .lock()
+        .unwrap()
+        .owner_of(plan)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("no plan {plan}"))?;
+    if c.me == owner || c.run.chart().is_above(c.me, &owner) {
+        Ok(())
+    } else {
+        bail!("only {owner} or someone above them can control plan {plan}")
+    }
 }
 
 /// A draft from `mail_send` arguments (also the board's API).
