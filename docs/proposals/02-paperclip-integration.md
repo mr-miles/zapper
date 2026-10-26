@@ -56,6 +56,21 @@ Paperclip has **two** human-in-the-loop surfaces, both pushed to the operator in
 
 The guiding rule: **Paperclip owns the human decision and its UI; zapper owns enforcement and the tamper-evident record.** Each decision has exactly one approval surface (Paperclip's) and exactly one enforcement point (zapper's). Budgets stay entirely Paperclip's (`budget_override_required`).
 
+### "Nobody decides their own", and how far Paperclip is trusted
+
+The Office enforced that no one decides their own access request. In this split the two identities have very different trust, which shapes how the rule is kept:
+
+- **The requester is anchored on zapper** — authoritatively and unspoofably, it is the VM the `ask` came from (the "sender is the VM" invariant); zapper, not the agent, sets `requestedByAgentId`.
+- **The decider comes from Paperclip.** zapper can check `decider ≠ requester` before it applies a grant, but that is only as good as Paperclip's report: it guards Paperclip *mistakes* (a self-approval slipping through its logic), not a Paperclip that lies. That is acceptable only because **Paperclip is already the access-decision authority here** — trusting its `decider_id` adds no trust beyond trusting it to decide at all.
+
+So the robustness does not come from the check; it comes from where the decision is anchored and from what zapper refuses to delegate:
+
+- **Default — board-decided, which satisfies the rule structurally.** The board is the human operators (`assertBoard`); an agent can never *be* the board, so `decider ≠ requester` holds with no check, however `decider_id` is set. Keep security-critical asks (network, credentials) board-decided and the constraint is free and robust.
+- **Delegating to an agent officer** needs the check *and* a trustworthy decision channel: either Paperclip authenticating the officer (trusted as part of trusting Paperclip to decide), or — to not trust the relay — **signed approvals that zapper verifies**, so a forged decider simply fails to validate.
+- **The hard floor, regardless of a buggy or compromised Paperclip:** an operator-set, zapper-side **ceiling** of what is grantable at all (which hosts, which credentials, which resources), configured in zapper's own config, not through Paperclip. Paperclip only ever grants *within* that ceiling. With zapper's enforcement (secret values never leave the host, egress always captured, the address policy, the record), a wrong or dishonest decision cannot exceed what the operator already allowed, exfiltrate a secret, reach a forbidden address, or forge the audit trail.
+
+In short: *Paperclip decides which allowed things happen; zapper decides what is possible at all.* The anti-self check is best-effort integrity layered on the board/signature anchor and the operator's ceiling — not the boundary itself.
+
 ## What each side keeps
 
 - **Paperclip:** the company/org chart, roles (including a security-officer role, if used), the heartbeat scheduler and turn control, issues/coordination, chat/inbox, budgets, both approval surfaces + their UI, and the **traffic review itself** — reviewing the reports zapper pushes and deciding.
@@ -67,7 +82,7 @@ The guiding rule: **Paperclip owns the human decision and its UI; zapper owns en
 - **Network policy in two places.** Paperclip's `local-process-sandbox` carries a `networkAllowlist`; zapper has the authoritative policy. Decide that zapper's policy is the source of truth and the Paperclip-side allowlist is left open (zapper enforces), to avoid split-brain config.
 - **The runner / HTTP bridge + credential injection.** Paperclip syncs a workspace and exposes a "Paperclip API bridge" and `secretsSvc` into the sandbox. Map which credentials Paperclip injects vs. which zapper injects at the proxy, so a secret isn't handled by both (prefer zapper for anything that must stay host-side).
 - **Identity mapping.** Paperclip `agentId`/`companyId` ↔ a zapper principal, for durable grants across runs (ties into [proposal 01](01-persistent-outputs.md)).
-- **Who may decide a traffic/credential ask.** Paperclip's durable approvals are board-decided (`assertBoard`). The Office's model had a delegated *security officer* decide, escalate to the CEO/board, and never decide their own request. Mapping that onto Paperclip means either the human board decides every ask, or Paperclip gains a delegated-approver (officer) authority with an anti-self-approval rule. Confirm what Paperclip's role/authority model supports before relying on an agent officer; until then, the board is the safe decider and zapper still enforces "an ask is refused until a decision arrives."
+- **Delegated-approver support / signed approvals.** The default (board-decided) needs nothing from Paperclip and keeps "nobody decides their own" structurally (see the trust note above). A delegated agent *security-officer* that may decide asks but never its own needs either a Paperclip authority model for a non-board approver, or signed approvals zapper can verify — confirm which Paperclip supports before relying on an agent officer. Until then the board is the safe decider, and zapper enforces "an ask is refused until a decision arrives" and the operator-set grant ceiling regardless.
 - **Reference implementation.** The Daytona/e2b/kubernetes providers (`packages/plugins/sandbox-providers/*`) are the templates to copy for the zapper provider; the Daytona `onEnvironmentExecute` is the closest shape to "run the CLI in a leased remote sandbox".
 
 ## Phased plan
