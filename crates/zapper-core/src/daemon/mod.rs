@@ -7,6 +7,7 @@
 
 pub mod addr;
 pub mod api_error;
+pub(crate) mod approvals;
 pub mod clients;
 pub mod deciders;
 pub(crate) mod dns;
@@ -26,7 +27,6 @@ mod summary;
 pub mod tls;
 pub mod vm;
 
-use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -203,7 +203,7 @@ pub struct Daemon {
     pub addrs: RwLock<addr::AddressPolicy>,
     pub(crate) sessions: session::SessionStore,
     pub(crate) events: events::EventBus,
-    approvals: Mutex<HashMap<String, Pending>>,
+    approvals: approvals::Approvals,
     pub ui_token: String,
     pub clients: clients::Clients,
     pub services: services::Services,
@@ -336,7 +336,7 @@ impl Daemon {
             addrs: RwLock::new(addrs),
             sessions: session::SessionStore::new(),
             events: events::EventBus::new(),
-            approvals: Mutex::new(HashMap::new()),
+            approvals: approvals::Approvals::new(),
             ui_token: random_id(24),
             clients: clients::Clients::default(),
             services: services::Services::default(),
@@ -498,18 +498,10 @@ impl Daemon {
             suggestion,
             tx: Arc::new(Mutex::new(Some(tx))),
         };
-        {
-            let mut approvals = self.approvals.lock().unwrap();
-            // A session cannot flood the operator.
-            if approvals
-                .values()
-                .filter(|p| p.session == session.id)
-                .count()
-                >= 32
-            {
-                return false;
-            }
-            approvals.insert(id.clone(), pending);
+        // A session cannot flood the operator (the store caps how many it may
+        // have outstanding).
+        if !self.approvals.register(pending) {
+            return false;
         }
         self.emit(
             Some(session),
@@ -525,7 +517,7 @@ impl Daemon {
             .ok()
             .and_then(Result::ok)
             .unwrap_or(false);
-        if self.approvals.lock().unwrap().remove(&id).is_some() {
+        if self.approvals.take(&id).is_some() {
             self.emit(
                 Some(session),
                 EventBody::Answer {
@@ -539,17 +531,13 @@ impl Daemon {
     }
 
     pub fn approvals(&self) -> Vec<Pending> {
-        let mut v: Vec<_> = self.approvals.lock().unwrap().values().cloned().collect();
-        v.sort_by(|a, b| a.created.total_cmp(&b.created));
-        v
+        self.approvals.list()
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
         let pending = self
             .approvals
-            .lock()
-            .unwrap()
-            .remove(id)
+            .take(id)
             .ok_or_else(|| anyhow!("no pending approval {id}"))?;
         let session = self.session(&pending.session)?;
         if let Some(r) = remember {
