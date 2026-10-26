@@ -2,7 +2,7 @@
 //! would send them, runs the parser that reads them, and checks what must
 //! hold whatever the input. The targets in `fuzz/` call these.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tokio::io::BufReader;
 use zapper_policy::proto::{Frame, GuestMsg, MAX_FRAME, MAX_LINE, MAX_MCP_LINE};
@@ -24,9 +24,15 @@ pub fn dns_query(data: &[u8]) {
     };
     let (question, rcode, answer) = match &parsed {
         Ok(q) => {
-            // A name the resolver passes on is a valid host name.
+            // A name the resolver passes on is a valid host name; answer with a
+            // synthetic address of the queried family (A, else AAAA).
             if zapper_policy::names::hostname(&q.name).is_ok() {
-                (Some(q), dns::NOERROR, Some(Ipv4Addr::new(10, 0, 0, 1)))
+                let ip = if q.qtype == dns::TYPE_AAAA {
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0x2, 0, 0, 0, 0, 0, 1))
+                } else {
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+                };
+                (Some(q), dns::NOERROR, Some(ip))
             } else {
                 (Some(q), dns::REFUSED, None)
             }
@@ -37,6 +43,13 @@ pub fn dns_query(data: &[u8]) {
     assert!(r.len() >= 12);
     assert_eq!(&r[..2], &data[..2], "the id is echoed");
     assert_ne!(r[2] & 0x80, 0, "a response");
+    // When an address was answered, its bytes close the response intact.
+    if let Some(ip) = answer {
+        match ip {
+            IpAddr::V4(a) => assert_eq!(&r[r.len() - 4..], &a.octets()),
+            IpAddr::V6(a) => assert_eq!(&r[r.len() - 16..], &a.octets()),
+        }
+    }
 }
 
 /// The first bytes of a guest's TLS connection: the record length and the

@@ -83,6 +83,9 @@ echo "port80=$(code http://example.com)"
 echo "rawip=$(code https://1.1.1.1)"
 echo "fronting=$(code --resolve github.com:443:$(getent hosts example.com | cut -d" " -f1) https://github.com)"
 echo "perl=$(perl -e "print 1" 2>&1)"
+echo "v6route=$(ip -6 route show default 2>/dev/null | grep -o "fd00:2::1")"
+echo "v6dns=$(getent ahostsv6 example.com 2>/dev/null | grep -o "2001:2:" | head -1)"
+echo "v6conn=$(code -6 https://example.com)"
 exit 7' 2>&1)
 code=$?
 expect "workload runs as uid 1000 with a NIC, no proxy settings" "$out" "id=1000 ifaces=eth0,lo, proxy=none"
@@ -101,6 +104,14 @@ expect "raw IP denied" "$out" "rawip=000"
 expect "TLS name must match the name dialled" "$out" "fronting=000"
 expect "exec deny rule" "$out" "Permission denied"
 [ "$code" = 7 ] && pass "exit code propagates" || fail "exit code propagates" "got $code"
+# IPv6 datapath, only when the guest kernel has IPv6 (the default route is set).
+case "$out" in
+  *"v6route=fd00:2::1"*)
+    expect "DNS answers AAAA with a synthetic v6 address" "$out" "v6dns=2001:2:"
+    expect "IPv6 egress to an allowed host is captured and allowed" "$out" "v6conn=200" ;;
+  *)
+    echo "skip  IPv6 datapath (no IPv6 in the guest kernel)" ;;
+esac
 
 out=$("$Z" run -C "$T/work" -- perl -e 1 2>&1)
 code=$?

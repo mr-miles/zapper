@@ -1,7 +1,7 @@
 //! The daemon end of a session's NIC: connections and DNS queries captured
 //! by the namespace shim (`crate::netns`) arrive here over a unix socket.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,7 +42,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std:
     let parts: Vec<&str> = line.split(' ').collect();
     match parts.as_slice() {
         ["TCP", ip, port] => {
-            let (Ok(ip), Ok(port)) = (ip.parse::<Ipv4Addr>(), port.parse::<u16>()) else {
+            let (Ok(ip), Ok(port)) = (ip.parse::<IpAddr>(), port.parse::<u16>()) else {
                 return Ok(());
             };
             proxy::transparent(d, s, stream, ip, port).await;
@@ -79,7 +79,7 @@ fn rcode_name(rcode: u8) -> &'static str {
 /// Answers one DNS query from the guest; `None` if it's too short to answer.
 pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -> Option<Vec<u8>> {
     let event =
-        |name: &str, qtype: u16, rcode: u8, answer: Option<Ipv4Addr>, reason: Option<&str>| {
+        |name: &str, qtype: u16, rcode: u8, answer: Option<IpAddr>, reason: Option<&str>| {
             d.emit(
                 Some(s),
                 EventBody::Dns {
@@ -143,12 +143,13 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
         event(&q.name, q.qtype, dns::NXDOMAIN, None, Some("no such name"));
         return Some(dns::respond(query, Some(&q), dns::NXDOMAIN, None));
     }
-    let answer = if q.qtype == dns::TYPE_A {
-        s.dns.lock().unwrap().address(&q.name)
-    } else {
-        None
+    // A synthetic address of the queried family; other types get NODATA.
+    let answer = match q.qtype {
+        dns::TYPE_A => s.dns.lock().unwrap().address(&q.name).map(IpAddr::V4),
+        dns::TYPE_AAAA => s.dns.lock().unwrap().address6(&q.name).map(IpAddr::V6),
+        _ => None,
     };
-    if q.qtype == dns::TYPE_A {
+    if q.qtype == dns::TYPE_A || q.qtype == dns::TYPE_AAAA {
         event(&q.name, q.qtype, dns::NOERROR, answer, None);
     }
     Some(dns::respond(query, Some(&q), dns::NOERROR, answer))

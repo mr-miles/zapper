@@ -110,6 +110,17 @@ fn early() -> Result<()> {
     Ok(())
 }
 
+/// Runs iproute2's `ip` if it is present, ignoring the outcome. Used only for
+/// best-effort IPv6 setup; the IPv4 path never depends on it.
+fn ip_cmd(args: &[&str]) {
+    for p in ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"] {
+        if Path::new(p).exists() {
+            let _ = Command::new(p).args(args).status();
+            return;
+        }
+    }
+}
+
 fn setup(control: &Control, spec: &GuestSpec) -> Result<()> {
     sys::sethostname(&spec.hostname);
     fs::write("/etc/hostname", format!("{}\n", spec.hostname))?;
@@ -118,8 +129,26 @@ fn setup(control: &Control, spec: &GuestSpec) -> Result<()> {
         format!("127.0.0.1 localhost {}\n::1 localhost\n", spec.hostname),
     )?;
     if spec.nic {
-        // The kernel configured eth0 (`ip=` on the command line).
-        fs::write("/etc/resolv.conf", "nameserver 10.0.2.1\n")?;
+        // The kernel configured eth0's IPv4 (`ip=` on the command line). That
+        // parameter is IPv4-only, so add the IPv6 address and default route
+        // here, best-effort: on a guest or kernel without IPv6 these do nothing
+        // and the session stays IPv4-only. The addresses match `netns` (the
+        // host end of the tap): gateway fd00:2::1, guest fd00:2::2.
+        ip_cmd(&["-6", "addr", "add", "fd00:2::2/64", "dev", "eth0"]);
+        ip_cmd(&[
+            "-6",
+            "route",
+            "add",
+            "default",
+            "via",
+            "fd00:2::1",
+            "dev",
+            "eth0",
+        ]);
+        fs::write(
+            "/etc/resolv.conf",
+            "nameserver 10.0.2.1\nnameserver fd00:2::1\n",
+        )?;
     } else {
         fs::write(
             "/etc/resolv.conf",
