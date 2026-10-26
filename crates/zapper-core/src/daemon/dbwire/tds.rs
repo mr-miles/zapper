@@ -47,7 +47,7 @@ pub async fn read_packet<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<(u8, u8, Vec<u8>), String> {
-    super::dbwire::read_framed(s, buf, MAX_PACKET, |b| {
+    super::read_framed(s, buf, MAX_PACKET, |b| {
         if b.len() < HEADER {
             return Ok(None);
         }

@@ -55,7 +55,7 @@ pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Frame, String> {
-    super::dbwire::read_framed(s, buf, HEADER + MAX_BODY, |b| {
+    super::read_framed(s, buf, HEADER + MAX_BODY, |b| {
         if b.len() < HEADER {
             return Ok(None);
         }

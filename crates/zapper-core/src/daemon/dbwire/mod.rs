@@ -1,9 +1,20 @@
-//! Shared plumbing for the database auth-relays (proposal 07).
+//! The database wire layer (proposal 07): a per-protocol codec module for each
+//! supported database — the parsing/building and the auth handshake it drives —
+//! plus the shared plumbing they all use. `proxy::relay` is the datapath that
+//! orchestrates these; nothing here knows about the proxy.
 //!
-//! Every relay reads length-prefixed messages off a socket the same way:
-//! accumulate bytes, try to frame one whole message, read more when short,
-//! bound the buffer and fail closed on a close. [`read_framed`] is that loop,
-//! once; each protocol supplies only how to frame one message from the buffer.
+//! The shared plumbing: every relay reads length-prefixed messages off a socket
+//! the same way — accumulate bytes, try to frame one whole message, read more
+//! when short, bound the buffer and fail closed on a close. [`read_framed`] is
+//! that loop, once; each protocol supplies only how to frame one message.
+
+pub(crate) mod cassandra;
+pub(crate) mod kafka;
+pub(crate) mod mongodb;
+pub(crate) mod mysql;
+pub(crate) mod pgwire;
+pub(crate) mod redis;
+pub(crate) mod tds;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 

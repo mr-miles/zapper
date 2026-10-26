@@ -426,7 +426,7 @@ async fn read_one<S: AsyncRead + Unpin>(
     server: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<(u8, Vec<u8>), String> {
-    super::dbwire::read_framed(server, buf, MAX_HANDSHAKE_MSG, |b| {
+    super::read_framed(server, buf, MAX_HANDSHAKE_MSG, |b| {
         Ok(message(b).map(|(typ, body, consumed)| ((typ, body.to_vec()), consumed)))
     })
     .await
@@ -770,7 +770,7 @@ mod tests {
     use base64::Engine as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::super::dbwire::scram_test;
+    use super::super::scram_test;
 
     fn tb64() -> base64::engine::general_purpose::GeneralPurpose {
         base64::engine::general_purpose::STANDARD

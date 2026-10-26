@@ -47,7 +47,7 @@ pub(crate) async fn read_response<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    super::dbwire::read_framed(s, buf, 4 + MAX_RESPONSE, |b| {
+    super::read_framed(s, buf, 4 + MAX_RESPONSE, |b| {
         if b.len() < 4 {
             return Ok(None);
         }
@@ -289,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn scram_authentication_completes_over_sasl_authenticate() {
-        use super::super::dbwire::scram_test;
+        use super::super::scram_test;
         let (mut client, server) = tokio::io::duplex(8192);
         let password = "pencil";
         let srv = tokio::spawn(async move {

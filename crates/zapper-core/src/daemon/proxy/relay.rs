@@ -14,10 +14,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{NetProtocol, NetRequest};
 
 use super::{dial, log, note_failure, note_verdict, NetLog, Prefixed, Target, Verdict};
+use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds};
 use crate::daemon::session::Session;
-use crate::daemon::{
-    cassandra, httplog, kafka, mongodb, mysql, pgwire, redis, services, tds, tls, Daemon,
-};
+use crate::daemon::{httplog, services, tls, Daemon};
 
 /// A `dbauth` credential resolved from the config: the user the proxy
 /// authenticates as, a pinned database (else the guest's), the host-held

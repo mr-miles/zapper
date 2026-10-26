@@ -7,7 +7,6 @@
 
 pub mod addr;
 pub mod api_error;
-pub(crate) mod cassandra;
 pub mod clients;
 pub(crate) mod dbwire;
 pub mod deciders;
@@ -16,20 +15,14 @@ pub mod driver;
 pub mod gateway;
 pub mod harness;
 pub mod httplog;
-pub(crate) mod kafka;
-pub(crate) mod mongodb;
-pub(crate) mod mysql;
 pub(crate) mod nic;
-pub(crate) mod pgwire;
 pub(crate) mod proxy;
 pub mod record;
-pub(crate) mod redis;
 pub mod registry;
 pub mod services;
 pub mod session;
 mod spec;
 mod summary;
-pub(crate) mod tds;
 pub mod tls;
 pub mod vm;
 

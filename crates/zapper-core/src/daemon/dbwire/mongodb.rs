@@ -186,7 +186,7 @@ pub(crate) async fn read_reply<S: AsyncRead + Unpin>(
     server: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Reply, String> {
-    super::dbwire::read_framed(server, buf, MAX_MSG, |b| {
+    super::read_framed(server, buf, MAX_MSG, |b| {
         if b.len() < 4 {
             return Ok(None);
         }
@@ -346,7 +346,7 @@ mod tests {
     /// A fake Mongo server that completes SCRAM-SHA-256 for `password` over two
     /// OP_MSG round trips, setting `done: true`.
     async fn fake_mongo<S: AsyncRead + AsyncWrite + Unpin>(mut c: S, password: &str) {
-        use super::super::dbwire::scram_test;
+        use super::super::scram_test;
         let mut buf = Vec::new();
         // saslStart → read client-first from the payload.
         let start = read_reply(&mut c, &mut buf).await.unwrap();

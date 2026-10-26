@@ -355,7 +355,7 @@ pub fn http2_uri(data: &[u8]) {
 /// (`daemon::pgwire`): the SSLRequest/startup parsers and the message framer
 /// must never panic or read out of bounds on arbitrary bytes.
 pub fn pg_startup(data: &[u8]) {
-    use crate::daemon::pgwire;
+    use crate::daemon::dbwire::pgwire;
     let _ = pgwire::is_ssl_request(data);
     let _ = pgwire::is_gssenc_request(data);
     let _ = pgwire::parse_startup(data);
@@ -373,7 +373,7 @@ pub fn pg_startup(data: &[u8]) {
 /// Postgres, MongoDB and Kafka: the proxy reads these from the server, so they
 /// must never panic on arbitrary bytes, for either hash.
 pub fn scram_server(data: &[u8]) {
-    use crate::daemon::pgwire::scram;
+    use crate::daemon::dbwire::pgwire::scram;
     for hash in [scram::Hash::Sha256, scram::Hash::Sha512] {
         let client = scram::Client::with_hash(hash, "user", "pencil", "clientnonce");
         if let Ok(fin) = client.client_final(data) {
@@ -385,7 +385,7 @@ pub fn scram_server(data: &[u8]) {
 /// Cassandra (CQL) guest-facing parsing: the frame header bounds and the
 /// STARTUP string-map walk must hold on arbitrary bytes.
 pub fn cassandra_frame(data: &[u8]) {
-    use crate::daemon::cassandra;
+    use crate::daemon::dbwire::cassandra;
     let _ = cassandra::startup_has_compression(data);
     let mut src = data;
     let mut buf = Vec::new();
@@ -397,7 +397,7 @@ pub fn cassandra_frame(data: &[u8]) {
 /// MySQL guest-facing parsing: packet framing, the SSLRequest test, and the
 /// initial-handshake parser.
 pub fn mysql_packet(data: &[u8]) {
-    use crate::daemon::mysql;
+    use crate::daemon::dbwire::mysql;
     let _ = mysql::is_ssl_request(data);
     let _ = mysql::parse_initial(data);
     let mut src = data;
@@ -411,7 +411,7 @@ pub fn mysql_packet(data: &[u8]) {
 /// TDS guest-facing parsing: packet framing, the PRELOGIN encryption option,
 /// and the login-response token scan.
 pub fn tds_packet(data: &[u8]) {
-    use crate::daemon::tds;
+    use crate::daemon::dbwire::tds;
     let _ = tds::prelogin_encryption(data);
     let _ = tds::login_result(data);
     let mut src = data;
@@ -424,7 +424,7 @@ pub fn tds_packet(data: &[u8]) {
 /// MongoDB reply parsing (`daemon::mongodb`): the little-endian BSON walker and
 /// the OP_MSG reply framer, run over arbitrary bytes.
 pub fn mongodb_reply(data: &[u8]) {
-    use crate::daemon::mongodb;
+    use crate::daemon::dbwire::mongodb;
     let _ = mongodb::walk(data);
     let mut src = data;
     let mut buf = Vec::new();
@@ -434,7 +434,7 @@ pub fn mongodb_reply(data: &[u8]) {
 /// Kafka response parsing (`daemon::kafka`): the SaslAuthenticate body parser
 /// and the response framer, run over arbitrary bytes.
 pub fn kafka_response(data: &[u8]) {
-    use crate::daemon::kafka;
+    use crate::daemon::dbwire::kafka;
     let _ = kafka::auth_bytes(data);
     let mut src = data;
     let mut buf = Vec::new();
