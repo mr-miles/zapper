@@ -15,6 +15,7 @@ pub mod driver;
 pub mod gateway;
 pub mod harness;
 pub mod httplog;
+pub(crate) mod mongodb;
 pub(crate) mod nic;
 pub(crate) mod pgwire;
 pub(crate) mod proxy;

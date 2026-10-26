@@ -35,7 +35,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{cassandra, httplog, pgwire, redis, services, spec, tls, Daemon, EventBody};
+use super::{cassandra, httplog, mongodb, pgwire, redis, services, spec, tls, Daemon, EventBody};
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -768,6 +768,7 @@ async fn relay_database<S>(
         NetProtocol::Postgres => pg_exchange(guest, first, server, host, &cred).await,
         NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
+        NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
         other => Err(format!("{other} relay is not implemented yet")),
     };
@@ -880,6 +881,39 @@ where
     let mut guest = guest_leg(s, guest, first, host).await?;
     let mut server = tls_server_leg(server, host, cred.plaintext).await?;
     cassandra::handshake(&mut guest, &mut server, &cred.user, &cred.password).await?;
+    Ok(Relayed {
+        guest,
+        server,
+        to_guest: vec![],
+    })
+}
+
+/// MongoDB: the guest holds no password and never authenticates; the proxy
+/// authenticates the server leg over SCRAM-SHA-256 (`OP_MSG` SASL), then
+/// splices. The guest's `hello` and commands run on that connection. The
+/// `database` pin is the auth source (default `admin`).
+async fn mongodb_exchange<S>(
+    s: &Arc<Session>,
+    guest: S,
+    first: Vec<u8>,
+    server: TcpStream,
+    host: &str,
+    cred: &DbCred,
+) -> Result<Relayed, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let guest = guest_leg(s, guest, first, host).await?;
+    let mut server = tls_server_leg(server, host, cred.plaintext).await?;
+    let auth_db = cred.database.as_deref().unwrap_or("admin");
+    mongodb::authenticate(
+        &mut server,
+        &cred.user,
+        &cred.password,
+        auth_db,
+        &scram_nonce(),
+    )
+    .await?;
     Ok(Relayed {
         guest,
         server,
