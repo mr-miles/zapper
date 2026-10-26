@@ -284,6 +284,589 @@ async fn a_role_slot_binds_and_reuses_the_same_worker() {
     );
 }
 
+/// Releasing a stage is best-effort: a child whose role slot the firm can't
+/// staff (no free worker, no budget to hire) is left pending and reported, but
+/// the siblings it *can* staff still go out. The plan does the work it can and
+/// returns the problems in bulk, rather than stopping at the first.
+#[tokio::test]
+async fn a_stage_sends_what_it_can_and_reports_the_unstaffable_in_bulk() {
+    let (t, run) = run();
+    // Two engineer slots in one stage: the firm has a single engineer (pat),
+    // so after `lead` binds them `second` has no free worker of the role, and
+    // neither slot carries a budget to hire one.
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "lead": { "role": "eng" }, "second": { "role": "eng" } },
+            "stages": [[
+                { "slot": "lead", "subject": "Build", "body": "build it" },
+                { "slot": "second", "subject": "Test", "body": "test it" },
+            ]],
+        }),
+    )
+    .await;
+    // `lead` went out to the one engineer; `second` is pending and reported.
+    assert_eq!(
+        plan["children"].as_array().map(Vec::len),
+        Some(1),
+        "the staffable child was sent: {plan}"
+    );
+    let problems = plan["problems"].as_array().expect("problems listed");
+    assert_eq!(problems.len(), 1, "one slot couldn't be staffed: {plan}");
+    assert_eq!(problems[0]["slot"], "second");
+    assert!(
+        problems[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no budget to hire"),
+        "the unstaffed slot asks for a budget: {plan}"
+    );
+    // The engineer did get the staffable child.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    assert_eq!(
+        inbox["unread"],
+        json!(1),
+        "pat got the Build child: {inbox}"
+    );
+}
+
+/// A pending child — one an earlier release couldn't staff — is sent on
+/// `plan_resume` once the gap is closed (here, a second engineer is hired, so
+/// the role slot now has a free worker). Resume reports no problems the second
+/// time, and the child goes out.
+#[tokio::test]
+async fn plan_resume_retries_a_child_once_the_slot_can_be_staffed() {
+    let (t, run) = run();
+    approved(&t, &run).await; // a budget, so the CEO can hire the second engineer
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "lead": { "role": "eng" }, "second": { "role": "eng" } },
+            "stages": [[
+                { "slot": "lead", "subject": "Build", "body": "build it" },
+                { "slot": "second", "subject": "Test", "body": "test it" },
+            ]],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    assert_eq!(plan["problems"].as_array().map(Vec::len), Some(1), "{plan}");
+    // Only the staffable child went out so far.
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 0).len(),
+        1,
+        "one child sent, one pending"
+    );
+
+    // The CEO hires a second engineer, so role `eng` now has a free worker.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "name": "robin", "budget": "1M", "subject": "Join", "brief": "Help out.", "reason": "more capacity" }),
+    )
+    .await;
+
+    // Resume retries the pending child: it now staffs onto robin, no problems.
+    // (robin is uncleared and takes no turn until their check clears, so we
+    // check the plan state, not robin acting.)
+    let resumed = ok(&t, &run, "ceo", "plan_resume", json!({ "plan": id })).await;
+    assert!(
+        resumed.get("problems").is_none(),
+        "the retry staffed the pending child: {resumed}"
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 0).len(),
+        2,
+        "the pending child was sent on resume"
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "second"),
+        Some("robin".into()),
+        "the pending slot bound to the newly hired engineer"
+    );
+}
+
+/// A budget on the slot lets a plan staff an unfilled role by hiring: the hire
+/// is funded from the slot's budget, out of the plan owner's balance.
+#[tokio::test]
+async fn a_plan_role_slot_with_a_budget_hires_to_staff_itself() {
+    let (t, run) = run();
+    approved(&t, &run).await; // the board's budget, so the firm can hire
+    let engineers = || {
+        run.chart()
+            .workers
+            .iter()
+            .filter(|w| w.role == "eng")
+            .count()
+    };
+    let balance = |who: &'static str| {
+        let (t, run) = (&t, &run);
+        async move {
+            ok(t, run, who, "budget", json!({})).await["you"]["balance"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    let before = engineers();
+    let owner_balance = balance("ceo").await;
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            // `lead` reuses pat; `second` has no free engineer but carries a
+            // budget, so the plan hires one to staff it.
+            "team": { "lead": { "role": "eng" }, "second": { "role": "eng", "budget": "2M" } },
+            "stages": [[
+                { "slot": "lead", "subject": "Build", "body": "build it" },
+                { "slot": "second", "subject": "Test", "body": "write the tests" },
+            ]],
+        }),
+    )
+    .await;
+    assert_eq!(engineers(), before + 1, "the budgeted slot hired: {plan}");
+    assert_eq!(
+        plan["children"].as_array().map(Vec::len),
+        Some(2),
+        "both children are tracked by the plan: {plan}"
+    );
+    assert_eq!(
+        balance("ceo").await,
+        owner_balance - 2_000_000,
+        "the hire was funded from the slot's budget"
+    );
+    // The accounting lands on the new worker too: they hold the slot's budget.
+    let id = plan["plan"].as_str().unwrap().to_string();
+    let hired = run.plans.lock().unwrap().binding(&id, "second").unwrap();
+    assert_eq!(
+        run.chart()
+            .workers
+            .iter()
+            .filter(|w| w.role == "eng")
+            .count(),
+        before + 1
+    );
+    assert_eq!(
+        ok(&t, &run, "ceo", "budget", json!({})).await["team"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["worker"] == hired.as_str())
+            .map(|w| w["balance"].as_i64().unwrap()),
+        Some(2_000_000),
+        "the hired worker holds the slot's budget"
+    );
+}
+
+/// A provisioned hire objected to at their background check is removed: their
+/// budget returns to the owner (accounting), and their plan slot reopens with
+/// the child pending, so a resume can re-staff it.
+#[tokio::test]
+async fn an_objected_provisioned_hire_reopens_the_slot_and_refunds() {
+    let (t, run) = run();
+    approved(&t, &run).await;
+    let ceo_balance = || {
+        let (t, run) = (&t, &run);
+        async move {
+            ok(t, run, "ceo", "budget", json!({})).await["you"]["balance"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    let before = ceo_balance().await;
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "lead": { "role": "eng" }, "second": { "role": "eng", "budget": "2M" } },
+            "stages": [[
+                { "slot": "lead", "subject": "Build", "body": "build it" },
+                { "slot": "second", "subject": "Test", "body": "write the tests" },
+            ]],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    let robin = run.plans.lock().unwrap().binding(&id, "second").unwrap();
+    assert_eq!(
+        ceo_balance().await,
+        before - 2_000_000,
+        "the hire was funded"
+    );
+
+    // A security officer objects to the hire at the background check.
+    let checks = ok(&t, &run, "sec", "background_checks", json!({})).await;
+    let screening = checks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["worker"] == robin.as_str())
+        .unwrap()["screening"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(
+        &t,
+        &run,
+        "sec",
+        "background_check",
+        json!({ "screening": screening, "clear": false, "note": "not a fit" }),
+    )
+    .await;
+
+    // The budget came back to the owner, the slot reopened, and the child that
+    // was the washed-out hire's brief is pending again.
+    assert_eq!(
+        ceo_balance().await,
+        before,
+        "the objected hire's budget returned"
+    );
+    assert_eq!(run.plans.lock().unwrap().binding(&id, "second"), None);
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 0).len(),
+        1,
+        "only the `lead` child is still sent; `second` is pending again"
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().pending(&id, 0).len(),
+        1,
+        "the reopened child is pending"
+    );
+}
+
+/// A worker released (terminated) while a plan is running frees their slot and
+/// reopens their in-flight child; a resume then re-staffs it onto another
+/// worker. Their unspent budget returns to the owner.
+#[tokio::test]
+async fn releasing_a_plan_worker_reopens_the_slot_and_resume_restaffs() {
+    let (t, run) = run();
+    approved(&t, &run).await;
+    // Provision robin for `second` (no free engineer besides pat).
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "lead": { "role": "eng" }, "second": { "role": "eng", "budget": "2M" } },
+            "stages": [[
+                { "slot": "lead", "subject": "Build", "body": "build it" },
+                { "slot": "second", "subject": "Test", "body": "write the tests" },
+            ]],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    let robin = run.plans.lock().unwrap().binding(&id, "second").unwrap();
+
+    // The CEO releases robin mid-plan.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "release",
+        json!({ "worker": robin, "reason": "changed the plan" }),
+    )
+    .await;
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "second"),
+        None,
+        "the terminated worker's slot reopened"
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 0).len(),
+        1,
+        "their in-flight child is pending again"
+    );
+
+    // Hire a replacement engineer, then resume: the slot re-staffs onto them.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "name": "sam", "budget": "1M", "subject": "Join", "brief": "Cover the tests.", "reason": "replacement" }),
+    )
+    .await;
+    let resumed = ok(&t, &run, "ceo", "plan_resume", json!({ "plan": id })).await;
+    assert!(resumed.get("problems").is_none(), "{resumed}");
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "second"),
+        Some("sam".into()),
+        "the reopened slot bound to the replacement"
+    );
+    // Duties stay separate across the re-staff: `lead` kept pat, `second` took
+    // the new worker, and the two slots hold distinct workers.
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "lead"),
+        Some("pat".into())
+    );
+}
+
+/// A stage reports every child it couldn't staff, not just the first: the bulk
+/// lists each unstaffable slot so the planner fixes them all in one pass.
+#[tokio::test]
+async fn a_stage_reports_every_unstaffable_slot_not_just_the_first() {
+    let (t, run) = run();
+    // Three engineer slots, one stage; the firm has one engineer (pat). `a`
+    // binds pat; `b` and `c` have no free worker and no budget to hire one.
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "a": { "role": "eng" }, "b": { "role": "eng" }, "c": { "role": "eng" } },
+            "stages": [[
+                { "slot": "a", "subject": "A", "body": "a" },
+                { "slot": "b", "subject": "B", "body": "b" },
+                { "slot": "c", "subject": "C", "body": "c" },
+            ]],
+        }),
+    )
+    .await;
+    assert_eq!(
+        plan["children"].as_array().map(Vec::len),
+        Some(1),
+        "only `a` could be staffed: {plan}"
+    );
+    let problems = plan["problems"].as_array().expect("problems listed");
+    let slots: Vec<&str> = problems
+        .iter()
+        .map(|p| p["slot"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        slots,
+        ["b", "c"],
+        "both unstaffable slots are reported: {plan}"
+    );
+    assert!(
+        problems
+            .iter()
+            .all(|p| p["error"].as_str().unwrap().contains("no budget")),
+        "each names the missing budget: {plan}"
+    );
+}
+
+/// Continuity reuses a role slot's worker across stages — but if that worker is
+/// terminated between stages, the later stage's child reopens and re-staffs
+/// onto someone else. The departed worker is not resurrected via the binding.
+#[tokio::test]
+async fn continuity_breaks_when_the_bound_worker_is_terminated_between_stages() {
+    let (t, run) = run();
+    approved(&t, &run).await;
+    // `busy` occupies the founding engineer (pat); `dev` has a budget, so with
+    // no free engineer it hires one for the slot.
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "busy": { "role": "eng" }, "dev": { "role": "eng", "budget": "2M" } },
+            "stages": [
+                [ { "slot": "busy", "subject": "Hold", "body": "hold" },
+                  { "slot": "dev", "subject": "Build", "body": "build" } ],
+                [ { "slot": "dev", "subject": "Revise", "body": "revise" } ],
+            ],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    let robin = run.plans.lock().unwrap().binding(&id, "dev").unwrap();
+
+    // Clear robin's background check and give them a VM, so they can work.
+    let checks = ok(&t, &run, "sec", "background_checks", json!({})).await;
+    let screening = checks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["worker"] == robin.as_str())
+        .unwrap()["screening"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ok(
+        &t,
+        &run,
+        "sec",
+        "background_check",
+        json!({ "screening": screening, "clear": true, "note": "ok" }),
+    )
+    .await;
+    give_vm(&t, &run, &robin);
+
+    // Both stage-0 children complete (found by subject, past the onboarding
+    // notice), so stage 1 releases.
+    for (who, subject) in [("pat", "Hold"), (robin.as_str(), "Build")] {
+        let inbox = ok(&t, &run, who, "mail_inbox", json!({ "unread": true })).await;
+        let msg = inbox["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["subject"].as_str() == Some(subject))
+            .unwrap_or_else(|| panic!("{who} has no {subject}: {inbox}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        ok(
+            &t,
+            &run,
+            who,
+            "mail_reply",
+            json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+        )
+        .await;
+    }
+    // Continuity: stage 1's `dev` child went to the same worker, robin.
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "dev"),
+        Some(robin.clone())
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 1).len(),
+        1,
+        "stage 1 reused robin"
+    );
+
+    // Robin is terminated mid-stage-1: the slot reopens, the child is pending.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "release",
+        json!({ "worker": robin, "reason": "left" }),
+    )
+    .await;
+    assert_eq!(run.plans.lock().unwrap().binding(&id, "dev"), None);
+    assert_eq!(run.plans.lock().unwrap().stage_threads(&id, 1).len(), 0);
+
+    // A replacement is hired and resume re-staffs the later stage onto them.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "name": "sam", "budget": "1M", "subject": "Join", "brief": "Finish the revise.", "reason": "replacement" }),
+    )
+    .await;
+    let resumed = ok(&t, &run, "ceo", "plan_resume", json!({ "plan": id })).await;
+    assert!(resumed.get("problems").is_none(), "{resumed}");
+    assert_eq!(
+        run.plans.lock().unwrap().binding(&id, "dev"),
+        Some("sam".into()),
+        "the later stage re-staffed onto the replacement, not the departed worker"
+    );
+}
+
+/// A later stage names a worker who has since left the firm. When that stage is
+/// released (on the event path, no planner in the loop) the office can't staff
+/// the named slot, so it reports the gap in bulk and tells the owner — the
+/// long-running plan holds rather than hanging or erroring.
+#[tokio::test]
+async fn a_later_stage_whose_named_worker_left_reports_the_gap() {
+    let (t, run) = run();
+    approved(&t, &run).await;
+    // Robin exists, then leaves the firm before the stage that names them.
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "name": "robin", "budget": "1M", "subject": "Join", "brief": "Start.", "reason": "capacity" }),
+    )
+    .await;
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "release",
+        json!({ "worker": "robin", "reason": "plans changed" }),
+    )
+    .await;
+
+    // Stage 0 goes to pat; stage 1 names the departed robin.
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "first": { "name": "pat" }, "later": { "name": "robin" } },
+            "stages": [
+                [ { "slot": "first", "subject": "Build", "body": "build it" } ],
+                [ { "slot": "later", "subject": "Review", "body": "review it" } ],
+            ],
+        }),
+    )
+    .await;
+    let id = plan["plan"].as_str().unwrap().to_string();
+    assert!(plan.get("problems").is_none(), "stage 0 was fine: {plan}");
+
+    // pat completes stage 0, which releases stage 1 — where robin is gone.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    let msg = inbox["messages"][0]["id"].as_str().unwrap().to_string();
+    ok(
+        &t,
+        &run,
+        "pat",
+        "mail_reply",
+        json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+    )
+    .await;
+
+    // The stage is stuck: journalled as such and the owner told, but the plan
+    // is intact (nothing sent for stage 1, no panic).
+    let stuck = journal(&run)
+        .into_iter()
+        .find(|e| e["type"] == "plan" && e["event"] == "stage_stuck" && e["stage"] == json!(1));
+    let stuck = stuck.expect("stage 1 recorded as stuck");
+    assert_eq!(stuck["problems"][0]["slot"], "later");
+    assert!(
+        stuck["problems"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no worker named robin"),
+        "the gap names the departed worker: {stuck}"
+    );
+    assert_eq!(
+        run.plans.lock().unwrap().stage_threads(&id, 1).len(),
+        0,
+        "nothing was sent for the stuck stage"
+    );
+    let notice = ok(&t, &run, "ceo", "mail_inbox", json!({ "unread": true })).await;
+    assert!(
+        notice["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["subject"]
+                .as_str()
+                .unwrap_or("")
+                .contains("could not start")),
+        "the owner was told stage 1 couldn't start: {notice}"
+    );
+}
+
 #[tokio::test]
 async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     let (t, run) = run();

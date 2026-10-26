@@ -181,6 +181,13 @@ pub(crate) struct Usage {
 }
 
 pub(crate) struct FirmRun {
+    /// A handle to the run's own `Arc`, so a `&self` method that must call an
+    /// API taking `&Arc<FirmRun>` (provisioning a hire from a plan) can recover
+    /// one.
+    pub me: std::sync::Weak<FirmRun>,
+    /// The core, held weakly (the core owns the office that owns this run), for
+    /// the same provisioning path, which needs a `&Core`.
+    pub core: zapper_core::WeakCore,
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
@@ -305,6 +312,41 @@ pub(crate) fn firm_dir(d: &Core, firm: &str) -> PathBuf {
 
 fn utc_day(ts: f64) -> i64 {
     (ts / 86400.0).floor() as i64
+}
+
+/// How a plan stage's child reaches the worker its slot resolves to.
+enum Dispatch {
+    /// An existing (named or already-on-the-chart) worker: the plan sends the
+    /// child to them as an assignment.
+    Mail(String),
+    /// A worker just hired for the slot: the hire already sent this child as
+    /// their first brief, on the returned thread.
+    Briefed(String),
+}
+
+/// A child a stage could not send: its slot and why. Reported in bulk so a
+/// stage does the work it can and the planner (or owner) sees all the gaps at
+/// once, rather than the release stopping at the first.
+#[derive(Serialize)]
+pub(crate) struct PlanProblem {
+    pub slot: String,
+    pub error: String,
+}
+
+impl PlanProblem {
+    /// The bulk as `[{slot, error}, …]` for a tool response or the journal.
+    pub(crate) fn json(problems: &[Self]) -> Value {
+        serde_json::to_value(problems).unwrap_or_else(|_| json!([]))
+    }
+
+    /// The bulk as a Markdown bullet list for a notice.
+    pub(crate) fn bullets(problems: &[Self]) -> String {
+        problems
+            .iter()
+            .map(|p| format!("- {}: {}", p.slot, p.error))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl FirmRun {
@@ -449,42 +491,78 @@ impl FirmRun {
         }
     }
 
-    /// Send a plan stage's children as assignments from the plan's owner,
-    /// parented under the plan's source task; return their thread ids in spec
-    /// order. Each child's slot is resolved to a worker (bound on first use);
-    /// each send is an ordinary assignment, so authority is enforced in `send`
-    /// as for any delegation.
-    pub(crate) fn plan_send_stage(
+    /// Release a plan stage, best-effort: send every child it can staff from
+    /// the plan's owner, parented under the plan's source task, and collect the
+    /// ones it can't as problems rather than stopping at the first. Each child's
+    /// slot is resolved to a worker (bound on first use): a worker already on
+    /// the chart is mailed the child as an ordinary assignment, so authority is
+    /// enforced in `send` as for any delegation; a role slot with no free worker
+    /// and a budget hires one, whose first brief is the child itself; a role
+    /// slot with no free worker and no budget is left pending and reported.
+    /// Returns the stage's sent threads (this release and any before) and the
+    /// problems from this release. Idempotent to re-run: already-sent children
+    /// aren't pending, so a retry only revisits the ones still missing.
+    pub(crate) fn release_stage(
         &self,
         plan: &str,
-        specs: &[plan::ChildSpec],
-    ) -> Result<Vec<String>> {
-        let (owner, source) = {
-            let plans = self.plans.lock().unwrap();
-            match plans.get(plan) {
-                Some(p) => (p.owner.clone(), p.source.clone()),
-                None => return Ok(Vec::new()),
-            }
+        stage: usize,
+    ) -> (Vec<String>, Vec<PlanProblem>) {
+        let (owner, source) = match self.plans.lock().unwrap().get(plan) {
+            Some(p) => (p.owner.clone(), p.source.clone()),
+            None => return (Vec::new(), Vec::new()),
         };
-        let mut threads = Vec::with_capacity(specs.len());
-        for s in specs {
-            let worker = self.resolve_slot(plan, &s.slot)?;
-            let mut d = Draft::new(&owner, vec![worker], &s.subject, &s.body, Kind::Assignment);
-            d.due = s.due;
-            d.context = Some(source.clone());
-            threads.push(self.send(d)?.thread);
+        let mut problems = Vec::new();
+        // Collect the pending children first, releasing the `plans` lock before
+        // the loop: `dispatch_slot`, `send` and `sent` all re-lock it, and the
+        // std mutex is not reentrant. (A lock held in a `for` iterator
+        // expression lives for the whole loop body.)
+        let pending = self.plans.lock().unwrap().pending(plan, stage);
+        for (idx, spec) in pending {
+            let sent = match self.dispatch_slot(plan, &spec, &owner, &source) {
+                Ok(Dispatch::Mail(worker)) => {
+                    let mut d = Draft::new(
+                        &owner,
+                        vec![worker],
+                        &spec.subject,
+                        &spec.body,
+                        Kind::Assignment,
+                    );
+                    d.due = spec.due;
+                    d.context = Some(source.clone());
+                    self.send(d).map(|s| s.thread)
+                }
+                Ok(Dispatch::Briefed(thread)) => Ok(thread),
+                Err(e) => Err(e),
+            };
+            match sent {
+                Ok(thread) => self.plans.lock().unwrap().sent(plan, stage, idx, &thread),
+                Err(e) => problems.push(PlanProblem {
+                    slot: spec.slot,
+                    error: format!("{e:#}"),
+                }),
+            }
         }
-        Ok(threads)
+        let threads = self.plans.lock().unwrap().stage_threads(plan, stage);
+        (threads, problems)
     }
 
-    /// Resolve a plan slot to a worker, binding it on first use (reused after,
-    /// for continuity): an existing worker for a name, or a free worker of a
-    /// role, distinct from the plan's other bindings (separation of duties).
-    /// Auto-hiring an unstaffed role is not yet wired (it needs the async
-    /// provisioning path) — name a worker or hire one first.
-    fn resolve_slot(&self, plan: &str, slot: &str) -> Result<String> {
+    /// Resolve a plan slot to a worker and say how its child reaches them,
+    /// binding the slot on first use (reused after, for continuity): an
+    /// existing worker for a name, a free worker of a role (distinct from the
+    /// plan's other bindings, for separation of duties), or — when no worker of
+    /// the role is free — a worker hired for the slot and funded by its budget,
+    /// whose first brief is this very child. A role slot with no free worker
+    /// and no budget can't be staffed, so the stage stops and says why.
+    fn dispatch_slot(
+        &self,
+        plan: &str,
+        spec: &plan::ChildSpec,
+        owner: &str,
+        source: &str,
+    ) -> Result<Dispatch> {
+        let slot = &spec.slot;
         if let Some(w) = self.plans.lock().unwrap().binding(plan, slot) {
-            return Ok(w);
+            return Ok(Dispatch::Mail(w));
         }
         let def = self
             .plans
@@ -492,25 +570,87 @@ impl FirmRun {
             .unwrap()
             .slot_def(plan, slot)
             .ok_or_else(|| anyhow!("plan {plan}: no slot {slot}"))?;
-        let chart = self.chart();
-        let worker = if let Some(name) = def.name {
-            if chart.worker(&name).is_none() {
+        if let Some(name) = def.name {
+            if self.chart().worker(&name).is_none() {
                 bail!("slot {slot}: no worker named {name}");
             }
-            name
-        } else if let Some(role) = def.role {
-            let bound = self.plans.lock().unwrap().bound_workers(plan);
-            chart
-                .workers
-                .iter()
-                .find(|w| w.role == role && !bound.contains(&w.name))
-                .map(|w| w.name.clone())
-                .ok_or_else(|| anyhow!("slot {slot}: no free worker of role {role} to staff it (auto-hiring an absent role is not yet wired; name a worker or hire one first)"))?
-        } else {
+            self.plans.lock().unwrap().bind_slot(plan, slot, &name);
+            return Ok(Dispatch::Mail(name));
+        }
+        let Some(role) = def.role else {
             bail!("slot {slot}: give a role or a name");
         };
+        let bound = self.plans.lock().unwrap().bound_workers(plan);
+        if let Some(name) = self
+            .chart()
+            .workers
+            .iter()
+            .find(|w| w.role == role && !bound.contains(&w.name))
+            .map(|w| w.name.clone())
+        {
+            self.plans.lock().unwrap().bind_slot(plan, slot, &name);
+            return Ok(Dispatch::Mail(name));
+        }
+        // No worker of the role is free: hire one for the slot, funded by its
+        // budget. Without a budget the plan can't staff the role, so it stops
+        // here and says so rather than silently leaving the child unsent.
+        let Some(budget) = def.budget else {
+            bail!("slot {slot}: no free worker of role {role} to staff it, and the slot has no budget to hire one; give the slot a budget, or name a worker, or hire one first");
+        };
+        let (worker, thread) = self.provision_slot(plan, spec, owner, source, &role, budget)?;
         self.plans.lock().unwrap().bind_slot(plan, slot, &worker);
-        Ok(worker)
+        Ok(Dispatch::Briefed(thread))
+    }
+
+    /// Hire a worker for a role slot the chart can't staff, funded by the
+    /// slot's budget, with the child as their first brief (parented under the
+    /// plan's source task, so the plan tracks it). Returns the worker and the
+    /// brief's thread. The hire itself enforces authority, the officer-first
+    /// rule, the budget and the background check — this is just the plan's way
+    /// in. Needs the live core and this run's `Arc` (a plan hire goes through
+    /// `workforce::hire`), reachable while the firm runs.
+    fn provision_slot(
+        &self,
+        plan: &str,
+        spec: &plan::ChildSpec,
+        owner: &str,
+        source: &str,
+        role: &str,
+        budget: i64,
+    ) -> Result<(String, String)> {
+        let slot = &spec.slot;
+        let shutting = || anyhow!("the firm is shutting down");
+        let core = self.core.upgrade().ok_or_else(shutting)?;
+        let run = self.me.upgrade().ok_or_else(shutting)?;
+        let brief = if spec.body.trim().is_empty() {
+            spec.subject.clone()
+        } else {
+            spec.body.clone()
+        };
+        let hired = workforce::hire(
+            &core,
+            &run,
+            owner,
+            workforce::HireArgs {
+                role: role.to_string(),
+                name: None,
+                title: None,
+                budget,
+                subject: spec.subject.clone(),
+                brief,
+                reason: format!("Staffing plan {plan}'s {slot} slot as a {role}."),
+                due: spec.due,
+                attachments: Vec::new(),
+                context: Some(source.to_string()),
+            },
+        )?;
+        let field = |k: &str| {
+            hired[k]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("hire for slot {slot} returned no {k}"))
+        };
+        Ok((field("worker")?, field("thread")?))
     }
 
     /// A closing reply landed on `thread`; if it is a plan child, advance the
@@ -520,19 +660,60 @@ impl FirmRun {
         self.apply_plan_advance(advance);
     }
 
-    /// Act on a plan state change: release the next stage (send and bind its
-    /// children) or record completion.
+    /// A worker left the firm (`let_go`): hand any plan they owned to `manager`
+    /// (so a long-running plan survives its planner leaving), free their slots
+    /// and reopen the in-flight children, then tell each affected plan's (new)
+    /// owner what changed and to resume. Their budget returns to the manager in
+    /// `let_go` as for any departure; here we only mend the plans.
+    pub(crate) fn plans_release_worker(&self, worker: &str, manager: &str) {
+        // Bind the changes before the loop so the `plans` lock is released: the
+        // body re-locks it (and the std mutex isn't reentrant).
+        let changes = self.plans.lock().unwrap().release_worker(worker, manager);
+        for change in changes {
+            let plan = &change.plan;
+            let (owner, stage) = {
+                let plans = self.plans.lock().unwrap();
+                (
+                    plans.owner_of(plan).map(str::to_string),
+                    plans.active_stage(plan),
+                )
+            };
+            let (Some(owner), Some(stage)) = (owner, stage) else {
+                continue;
+            };
+            self.journal.append(
+                "plan",
+                json!({ "event": "departure", "plan": plan, "stage": stage, "worker": worker,
+                        "reassigned": change.reassigned, "reopened": change.reopened, "owner": owner }),
+            );
+            // One notice to the (new) owner, naming whichever of the two things
+            // the departure did to the plan.
+            let mut body = format!("[Automatic notice] {worker} left the firm. ");
+            if change.reassigned {
+                body += &format!("You now own plan {plan} — it was theirs. ");
+            }
+            if change.reopened {
+                body += &format!("A slot they were staffing in plan {plan} is free again and its child is pending. ");
+            }
+            body += "Resume the plan (plan_resume) once the role can be staffed — a free or newly hired worker picks it up — or pause and close it.\n";
+            self.notice(
+                &owner,
+                &format!("Plan {plan} needs you ({worker} left)"),
+                &body,
+            );
+        }
+    }
+
+    /// Act on a plan state change: release the next stage (sending what it can)
+    /// or record completion. A stage that couldn't staff some of its children
+    /// is left holding them and the plan's owner is told, in bulk — the planner
+    /// isn't in this path (a child's close woke it), so no one else would see.
     pub(crate) fn apply_plan_advance(&self, advance: plan::Advance) {
         match advance {
-            plan::Advance::Release { plan, stage, specs } => {
-                match self.plan_send_stage(&plan, &specs) {
-                    Ok(threads) => self.plans.lock().unwrap().bind(&plan, stage, threads),
-                    Err(e) => {
-                        self.journal.append(
-                            "plan",
-                            json!({ "event": "release_failed", "plan": plan, "stage": stage, "error": format!("{e:#}") }),
-                        );
-                    }
+            plan::Advance::Release { plan, stage } => {
+                let (_, problems) = self.release_stage(&plan, stage);
+                if !problems.is_empty() {
+                    self.plan_stuck_notice(&plan, stage, &problems);
                 }
             }
             plan::Advance::Completed { plan } => {
@@ -540,6 +721,30 @@ impl FirmRun {
                     .append("plan", json!({ "event": "completed", "plan": plan }));
             }
             plan::Advance::None => {}
+        }
+    }
+
+    /// Journal a stage's unstaffed children and tell the plan's owner, in bulk,
+    /// what to fix. The stage holds those children until a retry (the owner's
+    /// next `plan_resume`) sends them.
+    fn plan_stuck_notice(&self, plan: &str, stage: usize, problems: &[PlanProblem]) {
+        self.journal.append(
+            "plan",
+            json!({ "event": "stage_stuck", "plan": plan, "stage": stage,
+                    "problems": PlanProblem::json(problems) }),
+        );
+        let owner = self
+            .plans
+            .lock()
+            .unwrap()
+            .owner_of(plan)
+            .map(str::to_string);
+        if let Some(owner) = owner {
+            self.notice(
+                &owner,
+                &format!("Plan {plan}: some of stage {stage} could not start"),
+                &format!("[Automatic notice] Your plan {plan} sent the children it could, but these could not be staffed:\n\n{}\n\nFix each (give the slot a budget, or free, name or hire a worker) and resume the plan (plan_resume) to send them; or pause and close the plan.\n", PlanProblem::bullets(problems)),
+            );
         }
     }
 
@@ -755,7 +960,35 @@ mod board_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::OfficeOf;
+    use super::{OfficeOf, PlanProblem};
+
+    #[test]
+    fn plan_problems_render_as_json_and_bullets() {
+        let problems = [
+            PlanProblem {
+                slot: "second".into(),
+                error: "no budget to hire".into(),
+            },
+            PlanProblem {
+                slot: "third".into(),
+                error: "no worker named kim".into(),
+            },
+        ];
+        assert_eq!(
+            PlanProblem::json(&problems),
+            serde_json::json!([
+                { "slot": "second", "error": "no budget to hire" },
+                { "slot": "third", "error": "no worker named kim" },
+            ])
+        );
+        assert_eq!(
+            PlanProblem::bullets(&problems),
+            "- second: no budget to hire\n- third: no worker named kim"
+        );
+        // Nothing to report renders as an empty array / empty string.
+        assert_eq!(PlanProblem::json(&[]), serde_json::json!([]));
+        assert_eq!(PlanProblem::bullets(&[]), "");
+    }
 
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {

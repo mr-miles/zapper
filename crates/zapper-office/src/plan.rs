@@ -12,9 +12,10 @@
 //!
 //! Minimal cut (proposal 06): a stage's children are created only when the
 //! stage is reached, so a not-yet-released stage is plan data, not a held
-//! ticket. Binding is to an existing worker; auto-hiring an unstaffed role
-//! and acting on `release_when_done` need the async provisioning path and are
-//! not done here.
+//! ticket. A slot binds to an existing worker, or — for a role slot with a
+//! budget and no free worker — to one the office hires for it (the resolution
+//! and the hire are the office's, not this pure-state module's). Acting on
+//! `release_when_done` is not done yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,8 +31,10 @@ pub struct SlotDef {
     /// Or a specific existing worker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Free the worker when the slot has no more work (acted on by the async
-    /// provisioning path; recorded here).
+    /// Tokens to fund a worker hired for a role slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<i64>,
+    /// Free a worker the plan hired once the slot has no more work.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub release_when_done: bool,
 }
@@ -56,19 +59,45 @@ pub enum Status {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct Child {
+    spec: ChildSpec,
+    /// The assignment thread, once the child has been sent. `None` while the
+    /// child is pending: its slot could not be staffed yet (a role slot with
+    /// no free worker and no budget), so the office sent what it could and
+    /// left this one to retry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread: Option<String>,
+    done: bool,
+}
+
+impl Child {
+    fn sent(&self) -> bool {
+        self.thread.is_some()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct Stage {
-    specs: Vec<ChildSpec>,
-    /// The child assignment threads, spec-aligned, once the stage is released.
-    threads: Vec<String>,
-    done: Vec<bool>,
+    children: Vec<Child>,
 }
 
 impl Stage {
-    fn released(&self) -> bool {
-        !self.threads.is_empty() || self.specs.is_empty()
-    }
+    /// Every child has been sent and reported done (an empty stage trivially).
     fn complete(&self) -> bool {
-        self.released() && self.done.iter().all(|d| *d)
+        self.children.iter().all(|c| c.sent() && c.done)
+    }
+    /// A child is live — sent and not yet done, i.e. a worker still at work.
+    fn in_progress(&self) -> bool {
+        self.children.iter().any(|c| c.sent() && !c.done)
+    }
+    /// The children not yet sent, with their indices, to send (or retry).
+    fn pending(&self) -> Vec<(usize, ChildSpec)> {
+        self.children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.sent())
+            .map(|(i, c)| (i, c.spec.clone()))
+            .collect()
     }
 }
 
@@ -90,18 +119,24 @@ pub struct Plan {
     stages: Vec<Stage>,
 }
 
-/// What the office should do after a state change.
+/// What the office should do after a state change. For a `Release` the office
+/// fetches the stage's pending children and sends what it can.
 #[derive(Debug, PartialEq)]
 pub enum Advance {
-    Release {
-        plan: String,
-        stage: usize,
-        specs: Vec<ChildSpec>,
-    },
-    Completed {
-        plan: String,
-    },
+    Release { plan: String, stage: usize },
+    Completed { plan: String },
     None,
+}
+
+/// What a worker's departure changed in one plan, so the office can tell the
+/// (new) owner what happened and retry.
+#[derive(Debug, PartialEq)]
+pub struct PlanChange {
+    pub plan: String,
+    /// The departed worker owned the plan; it moved to the new owner.
+    pub reassigned: bool,
+    /// A child the departed worker was staffing was reopened (now pending).
+    pub reopened: bool,
 }
 
 #[derive(Default)]
@@ -112,26 +147,29 @@ pub struct Plans {
 }
 
 impl Plans {
-    /// Record a new plan and return its id plus the stage-0 specs to send. The
-    /// office resolves each spec's slot to a worker, sends the assignments and
-    /// calls `bind(id, 0, threads)`. `stages` must be non-empty and every
-    /// stage non-empty (the caller validates).
+    /// Record a new plan and return its id. The office then releases stage 0
+    /// with `release` (sending each child it can staff). `stages` must be
+    /// non-empty and every stage non-empty (the caller validates).
     pub fn create(
         &mut self,
         owner: &str,
         source: &str,
         team: BTreeMap<String, SlotDef>,
         stages: Vec<Vec<ChildSpec>>,
-    ) -> (String, Vec<ChildSpec>) {
+    ) -> String {
         self.counter += 1;
         let id = format!("plan-{}", self.counter);
-        let stage0 = stages.first().cloned().unwrap_or_default();
         let stages = stages
             .into_iter()
             .map(|specs| Stage {
-                done: vec![false; specs.len()],
-                threads: Vec::new(),
-                specs,
+                children: specs
+                    .into_iter()
+                    .map(|spec| Child {
+                        spec,
+                        thread: None,
+                        done: false,
+                    })
+                    .collect(),
             })
             .collect();
         self.plans.insert(
@@ -147,19 +185,46 @@ impl Plans {
                 stages,
             },
         );
-        (id, stage0)
+        id
     }
 
-    /// Record the threads the office created for a released stage, in spec
-    /// order.
-    pub fn bind(&mut self, plan: &str, stage: usize, threads: Vec<String>) {
+    /// The stage currently in progress, if the plan exists.
+    pub fn active_stage(&self, plan: &str) -> Option<usize> {
+        self.plans.get(plan).map(|p| p.stage)
+    }
+
+    /// One stage of a plan, by index.
+    fn stage(&self, plan: &str, stage: usize) -> Option<&Stage> {
+        self.plans.get(plan).and_then(|p| p.stages.get(stage))
+    }
+
+    /// A stage's children not yet sent, with their indices: what `release`
+    /// still has to send (all of them on first release, the unstaffed ones on
+    /// a retry).
+    pub fn pending(&self, plan: &str, stage: usize) -> Vec<(usize, ChildSpec)> {
+        self.stage(plan, stage)
+            .map(Stage::pending)
+            .unwrap_or_default()
+    }
+
+    /// The threads a stage has sent so far (for the tool's response).
+    pub fn stage_threads(&self, plan: &str, stage: usize) -> Vec<String> {
+        self.stage(plan, stage)
+            .map(|s| s.children.iter().filter_map(|c| c.thread.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Record that child `idx` of `stage` went out on `thread`.
+    pub fn sent(&mut self, plan: &str, stage: usize, idx: usize, thread: &str) {
         if let Some(p) = self.plans.get_mut(plan) {
-            if let Some(s) = p.stages.get_mut(stage) {
-                for t in &threads {
-                    self.by_thread.insert(t.clone(), plan.to_string());
-                }
-                s.done = vec![false; threads.len()];
-                s.threads = threads;
+            if let Some(c) = p
+                .stages
+                .get_mut(stage)
+                .and_then(|s| s.children.get_mut(idx))
+            {
+                c.thread = Some(thread.to_string());
+                c.done = false;
+                self.by_thread.insert(thread.to_string(), plan.to_string());
             }
         }
     }
@@ -174,9 +239,9 @@ impl Plans {
             return Advance::None;
         };
         if let Some(s) = p.stages.get_mut(p.stage) {
-            for (i, t) in s.threads.iter().enumerate() {
-                if t == thread {
-                    s.done[i] = true;
+            for c in &mut s.children {
+                if c.thread.as_deref() == Some(thread) {
+                    c.done = true;
                 }
             }
         }
@@ -218,6 +283,61 @@ impl Plans {
         }
     }
 
+    /// A worker left the firm. For every live plan: if they owned it, hand it to
+    /// `new_owner` (their manager) so the plan outlives its planner — otherwise
+    /// its releases, sent from a worker no longer on the chart, would fail the
+    /// authority check and the plan would stall. Free every slot that bound to
+    /// them and reset any in-flight child of such a slot (sent but not done)
+    /// back to pending, so the stage can re-staff it; completed children are
+    /// kept (their work was delivered). Returns one `PlanChange` per plan the
+    /// departure touched, to retry and tell the (new) owner. (Out-of-budget is
+    /// not a departure: that worker waits and keeps their slot, so this is only
+    /// called from `let_go`.)
+    pub fn release_worker(&mut self, worker: &str, new_owner: &str) -> Vec<PlanChange> {
+        let mut changes = Vec::new();
+        let mut drop_threads = Vec::new();
+        for (id, p) in self.plans.iter_mut() {
+            if p.status == Status::Closed {
+                continue;
+            }
+            let reassigned = p.owner == worker;
+            if reassigned {
+                p.owner = new_owner.to_string();
+            }
+            let slots: Vec<String> = p
+                .bindings
+                .iter()
+                .filter(|(_, w)| w.as_str() == worker)
+                .map(|(s, _)| s.clone())
+                .collect();
+            for s in &slots {
+                p.bindings.remove(s);
+            }
+            let mut reopened = false;
+            if let Some(stage) = p.stages.get_mut(p.stage) {
+                for c in &mut stage.children {
+                    if slots.contains(&c.spec.slot) && c.sent() && !c.done {
+                        if let Some(t) = c.thread.take() {
+                            drop_threads.push(t);
+                        }
+                        reopened = true;
+                    }
+                }
+            }
+            if reassigned || reopened {
+                changes.push(PlanChange {
+                    plan: id.clone(),
+                    reassigned,
+                    reopened,
+                });
+            }
+        }
+        for t in drop_threads {
+            self.by_thread.remove(&t);
+        }
+        changes
+    }
+
     pub fn pause(&mut self, plan: &str) -> bool {
         match self.plans.get_mut(plan) {
             Some(p) if p.status == Status::Active => {
@@ -251,10 +371,7 @@ impl Plans {
         if p.status != Status::Paused {
             return Err("pause the plan first; a plan is closed only from paused");
         }
-        if p.stages
-            .get(p.stage)
-            .is_some_and(|s| s.released() && !s.complete())
-        {
+        if p.stages.get(p.stage).is_some_and(Stage::in_progress) {
             return Err("work is still in progress; close only when nothing is open");
         }
         p.status = Status::Closed;
@@ -277,7 +394,6 @@ impl Plan {
             Advance::Release {
                 plan: self.id.clone(),
                 stage: self.stage,
-                specs: self.stages[self.stage].specs.clone(),
             }
         } else {
             self.status = Status::Closed;
@@ -319,21 +435,23 @@ mod tests {
     #[test]
     fn stages_release_on_completion() {
         let mut plans = Plans::default();
-        let (id, stage0) = plans.create(
+        let id = plans.create(
             "ceo",
             "t-1",
             team(&[("a", "ada"), ("b", "ben"), ("c", "cara")]),
             vec![vec![spec("a")], vec![spec("b"), spec("c")]],
         );
-        assert_eq!(stage0, vec![spec("a")]);
-        plans.bind(&id, 0, vec!["t-ada".into()]);
+        assert_eq!(plans.pending(&id, 0), vec![(0, spec("a"))]);
+        plans.sent(&id, 0, 0, "t-ada");
 
         let adv = plans.complete("t-ada");
-        let Advance::Release { stage, specs, .. } = adv else {
+        let Advance::Release { stage, .. } = adv else {
             panic!("{adv:?}")
         };
-        assert_eq!((stage, specs.len()), (1, 2));
-        plans.bind(&id, 1, vec!["t-ben".into(), "t-cara".into()]);
+        assert_eq!(stage, 1);
+        assert_eq!(plans.pending(&id, 1).len(), 2);
+        plans.sent(&id, 1, 0, "t-ben");
+        plans.sent(&id, 1, 1, "t-cara");
 
         assert_eq!(plans.complete("t-ben"), Advance::None);
         assert_eq!(
@@ -346,13 +464,13 @@ mod tests {
     #[test]
     fn pause_holds_release_and_resume_frees_it() {
         let mut plans = Plans::default();
-        let (id, _) = plans.create(
+        let id = plans.create(
             "ceo",
             "t-1",
             team(&[("a", "ada"), ("b", "ben")]),
             vec![vec![spec("a")], vec![spec("b")]],
         );
-        plans.bind(&id, 0, vec!["t-ada".into()]);
+        plans.sent(&id, 0, 0, "t-ada");
         assert!(plans.pause(&id));
         assert_eq!(plans.complete("t-ada"), Advance::None);
         assert_eq!(plans.get(&id).unwrap().status, Status::Paused);
@@ -365,13 +483,13 @@ mod tests {
     #[test]
     fn close_needs_paused_and_quiescent() {
         let mut plans = Plans::default();
-        let (id, _) = plans.create(
+        let id = plans.create(
             "ceo",
             "t-1",
             team(&[("a", "ada"), ("b", "ben")]),
             vec![vec![spec("a")], vec![spec("b")]],
         );
-        plans.bind(&id, 0, vec!["t-ada".into()]);
+        plans.sent(&id, 0, 0, "t-ada");
         assert!(plans.close(&id).is_err());
         plans.pause(&id);
         assert!(plans.close(&id).is_err());
@@ -380,10 +498,187 @@ mod tests {
         assert_eq!(plans.get(&id).unwrap().status, Status::Closed);
     }
 
+    /// A stage sends what it can and keeps the rest pending: the stage is not
+    /// complete, so completing the sent child does not advance the plan; once
+    /// the pending child is sent and done too, it advances.
+    #[test]
+    fn a_partly_sent_stage_holds_until_its_pending_children_are_sent() {
+        let mut plans = Plans::default();
+        let id = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a"), spec("b")], vec![spec("a")]],
+        );
+        // Only child 0 could be sent; child 1 stays pending.
+        plans.sent(&id, 0, 0, "t-ada");
+        assert_eq!(plans.pending(&id, 0), vec![(1, spec("b"))]);
+        // The sent child finishing does not advance: the stage isn't complete.
+        assert_eq!(plans.complete("t-ada"), Advance::None);
+        // The pending child is sent (a retry) and finishes: now stage 0 is
+        // complete and the plan releases stage 1.
+        plans.sent(&id, 0, 1, "t-ben");
+        assert_eq!(
+            plans.complete("t-ben"),
+            Advance::Release {
+                plan: id.clone(),
+                stage: 1
+            }
+        );
+    }
+
+    /// A worker leaving frees their slot and reopens the child still in flight,
+    /// but keeps a child they already completed (the work was delivered).
+    #[test]
+    fn release_worker_reopens_in_flight_and_keeps_done() {
+        let mut plans = Plans::default();
+        // One stage, two children on the same slot `a` (both go to its worker).
+        let id = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada")]),
+            vec![vec![spec("a"), spec("a")]],
+        );
+        plans.bind_slot(&id, "a", "ada");
+        plans.sent(&id, 0, 0, "t-done");
+        plans.sent(&id, 0, 1, "t-live");
+        assert_eq!(plans.complete("t-done"), Advance::None); // child 0 done
+
+        let changes = plans.release_worker("ada", "ceo");
+        assert_eq!(
+            changes,
+            vec![PlanChange {
+                plan: id.clone(),
+                reassigned: false,
+                reopened: true,
+            }]
+        );
+        // The slot is free, the done child is kept, the in-flight one reopened.
+        assert_eq!(plans.binding(&id, "a"), None);
+        assert_eq!(plans.stage_threads(&id, 0), vec!["t-done".to_string()]);
+        assert_eq!(plans.pending(&id, 0), vec![(1, spec("a"))]);
+        // The reopened thread no longer maps back to the plan.
+        assert_eq!(plans.complete("t-live"), Advance::None);
+    }
+
+    /// Long-running plans see duplicate and late closes (a worker retries, or a
+    /// reply lands after the stage moved on). A repeat close of an already-done
+    /// child, and a close of a thread the plan doesn't know, are both no-ops —
+    /// they never double-advance or complete the wrong stage.
+    #[test]
+    fn a_duplicate_or_stale_close_does_not_double_advance() {
+        let mut plans = Plans::default();
+        let id = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a")], vec![spec("b")]],
+        );
+        plans.sent(&id, 0, 0, "t-ada");
+        // The first close advances to stage 1.
+        assert!(matches!(
+            plans.complete("t-ada"),
+            Advance::Release { stage: 1, .. }
+        ));
+        // A duplicate close of the same (now previous-stage) thread does nothing.
+        assert_eq!(plans.complete("t-ada"), Advance::None);
+        // A close of a thread the plan never recorded does nothing.
+        assert_eq!(plans.complete("t-unknown"), Advance::None);
+        // The real stage-1 completion still finishes the plan, exactly once.
+        plans.sent(&id, 1, 0, "t-ben");
+        assert_eq!(
+            plans.complete("t-ben"),
+            Advance::Completed { plan: id.clone() }
+        );
+    }
+
+    /// A stage holding an unsent (pending) child is not "in progress" — no
+    /// worker is running it — so a paused plan can be closed; a stage with a
+    /// sent, not-yet-done child cannot (it would cut off a working agent).
+    #[test]
+    fn a_pending_child_does_not_block_close_but_an_in_flight_one_does() {
+        let mut plans = Plans::default();
+        let id = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a"), spec("b")]],
+        );
+        plans.sent(&id, 0, 0, "t-ada"); // child 0 sent; child 1 stays pending
+        plans.pause(&id);
+        // child 0 is in flight (sent, not done): close is refused.
+        assert!(plans.close(&id).is_err());
+        plans.complete("t-ada"); // paused: marks done, no advance
+                                 // Now nothing is in flight — child 1 is only pending — so close is fine.
+        assert!(plans.close(&id).is_ok());
+        assert_eq!(plans.get(&id).unwrap().status, Status::Closed);
+    }
+
+    /// Separation of duties is tracked by `bound_workers` (what the office
+    /// excludes when staffing a role slot): distinct slots reserve distinct
+    /// workers, and a departed worker stops being reserved so a re-staff can
+    /// reuse the role — while the other slot's worker stays reserved.
+    #[test]
+    fn bound_workers_tracks_distinct_slots_and_drops_a_departed_one() {
+        let mut plans = Plans::default();
+        let id = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a"), spec("b")]],
+        );
+        plans.bind_slot(&id, "a", "ada");
+        plans.bind_slot(&id, "b", "ben");
+        plans.sent(&id, 0, 0, "t-a");
+        plans.sent(&id, 0, 1, "t-b");
+        let bound = plans.bound_workers(&id);
+        assert!(bound.contains("ada") && bound.contains("ben"));
+
+        // ben leaves: his slot frees and he is no longer reserved, so a re-staff
+        // of `b` is free to pick another worker; ada stays reserved for `a`.
+        plans.release_worker("ben", "ceo");
+        let bound = plans.bound_workers(&id);
+        assert!(bound.contains("ada"), "ada stays reserved for slot a");
+        assert!(!bound.contains("ben"), "ben is no longer reserved");
+        assert_eq!(plans.binding(&id, "b"), None, "slot b reopened");
+    }
+
+    /// A long-running plan outlives its planner: when the owner leaves, the
+    /// plan is handed to their manager, who can then drive it (resume, close).
+    #[test]
+    fn a_departing_owner_hands_the_plan_to_the_manager() {
+        let mut plans = Plans::default();
+        let id = plans.create(
+            "dana",
+            "t-1",
+            team(&[("a", "ada")]),
+            vec![vec![spec("a")], vec![spec("a")]],
+        );
+        plans.sent(&id, 0, 0, "t-ada");
+        // dana owns the plan but staffs no slot; when they leave, ownership
+        // moves to their manager (ceo) and nothing is reopened.
+        let changes = plans.release_worker("dana", "ceo");
+        assert_eq!(
+            changes,
+            vec![PlanChange {
+                plan: id.clone(),
+                reassigned: true,
+                reopened: false,
+            }]
+        );
+        assert_eq!(plans.owner_of(&id), Some("ceo"));
+        // The new owner can still drive it: the in-flight child completing
+        // advances the plan as usual.
+        assert!(matches!(
+            plans.complete("t-ada"),
+            Advance::Release { stage: 1, .. }
+        ));
+    }
+
     #[test]
     fn a_slot_binds_once_and_distinct_slots_are_tracked() {
         let mut plans = Plans::default();
-        let (id, _) = plans.create(
+        let id = plans.create(
             "ceo",
             "t-1",
             team(&[("a", "ada"), ("b", "ben")]),

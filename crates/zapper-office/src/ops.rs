@@ -365,7 +365,7 @@ static TOOLS: &[Tool] = &[
         description: "Lay out a multi-step plan under a task: a team of slots and ordered stages of child assignments, released stage by stage as each stage's children are reported done. Stage 0 starts at once; a later stage is created only when the stage before it completes. Each child names a slot (a team member): reuse a slot for continuity, use distinct slots to keep duties separate. mail_send is the one-off, one-stage case.",
         props: || json!({
             "source": s("The task thread the children belong to (e.g. t-12); defaults to the task you are working on"),
-            "team": { "type": "object", "description": "Slots the children address, by id: each {role} to staff or {name} of an existing worker, with optional release_when_done", "additionalProperties": { "type": "object", "properties": { "role": s("A role to staff"), "name": s("An existing worker"), "release_when_done": { "type": "boolean" } } } },
+            "team": { "type": "object", "description": "Slots the children address, by id: each {role} to staff or {name} of an existing worker, with optional budget (to fund a hire for a role) and release_when_done", "additionalProperties": { "type": "object", "properties": { "role": s("A role to staff"), "name": s("An existing worker"), "budget": s("Tokens to fund a worker hired for a role slot, like 5M"), "release_when_done": { "type": "boolean" } } } },
             "stages": { "type": "array", "description": "Ordered stages; each stage is an array of child assignments {slot, subject, body, due} that run in parallel", "items": { "type": "array", "items": { "type": "object", "properties": { "slot": s("A slot id from the team"), "subject": s("The ask"), "body": s("Markdown: the ask, context, what done looks like"), "due": s("Like 2h, 1d") }, "required": ["slot", "body"] } } }
         }),
         required: &["team", "stages"],
@@ -387,9 +387,16 @@ static TOOLS: &[Tool] = &[
                 if role.is_some() == name.is_some() {
                     bail!("slot {id}: give exactly one of role or name");
                 }
+                let budget = match &def["budget"] {
+                    Value::Null => None,
+                    v => Some(workforce::tokens_arg(v, "budget")?),
+                };
+                if budget.is_some() && name.is_some() {
+                    bail!("slot {id}: budget funds a hire for a role; a named worker already has their own");
+                }
                 team.insert(
                     id.clone(),
-                    crate::plan::SlotDef { role, name, release_when_done: def["release_when_done"].as_bool().unwrap_or(false) },
+                    crate::plan::SlotDef { role, name, budget, release_when_done: def["release_when_done"].as_bool().unwrap_or(false) },
                 );
             }
             if team.is_empty() {
@@ -426,10 +433,14 @@ static TOOLS: &[Tool] = &[
             if stages.is_empty() {
                 bail!("the plan has no stages");
             }
-            let (id, stage0) = c.run.plans.lock().unwrap().create(c.me, &source, team, stages);
-            let threads = c.run.plan_send_stage(&id, &stage0)?;
-            c.run.plans.lock().unwrap().bind(&id, 0, threads.clone());
-            Ok(json!({ "plan": id, "source": source, "children": threads }))
+            let id = c.run.plans.lock().unwrap().create(c.me, &source, team, stages);
+            // Best-effort: send every stage-0 child that can be staffed now,
+            // and report the rest (e.g. a role slot needing a budget) in bulk.
+            let (threads, problems) = c.run.release_stage(&id, 0);
+            Ok(with_problems(
+                json!({ "plan": id, "source": source, "children": threads }),
+                &problems,
+            ))
         }),
     },
     Tool {
@@ -451,15 +462,27 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "plan_resume",
         shown: |p| p.root || p.manages || p.hires,
-        description: "Resume a plan you paused; if its current stage already finished, the next stage is released now.",
+        description: "Resume a plan you paused; if its current stage already finished, the next stage is released now. Also retries any children an earlier stage could not staff — give the slot a budget, or free, name or hire a worker first, then resume to send them.",
         props: || json!({ "plan": s("Plan id, e.g. plan-1") }),
         required: &["plan"],
         run: Run::Sync(|c| {
             let id = c.args.req("plan")?;
             authorize_plan(c, &id)?;
             let advance = c.run.plans.lock().unwrap().resume(&id);
+            // A resume that finished a held stage releases the next one itself;
+            // otherwise retry the active stage's still-pending children here.
+            let advanced = !matches!(advance, crate::plan::Advance::None);
             c.run.apply_plan_advance(advance);
-            Ok(json!({ "plan": id, "status": "active" }))
+            let out = json!({ "plan": id, "status": "active" });
+            // A resume that finished a held stage already released the next one;
+            // otherwise retry the active stage's still-pending children here.
+            let stage = (!advanced)
+                .then(|| c.run.plans.lock().unwrap().active_stage(&id))
+                .flatten();
+            let problems = stage
+                .map(|stage| c.run.release_stage(&id, stage).1)
+                .unwrap_or_default();
+            Ok(with_problems(out, &problems))
         }),
     },
     Tool {
@@ -644,9 +667,10 @@ static TOOLS: &[Tool] = &[
                     reason: c.args.req("reason")?,
                     due: c.args.due("due")?,
                     attachments: c.args.attachments()?,
+                    context: None,
                 };
                 check_attachments(c.run, c.me, &a.attachments)?;
-                workforce::hire(c.d, c.run, c.me, a).await
+                workforce::hire(c.d, c.run, c.me, a)
             })
         }),
     },
@@ -1147,6 +1171,15 @@ fn attachments(v: &Value) -> Result<Vec<String>> {
 }
 
 /// A plan is controlled only by its owner or someone above them in the chart.
+/// Attach a release's unstaffed children to a plan tool's response, under
+/// `problems`, when there are any; an empty bulk leaves the response clean.
+fn with_problems(mut out: Value, problems: &[crate::PlanProblem]) -> Value {
+    if !problems.is_empty() {
+        out["problems"] = crate::PlanProblem::json(problems);
+    }
+    out
+}
+
 fn authorize_plan(c: &Call, plan: &str) -> Result<()> {
     let owner = c
         .run

@@ -26,5 +26,5 @@ pub use daemon::record;
 pub use interface::{
     Core, Decider, Event, EventBody, McpServer, NewSession, Pending, Referral, Remember,
     RuleKeeper, RuleRemoval, ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget,
-    Session, SessionInfo, Status, TermChunk, TerminalInfo,
+    Session, SessionInfo, Status, TermChunk, TerminalInfo, WeakCore,
 };
