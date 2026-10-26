@@ -82,10 +82,12 @@ Most of the weight is the held-ticket state and the release-on-accept effect —
 
 Governance — optional completion contracts and assessments — is **deferred**: it is proposal 05's workflow-profile layer, laid on this model later, not part of this proposal. The `completion_contract` and `assessment` objects appear above only to fix the shape they will take, so adopting them later is additive.
 
-## Open questions
+## Decisions
 
-- **Declarable `context`** — settable and re-parentable up front, or auto-derived with children attached explicitly?
-- **Plan acceptance gate** — accept the plan as an artifact before children exist (Paperclip/Legion parity), or materialise on the `plan` call?
-- **Ordering storage** — `blocks` edges (chosen, for swap-fidelity) vs a per-child `stage` ordinal (scatters the plan, loses parallelism).
-- **Reviewer ≠ author** — does Paperclip's `review_policy` / `work_assessments` enforce it, or only schedule a review? The Office gets separation from distinct slots; `review_policy` should record which.
-- **`requested_children` shape** — align the child spec with Paperclip's so a decomposition round-trips.
+- **Hierarchy is declared at creation.** `plan` sets each child's `parent` (= `context`); mail delegation still auto-derives it. No general re-parenting of existing tickets.
+- **The `plan` call materialises the plan** — the planner's call is the commit. A **propose → approve → execute** flow (a planner drafts a plan, hands it back to the owner, who gets human/board approval, then executes) is a nice later enhancement, deferred with the governance layer.
+- **Ordering is stored as `blocks` edges**, with the stage-list as the authoring surface — not a per-child `stage` ordinal.
+- **Separation of duties is structural, via distinct slots.** A host-enforced `review_policy` (author ≠ reviewer) is deferred with governance.
+- **Child specs use the `mail_send` field set** (`slot`, `subject`, `body`, `due`, `cc`, `attachments`, `blocked_by`); align with Paperclip's `requested_children` at implementation.
+
+Deferred (all proposal 05 territory, layered on additively): the governance layer — completion contracts, assessments, an enforced `review_policy` — and the propose → approve → execute acceptance flow.
