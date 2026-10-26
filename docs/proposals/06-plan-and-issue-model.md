@@ -22,7 +22,7 @@ Work moves by **mail**: an `assignment` (`mail_send`) creates a thread and an ob
 
 ## The `plan` tool
 
-A `plan` is authored and materialised in one atomic call (validate the whole plan or reject none), because a ticket must exist *before* it is delivered. It names a **team of slots** (`{role | name, budget?, release_when_done?}`), a **source** ticket (the current task by default), and **ordered stages** of child specs — the fields `mail_send` already takes (`slot`, `subject`, `body`, `due`, `cc`, `attachments`), with each child's `blocked_by` lowered from the stage order.
+A `plan` is authored and materialised in one atomic call (validate the whole plan or reject none), because a ticket must exist *before* it is delivered. It names a **team of slots** (`{role | name, budget?, release_when_done?}`), a **source** ticket — the task its children are parented under, set by whoever commences the plan, not defaulted to a planner's own "make a plan" thread — and **ordered stages** of child specs — the fields `mail_send` already takes (`slot`, `subject`, `body`, `due`, `cc`, `attachments`), with each child's `blocked_by` lowered from the stage order.
 
 It creates every child under the source, wires the `blocks` edges, records the decomposition, holds the subtree with a release policy that frees each stage as its blockers are accepted, and binds or defers each slot; stage 0 is activated and the rest held. `mail_send` stays as the degenerate one-ticket plan. Governance (a per-child **completion contract**, under a proposal 05 workflow profile) is deferred; acceptance here is the ordinary `reviewing-work` close.
 
@@ -84,7 +84,7 @@ Governance — optional completion contracts and assessments — is **deferred**
 
 ## Decisions
 
-- **Hierarchy is declared at creation.** `plan` sets each child's `parent` (= `context`); mail delegation still auto-derives it. No general re-parenting of existing tickets.
+- **Hierarchy is set at execution, not at authoring.** A plan's children are parented under its explicit **source** task (their `context`), fixed when the plan is commenced, by the executor, to the executor's task — never auto-derived from a planner's current thread, which may be a "make a plan for X" assignment (the wrong parent). This dovetails with the deferred propose → approve → execute flow: the owner who executes sets the real parent. No general re-parenting of existing tickets.
 - **The `plan` call materialises the plan** — the planner's call is the commit. A **propose → approve → execute** flow (a planner drafts a plan, hands it back to the owner, who gets human/board approval, then executes) is a nice later enhancement, deferred with the governance layer.
 - **Ordering is stored as `blocks` edges**, with the stage-list as the authoring surface — not a per-child `stage` ordinal.
 - **Separation of duties is structural, via distinct slots.** A host-enforced `review_policy` (author ≠ reviewer) is deferred with governance.
