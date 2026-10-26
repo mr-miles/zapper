@@ -11,6 +11,7 @@ pub mod clients;
 pub mod deciders;
 pub(crate) mod dns;
 pub mod driver;
+pub(crate) mod events;
 pub mod gateway;
 pub mod harness;
 pub mod httplog;
@@ -25,16 +26,15 @@ mod summary;
 pub mod tls;
 pub mod vm;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use zapper_policy::proto::GuestEvent;
 use zapper_policy::{expand_home, Action, AnyRule, Config, Kind, SecretSource};
 
@@ -202,9 +202,7 @@ pub struct Daemon {
     pub paths: Paths,
     pub addrs: RwLock<addr::AddressPolicy>,
     pub sessions: RwLock<BTreeMap<String, Arc<Session>>>,
-    pub events: broadcast::Sender<Event>,
-    recent: Mutex<VecDeque<Event>>,
-    seq: AtomicU64,
+    pub(crate) events: events::EventBus,
     approvals: Mutex<HashMap<String, Pending>>,
     pub ui_token: String,
     pub clients: clients::Clients,
@@ -331,16 +329,13 @@ impl Daemon {
             bail!("firecracker not found at {}", paths.firecracker.display());
         }
         let addrs = addr::AddressPolicy::new(&d.private_networks)?;
-        let (events, _) = broadcast::channel(1024);
         Ok(Arc::new(Daemon {
             config: RwLock::new(config),
             startup_path,
             paths,
             addrs: RwLock::new(addrs),
             sessions: RwLock::new(BTreeMap::new()),
-            events,
-            recent: Mutex::new(VecDeque::new()),
-            seq: AtomicU64::new(1),
+            events: events::EventBus::new(),
             approvals: Mutex::new(HashMap::new()),
             ui_token: random_id(24),
             clients: clients::Clients::default(),
@@ -351,32 +346,11 @@ impl Daemon {
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {
-        let event = Event {
-            seq: self.seq.fetch_add(1, Ordering::Relaxed),
-            ts: now(),
-            session: session.map(|s| s.id.clone()),
-            body,
-        };
-        if let Some(s) = session {
-            s.record(&event);
-        }
-        {
-            let mut recent = self.recent.lock().unwrap();
-            if recent.len() >= RECENT_EVENTS {
-                recent.pop_front();
-            }
-            recent.push_back(event.clone());
-        }
-        let _ = self.events.send(event);
+        self.events.emit(session, body);
     }
 
     pub fn recent_events(&self, session: Option<&str>) -> Vec<Event> {
-        let recent = self.recent.lock().unwrap();
-        recent
-            .iter()
-            .filter(|e| session.is_none() || e.session.as_deref() == session)
-            .cloned()
-            .collect()
+        self.events.recent(session)
     }
 
     pub fn session(&self, id: &str) -> Result<Arc<Session>> {
