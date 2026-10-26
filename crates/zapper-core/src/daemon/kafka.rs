@@ -43,7 +43,7 @@ fn request(api_key: i16, api_version: i16, correlation: i32, body: &[u8]) -> Vec
 
 /// Reads one response and returns its body (the bytes after the `Int32` size
 /// and the `Int32` correlation id of the v0 response header).
-async fn read_response<S: AsyncRead + Unpin>(
+pub(crate) async fn read_response<S: AsyncRead + Unpin>(
     s: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>, String> {
@@ -103,7 +103,7 @@ fn oauthbearer_token(token: &str) -> Vec<u8> {
 /// Parses a `SaslAuthenticate` response body: `Int16` error code, nullable
 /// error message, then the auth `BYTES`. Returns the auth bytes, or an error
 /// with the broker's message.
-fn auth_bytes(body: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn auth_bytes(body: &[u8]) -> Result<Vec<u8>, String> {
     let code = get_i16(body, 0).ok_or("truncated SaslAuthenticate response")?;
     // Nullable error message string: Int16 length, -1 for null.
     let mlen = get_i16(body, 2).ok_or("truncated SaslAuthenticate response")?;

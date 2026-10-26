@@ -60,13 +60,21 @@ impl Doc {
     }
 }
 
+/// A non-negative BSON length prefix (`Int32`) at the front of `b`. A negative
+/// value (which `as usize` would turn into a huge number) is rejected.
+fn blen(b: &[u8]) -> Option<usize> {
+    usize::try_from(i32le(b)?).ok()
+}
+
 /// The byte length of a BSON value of `ty` at the front of `b`, for skipping.
+/// Length arithmetic is checked, so a hostile prefix yields `None`, never an
+/// overflow.
 fn value_len(ty: u8, b: &[u8]) -> Option<usize> {
     Some(match ty {
         0x01 | 0x09 | 0x11 | 0x12 => 8, // double / datetime / timestamp / int64
-        0x02 | 0x0D | 0x0E => 4 + i32le(b)? as usize, // string / code / symbol
-        0x03 | 0x04 => i32le(b)? as usize, // embedded document / array (self-sized)
-        0x05 => 4 + 1 + i32le(b)? as usize, // binary: len + subtype + bytes
+        0x02 | 0x0D | 0x0E => blen(b)?.checked_add(4)?, // string / code / symbol
+        0x03 | 0x04 => blen(b)?,        // embedded document / array (self-sized)
+        0x05 => blen(b)?.checked_add(5)?, // binary: len + subtype + bytes
         0x07 => 12,                     // ObjectId
         0x08 => 1,                      // bool
         0x0A => 0,                      // null
@@ -77,7 +85,7 @@ fn value_len(ty: u8, b: &[u8]) -> Option<usize> {
 
 /// Walks a BSON document into `(type, name, value)` triples. `None` if it is
 /// malformed or uses a type we do not size.
-fn walk(doc: &[u8]) -> Option<Vec<(u8, String, Vec<u8>)>> {
+pub(crate) fn walk(doc: &[u8]) -> Option<Vec<(u8, String, Vec<u8>)>> {
     let total = i32le(doc)? as usize;
     if total > doc.len() || total < 5 {
         return None;
@@ -99,7 +107,7 @@ fn walk(doc: &[u8]) -> Option<Vec<(u8, String, Vec<u8>)>> {
     }
 }
 
-struct Reply {
+pub(crate) struct Reply {
     fields: Vec<(u8, String, Vec<u8>)>,
 }
 
@@ -109,8 +117,8 @@ impl Reply {
             .fields
             .iter()
             .find(|(t, n, _)| *t == 0x05 && n == name)?;
-        let len = i32le(v)? as usize;
-        v.get(5..5 + len).map(<[u8]>::to_vec)
+        let end = blen(v)?.checked_add(5)?;
+        v.get(5..end).map(<[u8]>::to_vec)
     }
     fn int32(&self, name: &str) -> Option<i32> {
         let (_, _, v) = self
@@ -147,9 +155,11 @@ impl Reply {
     fn errmsg(&self) -> String {
         for (t, n, v) in &self.fields {
             if *t == 0x02 && n == "errmsg" {
-                let len = i32le(v).unwrap_or(0) as usize;
-                if let Some(s) = v.get(4..4 + len.saturating_sub(1)) {
-                    return String::from_utf8_lossy(s).into_owned();
+                // String value: Int32 length (incl. trailing NUL), then bytes.
+                if let Some(end) = blen(v).map(|len| len.saturating_sub(1) + 4) {
+                    if let Some(s) = v.get(4..end) {
+                        return String::from_utf8_lossy(s).into_owned();
+                    }
                 }
             }
         }
@@ -172,7 +182,7 @@ fn op_msg(request_id: i32, doc: &[u8]) -> Vec<u8> {
 }
 
 /// Reads one `OP_MSG` and returns its body document bytes.
-async fn read_reply<S: AsyncRead + Unpin>(
+pub(crate) async fn read_reply<S: AsyncRead + Unpin>(
     server: &mut S,
     buf: &mut Vec<u8>,
 ) -> Result<Reply, String> {
@@ -311,6 +321,29 @@ mod tests {
             reply.binary("payload").as_deref(),
             Some(&b"n,,n=u,r=abc"[..])
         );
+    }
+
+    #[test]
+    fn walk_rejects_malformed_lengths_without_panicking() {
+        // A string element whose length prefix is negative must not overflow.
+        let mut doc_body = vec![0x02]; // string element
+        doc_body.extend_from_slice(b"k\0");
+        doc_body.extend_from_slice(&(-1i32).to_le_bytes()); // bogus length
+        let total = 4 + doc_body.len() + 1;
+        let mut doc = (total as i32).to_le_bytes().to_vec();
+        doc.extend_from_slice(&doc_body);
+        doc.push(0);
+        assert_eq!(walk(&doc), None);
+        // A binary element with a huge length is rejected, not sliced OOB.
+        let mut doc_body = vec![0x05];
+        doc_body.extend_from_slice(b"k\0");
+        doc_body.extend_from_slice(&i32::MAX.to_le_bytes());
+        doc_body.push(0); // subtype
+        let total = 4 + doc_body.len() + 1;
+        let mut doc = (total as i32).to_le_bytes().to_vec();
+        doc.extend_from_slice(&doc_body);
+        doc.push(0);
+        assert_eq!(walk(&doc), None);
     }
 
     #[tokio::test]

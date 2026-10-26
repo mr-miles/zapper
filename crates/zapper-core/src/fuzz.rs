@@ -357,6 +357,7 @@ pub fn http2_uri(data: &[u8]) {
 pub fn pg_startup(data: &[u8]) {
     use crate::daemon::pgwire;
     let _ = pgwire::is_ssl_request(data);
+    let _ = pgwire::is_gssenc_request(data);
     let _ = pgwire::parse_startup(data);
     // Frame typed messages; each reported length stays within the buffer and
     // always advances, so the walk terminates.
@@ -365,5 +366,79 @@ pub fn pg_startup(data: &[u8]) {
         assert!(consumed <= rest.len() && consumed >= 5);
         assert_eq!(body.len() + 5, consumed);
         rest = &rest[consumed..];
+    }
+}
+
+/// The SCRAM server-first / server-final parsing (`pgwire::scram`), shared by
+/// Postgres, MongoDB and Kafka: the proxy reads these from the server, so they
+/// must never panic on arbitrary bytes, for either hash.
+pub fn scram_server(data: &[u8]) {
+    use crate::daemon::pgwire::scram;
+    for hash in [scram::Hash::Sha256, scram::Hash::Sha512] {
+        let client = scram::Client::with_hash(hash, "user", "pencil", "clientnonce");
+        if let Ok(fin) = client.client_final(data) {
+            let _ = scram::Client::verify_server_final(&fin, data);
+        }
+    }
+}
+
+/// Cassandra (CQL) guest-facing parsing: the frame header bounds and the
+/// STARTUP string-map walk must hold on arbitrary bytes.
+pub fn cassandra_frame(data: &[u8]) {
+    use crate::daemon::cassandra;
+    let _ = cassandra::startup_has_compression(data);
+    let mut src = data;
+    let mut buf = Vec::new();
+    while let Ok(f) = block_on(cassandra::read_frame(&mut src, &mut buf)) {
+        let _ = cassandra::startup_has_compression(&f.body);
+    }
+}
+
+/// MySQL guest-facing parsing: packet framing, the SSLRequest test, and the
+/// initial-handshake parser.
+pub fn mysql_packet(data: &[u8]) {
+    use crate::daemon::mysql;
+    let _ = mysql::is_ssl_request(data);
+    let _ = mysql::parse_initial(data);
+    let mut src = data;
+    let mut buf = Vec::new();
+    while let Ok((_seq, payload)) = block_on(mysql::read_packet(&mut src, &mut buf)) {
+        let _ = mysql::is_ssl_request(&payload);
+        let _ = mysql::parse_initial(&payload);
+    }
+}
+
+/// TDS guest-facing parsing: packet framing, the PRELOGIN encryption option,
+/// and the login-response token scan.
+pub fn tds_packet(data: &[u8]) {
+    use crate::daemon::tds;
+    let _ = tds::prelogin_encryption(data);
+    let _ = tds::login_result(data);
+    let mut src = data;
+    let mut buf = Vec::new();
+    while let Ok((_t, _s, payload)) = block_on(tds::read_packet(&mut src, &mut buf)) {
+        let _ = tds::prelogin_encryption(&payload);
+    }
+}
+
+/// MongoDB reply parsing (`proxy::mongodb`): the little-endian BSON walker and
+/// the OP_MSG reply framer, run over arbitrary bytes.
+pub fn mongodb_reply(data: &[u8]) {
+    use crate::daemon::mongodb;
+    let _ = mongodb::walk(data);
+    let mut src = data;
+    let mut buf = Vec::new();
+    while block_on(mongodb::read_reply(&mut src, &mut buf)).is_ok() {}
+}
+
+/// Kafka response parsing (`proxy::kafka`): the SaslAuthenticate body parser
+/// and the response framer, run over arbitrary bytes.
+pub fn kafka_response(data: &[u8]) {
+    use crate::daemon::kafka;
+    let _ = kafka::auth_bytes(data);
+    let mut src = data;
+    let mut buf = Vec::new();
+    while let Ok(body) = block_on(kafka::read_response(&mut src, &mut buf)) {
+        let _ = kafka::auth_bytes(&body);
     }
 }

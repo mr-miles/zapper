@@ -94,3 +94,45 @@ path = "fuzz_targets/pg_startup.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scram_server"
+path = "fuzz_targets/scram_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cassandra_frame"
+path = "fuzz_targets/cassandra_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_packet"
+path = "fuzz_targets/mysql_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tds_packet"
+path = "fuzz_targets/tds_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mongodb_reply"
+path = "fuzz_targets/mongodb_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kafka_response"
+path = "fuzz_targets/kafka_response.rs"
+test = false
+doc = false
+bench = false

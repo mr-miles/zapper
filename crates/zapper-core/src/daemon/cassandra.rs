@@ -51,7 +51,10 @@ pub fn build(version: u8, flags: u8, stream: i16, opcode: u8, body: &[u8]) -> Ve
 }
 
 /// Reads one whole frame, buffering partial reads in `buf`.
-async fn read_frame<S: AsyncRead + Unpin>(s: &mut S, buf: &mut Vec<u8>) -> Result<Frame, String> {
+pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
+    s: &mut S,
+    buf: &mut Vec<u8>,
+) -> Result<Frame, String> {
     let mut chunk = [0u8; 4096];
     loop {
         if buf.len() >= HEADER {
@@ -98,7 +101,7 @@ fn read_string(b: &[u8], off: usize) -> Option<(String, usize)> {
 
 /// Whether a `STARTUP` string-map body requests frame compression — which this
 /// relay does not implement, so such a startup is refused.
-fn startup_has_compression(body: &[u8]) -> bool {
+pub(crate) fn startup_has_compression(body: &[u8]) -> bool {
     let Some(n) = read_short(body, 0) else {
         return false;
     };
