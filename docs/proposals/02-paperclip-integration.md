@@ -52,14 +52,14 @@ Paperclip has **two** human-in-the-loop surfaces, both pushed to the operator in
 
 - A zapper **network `ask`** (a guest hit an `ask` rule mid-turn) → surface as a **live** `request_human_input`/`request_confirmation` so the operator answers in the same place they watch the run; zapper still *enforces* the outcome at the proxy. For a decision that should be durable and auditable (a standing grant), file a `request_board_approval` instead — it persists, requires the board, and auto-wakes the agent.
 - A zapper **credential / resource grant** (git, cluster, a drive space) → a `request_board_approval` with the grant detail in `payload`; Paperclip owns the human decision and the record of it, zapper owns minting/scoping/expiry/revocation and enforcement.
-- zapper's **security-officer review** of traffic → this is zapper's distinctive piece and has no Paperclip equivalent; keep it host-side as an *additional* gate, and emit its findings/decisions into Paperclip as approvals/activity so the operator sees one timeline. Do **not** rebuild it inside Paperclip.
+- zapper's **traffic review** → split sight from judgement. zapper is the only thing that can *see* all egress, so it emits the traffic (a per-session log, and a digest) and each `ask` to Paperclip, and it *enforces* whatever is decided. But the review itself — someone looking at that traffic and deciding — is orchestration, so it belongs to Paperclip: push the report to a Paperclip **security-officer role** (an agent woken with it) or to the board, as an ordinary wake/approval. zapper should **not** run the officer or the review logic; The Office only did because it was the orchestrator, and that reason is gone here. The judgement is Paperclip's; the sight and the enforcement are zapper's.
 
 The guiding rule: **Paperclip owns the human decision and its UI; zapper owns enforcement and the tamper-evident record.** Each decision has exactly one approval surface (Paperclip's) and exactly one enforcement point (zapper's). Budgets stay entirely Paperclip's (`budget_override_required`).
 
 ## What each side keeps
 
-- **Paperclip:** the company/org chart, roles, the heartbeat scheduler and turn control, issues/coordination, chat/inbox, budgets, and both approval surfaces + their UI.
-- **zapper:** the VM sandbox (as a provider plugin), all network/DNS/exec policy and egress capture, host-held secret injection, credential-grant minting/scoping/expiry/revocation, the security-officer traffic review, and the keeper-backed record (which Paperclip's `activity_log` is not — it is mutable).
+- **Paperclip:** the company/org chart, roles (including a security-officer role, if used), the heartbeat scheduler and turn control, issues/coordination, chat/inbox, budgets, both approval surfaces + their UI, and the **traffic review itself** — reviewing the reports zapper pushes and deciding.
+- **zapper:** the VM sandbox (as a provider plugin), all network/DNS/exec policy and egress capture, host-held secret injection, credential-grant minting/scoping/expiry/revocation, **emitting traffic reports + `ask`s for Paperclip to review** (zapper sees and enforces; Paperclip judges), and the keeper-backed record (which Paperclip's `activity_log` is not — it is mutable).
 
 ## Open questions / to confirm against the source
 
@@ -67,6 +67,7 @@ The guiding rule: **Paperclip owns the human decision and its UI; zapper owns en
 - **Network policy in two places.** Paperclip's `local-process-sandbox` carries a `networkAllowlist`; zapper has the authoritative policy. Decide that zapper's policy is the source of truth and the Paperclip-side allowlist is left open (zapper enforces), to avoid split-brain config.
 - **The runner / HTTP bridge + credential injection.** Paperclip syncs a workspace and exposes a "Paperclip API bridge" and `secretsSvc` into the sandbox. Map which credentials Paperclip injects vs. which zapper injects at the proxy, so a secret isn't handled by both (prefer zapper for anything that must stay host-side).
 - **Identity mapping.** Paperclip `agentId`/`companyId` ↔ a zapper principal, for durable grants across runs (ties into [proposal 01](01-persistent-outputs.md)).
+- **Who may decide a traffic/credential ask.** Paperclip's durable approvals are board-decided (`assertBoard`). The Office's model had a delegated *security officer* decide, escalate to the CEO/board, and never decide their own request. Mapping that onto Paperclip means either the human board decides every ask, or Paperclip gains a delegated-approver (officer) authority with an anti-self-approval rule. Confirm what Paperclip's role/authority model supports before relying on an agent officer; until then, the board is the safe decider and zapper still enforces "an ask is refused until a decision arrives."
 - **Reference implementation.** The Daytona/e2b/kubernetes providers (`packages/plugins/sandbox-providers/*`) are the templates to copy for the zapper provider; the Daytona `onEnvironmentExecute` is the closest shape to "run the CLI in a leased remote sandbox".
 
 ## Phased plan
@@ -74,4 +75,4 @@ The guiding rule: **Paperclip owns the human decision and its UI; zapper owns en
 - **Phase 0 — spike the provider.** A minimal zapper sandbox-provider plugin implementing `acquireLease` (create a session), `realizeWorkspace`/`syncIn`, `execute` (run `claude -p` in the VM), `syncOut`, `releaseLease`. Drive one company agent through it with all egress behind the proxy. Validates the seam against the real plugin API.
 - **Phase 1 — map companies to sessions.** Per-agent sessions with zapper profiles/rule layers; confirm sync-in/out and the control/terminal ingress hooks.
 - **Phase 2 — approvals.** Route zapper network `ask`s to live `request_human_input` and credential grants to `request_board_approval`; verify the auto-wake closes the loop and the operator sees one timeline.
-- **Phase 3 — trust + identity.** Wire the security-officer review as a host-side gate feeding Paperclip approvals; durable grants keyed to a stable principal ([proposal 01](01-persistent-outputs.md)).
+- **Phase 3 — trust + identity.** Push zapper's traffic reports + `ask`s to a Paperclip security-officer role (or the board) for review, with zapper enforcing the verdict; durable grants keyed to a stable principal ([proposal 01](01-persistent-outputs.md)).
