@@ -18,7 +18,7 @@ function showTab(t) {
   if (t === 'overview') requestAnimationFrame(fitOverview);
 }
 function mountAll() {
-  mountKickoff(); mountOverview(); mountPeople(); mountWork(); mountRuns(); mountMessages(); mountSecurity(); mountDrive(); mountGit(); mountStats(); mountVms();
+  mountKickoff(); mountOverview(); mountPeople(); mountWork(); mountPlans(); mountRuns(); mountMessages(); mountSecurity(); mountDrive(); mountGit(); mountStats(); mountVms();
   MSG.thread = null; MSG.treeRoot = null; MSG.compose = false; MSG.reply = null;
   DRV.sel = null; SEC.traffic = []; SEC.trafficAt = 0; S.security = null;
 }
@@ -40,6 +40,7 @@ function render() {
     if (S.tab === 'overview') updateOverview();
     else if (S.tab === 'people') updatePeople();
     else if (S.tab === 'work') updateWork();
+    else if (S.tab === 'plans') updatePlans();
     else if (S.tab === 'kickoff') updateKickoff();
     else if (S.tab === 'runs') updateRuns();
     else if (S.tab === 'messages') updateMessages();

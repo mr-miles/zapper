@@ -33,6 +33,30 @@ pub struct Core {
     d: Arc<Daemon>,
 }
 
+/// A non-owning handle to the core, for state the core itself holds (a firm's
+/// run lives in the office, which the core owns) so it can reach back without
+/// a cycle that would keep the daemon alive. Upgrades while the core runs.
+#[derive(Clone)]
+pub struct WeakCore {
+    d: std::sync::Weak<Daemon>,
+}
+
+impl Core {
+    /// A weak handle to this core.
+    pub fn downgrade(&self) -> WeakCore {
+        WeakCore {
+            d: Arc::downgrade(&self.d),
+        }
+    }
+}
+
+impl WeakCore {
+    /// The core, if it is still running.
+    pub fn upgrade(&self) -> Option<Core> {
+        self.d.upgrade().map(|d| Core { d })
+    }
+}
+
 /// What removing a rule did.
 pub enum RuleRemoval {
     /// The rule left its layer.

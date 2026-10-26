@@ -962,12 +962,15 @@ pub struct HireArgs {
     pub reason: String,
     pub due: Option<f64>,
     pub attachments: Vec<String>,
+    /// The task to parent the brief under. `None` uses the hirer's current
+    /// context; a plan sets its source task so the brief is the plan's child.
+    pub context: Option<String>,
 }
 
 /// Hires a worker under `by`: checks the role, the money and the host,
 /// adds them to the chart, funds them, boots their VM, and sends them the
 /// brief as their first assignment.
-pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
+pub fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     let hirer = run.worker(by)?;
     let can = run
         .config
@@ -1042,7 +1045,10 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     );
     draft.due = a.due;
     draft.attachments = a.attachments.clone();
-    draft.context = hirer.context.lock().unwrap().clone();
+    draft.context = a
+        .context
+        .clone()
+        .or_else(|| hirer.context.lock().unwrap().clone());
     // An officer's brief is a standing role, never done: nobody waits on it.
     if role.officer {
         draft.expects = Some(Expects::Nothing);
@@ -1313,6 +1319,10 @@ pub fn let_go(
             &format!("[Automatic notice] {by} let {worker} go: {}\nTheir reports now report to you, their mail comes to you (what they hadn't read, and the requests they hadn't answered, are in your inbox now), and you have their unspent budget ({} tokens).\n{}", reason.trim(), fmt_tokens(returned as i64), if list.is_empty() { String::new() } else { format!("What they owed is now yours:\n{list}") }),
         );
     }
+    // Plans mend around the departure: a plan they owned passes to their
+    // manager (so it outlives its planner), and a slot they staffed frees and
+    // reopens its in-flight child for the stage to re-staff on the next resume.
+    run.plans_release_worker(worker, &manager);
     json!({ "worker": worker, "returned": returned, "to": manager, "moved": moved.len() })
 }
 

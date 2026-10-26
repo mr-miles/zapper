@@ -444,7 +444,13 @@ fn create_run(
     let agents = profile_agents(config);
     let live = Arc::new(RwLock::new(firm.clone()));
     let (boots, boot_rx) = tokio::sync::mpsc::unbounded_channel();
-    let run = Arc::new(FirmRun {
+    let core = d.downgrade();
+    // Fallible setup happens before the cyclic construction, which can't use
+    // `?`: the closure must return a `FirmRun`, not a `Result`.
+    let drive = Mutex::new(drive::Drive::new(&firm)?);
+    let run = Arc::new_cyclic(|me| FirmRun {
+        me: me.clone(),
+        core,
         boots,
         firm: name.to_string(),
         id: id.clone(),
@@ -460,7 +466,7 @@ fn create_run(
         scenario: scenario.as_ref().map(|(n, sc)| scenario::Play::new(n, sc)),
         close_waiter: Mutex::new(None),
         departed: Mutex::new(BTreeMap::new()),
-        drive: Mutex::new(drive::Drive::new(&firm)?),
+        drive,
         security: Mutex::new(security::Security::default()),
         contracts: Mutex::new(contracts::Contracts::default()),
         access: Mutex::new(access::Access::default()),
@@ -478,6 +484,7 @@ fn create_run(
         journal,
         workers: RwLock::new(workers),
         tools: Mutex::new(None),
+        plans: Mutex::new(crate::plan::Plans::default()),
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });

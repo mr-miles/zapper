@@ -34,6 +34,7 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "skills/office-resources/SKILL.md",
     "skills/office-git/SKILL.md",
     "skills/manager/SKILL.md",
+    "skills/staged-plans/SKILL.md",
     "skills/security-review/SKILL.md",
     "skills/reviewing-work/SKILL.md",
     "skills/checking-the-product/SKILL.md",
@@ -76,6 +77,8 @@ const EVERYONE: &[&str] = &["office-mail", "office-publish", "office-resources"]
 const SECURITY: &str = "security-review";
 /// The skill of every role that hires.
 const MANAGER: &str = "manager";
+/// How those roles lay out multi-step work with the plan tool.
+const PLANNING: &str = "staged-plans";
 /// Every worker's, in a firm with a repository: branches, review, who
 /// merges to main.
 const GIT: &str = "office-git";
@@ -171,8 +174,8 @@ pub fn agent(agents: &Path, name: &str) -> Result<Agent> {
 
 /// The skills from the skills directory a role has whatever its brief
 /// says: everyone's, the git skill in a firm with a repository, the manager
-/// skill for roles that hire, and the security skill for officers and the
-/// CEO (who holds security until an officer is hired).
+/// and staged-plans skills for roles that hire, and the security skill for
+/// officers and the CEO (who holds security until an officer is hired).
 pub(crate) fn automatic(firm: &Firm, role_name: &str, role: &Role) -> Vec<&'static str> {
     let root_role = firm
         .root()
@@ -184,6 +187,7 @@ pub(crate) fn automatic(firm: &Firm, role_name: &str, role: &Role) -> Vec<&'stat
     }
     if !role.hires.is_empty() {
         names.push(MANAGER);
+        names.push(PLANNING);
     }
     if role.officer || root_role.as_deref() == Some(role_name) {
         names.push(SECURITY);

@@ -42,6 +42,8 @@ Group sub-questions into strands that can run in parallel without the same sourc
 
 ## Staffing it
 
+The strands run in parallel and the collation follows them, so lay the staffing out as a staged plan (the staged-plans skill): a first stage of one child per strand — a role slot with a budget, so each is staffed or hired — and a second stage to collate, released only when every strand is done. For a single strand, hire and brief directly.
+
 - Hire (or contract, for a one-off question) one researcher per strand, with the strand as the brief: the plan's link, their sub-questions, sources and the hosts they need, the pack they return, the due date.
 - Tell them to ask for their strand's hosts at once, all in their first turn, one `request_access` each, the reason naming the plan and the strand; and to bring new sources to you as suggestions, not to security.
 - Security approves what the plan names. When security asks you about a request, answer in the turn you read it: yes with why, or no with the alternative. A denied host changes the plan: replace the source or narrow the sub-question, and tell the researcher.
