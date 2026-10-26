@@ -44,12 +44,12 @@ A valid name is then answered by policy. Answers are never made up:
 
 | The policy for the name | Answer |
 |---|---|
-| Some request to it could be allowed, outright or after an `ask` | The host looks the name up. If it doesn't exist: NXDOMAIN. If it does: an address from `198.18.0.0/15` that stands for the name within the session |
+| Some request to it could be allowed, outright or after an `ask` | The host looks the name up. If it doesn't exist: NXDOMAIN. If it does: a synthetic address that stands for the name within the session — from `198.18.0.0/15` for an A query, `2001:2::/48` for AAAA |
 | Nothing could allow it | REFUSED |
 
 "Some request" counts every port, method and path. The rules are taken in evaluation order: final rules from the global layer down, then the layers, then the default. A matching `allow` rule makes the name reachable, even if it only covers some ports or requests. A matching rule that covers all requests (no `ports`, `methods` or `path`) settles the rest, so `deny host: x` stops the search, while `deny host: x, path: /admin/**` doesn't. In short: if a session can reach a name in any way, the name resolves. `ask` decides access, not resolution, so a name under an `ask` rule resolves without a prompt, and the approval comes when the session connects.
 
-Names are looked up on the host's resolver, so a query for a name the rules cover leaves the host. With a narrow rule (`*.wikipedia.org`) that only reaches the domain's own DNS servers. With a broad `allow` or `ask` (`host: "*"`, or an `allow` or `ask` default), any name a session makes up reaches the resolver, and a program can encode data in names (`data.attacker.example`) without connecting anywhere. Keep broad rules out of profiles for untrusted sessions. Lookups are cached for a minute, with at most 8 at once per session. AAAA and other query types for existing names get an empty answer, so clients use IPv4. Each A query, refusal and rejection is a `dns` event with its response code and reason.
+Names are looked up on the host's resolver, so a query for a name the rules cover leaves the host. With a narrow rule (`*.wikipedia.org`) that only reaches the domain's own DNS servers. With a broad `allow` or `ask` (`host: "*"`, or an `allow` or `ask` default), any name a session makes up reaches the resolver, and a program can encode data in names (`data.attacker.example`) without connecting anywhere. Keep broad rules out of profiles for untrusted sessions. Lookups are cached for a minute, with at most 8 at once per session. An AAAA query for an existing name gets a synthetic address from `2001:2::/48` when the guest kernel has IPv6; otherwise it gets an empty answer and the client uses IPv4. Other query types get an empty answer. Each A or AAAA query, refusal and rejection is a `dns` event with its response code and reason.
 
 ### Connections
 
@@ -134,7 +134,7 @@ make test-e2e                 # the NIC, root and vsock groups in docs/testing.m
 
 ## Limitations
 
-- TCP and DNS are the only traffic that leaves a NIC session. QUIC clients fall back to TCP. IPv6 isn't routed.
+- TCP and DNS are the only traffic that leaves a NIC session. QUIC clients fall back to TCP. IPv6 is captured and policy-checked exactly like IPv4 (a synthetic `2001:2::/48` address per name, the same redirect and address checks) when the guest kernel has IPv6; without it the datapath is IPv4-only.
 - A program that connects to an address without looking up a name is decided on that address. Its TLS server name then has to equal the address.
 - A server-first protocol such as SSH waits up to 300 ms for its first bytes, while the daemon checks whether the client is starting TLS.
 - A NIC adds about 0.4 s to session start, for the namespace and its nftables rules.

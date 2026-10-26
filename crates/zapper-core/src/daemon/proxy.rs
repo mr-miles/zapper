@@ -8,7 +8,7 @@
 //! secrets are never injected into them.
 
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -429,7 +429,7 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
 /// A connection the guest made through its NIC, captured outside the VM.
 /// `ip` is what it dialled: a synthetic address from the session's DNS stands
 /// for the name it was given out for, anything else for itself.
-pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: Ipv4Addr, port: u16) {
+pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: IpAddr, port: u16) {
     let host = s
         .dns
         .lock()

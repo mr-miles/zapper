@@ -14,12 +14,15 @@
 //! default) therefore lets queries for any name reach the host's resolver.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use zapper_policy::names;
 
+/// The synthetic IPv4 pool, 198.18.0.0/15 (benchmarking, non-routable).
 const BASE: u32 = u32::from_be_bytes([198, 18, 0, 0]);
+/// The synthetic IPv6 pool, 2001:2::/48 (benchmarking, non-routable).
+const BASE6: u128 = Ipv6Addr::new(0x2001, 0x2, 0, 0, 0, 0, 0, 0).to_bits();
 const SIZE: u32 = 1 << 17;
 /// How long a lookup's outcome is reused.
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -32,32 +35,50 @@ pub const NOTIMP: u8 = 4;
 pub const REFUSED: u8 = 5;
 
 pub const TYPE_A: u16 = 1;
+pub const TYPE_AAAA: u16 = 28;
 const CLASS_IN: u16 = 1;
 
 #[derive(Default)]
 pub struct FakeDns {
-    by_name: HashMap<String, Ipv4Addr>,
-    by_ip: HashMap<Ipv4Addr, String>,
+    v4: HashMap<String, Ipv4Addr>,
+    v6: HashMap<String, Ipv6Addr>,
+    by_ip: HashMap<IpAddr, String>,
     /// Whether looked-up names exist, and when that was found out.
     exists: HashMap<String, (bool, Instant)>,
 }
 
 impl FakeDns {
+    /// A synthetic IPv4 address for `name`, from the pool, stable per name.
     pub fn address(&mut self, name: &str) -> Option<Ipv4Addr> {
-        if let Some(ip) = self.by_name.get(name) {
+        if let Some(ip) = self.v4.get(name) {
             return Some(*ip);
         }
-        let n = self.by_name.len() as u32 + 1;
+        let n = self.v4.len() as u32 + 1;
         if n >= SIZE {
             return None;
         }
         let ip = Ipv4Addr::from(BASE + n);
-        self.by_name.insert(name.to_string(), ip);
-        self.by_ip.insert(ip, name.to_string());
+        self.v4.insert(name.to_string(), ip);
+        self.by_ip.insert(IpAddr::V4(ip), name.to_string());
         Some(ip)
     }
 
-    pub fn name(&self, ip: Ipv4Addr) -> Option<&str> {
+    /// A synthetic IPv6 address for `name`, from the pool, stable per name.
+    pub fn address6(&mut self, name: &str) -> Option<Ipv6Addr> {
+        if let Some(ip) = self.v6.get(name) {
+            return Some(*ip);
+        }
+        let n = self.v6.len() as u128 + 1;
+        if n >= SIZE as u128 {
+            return None;
+        }
+        let ip = Ipv6Addr::from(BASE6 + n);
+        self.v6.insert(name.to_string(), ip);
+        self.by_ip.insert(IpAddr::V6(ip), name.to_string());
+        Some(ip)
+    }
+
+    pub fn name(&self, ip: IpAddr) -> Option<&str> {
         self.by_ip.get(&ip).map(String::as_str)
     }
 
@@ -151,12 +172,13 @@ pub fn parse(q: &[u8]) -> Option<Result<Question, Rejected>> {
 }
 
 /// A response to `query` with `rcode`, echoing the question if there is a
-/// valid one, and an A record if `answer` is set.
+/// valid one, and an address record if `answer` is set: an A record for an
+/// IPv4 answer, AAAA for IPv6.
 pub fn respond(
     query: &[u8],
     question: Option<&Question>,
     rcode: u8,
-    answer: Option<Ipv4Addr>,
+    answer: Option<IpAddr>,
 ) -> Vec<u8> {
     let mut r = query[..12].to_vec();
     r[2] = 0x80 | (query[2] & 0x79); // QR, opcode, RD
@@ -168,11 +190,15 @@ pub fn respond(
         if let Some(ip) = answer {
             r[7] = 1;
             r.extend_from_slice(&[0xc0, 0x0c]); // name: pointer to the question
-            r.extend_from_slice(&TYPE_A.to_be_bytes());
+            let (rtype, rdata): (u16, Vec<u8>) = match ip {
+                IpAddr::V4(a) => (TYPE_A, a.octets().to_vec()),
+                IpAddr::V6(a) => (TYPE_AAAA, a.octets().to_vec()),
+            };
+            r.extend_from_slice(&rtype.to_be_bytes());
             r.extend_from_slice(&CLASS_IN.to_be_bytes());
             r.extend_from_slice(&60u32.to_be_bytes()); // TTL
-            r.extend_from_slice(&4u16.to_be_bytes());
-            r.extend_from_slice(&ip.octets());
+            r.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            r.extend_from_slice(&rdata);
         }
     }
     r
@@ -235,10 +261,36 @@ mod tests {
         let q = query(&[b"API", b"Example", b"com"], TYPE_A, 1);
         let p = parse(&q).unwrap().unwrap();
         assert_eq!((p.name.as_str(), p.qtype), ("api.example.com", TYPE_A));
-        let r = respond(&q, Some(&p), NOERROR, Some(Ipv4Addr::new(198, 18, 0, 1)));
+        let r = respond(
+            &q,
+            Some(&p),
+            NOERROR,
+            Some(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))),
+        );
         assert_eq!(&r[..2], &[0x12, 0x34]);
         assert_eq!((r[3] & 0x0f, r[5], r[7]), (0, 1, 1));
+        // An A record (12-byte record + 4-byte rdata): type A, then the address.
+        assert_eq!(
+            u16::from_be_bytes([r[r.len() - 14], r[r.len() - 13]]),
+            TYPE_A
+        );
         assert_eq!(&r[r.len() - 4..], &[198, 18, 0, 1]);
+    }
+
+    #[test]
+    fn answers_aaaa_with_a_v6_record() {
+        let q = query(&[b"api", b"example"], TYPE_AAAA, 1);
+        let p = parse(&q).unwrap().unwrap();
+        assert_eq!(p.qtype, TYPE_AAAA);
+        let v6 = Ipv6Addr::new(0x2001, 0x2, 0, 0, 0, 0, 0, 1);
+        let r = respond(&q, Some(&p), NOERROR, Some(IpAddr::V6(v6)));
+        assert_eq!((r[3] & 0x0f, r[5], r[7]), (0, 1, 1));
+        // An AAAA record (12-byte record + 16-byte rdata): type AAAA, then it.
+        assert_eq!(
+            u16::from_be_bytes([r[r.len() - 26], r[r.len() - 25]]),
+            TYPE_AAAA
+        );
+        assert_eq!(&r[r.len() - 16..], &v6.octets());
     }
 
     #[test]
@@ -290,7 +342,14 @@ mod tests {
         let mut f = FakeDns::default();
         let ip = f.address("a.example").unwrap();
         assert_eq!(f.address("a.example"), Some(ip));
-        assert_eq!(f.name(ip), Some("a.example"));
+        assert_eq!(f.name(IpAddr::V4(ip)), Some("a.example"));
+        // A v6 synthetic is separate, stable, and reverse-maps too.
+        let ip6 = f.address6("a.example").unwrap();
+        assert!(Ipv6Addr::from(BASE6).octets()[..6] == ip6.octets()[..6]);
+        assert_eq!(f.address6("a.example"), Some(ip6));
+        assert_eq!(f.name(IpAddr::V6(ip6)), Some("a.example"));
+        // The two families don't collide in the reverse map.
+        assert_eq!(f.name(IpAddr::V4(ip)), Some("a.example"));
         assert_eq!(f.cached("a.example"), None);
         f.remember("a.example", false);
         assert_eq!(f.cached("a.example"), Some(false));

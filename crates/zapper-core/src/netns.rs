@@ -9,7 +9,9 @@
 //! guest can't get around it.
 
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::net::{
+    Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream, UdpSocket,
+};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,11 @@ use anyhow::{bail, Context, Result};
 
 pub const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 1);
 pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+/// The point-to-point IPv6 link (ULA), the counterpart of GATEWAY/GUEST. Used
+/// only when the host and guest kernels have IPv6; otherwise the datapath
+/// stays IPv4-only.
+pub const GATEWAY6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+pub const GUEST6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 2);
 pub const GUEST_MAC: &str = "06:00:0a:00:02:02";
 pub const TAP: &str = "tap0";
 const TCP_PORT: u16 = 15001;
@@ -108,26 +115,59 @@ pub fn setup(tap_user: Option<u32>) -> Result<()> {
         &["addr", "add", &format!("{GATEWAY}/30"), "dev", TAP],
         None,
     )?;
+    // IPv6 on the tap is best-effort: on a host without IPv6 this fails and the
+    // datapath stays IPv4-only. The redirect rules below are family-agnostic,
+    // so once the tap has this address v6 is captured the same way v4 is.
+    let _ = run(
+        "ip",
+        &["-6", "addr", "add", &format!("{GATEWAY6}/64"), "dev", TAP],
+        None,
+    );
     run("ip", &["link", "set", TAP, "up"], None)?;
     run("nft", &["-f", "-"], Some(&ruleset()))?;
     Ok(())
 }
 
 /// Starts the capture listeners; they hand traffic to the daemon over the
-/// session's `nic.sock`.
+/// session's `nic.sock`. IPv4 is required; the IPv6 listeners are best-effort,
+/// started only when the tap has an IPv6 address (a host with IPv6).
 pub fn serve(dir: &Path) -> Result<()> {
     let socket = dir.join(SOCKET);
-    let tcp = TcpListener::bind(SocketAddrV4::new(GATEWAY, TCP_PORT))?;
-    let udp = UdpSocket::bind(SocketAddrV4::new(GATEWAY, DNS_PORT))?;
-    let s = socket.clone();
+    serve_tcp(
+        TcpListener::bind(SocketAddrV4::new(GATEWAY, TCP_PORT))?,
+        socket.clone(),
+        false,
+    );
+    serve_dns(
+        UdpSocket::bind(SocketAddrV4::new(GATEWAY, DNS_PORT))?,
+        socket.clone(),
+    );
+    if let Ok(tcp6) = TcpListener::bind(SocketAddrV6::new(GATEWAY6, TCP_PORT, 0, 0)) {
+        serve_tcp(tcp6, socket.clone(), true);
+    }
+    if let Ok(udp6) = UdpSocket::bind(SocketAddrV6::new(GATEWAY6, DNS_PORT, 0, 0)) {
+        serve_dns(udp6, socket.clone());
+    }
+    Ok(())
+}
+
+/// Relays each captured TCP connection to the daemon. `v6` selects how the
+/// pre-redirect destination is read.
+fn serve_tcp(listener: TcpListener, socket: PathBuf, v6: bool) {
     thread::spawn(move || {
-        for conn in tcp.incoming().flatten() {
-            let s = s.clone();
+        for conn in listener.incoming().flatten() {
+            let s = socket.clone();
             thread::spawn(move || {
-                let _ = relay_tcp(conn, &s);
+                let _ = relay_tcp(conn, &s, v6);
             });
         }
     });
+}
+
+/// Relays each captured DNS query to the daemon and sends back its answer.
+/// Address-family-agnostic: a v6 query comes in on the v6 socket and the
+/// answer (an A or AAAA record) goes back the same way.
+fn serve_dns(udp: UdpSocket, socket: PathBuf) {
     thread::spawn(move || {
         let mut buf = [0u8; 1500];
         loop {
@@ -142,35 +182,59 @@ pub fn serve(dir: &Path) -> Result<()> {
             });
         }
     });
-    Ok(())
 }
 
 /// The destination the guest dialled, before the redirect.
-fn original_dst(conn: &TcpStream) -> io::Result<SocketAddrV4> {
+fn original_dst(conn: &TcpStream, v6: bool) -> io::Result<SocketAddr> {
     const SO_ORIGINAL_DST: libc::c_int = 80;
-    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    let r = unsafe {
-        libc::getsockopt(
-            conn.as_raw_fd(),
-            libc::SOL_IP,
-            SO_ORIGINAL_DST,
-            &mut addr as *mut _ as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if r != 0 {
-        return Err(io::Error::last_os_error());
+    if v6 {
+        let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockopt(
+                conn.as_raw_fd(),
+                libc::SOL_IPV6,
+                SO_ORIGINAL_DST,
+                &mut addr as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(addr.sin6_addr.s6_addr),
+            u16::from_be(addr.sin6_port),
+            0,
+            0,
+        )))
+    } else {
+        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockopt(
+                conn.as_raw_fd(),
+                libc::SOL_IP,
+                SO_ORIGINAL_DST,
+                &mut addr as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
+            u16::from_be(addr.sin_port),
+        )))
     }
-    Ok(SocketAddrV4::new(
-        Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
-        u16::from_be(addr.sin_port),
-    ))
 }
 
-fn relay_tcp(conn: TcpStream, socket: &Path) -> io::Result<()> {
-    let dst = original_dst(&conn)?;
+fn relay_tcp(conn: TcpStream, socket: &Path, v6: bool) -> io::Result<()> {
+    let dst = original_dst(&conn, v6)?;
     let mut up = UnixStream::connect(socket)?;
+    // The destination's IP literal; a v6 address writes as e.g. `2001:2::1`,
+    // which the daemon parses as an `IpAddr`.
     up.write_all(format!("TCP {} {}\n", dst.ip(), dst.port()).as_bytes())?;
     let (mut cr, mut uw) = (conn.try_clone()?, up.try_clone()?);
     let t = thread::spawn(move || {

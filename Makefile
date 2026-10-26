@@ -43,7 +43,7 @@ EXCLUDE  :=
 endif
 
 # Image recipes: name → base and build steps.
-BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps && rm -rf /var/lib/apt/lists/*
+BASE_PKGS := apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*
 IMAGE_FROM_ubuntu-26.04 := docker.io/library/ubuntu:26.04
 IMAGE_RUN_ubuntu-26.04  := --run "$(BASE_PKGS)"
 # Office workers: Claude Code at a pinned version (auto-update is off in

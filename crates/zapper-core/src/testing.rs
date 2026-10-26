@@ -77,8 +77,22 @@ pub fn dial(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream
     let ip = {
         let mut dns = s.dns.lock().unwrap();
         dns.remember(name, true);
-        dns.address(name).unwrap()
+        std::net::IpAddr::V4(dns.address(name).unwrap())
     };
+    dial_ip(t, s, ip, port)
+}
+
+/// Like `dial`, but the guest reached the name's synthetic IPv6 address.
+pub fn dial6(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream {
+    let ip = {
+        let mut dns = s.dns.lock().unwrap();
+        dns.remember(name, true);
+        std::net::IpAddr::V6(dns.address6(name).unwrap())
+    };
+    dial_ip(t, s, ip, port)
+}
+
+fn dial_ip(t: &TestCore, s: &Arc<Session>, ip: std::net::IpAddr, port: u16) -> UnixStream {
     let (guest, host) = UnixStream::pair().unwrap();
     tokio::spawn(crate::daemon::proxy::transparent(
         t.core.daemon().clone(),
