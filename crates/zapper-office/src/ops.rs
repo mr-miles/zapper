@@ -362,18 +362,39 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "plan",
         shown: |p| p.root || p.manages || p.hires,
-        description: "Lay out a multi-step plan under a task: ordered stages of child assignments, released stage by stage as each stage's children are reported done. Stage 0 starts at once; a later stage is created only when the stage before it completes. mail_send is the one-off, one-stage case.",
+        description: "Lay out a multi-step plan under a task: a team of slots and ordered stages of child assignments, released stage by stage as each stage's children are reported done. Stage 0 starts at once; a later stage is created only when the stage before it completes. Each child names a slot (a team member): reuse a slot for continuity, use distinct slots to keep duties separate. mail_send is the one-off, one-stage case.",
         props: || json!({
             "source": s("The task thread the children belong to (e.g. t-12); defaults to the task you are working on"),
-            "stages": { "type": "array", "description": "Ordered stages; each stage is an array of child assignments {to, subject, body, due} that run in parallel", "items": { "type": "array", "items": { "type": "object", "properties": { "to": s("A worker below you in the chart"), "subject": s("The ask"), "body": s("Markdown: the ask, context, what done looks like"), "due": s("Like 2h, 1d") }, "required": ["to", "body"] } } }
+            "team": { "type": "object", "description": "Slots the children address, by id: each {role} to staff or {name} of an existing worker, with optional release_when_done", "additionalProperties": { "type": "object", "properties": { "role": s("A role to staff"), "name": s("An existing worker"), "release_when_done": { "type": "boolean" } } } },
+            "stages": { "type": "array", "description": "Ordered stages; each stage is an array of child assignments {slot, subject, body, due} that run in parallel", "items": { "type": "array", "items": { "type": "object", "properties": { "slot": s("A slot id from the team"), "subject": s("The ask"), "body": s("Markdown: the ask, context, what done looks like"), "due": s("Like 2h, 1d") }, "required": ["slot", "body"] } } }
         }),
-        required: &["stages"],
+        required: &["team", "stages"],
         run: Run::Sync(|c| {
             let source = c
                 .args
                 .opt("source")
                 .or_else(|| c.w.context.lock().unwrap().clone())
                 .ok_or_else(|| anyhow!("give a source task thread, or call plan from within a task"))?;
+            let team_v = c
+                .args
+                .raw("team")
+                .as_object()
+                .ok_or_else(|| anyhow!("team must be an object of slot definitions"))?;
+            let mut team = std::collections::BTreeMap::new();
+            for (id, def) in team_v {
+                let role = opt_str(def, "role");
+                let name = opt_str(def, "name");
+                if role.is_some() == name.is_some() {
+                    bail!("slot {id}: give exactly one of role or name");
+                }
+                team.insert(
+                    id.clone(),
+                    crate::plan::SlotDef { role, name, release_when_done: def["release_when_done"].as_bool().unwrap_or(false) },
+                );
+            }
+            if team.is_empty() {
+                bail!("the plan has no team");
+            }
             let stages_v = c
                 .args
                 .raw("stages")
@@ -386,13 +407,16 @@ static TOOLS: &[Tool] = &[
                     .ok_or_else(|| anyhow!("each stage is an array of child assignments"))?;
                 let mut specs = Vec::new();
                 for ch in arr {
-                    let to = req_str(ch, "to")?;
+                    let slot = req_str(ch, "slot")?;
+                    if !team.contains_key(&slot) {
+                        bail!("child names slot {slot}, which is not in the team");
+                    }
                     let subject = opt_str(ch, "subject").unwrap_or_default();
                     let body = opt_str(ch, "body").unwrap_or_default();
                     if subject.trim().is_empty() && body.trim().is_empty() {
                         bail!("each child needs a subject or a body");
                     }
-                    specs.push(crate::plan::ChildSpec { to, subject, body, due: parse_due(&ch["due"])? });
+                    specs.push(crate::plan::ChildSpec { slot, subject, body, due: parse_due(&ch["due"])? });
                 }
                 if specs.is_empty() {
                     bail!("a stage has no children");
@@ -402,16 +426,8 @@ static TOOLS: &[Tool] = &[
             if stages.is_empty() {
                 bail!("the plan has no stages");
             }
-            let chart = c.run.chart();
-            for st in &stages {
-                for sp in st {
-                    if !chart.is_above(c.me, &sp.to) {
-                        bail!("{} can't assign to {}: only their managers can", c.me, sp.to);
-                    }
-                }
-            }
-            let (id, stage0) = c.run.plans.lock().unwrap().create(c.me, &source, stages);
-            let threads = c.run.plan_send_stage(c.me, &source, &stage0)?;
+            let (id, stage0) = c.run.plans.lock().unwrap().create(c.me, &source, team, stages);
+            let threads = c.run.plan_send_stage(&id, &stage0)?;
             c.run.plans.lock().unwrap().bind(&id, 0, threads.clone());
             Ok(json!({ "plan": id, "source": source, "children": threads }))
         }),

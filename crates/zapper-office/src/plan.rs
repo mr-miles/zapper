@@ -1,24 +1,46 @@
 //! Staged plans: a decomposition of a source task into child assignments,
-//! released one stage at a time as each stage's children are done. This is
-//! pure state — the office turns a stage's `ChildSpec`s into assignments (one
-//! per spec, delivered to their workers) and reports each child's completion
+//! released one stage at a time as each stage's children are done. Pure
+//! state — the office turns a stage's `ChildSpec`s into assignments (one per
+//! spec, to the worker its slot binds to) and reports each child's completion
 //! back here, which may release the next stage.
 //!
-//! The minimal cut (proposal 06, "smallest first"): children are created
-//! stage by stage as prior stages complete, so there is no held-ticket state
-//! in the mail model — a not-yet-released stage is plan data, not a ticket.
-//! Ordering is the stage list; `blocks` edges, slots and completion contracts
-//! are later increments.
+//! Tickets name a **slot**, not a worker: a slot binds to one worker the
+//! first time it is used and is reused after (continuity), and distinct slots
+//! bind to distinct workers (separation of duties). This module holds the
+//! team, the stages and the bindings; the office resolves a slot to a worker
+//! (it knows the chart) and records the binding with `bind_slot`.
+//!
+//! Minimal cut (proposal 06): a stage's children are created only when the
+//! stage is reached, so a not-yet-released stage is plan data, not a held
+//! ticket. Binding is to an existing worker; auto-hiring an unstaffed role
+//! and acting on `release_when_done` need the async provisioning path and are
+//! not done here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-/// One child assignment a stage will create: the same fields `mail_send`
-/// takes (minimal subset).
+/// A team member a plan's tickets are addressed to. Bound to one worker on
+/// first use.
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct SlotDef {
+    /// A role to staff (bound to a worker of that role).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Or a specific existing worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Free the worker when the slot has no more work (acted on by the async
+    /// provisioning path; recorded here).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub release_when_done: bool,
+}
+
+/// One child assignment a stage will create. `slot` names which team member
+/// does it; the office resolves it to a worker.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ChildSpec {
-    pub to: String,
+    pub slot: String,
     pub subject: String,
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,14 +80,17 @@ pub struct Plan {
     /// the plan, never a planner's own thread (proposal 06, decision 1).
     pub source: String,
     pub status: Status,
+    /// The team of slots the tickets address.
+    pub team: BTreeMap<String, SlotDef>,
+    /// Which worker each slot bound to, once used.
+    pub bindings: BTreeMap<String, String>,
     /// The stage currently in progress: stages before it are complete, stages
     /// after it are not yet released.
     stage: usize,
     stages: Vec<Stage>,
 }
 
-/// What the office should do after a state change: release the next stage's
-/// children (send them, then `bind`), note the plan finished, or nothing.
+/// What the office should do after a state change.
 #[derive(Debug, PartialEq)]
 pub enum Advance {
     Release {
@@ -88,12 +113,14 @@ pub struct Plans {
 
 impl Plans {
     /// Record a new plan and return its id plus the stage-0 specs to send. The
-    /// office sends them and calls `bind(id, 0, threads)`. `stages` must be
-    /// non-empty and every stage non-empty (the caller validates).
+    /// office resolves each spec's slot to a worker, sends the assignments and
+    /// calls `bind(id, 0, threads)`. `stages` must be non-empty and every
+    /// stage non-empty (the caller validates).
     pub fn create(
         &mut self,
         owner: &str,
         source: &str,
+        team: BTreeMap<String, SlotDef>,
         stages: Vec<Vec<ChildSpec>>,
     ) -> (String, Vec<ChildSpec>) {
         self.counter += 1;
@@ -114,11 +141,13 @@ impl Plans {
                 owner: owner.into(),
                 source: source.into(),
                 status: Status::Active,
+                team,
+                bindings: BTreeMap::new(),
                 stage: 0,
                 stages,
             },
         );
-        (id.clone(), stage0)
+        (id, stage0)
     }
 
     /// Record the threads the office created for a released stage, in spec
@@ -136,8 +165,7 @@ impl Plans {
     }
 
     /// A child assignment's thread was reported done. Marks it, and if that
-    /// completes the active stage of an active plan, advances to the next
-    /// stage (or finishes the plan).
+    /// completes the active stage of an active plan, advances.
     pub fn complete(&mut self, thread: &str) -> Advance {
         let Some(plan) = self.by_thread.get(thread).cloned() else {
             return Advance::None;
@@ -163,8 +191,33 @@ impl Plans {
         self.plans.get(plan).map(|p| p.owner.as_str())
     }
 
-    /// Pause a plan: the office stops releasing its stages (the current
-    /// stage's in-flight work still finishes). No-op unless it is active.
+    /// The slot's definition.
+    pub fn slot_def(&self, plan: &str, slot: &str) -> Option<SlotDef> {
+        self.plans.get(plan).and_then(|p| p.team.get(slot).cloned())
+    }
+
+    /// The worker a slot is already bound to, if any (continuity).
+    pub fn binding(&self, plan: &str, slot: &str) -> Option<String> {
+        self.plans
+            .get(plan)
+            .and_then(|p| p.bindings.get(slot).cloned())
+    }
+
+    /// Workers already bound to some slot of the plan (for distinctness).
+    pub fn bound_workers(&self, plan: &str) -> BTreeSet<String> {
+        self.plans
+            .get(plan)
+            .map(|p| p.bindings.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Record that a slot bound to a worker.
+    pub fn bind_slot(&mut self, plan: &str, slot: &str, worker: &str) {
+        if let Some(p) = self.plans.get_mut(plan) {
+            p.bindings.insert(slot.into(), worker.into());
+        }
+    }
+
     pub fn pause(&mut self, plan: &str) -> bool {
         match self.plans.get_mut(plan) {
             Some(p) if p.status == Status::Active => {
@@ -175,8 +228,6 @@ impl Plans {
         }
     }
 
-    /// Resume a paused plan, releasing the next stage if the current one
-    /// already completed while paused.
     pub fn resume(&mut self, plan: &str) -> Advance {
         match self.plans.get_mut(plan) {
             Some(p) if p.status == Status::Paused => {
@@ -187,9 +238,9 @@ impl Plans {
         }
     }
 
-    /// Close a plan deliberately. Allowed only when it is paused and nothing
-    /// is in progress (the active stage has no open child), so it is never
-    /// closed under a running worker. Returns the reason it was refused.
+    /// Close a plan deliberately — only when paused and nothing is in progress
+    /// (the active stage has no open child), so it is never closed under a
+    /// running worker. Returns the reason it was refused.
     pub fn close(&mut self, plan: &str) -> Result<(), &'static str> {
         let Some(p) = self.plans.get_mut(plan) else {
             return Err("no such plan");
@@ -212,8 +263,8 @@ impl Plans {
 }
 
 impl Plan {
-    /// If the active stage is complete, move to and release the next stage,
-    /// or finish the plan. Held while paused.
+    /// If the active stage is complete, release the next stage or finish the
+    /// plan. Held while paused.
     fn advance(&mut self) -> Advance {
         if self.status != Status::Active {
             return Advance::None;
@@ -241,38 +292,49 @@ impl Plan {
 mod tests {
     use super::*;
 
-    fn spec(to: &str) -> ChildSpec {
+    fn team(slots: &[(&str, &str)]) -> BTreeMap<String, SlotDef> {
+        slots
+            .iter()
+            .map(|(id, name)| {
+                (
+                    id.to_string(),
+                    SlotDef {
+                        name: Some(name.to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn spec(slot: &str) -> ChildSpec {
         ChildSpec {
-            to: to.into(),
-            subject: to.into(),
+            slot: slot.into(),
+            subject: "s".into(),
             body: "do it".into(),
             due: None,
         }
     }
 
-    /// Two stages drive each other: completing stage 0 releases stage 1, and
-    /// completing stage 1 finishes the plan.
     #[test]
     fn stages_release_on_completion() {
         let mut plans = Plans::default();
         let (id, stage0) = plans.create(
             "ceo",
             "t-1",
-            vec![vec![spec("ada")], vec![spec("ben"), spec("cara")]],
+            team(&[("a", "ada"), ("b", "ben"), ("c", "cara")]),
+            vec![vec![spec("a")], vec![spec("b"), spec("c")]],
         );
-        assert_eq!(stage0, vec![spec("ada")]);
+        assert_eq!(stage0, vec![spec("a")]);
         plans.bind(&id, 0, vec!["t-ada".into()]);
 
-        // Stage 0 done -> release stage 1 (its two children).
         let adv = plans.complete("t-ada");
-        let Advance::Release { plan, stage, specs } = adv else {
+        let Advance::Release { stage, specs, .. } = adv else {
             panic!("{adv:?}")
         };
-        assert_eq!((plan.as_str(), stage), (id.as_str(), 1));
-        assert_eq!(specs.len(), 2);
+        assert_eq!((stage, specs.len()), (1, 2));
         plans.bind(&id, 1, vec!["t-ben".into(), "t-cara".into()]);
 
-        // One of two done -> nothing yet; both done -> completed.
         assert_eq!(plans.complete("t-ben"), Advance::None);
         assert_eq!(
             plans.complete("t-cara"),
@@ -284,30 +346,53 @@ mod tests {
     #[test]
     fn pause_holds_release_and_resume_frees_it() {
         let mut plans = Plans::default();
-        let (id, _) = plans.create("ceo", "t-1", vec![vec![spec("ada")], vec![spec("ben")]]);
+        let (id, _) = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a")], vec![spec("b")]],
+        );
         plans.bind(&id, 0, vec!["t-ada".into()]);
         assert!(plans.pause(&id));
-        // Stage 0 completes while paused: no release.
         assert_eq!(plans.complete("t-ada"), Advance::None);
         assert_eq!(plans.get(&id).unwrap().status, Status::Paused);
-        // Resume releases the held next stage.
-        let adv = plans.resume(&id);
-        assert!(matches!(adv, Advance::Release { stage: 1, .. }), "{adv:?}");
+        assert!(matches!(
+            plans.resume(&id),
+            Advance::Release { stage: 1, .. }
+        ));
     }
 
     #[test]
     fn close_needs_paused_and_quiescent() {
         let mut plans = Plans::default();
-        let (id, _) = plans.create("ceo", "t-1", vec![vec![spec("ada")], vec![spec("ben")]]);
+        let (id, _) = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a")], vec![spec("b")]],
+        );
         plans.bind(&id, 0, vec!["t-ada".into()]);
-        // Not paused -> refused.
         assert!(plans.close(&id).is_err());
         plans.pause(&id);
-        // Paused but stage 0 still open -> refused.
         assert!(plans.close(&id).is_err());
-        // Quiescent (stage 0 done, next not released because paused) -> closes.
         assert_eq!(plans.complete("t-ada"), Advance::None);
         assert!(plans.close(&id).is_ok());
         assert_eq!(plans.get(&id).unwrap().status, Status::Closed);
+    }
+
+    #[test]
+    fn a_slot_binds_once_and_distinct_slots_are_tracked() {
+        let mut plans = Plans::default();
+        let (id, _) = plans.create(
+            "ceo",
+            "t-1",
+            team(&[("a", "ada"), ("b", "ben")]),
+            vec![vec![spec("a")]],
+        );
+        assert_eq!(plans.binding(&id, "a"), None);
+        plans.bind_slot(&id, "a", "ada");
+        assert_eq!(plans.binding(&id, "a"), Some("ada".into()));
+        assert!(plans.bound_workers(&id).contains("ada"));
+        assert!(!plans.bound_workers(&id).contains("ben"));
     }
 }

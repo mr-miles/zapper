@@ -203,9 +203,10 @@ async fn a_plan_releases_its_next_stage_on_completion() {
         "plan",
         json!({
             "source": "t-objective",
+            "team": { "builder": { "name": "pat" }, "reviewer": { "name": "sec" } },
             "stages": [
-                [ { "to": "pat", "subject": "Build", "body": "build it" } ],
-                [ { "to": "sec", "subject": "Review", "body": "review it" } ],
+                [ { "slot": "builder", "subject": "Build", "body": "build it" } ],
+                [ { "slot": "reviewer", "subject": "Review", "body": "review it" } ],
             ],
         }),
     )
@@ -229,6 +230,58 @@ async fn a_plan_releases_its_next_stage_on_completion() {
 
     // Stage 1 is now released to sec.
     assert_eq!(unread("sec").await, json!(1));
+}
+
+/// A role slot binds to a worker of that role on first use and reuses it for
+/// the slot's later tickets (continuity).
+#[tokio::test]
+async fn a_role_slot_binds_and_reuses_the_same_worker() {
+    let (t, run) = run();
+    let unread =
+        ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await["unread"].clone();
+    assert_eq!(unread, json!(0));
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "dev": { "role": "eng" } },
+            "stages": [
+                [ { "slot": "dev", "subject": "Build", "body": "build" } ],
+                [ { "slot": "dev", "subject": "Fix", "body": "fix" } ],
+            ],
+        }),
+    )
+    .await;
+    // Stage 0 bound slot `dev` to the one engineer, pat.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    assert_eq!(
+        inbox["unread"],
+        json!(1),
+        "stage 0 went to the engineer: {inbox}"
+    );
+    let msg = inbox["messages"][0]["id"].as_str().unwrap().to_string();
+    ok(
+        &t,
+        &run,
+        "pat",
+        "mail_reply",
+        json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+    )
+    .await;
+    // Stage 1 reused the same slot, so the Fix assignment went to pat again.
+    let inbox2 = ok(&t, &run, "pat", "mail_inbox", json!({})).await;
+    let got_fix = inbox2["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["subject"] == "Fix" && m["to"][0] == "pat");
+    assert!(
+        got_fix,
+        "stage 1 (Fix) reused the same worker pat: {inbox2}"
+    );
 }
 
 #[tokio::test]

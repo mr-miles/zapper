@@ -451,28 +451,66 @@ impl FirmRun {
 
     /// Send a plan stage's children as assignments from the plan's owner,
     /// parented under the plan's source task; return their thread ids in spec
-    /// order. Each is an ordinary assignment, so authority is enforced in
-    /// `send` as for any delegation.
+    /// order. Each child's slot is resolved to a worker (bound on first use);
+    /// each send is an ordinary assignment, so authority is enforced in `send`
+    /// as for any delegation.
     pub(crate) fn plan_send_stage(
         &self,
-        owner: &str,
-        source: &str,
+        plan: &str,
         specs: &[plan::ChildSpec],
     ) -> Result<Vec<String>> {
+        let (owner, source) = {
+            let plans = self.plans.lock().unwrap();
+            match plans.get(plan) {
+                Some(p) => (p.owner.clone(), p.source.clone()),
+                None => return Ok(Vec::new()),
+            }
+        };
         let mut threads = Vec::with_capacity(specs.len());
         for s in specs {
-            let mut d = Draft::new(
-                owner,
-                vec![s.to.clone()],
-                &s.subject,
-                &s.body,
-                Kind::Assignment,
-            );
+            let worker = self.resolve_slot(plan, &s.slot)?;
+            let mut d = Draft::new(&owner, vec![worker], &s.subject, &s.body, Kind::Assignment);
             d.due = s.due;
-            d.context = Some(source.to_string());
+            d.context = Some(source.clone());
             threads.push(self.send(d)?.thread);
         }
         Ok(threads)
+    }
+
+    /// Resolve a plan slot to a worker, binding it on first use (reused after,
+    /// for continuity): an existing worker for a name, or a free worker of a
+    /// role, distinct from the plan's other bindings (separation of duties).
+    /// Auto-hiring an unstaffed role is not yet wired (it needs the async
+    /// provisioning path) — name a worker or hire one first.
+    fn resolve_slot(&self, plan: &str, slot: &str) -> Result<String> {
+        if let Some(w) = self.plans.lock().unwrap().binding(plan, slot) {
+            return Ok(w);
+        }
+        let def = self
+            .plans
+            .lock()
+            .unwrap()
+            .slot_def(plan, slot)
+            .ok_or_else(|| anyhow!("plan {plan}: no slot {slot}"))?;
+        let chart = self.chart();
+        let worker = if let Some(name) = def.name {
+            if chart.worker(&name).is_none() {
+                bail!("slot {slot}: no worker named {name}");
+            }
+            name
+        } else if let Some(role) = def.role {
+            let bound = self.plans.lock().unwrap().bound_workers(plan);
+            chart
+                .workers
+                .iter()
+                .find(|w| w.role == role && !bound.contains(&w.name))
+                .map(|w| w.name.clone())
+                .ok_or_else(|| anyhow!("slot {slot}: no free worker of role {role} to staff it (auto-hiring an absent role is not yet wired; name a worker or hire one first)"))?
+        } else {
+            bail!("slot {slot}: give a role or a name");
+        };
+        self.plans.lock().unwrap().bind_slot(plan, slot, &worker);
+        Ok(worker)
     }
 
     /// A closing reply landed on `thread`; if it is a plan child, advance the
@@ -487,16 +525,7 @@ impl FirmRun {
     pub(crate) fn apply_plan_advance(&self, advance: plan::Advance) {
         match advance {
             plan::Advance::Release { plan, stage, specs } => {
-                let Some((owner, source)) = self
-                    .plans
-                    .lock()
-                    .unwrap()
-                    .get(&plan)
-                    .map(|p| (p.owner.clone(), p.source.clone()))
-                else {
-                    return;
-                };
-                match self.plan_send_stage(&owner, &source, &specs) {
+                match self.plan_send_stage(&plan, &specs) {
                     Ok(threads) => self.plans.lock().unwrap().bind(&plan, stage, threads),
                     Err(e) => {
                         self.journal.append(
