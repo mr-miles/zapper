@@ -824,6 +824,12 @@ impl PostOffice {
             bail!("no message {id}");
         }
         let mut v = serde_json::to_value(m)?;
+        // The full body replaces the list-view preview: this is the one view
+        // that carries the whole message, so the preview is only a decoy to
+        // read the message off by mistake.
+        if let Some(o) = v.as_object_mut() {
+            o.remove("preview");
+        }
         v["body"] = json!(self.body(journal, id));
         Ok(v)
     }
