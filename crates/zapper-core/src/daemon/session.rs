@@ -32,6 +32,51 @@ pub enum Status {
     Stopped(String),
 }
 
+/// The daemon's live sessions, by id. Behind one lock; readers take a cloned
+/// snapshot so the lock is never held across other work.
+pub(crate) struct SessionStore(RwLock<BTreeMap<String, Arc<Session>>>);
+
+impl SessionStore {
+    pub(crate) fn new() -> SessionStore {
+        SessionStore(RwLock::new(BTreeMap::new()))
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.0.read().unwrap().get(id).cloned()
+    }
+
+    pub(crate) fn all(&self) -> Vec<Arc<Session>> {
+        self.0.read().unwrap().values().cloned().collect()
+    }
+
+    pub(crate) fn insert(&self, session: Arc<Session>) {
+        self.0.write().unwrap().insert(session.id.clone(), session);
+    }
+
+    /// How many sessions are starting or running, for the session limit.
+    pub(crate) fn running(&self) -> usize {
+        self.0
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| matches!(*s.status.borrow(), Status::Starting | Status::Running))
+            .count()
+    }
+
+    /// Take a stopped session off the list; a starting or running one stays,
+    /// as nothing would manage its VM.
+    pub(crate) fn forget(&self, id: &str) -> Result<()> {
+        let mut sessions = self.0.write().unwrap();
+        if let Some(s) = sessions.get(id) {
+            if matches!(*s.status.borrow(), Status::Starting | Status::Running) {
+                bail!("session {id} is still running; stop it first");
+            }
+        }
+        sessions.remove(id);
+        Ok(())
+    }
+}
+
 #[derive(Default, Serialize)]
 pub struct Counters {
     pub net_allowed: AtomicU64,
@@ -417,13 +462,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         let extra = h.mounts(&resolved.agent, &home);
         resolved.mounts.extend(extra);
     }
-    let running = daemon
-        .sessions
-        .read()
-        .unwrap()
-        .values()
-        .filter(|s| matches!(*s.status.borrow(), Status::Starting | Status::Running))
-        .count();
+    let running = daemon.sessions.running();
     if running >= max {
         bail!("{running} sessions running; daemon.max_sessions is {max}");
     }
@@ -471,11 +510,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
     for rule in new.policy.rules() {
         session.add_rule(rule, None);
     }
-    daemon
-        .sessions
-        .write()
-        .unwrap()
-        .insert(id.clone(), session.clone());
+    daemon.sessions.insert(session.clone());
     daemon.emit(
         Some(&session),
         EventBody::Session {

@@ -26,7 +26,7 @@ mod summary;
 pub mod tls;
 pub mod vm;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -201,7 +201,7 @@ pub struct Daemon {
     pub startup_path: PathBuf,
     pub paths: Paths,
     pub addrs: RwLock<addr::AddressPolicy>,
-    pub sessions: RwLock<BTreeMap<String, Arc<Session>>>,
+    pub(crate) sessions: session::SessionStore,
     pub(crate) events: events::EventBus,
     approvals: Mutex<HashMap<String, Pending>>,
     pub ui_token: String,
@@ -334,7 +334,7 @@ impl Daemon {
             startup_path,
             paths,
             addrs: RwLock::new(addrs),
-            sessions: RwLock::new(BTreeMap::new()),
+            sessions: session::SessionStore::new(),
             events: events::EventBus::new(),
             approvals: Mutex::new(HashMap::new()),
             ui_token: random_id(24),
@@ -355,10 +355,7 @@ impl Daemon {
 
     pub fn session(&self, id: &str) -> Result<Arc<Session>> {
         self.sessions
-            .read()
-            .unwrap()
             .get(id)
-            .cloned()
             .ok_or_else(|| anyhow!("no session {id}"))
     }
 
@@ -371,9 +368,8 @@ impl Daemon {
         if !next.daemon.driver {
             let driven: Vec<String> = self
                 .sessions
-                .read()
-                .unwrap()
-                .values()
+                .all()
+                .into_iter()
                 .filter(|s| s.driver.is_some() && s.is_running())
                 .map(|s| s.id.clone())
                 .collect();

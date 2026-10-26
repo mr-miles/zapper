@@ -155,7 +155,7 @@ impl Core {
     }
 
     pub fn sessions(&self) -> Vec<Arc<Session>> {
-        self.d.sessions.read().unwrap().values().cloned().collect()
+        self.d.sessions.all()
     }
 
     /// The sessions with a label set to a value, e.g. `firm` = `acme`.
@@ -179,17 +179,7 @@ impl Core {
     /// Takes a stopped session off the list; a session still starting or
     /// running stays, as nothing would manage its VM.
     pub fn forget_session(&self, id: &str) -> Result<()> {
-        let mut sessions = self.d.sessions.write().unwrap();
-        if let Some(s) = sessions.get(id) {
-            if matches!(
-                *s.status.borrow(),
-                session::Status::Starting | session::Status::Running
-            ) {
-                return Err(anyhow!("session {id} is still running; stop it first"));
-            }
-        }
-        sessions.remove(id);
-        Ok(())
+        self.d.sessions.forget(id)
     }
 
     /// A session registered as `new` describes, without a VM: for tests of
@@ -368,8 +358,8 @@ impl Core {
                 .iter()
                 .map(|(n, p)| (Scope::Profile(n.clone()), p.policy.clone())),
         );
-        for (id, s) in self.d.sessions.read().unwrap().iter() {
-            layers.push((Scope::Session(id.clone()), s.policy.read().unwrap().clone()));
+        for s in self.d.sessions.all() {
+            layers.push((Scope::Session(s.id.clone()), s.policy.read().unwrap().clone()));
         }
         for k in self.d.clients.rule_keepers.read().unwrap().iter() {
             layers.extend(k.layers());
@@ -389,7 +379,7 @@ impl Core {
             }
         }
         if id.starts_with("s-") {
-            for s in self.d.sessions.read().unwrap().values() {
+            for s in self.d.sessions.all() {
                 if let Some(r) = s.remove_rule(id) {
                     return Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
