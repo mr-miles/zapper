@@ -12,6 +12,6 @@ Drafted 2026-10-25 on branch `feat/require-config` (01–04); proposal 05 added 
 | [04 — The verifiable record](04-verifiable-record.md) | Keep the bespoke keeper, or re-base the tamper-evident record on transparency-log standards (C2SP `tlog-tiles`, signed checkpoints, witnesses) and crates like `siglog`; where a Rust library helps and where it doesn't. |
 | [05 — Legion Ascended mapping](05-legion-ascended-mapping.md) | Map Legion Ascended's governed `start→ship` workflow (oracles, evidence, risk-tiered gates, approvals, attestation) onto The Office's roles and record, and borrow its risk-tier → gate policy as per-assignment governance. |
 
-## Caveat on paperclip.ai
+## Caveat on Paperclip
 
-Paperclip.ai launched after the model's January 2026 knowledge cutoff, so proposal 02 is built from third-party write-ups (some vendor-authored), not first-hand knowledge of its internals. Its adapter interface and API must be confirmed against the real Paperclip docs/repo before that proposal is acted on.
+Paperclip launched after the model's January 2026 knowledge cutoff. Proposal 02 was first sketched from third-party write-ups but is now grounded in Paperclip's own source (`github.com/paperclipai/paperclip`, read at commit `1fbbef4`), with file references throughout. It is a fast-moving monorepo, so re-check the cited symbols and paths before building on them; anything the proposal marks *(inferred)* comes from its docs rather than its code.

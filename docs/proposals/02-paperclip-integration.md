@@ -1,66 +1,77 @@
-# Paperclip.ai companies on zapper
+# Paperclip companies on zapper
 
-Run paperclip.ai "companies" using zapper purely as the sandbox / network / credential / security substrate, while keeping zapper's credential-request flow, access control, and security review — the parts that are well thought through.
+Run [Paperclip](https://github.com/paperclipai/paperclip) "companies" with zapper underneath as the sandbox / network / credential / security substrate, keeping zapper's enforced isolation and its credential-and-security review — but *reusing* Paperclip's own orchestration (foreman, coordination, turn control) and its approval surfaces rather than duplicating them.
 
-> **Confirm first.** Paperclip.ai launched after the model's January 2026 cutoff, so this is built from third-party write-ups, not first-hand knowledge. Treating Paperclip as "org chart + roles + budgets + approvals + heartbeat scheduling, with agents plugged in via adapters (Claude Code, Codex, Gemini, Cursor)" — verify its real **adapter interface** and API before acting on the seam below.
+> **Grounding.** This is written against the Paperclip source at `github.com/paperclipai/paperclip`, read at commit `1fbbef4` (file paths below are from there). Paperclip is a fast-moving TypeScript monorepo, so treat the specific symbol/paths as "as of that commit" and re-check before building. Points marked *(inferred)* come from its docs, not code.
 
-## The structural match
+## The key realisation: zapper is a Paperclip *sandbox provider*, not a new brain
 
-Paperclip is, functionally, almost exactly what **The Office** already is in zapper: an orchestration brain — org chart, roles, inter-agent coordination/mail, budgets, approval controls, scheduled wakeups. The crucial fact from the zapper side is that **The Office is just one client of `Core`** (`crates/zapper-core/src/interface.rs`). Core is the enforcement substrate; the office is pure orchestration on top of it.
+Paperclip already separates *what runs an agent* from *where it runs*. An adapter (`ServerAdapterModule.execute(ctx)`, `packages/adapter-utils/src/types.ts`) is handed an `AdapterExecutionTarget` — `local`, `remote`/ssh, or `remote`/**sandbox** (`packages/adapter-utils/src/execution-target.ts`) — and the built-in adapters (claude, codex, cursor, gemini, …) already know how to **sync the workspace in, run the agent CLI against the target, and sync changes back** (`packages/adapters/claude-local/src/server/execute.ts`, `packages/adapters/AUTHORING.md`). A sandbox target is backed by a **provider plugin** (`packages/plugins/sandbox-providers/*`: cloudflare, daytona, e2b, kubernetes, modal, …) that implements a documented set of `onEnvironment*` lease/exec/sync hooks (`packages/plugins/sdk/src/define-plugin.ts`).
 
-From the research, the division is clean:
+So the integration seam is clear and already exists: **zapper is a Paperclip sandbox provider** (a plugin declaring `kind: "sandbox_provider"`, capability `environment.drivers.register`), and each agent turn runs inside a zapper session. This is your shape (b) — Paperclip owns the agent process and its orchestration; zapper wraps it — and it is the grain of Paperclip's own design, not something bolted on.
 
-- **Core enforces** (behind the VM boundary): VM isolation/boot, all network/DNS/exec policy evaluation, secret injection, the layered rule engine (global → profile → session → role/keeper), approvals, the MCP gateway, services/zones/DNS routing, and the tamper-evident recording.
-- **The client orchestrates:** which sessions exist and their labels, the turn loop and prompts (mail → wake), budgets, the org chart, who decides asks (deciders), the extra rule layers, credential grants, and config checks.
+Paperclip's sandbox contract makes the case for zapper outright. `packages/plugins/sandbox-providers/SANDBOX-REQUIREMENTS.md`:
 
-So the goal reduces to: **Paperclip replaces the brain; Core stays as the substrate; and the trust-bearing pieces of the office (credential grants + security review) are kept because they are enforcement, not orchestration.**
+> "A sandbox is an untrusted execution environment… Paperclip protects two authorities across the boundary: the authority to write host files and the authority to call the Paperclip API… The provider and the operator set the policy for general internet access. **This repository does not enforce these provider rules today, and Paperclip cannot verify them for an externally supplied sandbox.**"
 
-## The integration seam (Core as a service)
+That last sentence is zapper's whole value proposition: it is a provider that *actually enforces* the boundary — VM isolation, all egress through host-side policy, host-held secret injection, and a tamper-evident record.
 
-Paperclip runs each agent through an adapter that today spawns a local process (e.g. `claude -p`). The seam is to write a Paperclip adapter that, instead, **creates and drives a zapper session**. Two shapes:
+### Why not the earlier "zapper drives via its own turn loop" shape
 
-- **(a) zapper owns the agent lifecycle; Paperclip drives via the API.** Map each Paperclip agent to a zapper session (`Core::create_session`, `interface.rs:170`) and reuse zapper's headless turn loop and harness (claude `-p` stream-json parsing, `TurnEnd`/`Outcome`, token accounting in `crates/zapper-core/src/daemon/harness.rs`). Paperclip's heartbeat wake → `POST /sessions/{id}/prompt` (which queues the next turn, `crates/zapper-api/src/lib.rs:494`); agent output streams back as events (`Core::subscribe`). Paperclip keeps the org chart, roles, budgets, and scheduling.
-- **(b) Paperclip owns the agent process; zapper wraps the sandbox.** Paperclip's adapter runs the agent via `zapper exec`/attach into a session, or runs the agent inside the VM while Paperclip talks to it. More coupling to Paperclip's process model, less reuse of zapper's harness and recording hooks.
+An earlier draft of this proposal leaned the other way — zapper owning the agent lifecycle and driving turns through its own harness, with Paperclip calling a REST API. The source shows that would **duplicate Paperclip's brain**: Paperclip has its own scheduler and turn control (below), its own adapters that drive the agent CLIs, and its own approval surfaces. Running zapper's foreman/harness alongside Paperclip's heartbeat would mean two turn loops fighting over one agent. The provider shape avoids all of that: zapper runs no turn loop and drives no agent; it leases a sandbox, executes what Paperclip hands it, and enforces policy around it.
 
-**Recommendation: (a).** Let zapper own the agent lifecycle and turn loop — that is where the enforcement, secret injection, and recording hooks live, and it guarantees *all* agent egress stays behind zapper's proxy, which is the entire point. Paperclip drives via the REST API (prompt / events / approvals).
+## What Paperclip already provides (so zapper must not duplicate)
 
-Concretely under (a):
+- **Foreman → "heartbeat".** `server/src/services/work-scheduler.ts` (a single-timer deadline scheduler) + `server/src/services/heartbeat/*` + a durable wake-queue (`server/src/modules/wake-queue/`, table `agent_wakeup_requests`). A "run" is one agent turn (`heartbeat_runs`), woken by schedule, issue assignment, dependency completion, chat, or **approval resolution**. zapper adds no turn control.
+- **Coordination → org chart + issues, not a mailbox.** `agents.reportsTo` is the reporting line (`packages/db/src/schema/agents.ts`); agents coordinate by creating/assigning/commenting on `issues` and escalating via `cases`; a wake signals the target. Human↔agent chat/email/inbox are separate channels. zapper's old per-firm mail concept maps onto this; don't bring a second messaging system.
+- **Approvals → two real-time surfaces** (see next section).
+- **Some isolation already.** Even local runs can be filesystem- and network-scoped (`packages/adapter-utils/src/local-process-sandbox.ts`: `access: "ro"|"rw"`, `networkScope: "deny"|"allowlist"`), and the Claude adapter only passes its skip-permissions flag "inside an identified sandbox" (`packages/adapters/claude-local/src/server/permissions.ts`). zapper replaces this soft, in-process scoping with a hard VM boundary — but note the overlap so network allowlists aren't configured in two places (open question below).
 
-- A Paperclip **agent/role** → a zapper **profile** (image + command + rule layers).
-- A Paperclip **company** → a set of sessions labeled `{company=<x>}` (mirroring `firm=<x>` today) plus a company-scoped role/rule layer.
-- Paperclip's **scheduler/heartbeat** → the caller of `create_session` + `prompt`.
-- Agent calls to the world (git, drive, external hosts, credentials) go through zapper: agents use zapper's MCP office tools (`request_access`, `drive_*`, …) served over each VM's MCP port, and egress is governed by zapper's proxy regardless of what Paperclip thinks.
+## The seam: a zapper sandbox-provider plugin
 
-## What to reuse vs replace
+Map the provider lifecycle hooks (`define-plugin.ts`) onto zapper's `Core`:
 
-**Paperclip owns (replaces the office brain):** org chart, role definitions, scheduling/heartbeats, inter-agent coordination, budgets, task assignment, the "company" concept, and the company-running UI.
+| Paperclip hook | zapper |
+|---|---|
+| `onEnvironmentAcquireLease` / `ResumeLease` | `Core::create_session` (a session = a lease); resume maps to a kept session |
+| `onEnvironmentRealizeWorkspace`, `onEnvironmentSyncIn` / `SyncOut` | copy the workspace into / out of the VM (`zapper cp`) |
+| `onEnvironmentExecute` | run the agent CLI in the session (the guest harness), returning output |
+| `onEnvironmentReleaseLease` / `Stop` / `Destroy` | `Core::stop_session` / `forget_session` |
+| `onEnvironmentRunnerIngressEndpoint`, duplex-stream hooks | the session's control/terminal channel |
 
-**Keep on the zapper side:**
+Paperclip then selects zapper per run through the `AdapterExecutionTarget` (`kind: "remote"`, `transport: "sandbox"`), and its existing adapters do the sync/execute/sync. All agent egress is captured by zapper's proxy regardless of what the agent attempts — which is precisely the enforcement Paperclip's contract wants but does not provide.
 
-- **`Core`** — non-negotiable; it is the substrate.
-- **Credential requests + access control** (`crates/zapper-office/src/access.rs`): the ask → owner-decides → grant → enforce model, with expiry and revoke. This is *enforcement* — it gates network rules, cluster RBAC, and git/drive access on the host — so it must stay on the zapper side even though Paperclip owns the org chart. Who the "policy owners" are can be Paperclip roles, but the decision must flow into zapper's grant/enforcement.
-- **Security review** (`crates/zapper-office/src/security.rs`): officers registered as the daemon `Decider` for asks, traffic digests, decide → `NetRule` → standing → promote-to-config. Keep this wholesale — it is the neat part and it is enforcement-side.
+## Approvals without duplication — the important part
 
-### The refactor this implies
+Paperclip has **two** human-in-the-loop surfaces, both pushed to the operator in real time over one websocket (`server/src/realtime/live-events-ws.ts`) and mirrored to an immutable `activity_log`. zapper should route its access/credential/network decisions through these rather than stand up a second approval UI.
 
-`access.rs` and `security.rs` are currently woven into the office (`FirmRun`, foreman, org chart). To use them under Paperclip, separate the **trust layer** from the **brain**. Two sub-options:
+- **Durable board queue** (`server/src/routes/approvals.ts`, table `approvals`). Types include `request_board_approval`, `budget_override_required`, `hire_agent`; the `payload` is an **open record** (`packages/shared/src/validators/approval.ts`), so a credential/network/grant ask fits with no schema change. An agent (or the system) `POST`s an approval; the **board** decides (`assertBoard`); and on decision the server **auto-wakes the requesting agent with the verdict** (`heartbeat.wakeup(..., reason: "approval_approved")`). This is a near-exact match for zapper's ask→decide→grant model, including closing the loop back to the agent.
+- **Live in-run "ask" tools** (DESIGN.md "Live tool reviews keep their own approval flow"; `request_human_input`, `request_confirmation`, `request_item_verdicts`, `request_board_approval`). These render as a card above the task composer and are answered synchronously mid-turn — the live/interactive approvals you asked about.
 
-- **(i) Run zapper-office as a thin trust/resource service.** It stops being the brain (Paperclip drives the agents via Core) but keeps being the trust layer — it already registers deciders, rule keepers, services, and the MCP tools on Core. Least refactor.
-- **(ii) Extract `access.rs` + `security.rs` + `facility.rs` into a standalone crate** that the Paperclip adapter consumes directly.
+**Recommended division of labour:**
 
-**Recommendation: (i) first.** The seam becomes: *Paperclip decides who runs and when; zapper/Core decides what they may reach, and records it.*
+- A zapper **network `ask`** (a guest hit an `ask` rule mid-turn) → surface as a **live** `request_human_input`/`request_confirmation` so the operator answers in the same place they watch the run; zapper still *enforces* the outcome at the proxy. For a decision that should be durable and auditable (a standing grant), file a `request_board_approval` instead — it persists, requires the board, and auto-wakes the agent.
+- A zapper **credential / resource grant** (git, cluster, a drive space) → a `request_board_approval` with the grant detail in `payload`; Paperclip owns the human decision and the record of it, zapper owns minting/scoping/expiry/revocation and enforcement.
+- zapper's **security-officer review** of traffic → this is zapper's distinctive piece and has no Paperclip equivalent; keep it host-side as an *additional* gate, and emit its findings/decisions into Paperclip as approvals/activity so the operator sees one timeline. Do **not** rebuild it inside Paperclip.
 
-## Open questions / confirmations
+The guiding rule: **Paperclip owns the human decision and its UI; zapper owns enforcement and the tamper-evident record.** Each decision has exactly one approval surface (Paperclip's) and exactly one enforcement point (zapper's). Budgets stay entirely Paperclip's (`budget_override_required`).
 
-- **Paperclip's adapter contract.** Does Paperclip allow an adapter to be a remote/async driver (needed for shape (a)), or must it spawn a local process? This gates the whole design.
-- **Approval ownership.** Paperclip has its own "approval controls"; zapper has asks/grants. Decide which system owns which decision to avoid double approval.
-- **Identity mapping.** Paperclip agent id ↔ zapper principal — ties directly into durable grants (see [proposal 01, access control](01-persistent-outputs.md#access-control-across-runs)).
-- **Coordination/mail.** Bridge Paperclip's coordination into zapper mail, or keep them separate (see [proposal 03](03-interactive-dialog.md)).
-- **The record.** Keep zapper's tamper-evident record (keeper) as the source of truth for what agents did — a zapper strength Paperclip does not replicate.
+## What each side keeps
+
+- **Paperclip:** the company/org chart, roles, the heartbeat scheduler and turn control, issues/coordination, chat/inbox, budgets, and both approval surfaces + their UI.
+- **zapper:** the VM sandbox (as a provider plugin), all network/DNS/exec policy and egress capture, host-held secret injection, credential-grant minting/scoping/expiry/revocation, the security-officer traffic review, and the keeper-backed record (which Paperclip's `activity_log` is not — it is mutable).
+
+## Open questions / to confirm against the source
+
+- **Provider-plugin API stability.** `adapter-plugin.md` describes external adapters as "phase-1"; confirm the sandbox-provider plugin surface (`onEnvironment*`) is loadable out-of-tree and stable enough to target, or whether a first cut lives in-tree like the bundled providers.
+- **Network policy in two places.** Paperclip's `local-process-sandbox` carries a `networkAllowlist`; zapper has the authoritative policy. Decide that zapper's policy is the source of truth and the Paperclip-side allowlist is left open (zapper enforces), to avoid split-brain config.
+- **The runner / HTTP bridge + credential injection.** Paperclip syncs a workspace and exposes a "Paperclip API bridge" and `secretsSvc` into the sandbox. Map which credentials Paperclip injects vs. which zapper injects at the proxy, so a secret isn't handled by both (prefer zapper for anything that must stay host-side).
+- **Identity mapping.** Paperclip `agentId`/`companyId` ↔ a zapper principal, for durable grants across runs (ties into [proposal 01](01-persistent-outputs.md)).
+- **Reference implementation.** The Daytona/e2b/kubernetes providers (`packages/plugins/sandbox-providers/*`) are the templates to copy for the zapper provider; the Daytona `onEnvironmentExecute` is the closest shape to "run the CLI in a leased remote sandbox".
 
 ## Phased plan
 
-- **Phase 0 — spike the seam.** A Paperclip adapter that creates one zapper session and drives a single turn via `POST /sessions/{id}/prompt`, egress behind the proxy. Confirms shape (a) is viable against the real Paperclip adapter interface.
-- **Phase 1 — company → sessions.** Map companies/roles to labeled sessions + per-company rule layer; all agent egress behind zapper's proxy.
-- **Phase 2 — wire the trust layer.** Run zapper-office as the access/approval path (shape (i)): credential grants + security review for Paperclip agents.
-- **Phase 3 — durable identity + dialog.** Persist grants/identity across Paperclip runs (proposal 01), and bridge operator↔agent dialogue (proposal 03).
+- **Phase 0 — spike the provider.** A minimal zapper sandbox-provider plugin implementing `acquireLease` (create a session), `realizeWorkspace`/`syncIn`, `execute` (run `claude -p` in the VM), `syncOut`, `releaseLease`. Drive one company agent through it with all egress behind the proxy. Validates the seam against the real plugin API.
+- **Phase 1 — map companies to sessions.** Per-agent sessions with zapper profiles/rule layers; confirm sync-in/out and the control/terminal ingress hooks.
+- **Phase 2 — approvals.** Route zapper network `ask`s to live `request_human_input` and credential grants to `request_board_approval`; verify the auto-wake closes the loop and the operator sees one timeline.
+- **Phase 3 — trust + identity.** Wire the security-officer review as a host-side gate feeding Paperclip approvals; durable grants keyed to a stable principal ([proposal 01](01-persistent-outputs.md)).
