@@ -11,7 +11,7 @@ mod term;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use http_body_util::BodyExt;
 use hyper::Method;
 use serde_json::{json, Value};
@@ -26,10 +26,6 @@ use client::Client;
     about = "Run agents and people in policy-bound Firecracker microVMs"
 )]
 struct Cli {
-    /// Startup config file. Default: `config/zapper.yaml` when run in a
-    /// zapper checkout, else `~/.config/zapper/zapper.yaml`.
-    #[arg(long, global = true, env = "ZAPPER_CONFIG")]
-    config: Option<String>,
     /// Print API responses as JSON.
     #[arg(long, global = true)]
     json: bool,
@@ -37,16 +33,40 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// `--config` for the commands that read the config file (`init`, `check`,
+/// `serve`). It is their own arg, not global: the client commands reach the
+/// daemon over its socket and never read the config, so they do not take it.
+#[derive(clap::Args)]
+struct ConfigArg {
+    /// Startup config file. Default: `config/zapper.yaml` when run in a
+    /// zapper checkout, else `~/.config/zapper/zapper.yaml`.
+    #[arg(long, env = "ZAPPER_CONFIG")]
+    config: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write the example config to --config if it does not exist; with the
-    /// office, also the default skills of its workers into `skills/` next to
-    /// it, keeping those already there.
-    Init,
+    /// Write a starter config to --config if it does not exist.
+    Init {
+        /// Which config to write. `example`: a full starter config and, with
+        /// the office, the default skills of its workers into `skills/` next
+        /// to it (keeping those already there). `empty`: just the daemon
+        /// defaults `serve` needs, and nothing else.
+        #[arg(value_enum, default_value_t = Template::Example)]
+        template: Template,
+        #[command(flatten)]
+        cfg: ConfigArg,
+    },
     /// Check prerequisites; prints the fix for anything missing.
-    Check,
+    Check {
+        #[command(flatten)]
+        cfg: ConfigArg,
+    },
     /// Run the daemon.
-    Serve,
+    Serve {
+        #[command(flatten)]
+        cfg: ConfigArg,
+    },
     /// Start a session, open its command, remove it on exit.
     Run {
         #[arg(short, long, default_value = "default")]
@@ -157,6 +177,8 @@ enum Cmd {
     Image {
         #[command(subcommand)]
         cmd: ImageCmd,
+        #[command(flatten)]
+        cfg: ConfigArg,
     },
     #[command(flatten)]
     Office(office::Cmd),
@@ -246,6 +268,15 @@ enum EvalCmd {
     },
     /// `zapper eval exec /usr/bin/curl curl example.com`
     Exec { path: String, argv: Vec<String> },
+}
+
+/// The config `zapper init` writes.
+#[derive(Clone, Copy, ValueEnum)]
+enum Template {
+    /// A full starter config, plus the office workers' default skills.
+    Example,
+    /// Only the daemon defaults `serve` needs; no profiles, policy or skills.
+    Empty,
 }
 
 #[derive(Subcommand)]
@@ -406,22 +437,42 @@ fn s(v: &Value) -> String {
 }
 
 async fn run(cli: Cli) -> Result<i32> {
-    let config_path = config_path(cli.config.as_deref());
     let c = Client::new();
     match cli.cmd {
-        Cmd::Init => {
+        Cmd::Init { template, cfg } => {
+            let config_path = config_path(cfg.config.as_deref());
             if config_path.exists() {
                 println!("{} exists; not touching it", config_path.display());
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
-                util::write_private(&config_path, office::example().as_bytes())?;
+                let contents = match template {
+                    Template::Example => office::example().to_string(),
+                    Template::Empty => Config::default().to_yaml(),
+                };
+                util::write_private(&config_path, contents.as_bytes())?;
                 println!("wrote {}", config_path.display());
             }
-            // Skills are the office's workers'.
-            office::init(config_path.parent().unwrap())?;
+            // The example also installs the office workers' skills; `empty`
+            // is config only.
+            if matches!(template, Template::Example) {
+                office::init(config_path.parent().unwrap())?;
+            }
         }
-        Cmd::Check => return check(&config_path).await,
-        Cmd::Serve => serve(config_path).await?,
+        Cmd::Check { cfg } => return check(&config_path(cfg.config.as_deref())).await,
+        Cmd::Serve { cfg } => {
+            let config_path = config_path(cfg.config.as_deref());
+            // `serve` requires a config file, whether named with --config or the
+            // default: a typo'd or missing path is an error, not a silent fall
+            // back to an empty config. `zapper init empty` writes the minimal
+            // one serve needs. (`check` reports a missing config itself.)
+            if !config_path.exists() {
+                bail!(
+                    "no config file at {}; run `zapper init` to create one",
+                    config_path.display()
+                );
+            }
+            serve(config_path).await?
+        }
         Cmd::Run {
             profile,
             keep,
@@ -815,8 +866,8 @@ async fn run(cli: Cli) -> Result<i32> {
             );
             return Ok(if ok { 0 } else { 1 });
         }
-        Cmd::Image { cmd } => {
-            let config = load_config(&config_path)?;
+        Cmd::Image { cmd, cfg } => {
+            let config = load_config(&config_path(cfg.config.as_deref()))?;
             let dir = PathBuf::from(expand_home(&config.daemon.images));
             match cmd {
                 ImageCmd::Build {

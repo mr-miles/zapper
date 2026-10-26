@@ -43,7 +43,15 @@ async fn zapper(d: &Daemon, args: &[&str]) -> Output {
 
 async fn run(config: &Path, socket: Option<&Path>, args: &[&str]) -> Output {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"));
-    cmd.arg("--config").arg(config).args(args);
+    cmd.args(args);
+    // --config is on the commands that read the config, not the client ones
+    // (they reach the daemon over its socket); it follows the subcommand.
+    if matches!(
+        args.first().copied(),
+        Some("init" | "check" | "serve" | "image")
+    ) {
+        cmd.arg("--config").arg(config);
+    }
     cmd.env_remove("ZAPPER_CONFIG")
         .env_remove("XDG_RUNTIME_DIR");
     cmd.env("HOME", config.parent().unwrap());
@@ -213,9 +221,9 @@ async fn serve_listens_on_its_socket() {
     let t = TestCore::new(CONFIG);
     let socket = t.dir.join("run").join("api.sock");
     let mut serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("serve")
         .arg("--config")
         .arg(t.startup())
-        .arg("serve")
         .env("ZAPPER_SOCKET", &socket)
         .env("HOME", &t.dir)
         .stderr(std::process::Stdio::null())
@@ -282,9 +290,9 @@ async fn a_ui_listening_on_the_network_end_to_end() {
     std::fs::write(t.startup(), startup).unwrap();
     let log = t.dir.join("serve.log");
     let mut serve = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("serve")
         .arg("--config")
         .arg(t.startup())
-        .arg("serve")
         .env("ZAPPER_SOCKET", t.dir.join("api.sock"))
         .env("HOME", &t.dir)
         .stderr(std::fs::File::create(&log).unwrap())
@@ -395,9 +403,9 @@ async fn serve_without_the_office_refuses_firms() {
     )
     .unwrap();
     let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .arg("serve")
         .arg("--config")
         .arg(t.startup())
-        .arg("serve")
         .env("ZAPPER_SOCKET", t.dir.join("api.sock"))
         .env("HOME", &t.dir)
         .output()
@@ -550,6 +558,31 @@ async fn init_writes_the_config_and_skills_once() {
         );
     }
     assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_empty_writes_only_the_default_config() {
+    let t = TestCore::new("");
+    let config = t.dir.join("fresh").join("zapper.yaml");
+    ok(run(&config, None, &["init", "empty"]).await);
+    let written = std::fs::read_to_string(&config).unwrap();
+    // The daemon defaults, and empty everything else: no profiles, no skills.
+    assert!(written.contains("daemon:"), "{written}");
+    assert!(written.contains("profiles: {}"), "{written}");
+    assert!(!written.contains("- {"), "no rules or profiles: {written}");
+    assert!(!config.parent().unwrap().join("skills").exists());
+    assert!(!config.parent().unwrap().join("agents").exists());
+    // It parses back as a valid config.
+    zapper_policy::Config::from_yaml(&written).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_needs_a_config_file() {
+    let t = TestCore::new("");
+    let missing = t.dir.join("no-such").join("zapper.yaml");
+    let text = failed(run(&missing, None, &["serve"]).await);
+    assert!(text.contains("no config file at"), "{text}");
+    assert!(text.contains("zapper init"), "{text}");
 }
 
 #[cfg(feature = "office")]
