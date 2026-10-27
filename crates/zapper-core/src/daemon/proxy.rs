@@ -10,7 +10,7 @@
 //! flag is refused rather than sent in the clear.
 
 use std::convert::Infallible;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,33 +21,39 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
+use hyper::header::{HeaderName, HeaderValue, HOST};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{
-    evaluate_net, needs_inspection, Action, AnyRule, Decision, Kind, NetEffects, NetRequest,
-    NetRule,
+    evaluate_net, needs_inspection, placeholder, render, Action, AnyRule, Decision, Kind,
+    NetEffects, NetProtocol, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, tls, Daemon, EventBody};
+use super::{httplog, services, tls, Daemon, EventBody};
 
-mod dial;
-mod inject;
-
-use dial::{dial, dial_target, target, Target};
-use inject::inject;
-// `clean_headers`/`upstream_uri` are used here and by the fuzz harness;
-// `inject_with` only by the fuzz harness.
+mod inspect;
+// Re-exported for the fuzz targets (crate::fuzz), which exercise these parsers.
 #[cfg(feature = "fuzz")]
-pub(crate) use inject::inject_with;
-pub(crate) use inject::{clean_headers, upstream_uri};
+pub(crate) use inspect::{clean_headers, inject_with, upstream_uri};
+mod relay;
 
 type Body = BoxBody<Bytes, hyper::Error>;
+
+const HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "upgrade",
+    "te",
+];
 
 fn text(status: StatusCode, msg: impl Into<String>) -> Response<Body> {
     let body = Full::new(Bytes::from(format!("zapper: {}\n", msg.into())))
@@ -89,7 +95,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Resp
     if req.method() == Method::CONNECT {
         connect(d, s, req).await
     } else {
-        plain(d, s, req).await
+        inspect::plain(d, s, req).await
     }
 }
 
@@ -173,6 +179,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
                 ports: vec![req.port],
                 methods: vec![],
                 path: None,
+                protocol: Default::default(),
                 secrets: vec![],
                 set_headers: Default::default(),
                 final_: false,
@@ -285,6 +292,70 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
             error: l.error,
         },
     );
+}
+
+/// Where a connection goes: an address on the network, or a service the
+/// daemon connects itself, by the name asked for.
+#[derive(Clone)]
+enum Target {
+    Addr(SocketAddr),
+    Service(String, services::Target),
+}
+
+/// The target for `host:port`: a service by name, anything else resolved on
+/// the host and checked against the address policy.
+async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
+    match d.services.route(s, host, port) {
+        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), t)),
+        Some(services::Route::Unserved) => Err(format!("nothing serves {host}:{port}")),
+        None => resolve(d, host, port).await.map(Target::Addr),
+    }
+}
+
+async fn dial_target(
+    d: &Daemon,
+    s: &Arc<Session>,
+    t: &Target,
+) -> std::io::Result<Box<dyn services::Io>> {
+    match t {
+        Target::Addr(a) => Ok(Box::new(dial(*a).await?)),
+        Target::Service(host, t) => services::connect(d, s, host, t)
+            .await
+            .map_err(|e| std::io::Error::other(format!("{e:#}"))),
+    }
+}
+
+/// Resolves on the host and returns the first address sessions may reach.
+async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<SocketAddr, String> {
+    let addrs: Vec<SocketAddr> = match tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(a)) => a.collect(),
+        Ok(Err(e)) => return Err(format!("resolving {host}: {e}")),
+        Err(_) => return Err(format!("resolving {host}: timed out")),
+    };
+    let policy = d.addrs.read().unwrap();
+    let mut why = "no addresses";
+    for a in &addrs {
+        match policy.check(a.ip()) {
+            Ok(()) => return Ok(*a),
+            Err(e) => why = e,
+        }
+    }
+    Err(format!("{host} resolves to a forbidden address: {why}"))
+}
+
+async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    match tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(addr)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connect timed out",
+        )),
+    }
 }
 
 async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
@@ -446,9 +517,12 @@ async fn stream<S>(
     };
     let is_tls = first.first() == Some(&0x16);
     match verdict {
+        Some(v) if v.effects.protocol != NetProtocol::Tcp => {
+            relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
+        }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
         None if is_tls => {
-            mitm(
+            inspect::mitm(
                 d,
                 s,
                 Prefixed::new(first, io),
@@ -458,7 +532,10 @@ async fn stream<S>(
             )
             .await
         }
-        None => plain_inspected(d, s, Prefixed::new(first, io), endpoint.host, endpoint.port).await,
+        None => {
+            inspect::plain_inspected(d, s, Prefixed::new(first, io), endpoint.host, endpoint.port)
+                .await
+        }
     }
 }
 
@@ -643,481 +720,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 
 /// The upstream side of an inspected connection: a reusable client speaking
 /// whichever protocol the real server negotiated by ALPN.
-enum Sender {
-    H1(hyper::client::conn::http1::SendRequest<Body>),
-    H2(hyper::client::conn::http2::SendRequest<Body>),
-}
-
-type Upstream = Arc<tokio::sync::Mutex<Option<Sender>>>;
-
-async fn mitm<S>(d: Arc<Daemon>, s: Arc<Session>, io: S, host: String, port: u16, addr: Target)
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let endpoint = NetRequest {
-        host: host.clone(),
-        port,
-        method: None,
-        path: None,
-    };
-    let config = match s.tls.server_config(&host) {
-        Ok(c) => c,
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(format!("{e:#}")),
-                },
-            );
-            return;
-        }
-    };
-    let tls = match tokio::time::timeout(
-        Duration::from_secs(15),
-        TlsAcceptor::from(config).accept(io),
-    )
-    .await
-    {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(format!("TLS from guest: {e}")),
-                },
-            );
-            return;
-        }
-        Err(_) => return,
-    };
-    if let Some(sni) = tls.get_ref().1.server_name() {
-        if !sni.eq_ignore_ascii_case(&host) {
-            let error = Some(format!("TLS server name {sni} does not match CONNECT host"));
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error,
-                },
-            );
-            return;
-        }
-    }
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
-    let upstream: Upstream = Default::default();
-    let svc = service_fn(move |req| {
-        let (d, s, host, upstream, addr) = (
-            d.clone(),
-            s.clone(),
-            host.clone(),
-            upstream.clone(),
-            addr.clone(),
-        );
-        async move { Ok::<_, Infallible>(inspected(d, s, req, host, port, addr, upstream).await) }
-    });
-    let io = TokioIo::new(tls);
-    // Serve the guest in whichever protocol it negotiated by ALPN.
-    if h2 {
-        let _ = http2().serve_connection(io, svc).await;
-    } else {
-        let _ = http1().serve_connection(io, svc).await;
-    }
-}
-
-async fn inspected(
-    d: Arc<Daemon>,
-    s: Arc<Session>,
-    req: Request<Incoming>,
-    host: String,
-    port: u16,
-    addr: Target,
-    upstream: Upstream,
-) -> Response<Body> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/".into());
-    let net = NetRequest {
-        host: host.clone(),
-        port,
-        method: Some(req.method().to_string()),
-        path: Some(path.clone()),
-    };
-    // Headers as the guest sent them: before secrets are added.
-    let rec = s.requests.lock().unwrap().start(
-        "https",
-        req.method().as_str(),
-        &host,
-        port,
-        Some(&path),
-        httplog::headers(req.headers()),
-    );
-    let v = decide(&d, &s, &net).await;
-    note_verdict(&rec, &v);
-    if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!(
-                "{} {host}{path}",
-                net.method.as_deref().unwrap_or("")
-            )),
-        );
-    }
-    let (mut parts, body) = req.into_parts();
-    clean_headers(&mut parts.headers, &host, port, 443);
-    let (used, values) = match inject(&d, &host, false, &v.effects, &mut parts.headers) {
-        Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
-    };
-    let mut guard = upstream.lock().await;
-    let ready = match guard.as_mut() {
-        Some(Sender::H1(sender)) => sender.ready().await.is_ok(),
-        Some(Sender::H2(sender)) => sender.ready().await.is_ok(),
-        None => false,
-    };
-    if !ready {
-        match open_tls(&host, &addr).await {
-            Ok(sender) => *guard = Some(sender),
-            Err(e) => {
-                log(
-                    &d,
-                    &s,
-                    NetLog {
-                        req: &net,
-                        verdict: Some(&v),
-                        inspected: true,
-                        status: None,
-                        secrets: used,
-                        error: Some(e.clone()),
-                    },
-                );
-                note_failure(&s, &rec, 502, Some(e.clone()));
-                return text(StatusCode::BAD_GATEWAY, e);
-            }
-        }
-    }
-    // The upstream's negotiated protocol decides how we shape the request:
-    // HTTP/2 needs an absolute URI (for `:authority`/`:scheme`); HTTP/1 keeps
-    // the origin-form path. The Host header set by `clean_headers` stays and
-    // agrees with the authority.
-    let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
-    parts.uri = upstream_uri(&host, port, &path, is_h2);
-    parts.version = if is_h2 {
-        hyper::Version::HTTP_2
-    } else {
-        hyper::Version::HTTP_11
-    };
-    let body = httplog::Tee::wrap(
-        body.boxed(),
-        rec.clone(),
-        s.requests.clone(),
-        httplog::Side::Request,
-    );
-    let out = Request::from_parts(parts, body);
-    // HTTP/2 multiplexes: clone the sender and release the lock so concurrent
-    // streams on this guest connection run in parallel. HTTP/1 is serial, so
-    // we hold the one sender across the send.
-    let result = if is_h2 {
-        let mut sender = match guard.as_mut() {
-            Some(Sender::H2(s)) => s.clone(),
-            _ => unreachable!(),
-        };
-        drop(guard);
-        sender.send_request(out).await
-    } else {
-        let r = match guard.as_mut() {
-            Some(Sender::H1(s)) => s.send_request(out).await,
-            _ => unreachable!(),
-        };
-        drop(guard);
-        r
-    };
-    match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.to_string()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.to_string()));
-            text(StatusCode::BAD_GATEWAY, e.to_string())
-        }
-    }
-}
-
-async fn open_tls(host: &str, addr: &Target) -> Result<Sender, String> {
-    let Target::Addr(addr) = addr else {
-        return Err(format!(
-            "{host} is a service; rules with methods, paths or secrets don't apply to it"
-        ));
-    };
-    let tcp = dial(*addr)
-        .await
-        .map_err(|e| format!("connecting to {host}: {e}"))?;
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    let tls = TlsConnector::from(tls::client_config())
-        .connect(name, tcp)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))?;
-    // Speak whatever the server negotiated by ALPN.
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
-    if h2 {
-        let (sender, conn) =
-            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
-                .await
-                .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        Ok(Sender::H2(sender))
-    } else {
-        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        Ok(Sender::H1(sender))
-    }
-}
-
-async fn plain(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
-    let uri = req.uri().clone();
-    if uri.scheme_str() != Some("http") {
-        return text(
-            StatusCode::BAD_REQUEST,
-            "expected an absolute http:// URI or CONNECT",
-        );
-    }
-    let Some((host, port)) = uri
-        .authority()
-        .and_then(|a| split_authority(a.as_str(), 80))
-    else {
-        return text(StatusCode::BAD_REQUEST, "bad request target");
-    };
-    forward_plain(d, s, req, host, port).await
-}
-
-/// Inspects plain HTTP on a captured connection to `host:port`.
-async fn plain_inspected<S>(d: Arc<Daemon>, s: Arc<Session>, io: S, host: String, port: u16)
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let svc = service_fn(move |req| {
-        let (d, s, host) = (d.clone(), s.clone(), host.clone());
-        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port).await) }
-    });
-    let _ = http1().serve_connection(TokioIo::new(io), svc).await;
-}
-
-/// Decides and forwards one plain HTTP request to `host:port`.
-async fn forward_plain(
-    d: Arc<Daemon>,
-    s: Arc<Session>,
-    req: Request<Incoming>,
-    host: String,
-    port: u16,
-) -> Response<Body> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/".into());
-    let net = NetRequest {
-        host: host.clone(),
-        port,
-        method: Some(req.method().to_string()),
-        path: Some(path.clone()),
-    };
-    let rec = s.requests.lock().unwrap().start(
-        "http",
-        req.method().as_str(),
-        &host,
-        port,
-        Some(&path),
-        httplog::headers(req.headers()),
-    );
-    let v = decide(&d, &s, &net).await;
-    note_verdict(&rec, &v);
-    if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!("{} http://{host}{path}", req.method())),
-        );
-    }
-    let addr = match target(&d, &s, &host, port).await {
-        Ok(a) => a,
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
-    };
-    let (mut parts, body) = req.into_parts();
-    clean_headers(&mut parts.headers, &host, port, 80);
-    let (used, values) = match inject(&d, &host, true, &v.effects, &mut parts.headers) {
-        Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
-    };
-    parts.uri = path.parse().unwrap_or_default();
-    let body = httplog::Tee::wrap(
-        body.boxed(),
-        rec.clone(),
-        s.requests.clone(),
-        httplog::Side::Request,
-    );
-    let out = Request::from_parts(parts, body);
-    let result = async {
-        let tcp = dial_target(&d, &s, &addr)
-            .await
-            .map_err(|e| e.to_string())?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
-                .await
-                .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        sender.send_request(out).await.map_err(|e| e.to_string())
-    }
-    .await;
-    match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.clone()));
-            text(StatusCode::BAD_GATEWAY, e)
-        }
-    }
-}
-
 #[cfg(test)]
 mod approval_tests;
 
@@ -1129,7 +731,10 @@ mod hardening_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::inspect::{clean_headers, inject};
     use super::{server_name_matches, split_authority};
+    use crate::testing::TestCore;
+    use zapper_policy::{placeholder, NetEffects};
 
     /// A passed-through ClientHello must name the checked host; one whose
     /// name can't be read is refused, a hello split across two records
@@ -1170,6 +775,70 @@ mod tests {
         assert!(e.contains("split across records"), "{e}");
     }
 
+    /// What goes upstream names the host that was checked, whatever Host
+    /// the client sent, and carries no hop-by-hop headers.
+    #[test]
+    fn the_host_header_is_the_checked_host() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("host", "evil.example".parse().unwrap());
+        headers.insert("proxy-authorization", "x".parse().unwrap());
+        headers.insert("connection", "keep-alive".parse().unwrap());
+        clean_headers(&mut headers, "api.example", 443, 443);
+        assert_eq!(headers["host"], "api.example");
+        assert!(headers.get("proxy-authorization").is_none());
+        assert!(headers.get("connection").is_none());
+        assert_eq!(headers.get_all("host").iter().count(), 1);
+        // Another port is named.
+        clean_headers(&mut headers, "api.example", 8443, 443);
+        assert_eq!(headers["host"], "api.example:8443");
+    }
+
+    /// A secret goes only to its own `hosts`, and over plain HTTP only with
+    /// `plaintext: true`, whichever rule asked for it.
+    #[test]
+    fn a_secret_goes_only_where_it_may() {
+        let t = TestCore::new(
+            "secrets:\n  s: { value: the-value, hosts: [api.example] }\n  lab: { value: lab-value, hosts: [lab.example], plaintext: true }\n",
+        );
+        let d = t.core.daemon();
+        let add = |name: &str, host: &str, plaintext: bool| {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", placeholder(name)).parse().unwrap(),
+            );
+            let effects = NetEffects {
+                secrets: vec![name.to_string()],
+                set_headers: vec![],
+                ..Default::default()
+            };
+            inject(d, host, plaintext, &effects, &mut headers).map(|i| (i.names, headers))
+        };
+        let (names, headers) = add("s", "api.example", false).unwrap();
+        assert_eq!(names, ["s"]);
+        assert_eq!(headers["authorization"], "Bearer the-value");
+        // A rule matching another host asks for it in vain.
+        let e = add("s", "evil.example", false).unwrap_err();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        // Plain HTTP, to its own host: refused without plaintext.
+        let e = add("s", "api.example", true).unwrap_err();
+        assert!(e.contains("plain HTTP"), "{e}");
+        let (_, headers) = add("lab", "lab.example", true).unwrap();
+        assert_eq!(headers["authorization"], "Bearer lab-value");
+        // set_headers is held to the same.
+        let mut headers = hyper::HeaderMap::new();
+        let effects = NetEffects {
+            secrets: vec![],
+            set_headers: vec![("x-key".into(), "{{secret:s}}".into())],
+            ..Default::default()
+        };
+        let e = inject(d, "evil.example", false, &effects, &mut headers)
+            .err()
+            .unwrap();
+        assert!(e.contains("may not be sent to evil.example"), "{e}");
+        assert!(headers.get("x-key").is_none());
+    }
+
     #[test]
     fn authorities() {
         assert_eq!(
@@ -1187,6 +856,36 @@ mod tests {
         assert_eq!(
             split_authority("example.com.:443", 443),
             Some(("example.com".into(), 443))
+        );
+    }
+
+    /// Upstream URIs: HTTP/1 keeps the origin-form path; HTTP/2 is absolute,
+    /// and the authority is always the checked host — a path cannot smuggle
+    /// one in, because the scheme and authority are prefixed before it.
+    #[test]
+    fn upstream_uri_shape() {
+        use super::inspect::upstream_uri;
+        assert_eq!(
+            upstream_uri("api.example", 443, "/a/b?q=1", false).to_string(),
+            "/a/b?q=1"
+        );
+        assert_eq!(
+            upstream_uri("api.example", 443, "/a/b?q=1", true).to_string(),
+            "https://api.example/a/b?q=1"
+        );
+        // A non-default port is named in the authority.
+        assert_eq!(
+            upstream_uri("api.example", 8443, "/x", true).to_string(),
+            "https://api.example:8443/x"
+        );
+        // Even a path that looks like it carries an authority stays the path.
+        let u = upstream_uri("api.example", 443, "//evil.example/x", true);
+        assert_eq!(u.authority().unwrap().host(), "api.example");
+        assert_eq!(u.path(), "//evil.example/x");
+        // An IPv6 literal is bracketed in the authority.
+        assert_eq!(
+            upstream_uri("::1", 8443, "/x", true).to_string(),
+            "https://[::1]:8443/x"
         );
     }
 }

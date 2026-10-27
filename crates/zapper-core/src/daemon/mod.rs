@@ -9,6 +9,7 @@ pub(crate) mod addr;
 pub(crate) mod api_error;
 pub(crate) mod approvals;
 pub(crate) mod clients;
+pub(crate) mod dbwire;
 pub(crate) mod deciders;
 pub(crate) mod dns;
 pub mod driver;

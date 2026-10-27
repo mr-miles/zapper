@@ -430,6 +430,7 @@ pub fn network_follows_grant(
         ports: vec![port],
         methods: vec![],
         path: None,
+        protocol: Default::default(),
         secrets: vec![],
         set_headers: Default::default(),
         final_: false,
