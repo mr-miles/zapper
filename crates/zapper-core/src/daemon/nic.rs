@@ -13,7 +13,7 @@ use super::session::Session;
 use super::{dns, proxy, Daemon, EventBody};
 
 pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
-    let limit = s.conns.clone();
+    let limit = s.runtime.conns();
     super::accept_loop(listener, limit, move |stream| {
         let (d, s) = (d.clone(), s.clone());
         async move {

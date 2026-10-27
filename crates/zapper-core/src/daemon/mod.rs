@@ -119,37 +119,49 @@ fn find_agent(configured: &str) -> Result<PathBuf> {
     })
 }
 
+/// Loads the startup config (empty when the file is absent), warning if the
+/// file is world-readable and might hold inline secrets.
+fn load_startup_config(path: &Path) -> Result<Config> {
+    let config = if path.exists() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Config::from_yaml(&text).with_context(|| format!("loading {}", path.display()))?
+    } else {
+        tracing::warn!(
+            "{} does not exist; starting with an empty config",
+            path.display()
+        );
+        Config::default()
+    };
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().mode() & 0o077 != 0 && config.has_inline_secrets() {
+            tracing::warn!(
+                "{} is readable by others; it may hold secrets (chmod 600)",
+                path.display()
+            );
+        }
+    }
+    Ok(config)
+}
+
+/// Resolves and prepares the state directory: creates it (0700) with its
+/// `sessions` subdirectory, and clears the VMM directories a previous daemon
+/// left behind (audit logs and recordings stay).
+fn prepare_state_dir(state: &str) -> Result<PathBuf> {
+    let state = PathBuf::from(expand_home(state));
+    std::fs::create_dir_all(state.join("sessions"))?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
+        let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
+    }
+    Ok(state)
+}
+
 impl Daemon {
     pub fn new(startup_path: PathBuf) -> Result<Arc<Self>> {
-        let config = if startup_path.exists() {
-            let text = std::fs::read_to_string(&startup_path)
-                .with_context(|| format!("reading {}", startup_path.display()))?;
-            Config::from_yaml(&text)
-                .with_context(|| format!("loading {}", startup_path.display()))?
-        } else {
-            tracing::warn!(
-                "{} does not exist; starting with an empty config",
-                startup_path.display()
-            );
-            Config::default()
-        };
-        if let Ok(meta) = std::fs::metadata(&startup_path) {
-            if meta.permissions().mode() & 0o077 != 0 && config.has_inline_secrets() {
-                tracing::warn!(
-                    "{} is readable by others; it may hold secrets (chmod 600)",
-                    startup_path.display()
-                );
-            }
-        }
+        let config = load_startup_config(&startup_path)?;
         let d = &config.daemon;
-        let state = PathBuf::from(expand_home(&d.state));
-        std::fs::create_dir_all(state.join("sessions"))?;
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-        // VMM directories (disks, sockets) of sessions a previous daemon left
-        // behind; audit logs and recordings stay.
-        for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-            let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
-        }
+        let state = prepare_state_dir(&d.state)?;
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;
         let initrd = state.join("initrd.cpio");
@@ -202,21 +214,7 @@ impl Daemon {
         let out = f(&mut next)?;
         next.normalize();
         next.validate()?;
-        if !next.daemon.driver {
-            let driven: Vec<String> = self
-                .sessions
-                .all()
-                .into_iter()
-                .filter(|s| s.driver.is_some() && s.is_running())
-                .map(|s| s.id.clone())
-                .collect();
-            if !driven.is_empty() {
-                anyhow::bail!(
-                    "daemon.driver: driven sessions are running ({}); stop them first",
-                    driven.join(", ")
-                );
-            }
-        }
+        self.ensure_driver_toggle_ok(&next)?;
         self.clients.check(&next)?;
         // Derived state: rebuild the address policy only when this change
         // touched the private networks (compared against the clone basis, not
@@ -232,6 +230,27 @@ impl Daemon {
             },
         );
         Ok(out)
+    }
+
+    /// Turning the driver off is refused while driven sessions are running.
+    fn ensure_driver_toggle_ok(&self, next: &Config) -> Result<()> {
+        if next.daemon.driver {
+            return Ok(());
+        }
+        let driven: Vec<String> = self
+            .sessions
+            .all()
+            .into_iter()
+            .filter(|s| s.driver.is_some() && s.is_running())
+            .map(|s| s.id.clone())
+            .collect();
+        if !driven.is_empty() {
+            bail!(
+                "daemon.driver: driven sessions are running ({}); stop them first",
+                driven.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// The running config with inline secret values hidden.

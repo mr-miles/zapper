@@ -126,7 +126,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     }
     {
         let (d, s) = (daemon.clone(), session.clone());
-        let limit = session.conns.clone();
+        let limit = session.runtime.conns();
         tokio::spawn(crate::daemon::accept_loop(
             proxy_listener,
             limit,

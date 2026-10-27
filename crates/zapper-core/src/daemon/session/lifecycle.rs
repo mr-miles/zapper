@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::sync::Semaphore;
 use zapper_policy::proto::HostMsg;
 
 use super::{Counters, GuestRuntime, NewSession, Rules, Session, SessionDir, Status};
@@ -62,7 +61,6 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         terminals: Mutex::new(Default::default()),
         requests: Default::default(),
         audit: Mutex::new(Some(audit)),
-        conns: Arc::new(Semaphore::new(256)),
         labels: new.labels.clone(),
         driver: driven.then(driver::Driver::new),
         daemon: Arc::downgrade(daemon),

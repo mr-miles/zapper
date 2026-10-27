@@ -279,6 +279,8 @@ pub(crate) struct GuestRuntime {
     next_shell: AtomicU64,
     /// Bounds concurrent exec decisions.
     exec_checks: Arc<Semaphore>,
+    /// Bounds concurrent proxy connections from the guest.
+    conns: Arc<Semaphore>,
 }
 
 impl GuestRuntime {
@@ -289,6 +291,7 @@ impl GuestRuntime {
             guest: Mutex::new(None),
             next_shell: AtomicU64::new(1),
             exec_checks: Arc::new(Semaphore::new(64)),
+            conns: Arc::new(Semaphore::new(256)),
         }
     }
 
@@ -329,6 +332,11 @@ impl GuestRuntime {
     pub fn exec_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.exec_checks.clone().try_acquire_owned().ok()
     }
+
+    /// The semaphore bounding concurrent proxy connections, for `accept_loop`.
+    pub fn conns(&self) -> Arc<Semaphore> {
+        self.conns.clone()
+    }
 }
 
 pub struct Session {
@@ -354,8 +362,6 @@ pub struct Session {
     /// The session's terminals, for watching them from the UI.
     pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
     audit: Mutex<Option<super::record::Writer>>,
-    /// Bounds concurrent proxy connections from the guest.
-    pub(crate) conns: Arc<Semaphore>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
