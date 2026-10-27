@@ -661,7 +661,7 @@ where
         method: None,
         path: None,
     };
-    let config = match s.ca.server_config(&host) {
+    let config = match s.server_config(&host) {
         Ok(c) => c,
         Err(e) => {
             log(

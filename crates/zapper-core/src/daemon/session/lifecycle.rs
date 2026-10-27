@@ -81,6 +81,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         policy: RwLock::new(Policy::default()),
         status: watch::channel(Status::Starting).0,
         ca: tls::SessionCa::new(&id)?,
+        tls_configs: Mutex::new(Default::default()),
         dir: dir.clone(),
         resolved,
         counters: Counters::default(),

@@ -4,8 +4,7 @@
 //! and never written to disk; the guest trusts only that CA. Leaf
 //! certificates are minted per host on first use.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
@@ -20,7 +19,13 @@ pub struct SessionCa {
     cert: rcgen::Certificate,
     key: KeyPair,
     pub pem: String,
-    leaves: Mutex<HashMap<String, Arc<ServerConfig>>>,
+}
+
+/// A leaf certificate minted by a [`SessionCa`]: the chain (leaf then CA) and
+/// the leaf's private key, ready for a rustls server config.
+pub struct Leaf {
+    pub chain: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
 }
 
 impl SessionCa {
@@ -40,50 +45,47 @@ impl SessionCa {
         let key = KeyPair::generate()?;
         let cert = params.self_signed(&key)?;
         let pem = cert.pem();
-        Ok(Self {
-            cert,
-            key,
-            pem,
-            leaves: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { cert, key, pem })
     }
 
-    /// Server config presenting a certificate for `host`.
-    pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
-        let host = host.to_ascii_lowercase();
-        if let Some(c) = self.leaves.lock().unwrap().get(&host) {
-            return Ok(c.clone());
-        }
+    /// Mints a leaf certificate for `host` (given lowercased), signed by this
+    /// CA. Assembling it into a server config is the caller's concern
+    /// ([`server_config`]).
+    pub fn leaf(&self, host: &str) -> Result<Leaf> {
         let mut params = CertificateParams::default();
         params
             .distinguished_name
-            .push(DnType::CommonName, host.clone());
+            .push(DnType::CommonName, host.to_string());
         params.subject_alt_names = vec![match host.parse() {
             Ok(ip) => SanType::IpAddress(ip),
-            Err(_) => SanType::DnsName(host.clone().try_into().context("host name")?),
+            Err(_) => SanType::DnsName(host.to_string().try_into().context("host name")?),
         }];
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::hours(1);
         params.not_after = now + time::Duration::days(7);
         let key = KeyPair::generate()?;
         let cert = params.signed_by(&key, &self.cert, &self.key)?;
-        let chain = vec![
-            CertificateDer::from(cert.der().to_vec()),
-            CertificateDer::from(self.cert.der().to_vec()),
-        ];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-        let mut config = ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(chain, key)?;
-        // Offer HTTP/2 and HTTP/1.1; the guest's client picks. h2 lets us
-        // inspect gRPC and other HTTP/2 traffic rather than forcing a
-        // downgrade.
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let config = Arc::new(config);
-        self.leaves.lock().unwrap().insert(host, config.clone());
-        Ok(config)
+        Ok(Leaf {
+            chain: vec![
+                CertificateDer::from(cert.der().to_vec()),
+                CertificateDer::from(self.cert.der().to_vec()),
+            ],
+            key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        })
     }
+}
+
+/// Server config for an inspected connection, presenting `leaf`. The mirror
+/// of [`client_config`] for the guest-facing side.
+pub(crate) fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
+    let mut config = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(leaf.chain, leaf.key)?;
+    // Offer HTTP/2 and HTTP/1.1; the guest's client picks. h2 lets us inspect
+    // gRPC and other HTTP/2 traffic rather than forcing a downgrade.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
 }
 
 /// Client config for upstream connections, verifying against the Mozilla
@@ -188,8 +190,8 @@ mod tests {
     fn mints_leaf() {
         let ca = SessionCa::new("t").unwrap();
         assert!(ca.pem.starts_with("-----BEGIN CERTIFICATE-----"));
-        ca.server_config("api.example.com").unwrap();
-        ca.server_config("10.0.0.1").unwrap();
+        server_config(ca.leaf("api.example.com").unwrap()).unwrap();
+        server_config(ca.leaf("10.0.0.1").unwrap()).unwrap();
     }
 
     /// Both the guest-facing and upstream configs offer HTTP/2 and HTTP/1.1,
@@ -197,7 +199,7 @@ mod tests {
     #[test]
     fn alpn_offers_h2_then_http11() {
         let ca = SessionCa::new("t").unwrap();
-        let sc = ca.server_config("api.example").unwrap();
+        let sc = server_config(ca.leaf("api.example").unwrap()).unwrap();
         assert_eq!(sc.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
         assert_eq!(
             client_config().alpn_protocols,
