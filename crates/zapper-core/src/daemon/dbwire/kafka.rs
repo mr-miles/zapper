@@ -78,15 +78,6 @@ fn get_bytes(b: &[u8], off: usize) -> Option<Vec<u8>> {
     b.get(off + 4..off + 4 + len as usize).map(<[u8]>::to_vec)
 }
 
-/// The SASL/PLAIN initial response: `authzid \0 authcid \0 passwd`.
-fn plain_token(user: &str, password: &str) -> Vec<u8> {
-    let mut t = vec![0];
-    t.extend_from_slice(user.as_bytes());
-    t.push(0);
-    t.extend_from_slice(password.as_bytes());
-    t
-}
-
 /// The SASL/OAUTHBEARER initial client response (RFC 7628):
 /// `n,, ^A auth=Bearer <token> ^A ^A`.
 fn oauthbearer_token(token: &str) -> Vec<u8> {
@@ -159,7 +150,7 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
     match mechanism {
         "PLAIN" => {
             server
-                .write_all(&send_auth(1, plain_token(user, password)))
+                .write_all(&send_auth(1, super::sasl_plain_token(user, password)))
                 .await
                 .map_err(|e| format!("sending SASL PLAIN: {e}"))?;
             auth_bytes(&read_response(server, &mut buf).await?)?;
@@ -203,7 +194,7 @@ mod tests {
 
     #[test]
     fn tokens_have_the_sasl_shapes() {
-        assert_eq!(plain_token("u", "p"), b"\0u\0p");
+        assert_eq!(super::super::sasl_plain_token("u", "p"), b"\0u\0p");
         assert_eq!(oauthbearer_token("tok"), b"n,,\x01auth=Bearer tok\x01\x01");
     }
 

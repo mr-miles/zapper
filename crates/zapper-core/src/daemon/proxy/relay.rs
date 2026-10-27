@@ -18,6 +18,24 @@ use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
 
+/// Terminates the guest's TLS with the session CA for `host`, over `io` (which
+/// replays any bytes already read from the guest), returning the plaintext
+/// stream. Used by each protocol's in-band STARTTLS.
+async fn accept_guest_tls<IO>(
+    s: &Session,
+    host: &str,
+    io: IO,
+) -> Result<tokio_rustls::server::TlsStream<IO>, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
+    TlsAcceptor::from(config)
+        .accept(io)
+        .await
+        .map_err(|e| format!("TLS from guest: {e}"))
+}
+
 /// A `dbauth` credential resolved from the config: the user the proxy
 /// authenticates as, a pinned database (else the guest's), the host-held
 /// password, and whether a non-TLS server leg is permitted.
@@ -241,11 +259,7 @@ where
                     .await
                     .map_err(|e| format!("accepting the guest's SSLRequest: {e}"))?;
                 buf.drain(..8);
-                let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-                let tls = TlsAcceptor::from(config)
-                    .accept(Prefixed::new(buf, guest))
-                    .await
-                    .map_err(|e| format!("TLS from guest: {e}"))?;
+                let tls = accept_guest_tls(s, host, Prefixed::new(buf, guest)).await?;
                 let mut tls: Box<dyn services::Io> = Box::new(tls);
                 let startup = pgwire::read_startup(&mut tls, Vec::new()).await?;
                 return Ok((tls, true, startup));
@@ -384,11 +398,8 @@ where
     // A TLS client first sends a 32-byte SSLRequest packet; terminate TLS with
     // the session CA, then read its real handshake response over TLS.
     let (mut guest, guest_tls, resp_seq) = if mysql::is_ssl_request(&gpkt) {
-        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-        let tls = TlsAcceptor::from(config)
-            .accept(Prefixed::new(std::mem::take(&mut gbuf), guest))
-            .await
-            .map_err(|e| format!("TLS from guest: {e}"))?;
+        let tls =
+            accept_guest_tls(s, host, Prefixed::new(std::mem::take(&mut gbuf), guest)).await?;
         let mut tls: Box<dyn services::Io> = Box::new(tls);
         let (seq, _real) = mysql::read_packet(&mut tls, &mut Vec::new()).await?;
         (tls, true, seq)
@@ -489,11 +500,7 @@ where
     let mut guest: Box<dyn services::Io> = if guest_wants_tls {
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let wrapper = tds::TdsTls::new(guest, handshaking.clone());
-        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-        let tls = TlsAcceptor::from(config)
-            .accept(wrapper)
-            .await
-            .map_err(|e| format!("TLS from guest: {e}"))?;
+        let tls = accept_guest_tls(s, host, wrapper).await?;
         handshaking.store(false, Ordering::Relaxed);
         Box::new(tls)
     } else {
@@ -632,11 +639,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     if first.first() == Some(&0x16) {
-        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-        let tls = TlsAcceptor::from(config)
-            .accept(Prefixed::new(first, io))
-            .await
-            .map_err(|e| format!("TLS from guest: {e}"))?;
+        let tls = accept_guest_tls(s, host, Prefixed::new(first, io)).await?;
         Ok((Box::new(tls), true))
     } else {
         Ok((Box::new(Prefixed::new(first, io)), false))

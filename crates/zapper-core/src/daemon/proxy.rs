@@ -81,9 +81,11 @@ fn http2() -> hyper::server::conn::http2::Builder<TokioExecutor> {
 }
 
 pub async fn serve(daemon: Arc<Daemon>, session: Arc<Session>, stream: UnixStream) {
+    // Pooled upstreams for the plain-HTTP requests on this guest connection.
+    let pool = inspect::PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s) = (daemon.clone(), session.clone());
-        async move { Ok::<_, Infallible>(handle(d, s, req).await) }
+        let (d, s, pool) = (daemon.clone(), session.clone(), pool.clone());
+        async move { Ok::<_, Infallible>(handle(d, s, req, pool).await) }
     });
     let _ = http1()
         .serve_connection(TokioIo::new(stream), svc)
@@ -91,11 +93,16 @@ pub async fn serve(daemon: Arc<Daemon>, session: Arc<Session>, stream: UnixStrea
         .await;
 }
 
-async fn handle(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
+async fn handle(
+    d: Arc<Daemon>,
+    s: Arc<Session>,
+    req: Request<Incoming>,
+    pool: inspect::PlainPool,
+) -> Response<Body> {
     if req.method() == Method::CONNECT {
         connect(d, s, req).await
     } else {
-        inspect::plain(d, s, req).await
+        inspect::plain(d, s, req, pool).await
     }
 }
 
@@ -159,34 +166,37 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
             true
         }
         Action::Deny => false,
-        // A decider's `ask` doesn't hold the request: it may take minutes.
-        Action::Ask if decider.is_some() => {
-            match decider.unwrap().ask(s, req) {
-                Ok(r) => pending = Some(r),
-                Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
+        Action::Ask => match &decider {
+            // A decider's `ask` doesn't hold the request: it may take minutes.
+            Some(dc) => {
+                match dc.ask(s, req) {
+                    Ok(r) => pending = Some(r),
+                    Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
+                }
+                false
             }
-            false
-        }
-        Action::Ask => {
-            let subject = match (&req.method, &req.path) {
-                (Some(m), Some(p)) => format!("{m} https://{}:{}{p}", req.host, req.port),
-                _ => format!("connect {}:{}", req.host, req.port),
-            };
-            let suggestion = AnyRule::Net(NetRule {
-                id: None,
-                action: Action::Allow,
-                host: req.host.clone(),
-                ports: vec![req.port],
-                methods: vec![],
-                path: None,
-                protocol: Default::default(),
-                secrets: vec![],
-                set_headers: Default::default(),
-                final_: false,
-                comment: Some("approved".into()),
-            });
-            d.ask(s, Kind::Net, subject, suggestion).await
-        }
+            // No decider: the operator answers; the suggested rule remembers a yes.
+            None => {
+                let subject = match (&req.method, &req.path) {
+                    (Some(m), Some(p)) => format!("{m} https://{}:{}{p}", req.host, req.port),
+                    _ => format!("connect {}:{}", req.host, req.port),
+                };
+                let suggestion = AnyRule::Net(NetRule {
+                    id: None,
+                    action: Action::Allow,
+                    host: req.host.clone(),
+                    ports: vec![req.port],
+                    methods: vec![],
+                    path: None,
+                    protocol: Default::default(),
+                    secrets: vec![],
+                    set_headers: Default::default(),
+                    final_: false,
+                    comment: Some("approved".into()),
+                });
+                d.ask(s, Kind::Net, subject, suggestion).await
+            }
+        },
     };
     Verdict {
         decision,
@@ -358,36 +368,40 @@ async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
     }
 }
 
-async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
-    let Some((host, port)) = req
-        .uri()
-        .authority()
-        .and_then(|a| split_authority(a.as_str(), 443))
-    else {
-        return text(StatusCode::BAD_REQUEST, "bad CONNECT target");
-    };
+/// Decides a passthrough connection to `host:port` unless it will be inspected
+/// per request, logging and recording a refusal. `scheme` labels the request
+/// log (`connect`/`tcp`). `Ok` is the endpoint, its resolved target, and the
+/// verdict (`None` when the connection will be inspected); `Err` is the
+/// already-logged denial or target error, for the caller to answer with.
+async fn prepare(
+    d: &Daemon,
+    s: &Session,
+    host: String,
+    port: u16,
+    scheme: &'static str,
+) -> Result<(NetRequest, Target, Option<Verdict>), String> {
     let endpoint = NetRequest {
-        host: host.clone(),
+        host,
         port,
         method: None,
         path: None,
     };
+    // Inspected tunnels are decided per request; others here, once.
     let inspect = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&Session::layers_of(&layers), &host, port)
+        needs_inspection(&Session::layers_of(&layers), &endpoint.host, port)
     };
-    // Inspected tunnels are decided per request; others here, once.
     let verdict = if inspect {
         None
     } else {
-        Some(decide(&d, &s, &endpoint).await)
+        Some(decide(d, s, &endpoint).await)
     };
     if let Some(v) = &verdict {
         if !v.allowed {
             log(
-                &d,
-                &s,
+                d,
+                s,
                 NetLog {
                     req: &endpoint,
                     verdict: Some(v),
@@ -397,16 +411,16 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
                     error: None,
                 },
             );
-            note_refused(&s, "connect", &endpoint, v);
-            return text(StatusCode::FORBIDDEN, v.denial(&format!("{host}:{port}")));
+            note_refused(s, scheme, &endpoint, v);
+            return Err(v.denial(&format!("{}:{}", endpoint.host, port)));
         }
     }
-    let addr = match target(&d, &s, &host, port).await {
+    let addr = match target(d, s, &endpoint.host, port).await {
         Ok(a) => a,
         Err(e) => {
             log(
-                &d,
-                &s,
+                d,
+                s,
                 NetLog {
                     req: &endpoint,
                     verdict: verdict.as_ref(),
@@ -416,8 +430,23 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
                     error: Some(e.clone()),
                 },
             );
-            return text(StatusCode::FORBIDDEN, e);
+            return Err(e);
         }
+    };
+    Ok((endpoint, addr, verdict))
+}
+
+async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
+    let Some((host, port)) = req
+        .uri()
+        .authority()
+        .and_then(|a| split_authority(a.as_str(), 443))
+    else {
+        return text(StatusCode::BAD_REQUEST, "bad CONNECT target");
+    };
+    let (endpoint, addr, verdict) = match prepare(&d, &s, host, port, "connect").await {
+        Ok(ready) => ready,
+        Err(denial) => return text(StatusCode::FORBIDDEN, denial),
     };
     tokio::spawn(async move {
         let Ok(up) = hyper::upgrade::on(req).await else {
@@ -445,57 +474,9 @@ pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: Ip
         .name(ip)
         .map(str::to_string)
         .unwrap_or_else(|| ip.to_string());
-    let endpoint = NetRequest {
-        host: host.clone(),
-        port,
-        method: None,
-        path: None,
-    };
-    let inspect = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        needs_inspection(&Session::layers_of(&layers), &host, port)
-    };
-    let verdict = if inspect {
-        None
-    } else {
-        Some(decide(&d, &s, &endpoint).await)
-    };
-    if let Some(v) = &verdict {
-        if !v.allowed {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: Some(v),
-                    inspected: false,
-                    status: None,
-                    secrets: vec![],
-                    error: None,
-                },
-            );
-            note_refused(&s, "tcp", &endpoint, v);
-            return;
-        }
-    }
-    let addr = match target(&d, &s, &host, port).await {
-        Ok(a) => a,
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: verdict.as_ref(),
-                    inspected: inspect,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e),
-                },
-            );
-            return;
-        }
+    let (endpoint, addr, verdict) = match prepare(&d, &s, host, port, "tcp").await {
+        Ok(ready) => ready,
+        Err(_) => return,
     };
     stream(d, s, io, endpoint, addr, verdict).await;
 }
@@ -609,7 +590,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         vec![],
     );
     note_verdict(&rec, &v);
-    if let Err(error) = server_name_matches(&first, &endpoint.host) {
+    let logp = |error: Option<String>| {
         log(
             d,
             s,
@@ -619,9 +600,12 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
                 inspected: false,
                 status: None,
                 secrets: vec![],
-                error: Some(error.clone()),
+                error,
             },
         );
+    };
+    if let Err(error) = server_name_matches(&first, &endpoint.host) {
+        logp(Some(error.clone()));
         rec.lock().unwrap().action = Action::Deny;
         note_failure(s, &rec, 403, Some(error));
         return;
@@ -629,34 +613,12 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
         Err(e) => {
-            log(
-                d,
-                s,
-                NetLog {
-                    req: endpoint,
-                    verdict: Some(&v),
-                    inspected: false,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.to_string()),
-                },
-            );
+            logp(Some(e.to_string()));
             note_failure(s, &rec, 502, Some(e.to_string()));
             return;
         }
     };
-    log(
-        d,
-        s,
-        NetLog {
-            req: endpoint,
-            verdict: Some(&v),
-            inspected: false,
-            status: None,
-            secrets: vec![],
-            error: None,
-        },
-    );
+    logp(None);
     httplog::mark_ttfb(&rec);
     if upstream.write_all(&first).await.is_ok() {
         if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut io, &mut upstream).await {

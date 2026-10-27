@@ -24,6 +24,11 @@ const MAX_PACKET: u32 = 16 * 1024 * 1024;
 const CHARSET_UTF8: u8 = 0x21;
 
 /// Frames a payload: 3-byte little-endian length, 1-byte sequence, payload.
+/// A 3-byte little-endian length, as MySQL packet headers carry it.
+fn u24_le(b: &[u8]) -> usize {
+    (b[0] as usize) | (b[1] as usize) << 8 | (b[2] as usize) << 16
+}
+
 pub fn packet(seq: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = (payload.len() as u32).to_le_bytes()[..3].to_vec();
     out.push(seq);
@@ -41,7 +46,7 @@ pub async fn read_packet<S: AsyncRead + Unpin>(
         if b.len() < 4 {
             return Ok(None);
         }
-        let len = (b[0] as usize) | (b[1] as usize) << 8 | (b[2] as usize) << 16;
+        let len = u24_le(b);
         if len > MAX_PACKET as usize {
             return Err("MySQL packet too large".into());
         }

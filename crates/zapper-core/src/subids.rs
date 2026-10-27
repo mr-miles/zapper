@@ -12,7 +12,7 @@
 //! keeps the daemon user's uid, as before.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
@@ -26,7 +26,7 @@ pub struct Range {
 
 /// The first range for `user` (by name or numeric id) in a subuid or
 /// subgid file's text: `name:start:count` lines.
-pub fn range_in(text: &str, user: &str, id: u32) -> Option<Range> {
+fn range_in(text: &str, user: &str, id: u32) -> Option<Range> {
     text.lines().find_map(|l| {
         let mut f = l.trim().split(':');
         let (who, start, count) = (f.next()?, f.next()?, f.next()?);
@@ -56,10 +56,7 @@ pub struct SubIds {
 const MAX: u32 = 4096;
 
 fn helper(name: &str) -> Option<PathBuf> {
-    ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-        .iter()
-        .map(|d| Path::new(d).join(name))
-        .find(|p| p.is_file())
+    crate::util::find_exe(name, &["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
 }
 
 fn user_name(uid: u32) -> Option<String> {
@@ -71,7 +68,7 @@ fn user_name(uid: u32) -> Option<String> {
 }
 
 /// The daemon user's subordinate ids, or why there are none.
-pub fn detect() -> Result<SubIds, String> {
+fn detect() -> Result<SubIds, String> {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let name = user_name(uid).unwrap_or_else(|| uid.to_string());
     let range = |file: &str, id: u32| {
@@ -133,7 +130,7 @@ pub fn release(session: &str) {
 
 /// The `newuidmap` and `newgidmap` arguments for a VMM at `pid` with
 /// offset `n`: 0 the daemon user, 1 its own subordinate id.
-pub fn map_args(ids: &SubIds, pid: u32, n: u32) -> [Vec<String>; 2] {
+fn map_args(ids: &SubIds, pid: u32, n: u32) -> [Vec<String>; 2] {
     let pid = pid.to_string();
     [
         vec![
@@ -163,6 +160,7 @@ pub async fn map(ids: &SubIds, pid: u32, n: u32) -> Result<()> {
     let own = std::fs::read_link("/proc/self/ns/user")?;
     let theirs = format!("/proc/{pid}/ns/user");
     let mut entered = false;
+    // Wait up to ~5s (1000 × 5ms) for the VMM to enter its user namespace.
     for _ in 0..1000 {
         match std::fs::read_link(&theirs) {
             Ok(ns) if ns != own => {

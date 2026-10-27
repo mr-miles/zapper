@@ -6,6 +6,8 @@
 //! helpers directly; `stream()` and `handle()` enter it via mitm/plain/
 //! plain_inspected.
 
+use std::collections::HashMap;
+
 use super::*;
 
 enum Sender {
@@ -14,6 +16,152 @@ enum Sender {
 }
 
 type Upstream = Arc<tokio::sync::Mutex<Option<Sender>>>;
+
+type SendRequestH1 = hyper::client::conn::http1::SendRequest<Body>;
+
+/// Pooled plain-HTTP/1 upstreams for one guest connection, keyed by origin, so
+/// the connection's requests reuse upstream connections instead of opening one
+/// per request (which a connection-rate firewall may ban). The TLS path pools
+/// via `Upstream`; this is the `http://` and captured-plain-HTTP path, keyed by
+/// origin because one proxy connection can carry several.
+#[derive(Clone, Default)]
+pub(super) struct PlainPool(Arc<tokio::sync::Mutex<HashMap<(String, u16), SendRequestH1>>>);
+
+impl PlainPool {
+    /// Sends `out` to `target` for origin `host:port`, reusing a live pooled
+    /// HTTP/1 connection when there is one, else dialing a fresh one. A service
+    /// (in-process duplex, not a real upstream to rate-limit) is never pooled.
+    async fn send(
+        &self,
+        d: &Daemon,
+        s: &Arc<Session>,
+        host: &str,
+        port: u16,
+        target: &Target,
+        out: Request<Body>,
+    ) -> Result<Response<Incoming>, String> {
+        if !matches!(target, Target::Addr(_)) {
+            return dial_plain(d, s, target)
+                .await?
+                .send_request(out)
+                .await
+                .map_err(|e| e.to_string());
+        }
+        let key = (host.to_string(), port);
+        let mut pool = self.0.lock().await;
+        let ready = match pool.get_mut(&key) {
+            Some(sender) => sender.ready().await.is_ok(),
+            None => false,
+        };
+        if !ready {
+            pool.insert(key.clone(), dial_plain(d, s, target).await?);
+        }
+        // The guest connection is served serially, so at most one request per
+        // origin is in flight; holding the lock across the send keeps reuse
+        // correct (the next request waits for the sender to be ready again
+        // rather than opening another connection).
+        let r = pool.get_mut(&key).unwrap().send_request(out).await;
+        drop(pool);
+        r.map_err(|e| e.to_string())
+    }
+}
+
+/// Dials a fresh plain-HTTP/1 upstream to `target`, spawning its connection.
+async fn dial_plain(
+    d: &Daemon,
+    s: &Arc<Session>,
+    target: &Target,
+) -> Result<SendRequestH1, String> {
+    let tcp = dial_target(d, s, target).await.map_err(|e| e.to_string())?;
+    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(conn);
+    Ok(sender)
+}
+
+/// Logs a policy refusal of an inspected request, finishes its record, and
+/// returns the 403 for the guest.
+fn deny(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    denial: String,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: None,
+            secrets: vec![],
+            error: None,
+        },
+    );
+    note_failure(s, rec, 403, None);
+    text(StatusCode::FORBIDDEN, denial)
+}
+
+/// Logs an inspected request that failed to forward, finishes its record, and
+/// returns the error response. `status` is 403 (bad target or secret) or 502
+/// (upstream); `secrets` is whatever had already been injected.
+#[allow(clippy::too_many_arguments)]
+fn fail(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    status: StatusCode,
+    secrets: Vec<String>,
+    error: String,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: None,
+            secrets,
+            error: Some(error.clone()),
+        },
+    );
+    note_failure(s, rec, status.as_u16(), Some(error.clone()));
+    text(status, error)
+}
+
+/// Logs an inspected request's upstream response and returns it to the guest.
+#[allow(clippy::too_many_arguments)]
+fn responded(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    resp: Response<Incoming>,
+    used: Vec<String>,
+    values: Vec<String>,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: Some(resp.status().as_u16()),
+            secrets: used.clone(),
+            error: None,
+        },
+    );
+    note_response(s, rec, resp, used, values)
+}
 
 pub(super) async fn mitm<S>(
     d: Arc<Daemon>,
@@ -290,47 +438,17 @@ async fn inspected(
     let v = decide(&d, &s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!(
-                "{} {host}{path}",
-                net.method.as_deref().unwrap_or("")
-            )),
-        );
+        let denial = v.denial(&format!(
+            "{} {host}{path}",
+            net.method.as_deref().unwrap_or("")
+        ));
+        return deny(&d, &s, &rec, &net, &v, denial);
     }
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, 443);
     let (used, values) = match inject(&d, &host, false, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     let mut guard = upstream.lock().await;
     let ready = match guard.as_mut() {
@@ -341,22 +459,7 @@ async fn inspected(
     if !ready {
         match open_tls(&host, &addr).await {
             Ok(sender) => *guard = Some(sender),
-            Err(e) => {
-                log(
-                    &d,
-                    &s,
-                    NetLog {
-                        req: &net,
-                        verdict: Some(&v),
-                        inspected: true,
-                        status: None,
-                        secrets: used,
-                        error: Some(e.clone()),
-                    },
-                );
-                note_failure(&s, &rec, 502, Some(e.clone()));
-                return text(StatusCode::BAD_GATEWAY, e);
-            }
+            Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
         }
     }
     // The upstream's negotiated protocol decides how we shape the request:
@@ -396,37 +499,17 @@ async fn inspected(
         r
     };
     match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.to_string()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.to_string()));
-            text(StatusCode::BAD_GATEWAY, e.to_string())
-        }
+        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
+        Err(e) => fail(
+            &d,
+            &s,
+            &rec,
+            &net,
+            &v,
+            StatusCode::BAD_GATEWAY,
+            used,
+            e.to_string(),
+        ),
     }
 }
 
@@ -467,6 +550,7 @@ pub(super) async fn plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
+    pool: PlainPool,
 ) -> Response<Body> {
     let uri = req.uri().clone();
     if uri.scheme_str() != Some("http") {
@@ -481,7 +565,7 @@ pub(super) async fn plain(
     else {
         return text(StatusCode::BAD_REQUEST, "bad request target");
     };
-    forward_plain(d, s, req, host, port).await
+    forward_plain(d, s, req, host, port, pool).await
 }
 
 /// Inspects plain HTTP on a captured connection to `host:port`.
@@ -494,20 +578,24 @@ pub(super) async fn plain_inspected<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // One pool for this captured connection's requests (all to one origin).
+    let pool = PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s, host) = (d.clone(), s.clone(), host.clone());
-        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port).await) }
+        let (d, s, host, pool) = (d.clone(), s.clone(), host.clone(), pool.clone());
+        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, pool).await) }
     });
     let _ = http1().serve_connection(TokioIo::new(io), svc).await;
 }
 
-/// Decides and forwards one plain HTTP request to `host:port`.
+/// Decides and forwards one plain HTTP request to `host:port`, reusing a
+/// pooled upstream connection for the origin.
 async fn forward_plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
     host: String,
     port: u16,
+    pool: PlainPool,
 ) -> Response<Body> {
     let path = req
         .uri()
@@ -531,63 +619,18 @@ async fn forward_plain(
     let v = decide(&d, &s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!("{} http://{host}{path}", req.method())),
-        );
+        let denial = v.denial(&format!("{} http://{host}{path}", req.method()));
+        return deny(&d, &s, &rec, &net, &v, denial);
     }
     let addr = match target(&d, &s, &host, port).await {
         Ok(a) => a,
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, 80);
     let (used, values) = match inject(&d, &host, true, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     parts.uri = path.parse().unwrap_or_default();
     let body = httplog::Tee::wrap(
@@ -597,49 +640,8 @@ async fn forward_plain(
         httplog::Side::Request,
     );
     let out = Request::from_parts(parts, body);
-    let result = async {
-        let tcp = dial_target(&d, &s, &addr)
-            .await
-            .map_err(|e| e.to_string())?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
-                .await
-                .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        sender.send_request(out).await.map_err(|e| e.to_string())
-    }
-    .await;
-    match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.clone()));
-            text(StatusCode::BAD_GATEWAY, e)
-        }
+    match pool.send(&d, &s, &host, port, &addr, out).await {
+        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
+        Err(e) => fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
     }
 }

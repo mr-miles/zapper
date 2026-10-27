@@ -39,7 +39,7 @@ pub struct Frame {
 
 /// Serialises a frame: the 9-byte header (`version`, `flags`, `Int16` stream,
 /// `opcode`, `Int32` length) then the body.
-pub fn build(version: u8, flags: u8, stream: i16, opcode: u8, body: &[u8]) -> Vec<u8> {
+fn build(version: u8, flags: u8, stream: i16, opcode: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER + body.len());
     out.push(version);
     out.push(flags);
@@ -114,15 +114,6 @@ pub(crate) fn startup_has_compression(body: &[u8]) -> bool {
     false
 }
 
-/// A SASL/PLAIN token: `authzid \0 authcid \0 passwd`, with an empty authzid.
-fn plain_token(user: &str, password: &str) -> Vec<u8> {
-    let mut t = vec![0];
-    t.extend_from_slice(user.as_bytes());
-    t.push(0);
-    t.extend_from_slice(password.as_bytes());
-    t
-}
-
 /// Wraps a token as a CQL `[bytes]` value: `Int32` length then the bytes.
 fn bytes_value(token: &[u8]) -> Vec<u8> {
     let mut b = (token.len() as i32).to_be_bytes().to_vec();
@@ -195,7 +186,7 @@ where
                         return Ok(());
                     }
                     OP_AUTHENTICATE => {
-                        let body = bytes_value(&plain_token(user, password));
+                        let body = bytes_value(&super::sasl_plain_token(user, password));
                         server
                             .write_all(&build(
                                 f.version,
@@ -259,7 +250,7 @@ mod tests {
 
     #[test]
     fn plain_token_and_compression_detection() {
-        assert_eq!(plain_token("u", "p"), b"\0u\0p");
+        assert_eq!(super::super::sasl_plain_token("u", "p"), b"\0u\0p");
         // A STARTUP string map with CQL_VERSION only → no compression.
         let mut body = 1u16.to_be_bytes().to_vec();
         for s in ["CQL_VERSION", "3.0.0"] {

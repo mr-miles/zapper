@@ -394,6 +394,8 @@ impl RuleApi for Core {
                 return Ok(RuleRemoval::Revoked);
             }
         }
+        // `s-` ids are session-layer rules (`Rules::add` mints them);
+        // everything else lives in the config layers handled below.
         if id.starts_with("s-") {
             for s in self.d.sessions.all() {
                 if let Some(r) = s.remove_rule(id) {

@@ -15,6 +15,15 @@ pub use crate::daemon::session::read_frame;
 /// digits, without the ambiguous `l`, `o`, `0` and `1`.
 pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
+/// Finds the executable `name` in `dirs`, in order: the first directory that
+/// holds it as a file. Used to locate system tools (`ip`, `nft`, `newuidmap`,
+/// …) without trusting `PATH`.
+pub(crate) fn find_exe(name: &str, dirs: &[&str]) -> Option<std::path::PathBuf> {
+    dirs.iter()
+        .map(|d| Path::new(d).join(name))
+        .find(|p| p.is_file())
+}
+
 /// Unix time in seconds.
 pub fn now() -> f64 {
     SystemTime::now()

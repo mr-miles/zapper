@@ -62,23 +62,31 @@ pub struct AddressPolicy {
 }
 
 fn is_private(ip: IpAddr) -> bool {
-    const RANGES: [&str; 8] = [
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "100.64.0.0/10",
-        // Benchmarking ranges, also the DNS resolver's synthetic pools: a
-        // synthetic address stands for a name within one session and must
-        // never be reachable as a real destination (v4 `198.18.0.0/15`,
-        // v6 `2001:2::/48`, both RFC benchmarking).
-        "198.18.0.0/15",
-        "2001:2::/48",
-        "fc00::/7",
-        "fec0::/10",
-    ];
+    // Parsed once, not per packet. The literals are known-valid, so the
+    // `unwrap` runs at first use and never after.
+    static RANGES: std::sync::OnceLock<Vec<Cidr>> = std::sync::OnceLock::new();
     RANGES
+        .get_or_init(|| {
+            [
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "100.64.0.0/10",
+                // Benchmarking ranges, also the DNS resolver's synthetic pools:
+                // a synthetic address stands for a name within one session and
+                // must never be reachable as a real destination (v4
+                // `198.18.0.0/15`, v6 `2001:2::/48`, both RFC benchmarking).
+                "198.18.0.0/15",
+                "2001:2::/48",
+                "fc00::/7",
+                "fec0::/10",
+            ]
+            .iter()
+            .map(|r| r.parse::<Cidr>().unwrap())
+            .collect()
+        })
         .iter()
-        .any(|r| r.parse::<Cidr>().unwrap().contains(ip))
+        .any(|c| c.contains(ip))
 }
 
 impl AddressPolicy {
@@ -131,6 +139,9 @@ impl AddressPolicy {
 /// Addresses of the host's interfaces.
 fn host_addrs() -> Vec<IpAddr> {
     let mut out = Vec::new();
+    // SAFETY: getifaddrs allocates a list we walk via ifa_next until null and
+    // free with freeifaddrs; each node's ifa_addr is checked for null and its
+    // sa_family read before casting to the matching sockaddr_in/in6.
     unsafe {
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut ifap) != 0 {

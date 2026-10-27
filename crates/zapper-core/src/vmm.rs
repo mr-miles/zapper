@@ -27,7 +27,7 @@ use anyhow::{bail, Context, Result};
 use crate::netns;
 
 /// Directory in the VMM's directory where the new root is built.
-pub const ROOT: &str = ".vmroot";
+const ROOT: &str = ".vmroot";
 
 pub struct Args {
     pub dir: PathBuf,
@@ -130,6 +130,7 @@ fn unshare(sub: bool) -> Result<()> {
         bail!("unshare(user, net, mount): {e} (unprivileged user namespaces disabled? see docs/network.md)");
     }
     if sub {
+        // Wait up to ~10s (2000 × 5ms) for the daemon to write our id maps.
         for _ in 0..2000 {
             if !std::fs::read_to_string("/proc/self/uid_map")?
                 .trim()
@@ -247,7 +248,7 @@ fn confine(a: &Args) -> Result<()> {
 
 /// The namespace's uid that Firecracker runs as with `sub`: the session's
 /// subordinate uid on the host. 0 is the daemon user.
-pub const SUB_UID: u32 = 1;
+const SUB_UID: u32 = 1;
 
 /// Lets Firecracker, as `SUB_UID` in the daemon's group, use the session's
 /// VM directory: create its sockets there, use the disks, the config, the

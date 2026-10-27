@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
-use zapper_policy::{merge, ResolvedProfile};
+use zapper_policy::{merge, AgentSpec, ResolvedProfile};
 
 use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
 
@@ -138,6 +138,8 @@ pub(super) fn claude_activity(event: &Value) -> Option<String> {
     .find_map(|k| input[*k].as_str())
     .map(|s| {
         let s = s.lines().next().unwrap_or("");
+        // Show a path's basename, but keep a value with spaces whole — it is a
+        // command or prose, not a path.
         let s = s
             .rsplit('/')
             .next()
@@ -151,15 +153,14 @@ pub(super) fn claude_activity(event: &Value) -> Option<String> {
 
 /// Tokens of a turn: input, output and cache writes.
 fn claude_tokens(result: &Value) -> u64 {
-    let u = &result["usage"];
-    [
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-    ]
-    .iter()
-    .map(|k| u[*k].as_u64().unwrap_or(0))
-    .sum()
+    super::sum_u64(
+        &result["usage"],
+        &[
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
 }
 
 /// A turn that failed before Claude could work: the API refused it (bad
@@ -174,19 +175,14 @@ fn claude_api_failure(result: &Value) -> Option<String> {
 }
 
 fn claude_rate_limited(result: &Value) -> bool {
-    if result["is_error"] != json!(true) {
-        return false;
-    }
-    let text = result["result"].as_str().unwrap_or("").to_ascii_lowercase();
-    text.contains("rate limit")
-        || text.contains("rate_limit")
-        || text.contains("usage limit")
-        || text.contains("429")
-        || text.contains("overloaded")
+    result["is_error"] == json!(true)
+        && super::rate_limited(result["result"].as_str().unwrap_or(""))
 }
 
-fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>) -> Vec<GuestFile> {
-    let agent = &profile.agent;
+/// `~/.claude/settings.json`: the agent's extra settings, the model, and the
+/// turn-end command as a Stop hook (it blocks the stop with the reason it
+/// prints).
+fn claude_settings(agent: &AgentSpec) -> Value {
     let mut settings = json!({});
     if let Some(s) = &agent.settings {
         merge(&mut settings, s);
@@ -194,30 +190,18 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
     if let Some(m) = &agent.model {
         merge(&mut settings, &json!({ "model": m }));
     }
-    // The turn-end command as a Stop hook: it blocks the stop with the
-    // reason it prints.
     if let Some(cmd) = &agent.turn_end {
         merge(
             &mut settings,
             &json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": cmd, "timeout": 30 }] }] } }),
         );
     }
-    // The permission mode goes in managed settings, not ~/.claude/settings.json:
-    // Claude Code asks whether to switch to auto mode when the user settings
-    // file sets another mode and no other file does, and each session starts
-    // with a fresh home, so it would ask every time. The managed file is also
-    // root-owned, so the workload can't change it.
-    // https://code.claude.com/docs/en/permission-modes#which-mode-a-session-starts-in
-    let managed = agent.permission_mode.as_ref().map(|mode| {
-        let mut m = json!({ "permissions": { "defaultMode": mode } });
-        if mode == "bypassPermissions" {
-            merge(
-                &mut m,
-                &json!({ "skipDangerousModePermissionPrompt": true }),
-            );
-        }
-        m
-    });
+    settings
+}
+
+/// `~/.claude.json`: onboarding/trust state, MCP servers, and the pre-approved
+/// API key (so Claude Code does not prompt about it).
+fn claude_state(agent: &AgentSpec, api_key: Option<&String>) -> Value {
     let mut state = json!({
         "hasCompletedOnboarding": true,
         "bypassPermissionsModeAccepted": true,
@@ -226,9 +210,9 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
     if let Some(m) = &agent.mcp_servers {
         merge(&mut state, &json!({ "mcpServers": m }));
     }
-    // Pre-approve the API key (placeholder or value) so Claude Code does not
-    // ask about it.
     if let Some(key) = api_key {
+        // The last 20 characters of the key, by char not byte (reverse, take,
+        // reverse back) — what Claude Code records as the approved-key suffix.
         let tail: String = key
             .chars()
             .rev()
@@ -242,17 +226,41 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
             &json!({ "customApiKeyResponses": { "approved": [tail], "rejected": [] } }),
         );
     }
-    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap();
+    state
+}
+
+/// The root-owned managed-settings file carrying the permission mode, if any.
+///
+/// It goes here, not in `~/.claude/settings.json`: Claude Code asks whether to
+/// switch to auto mode when the user settings file sets a mode and no other
+/// file does, and each session starts with a fresh home, so it would ask every
+/// time. The managed file is root-owned, so the workload can't change it.
+/// https://code.claude.com/docs/en/permission-modes#which-mode-a-session-starts-in
+fn claude_managed(agent: &AgentSpec) -> Option<Value> {
+    agent.permission_mode.as_ref().map(|mode| {
+        let mut m = json!({ "permissions": { "defaultMode": mode } });
+        if mode == "bypassPermissions" {
+            merge(
+                &mut m,
+                &json!({ "skipDangerousModePermissionPrompt": true }),
+            );
+        }
+        m
+    })
+}
+
+fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>) -> Vec<GuestFile> {
+    let agent = &profile.agent;
     let mut files = vec![
         GuestFile {
             path: format!("{home}/.claude/settings.json"),
-            content: pretty(&settings),
+            content: super::pretty(&claude_settings(agent)),
             mode: 0o644,
             user_owned: true,
         },
         GuestFile {
             path: format!("{home}/.claude.json"),
-            content: pretty(&state),
+            content: super::pretty(&claude_state(agent, api_key)),
             mode: 0o600,
             user_owned: true,
         },
@@ -265,10 +273,10 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
             user_owned: true,
         });
     }
-    if let Some(m) = managed {
+    if let Some(m) = claude_managed(agent) {
         files.push(GuestFile {
             path: MANAGED_SETTINGS.into(),
-            content: pretty(&m),
+            content: super::pretty(&m),
             mode: 0o644,
             user_owned: false,
         });

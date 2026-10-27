@@ -48,26 +48,54 @@ pub use events::{Event, EventBody};
 pub(crate) use crate::util::{is_session_id, now, random_id, write_private};
 
 pub struct Paths {
-    pub state: PathBuf,
-    pub images: PathBuf,
-    pub kernels: PathBuf,
-    pub firecracker: PathBuf,
-    pub initrd: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) images: PathBuf,
+    pub(crate) kernels: PathBuf,
+    pub(crate) firecracker: PathBuf,
+    pub(crate) initrd: PathBuf,
 }
 
+// `Daemon` is never re-exported — `Core` (interface.rs) is the only public
+// handle — so its fields are `pub(crate)`, not `pub`.
 pub struct Daemon {
-    pub config: RwLock<Config>,
-    pub startup_path: PathBuf,
-    pub paths: Paths,
-    pub addrs: RwLock<addr::AddressPolicy>,
+    pub(crate) config: RwLock<Config>,
+    pub(crate) startup_path: PathBuf,
+    pub(crate) paths: Paths,
+    pub(crate) addrs: RwLock<addr::AddressPolicy>,
     pub(crate) sessions: session::SessionStore,
     pub(crate) events: events::EventBus,
     approvals: approvals::Approvals,
-    pub ui_token: String,
-    pub clients: clients::Clients,
-    pub services: services::Services,
-    pub deciders: deciders::Deciders,
-    pub gateway: gateway::Gateway,
+    pub(crate) ui_token: String,
+    pub(crate) clients: clients::Clients,
+    pub(crate) services: services::Services,
+    pub(crate) deciders: deciders::Deciders,
+    pub(crate) gateway: gateway::Gateway,
+}
+
+/// Accepts connections on `listener` and serves each with `handle`, running at
+/// most `limit` permits' worth at once; a connection over the limit is dropped
+/// rather than queued. The permit is held until the spawned task ends.
+pub(crate) async fn accept_loop<F, Fut>(
+    listener: tokio::net::UnixListener,
+    limit: Arc<tokio::sync::Semaphore>,
+    handle: F,
+) where
+    F: Fn(tokio::net::UnixStream) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        let Ok(permit) = limit.clone().try_acquire_owned() else {
+            continue;
+        };
+        let fut = handle(stream);
+        tokio::spawn(async move {
+            fut.await;
+            drop(permit);
+        });
+    }
 }
 
 /// Finds the guest agent binary.
@@ -91,37 +119,49 @@ fn find_agent(configured: &str) -> Result<PathBuf> {
     })
 }
 
+/// Loads the startup config (empty when the file is absent), warning if the
+/// file is world-readable and might hold inline secrets.
+fn load_startup_config(path: &Path) -> Result<Config> {
+    let config = if path.exists() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Config::from_yaml(&text).with_context(|| format!("loading {}", path.display()))?
+    } else {
+        tracing::warn!(
+            "{} does not exist; starting with an empty config",
+            path.display()
+        );
+        Config::default()
+    };
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().mode() & 0o077 != 0 && config.has_inline_secrets() {
+            tracing::warn!(
+                "{} is readable by others; it may hold secrets (chmod 600)",
+                path.display()
+            );
+        }
+    }
+    Ok(config)
+}
+
+/// Resolves and prepares the state directory: creates it (0700) with its
+/// `sessions` subdirectory, and clears the VMM directories a previous daemon
+/// left behind (audit logs and recordings stay).
+fn prepare_state_dir(state: &str) -> Result<PathBuf> {
+    let state = PathBuf::from(expand_home(state));
+    std::fs::create_dir_all(state.join("sessions"))?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
+        let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
+    }
+    Ok(state)
+}
+
 impl Daemon {
     pub fn new(startup_path: PathBuf) -> Result<Arc<Self>> {
-        let config = if startup_path.exists() {
-            let text = std::fs::read_to_string(&startup_path)
-                .with_context(|| format!("reading {}", startup_path.display()))?;
-            Config::from_yaml(&text)
-                .with_context(|| format!("loading {}", startup_path.display()))?
-        } else {
-            tracing::warn!(
-                "{} does not exist; starting with an empty config",
-                startup_path.display()
-            );
-            Config::default()
-        };
-        if let Ok(meta) = std::fs::metadata(&startup_path) {
-            if meta.permissions().mode() & 0o077 != 0 && config.has_inline_secrets() {
-                tracing::warn!(
-                    "{} is readable by others; it may hold secrets (chmod 600)",
-                    startup_path.display()
-                );
-            }
-        }
+        let config = load_startup_config(&startup_path)?;
         let d = &config.daemon;
-        let state = PathBuf::from(expand_home(&d.state));
-        std::fs::create_dir_all(state.join("sessions"))?;
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-        // VMM directories (disks, sockets) of sessions a previous daemon left
-        // behind; audit logs and recordings stay.
-        for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-            let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
-        }
+        let state = prepare_state_dir(&d.state)?;
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;
         let initrd = state.join("initrd.cpio");
@@ -170,26 +210,16 @@ impl Daemon {
     /// Applies a change to the running config if the result is valid.
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
         let mut next = self.config.read().unwrap().clone();
+        let old_networks = next.daemon.private_networks.clone();
         let out = f(&mut next)?;
         next.normalize();
         next.validate()?;
-        if !next.daemon.driver {
-            let driven: Vec<String> = self
-                .sessions
-                .all()
-                .into_iter()
-                .filter(|s| s.driver.is_some() && s.is_running())
-                .map(|s| s.id.clone())
-                .collect();
-            if !driven.is_empty() {
-                anyhow::bail!(
-                    "daemon.driver: driven sessions are running ({}); stop them first",
-                    driven.join(", ")
-                );
-            }
-        }
+        self.ensure_driver_toggle_ok(&next)?;
         self.clients.check(&next)?;
-        if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
+        // Derived state: rebuild the address policy only when this change
+        // touched the private networks (compared against the clone basis, not
+        // a second lock read).
+        if next.daemon.private_networks != old_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
         *self.config.write().unwrap() = next;
@@ -200,6 +230,27 @@ impl Daemon {
             },
         );
         Ok(out)
+    }
+
+    /// Turning the driver off is refused while driven sessions are running.
+    fn ensure_driver_toggle_ok(&self, next: &Config) -> Result<()> {
+        if next.daemon.driver {
+            return Ok(());
+        }
+        let driven: Vec<String> = self
+            .sessions
+            .all()
+            .into_iter()
+            .filter(|s| s.driver.is_some() && s.is_running())
+            .map(|s| s.id.clone())
+            .collect();
+        if !driven.is_empty() {
+            bail!(
+                "daemon.driver: driven sessions are running ({}); stop them first",
+                driven.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// The running config with inline secret values hidden.
@@ -220,8 +271,13 @@ impl Daemon {
                 }
             }
         }
-        self.change("config replaced", |c| {
-            *c = new;
+        self.set_config("config replaced", new)
+    }
+
+    /// Replaces the whole running config, validated and applied atomically.
+    fn set_config(&self, what: &str, config: Config) -> Result<()> {
+        self.change(what, |c| {
+            *c = config;
             Ok(())
         })
     }
@@ -281,10 +337,7 @@ impl Daemon {
     /// Replaces the running config with the startup file.
     pub fn reload(&self) -> Result<()> {
         let config = Config::from_yaml(&self.startup_yaml())?;
-        self.change("reloaded from startup", |c| {
-            *c = config;
-            Ok(())
-        })
+        self.set_config("reloaded from startup", config)
     }
 
     /// Waits for an operator's answer to an `ask`; denies on timeout.

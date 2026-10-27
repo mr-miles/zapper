@@ -81,19 +81,13 @@ impl Gateway {
 /// Accepts the session's connections to the gateway.
 pub async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListener) {
     let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
-        };
-        let Ok(permit) = limit.clone().try_acquire_owned() else {
-            continue;
-        };
+    super::accept_loop(listener, limit, move |stream| {
         let (d, s) = (d.clone(), s.clone());
-        tokio::spawn(async move {
+        async move {
             let _ = connection(&d, &s, stream).await;
-            drop(permit);
-        });
-    }
+        }
+    })
+    .await;
 }
 
 /// Reads one line, at most `MAX_MCP_LINE` bytes: `None` at the end, `Err`

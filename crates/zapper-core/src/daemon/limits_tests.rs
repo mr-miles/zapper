@@ -79,12 +79,12 @@ async fn a_session_holds_at_most_256_connections() {
     }
     // Every permit taken: the next connection is closed at once.
     for _ in 0..200 {
-        if s.conns.available_permits() == 0 {
+        if s.runtime.conns().available_permits() == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(s.conns.available_permits(), 0);
+    assert_eq!(s.runtime.conns().available_permits(), 0);
     let mut over = UnixStream::connect(&path).await.unwrap();
     let mut buf = [0u8; 1];
     let n = tokio::time::timeout(Duration::from_secs(5), over.read(&mut buf))
@@ -95,7 +95,7 @@ async fn a_session_holds_at_most_256_connections() {
     // One ends: a new one is held again.
     drop(held.pop());
     for _ in 0..200 {
-        if s.conns.available_permits() == 1 {
+        if s.runtime.conns().available_permits() == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
