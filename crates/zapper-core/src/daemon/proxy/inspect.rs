@@ -15,7 +15,54 @@ enum Sender {
     H2(hyper::client::conn::http2::SendRequest<Body>),
 }
 
-type Upstream = Arc<tokio::sync::Mutex<Option<Sender>>>;
+/// The pooled upstream for one inspected (TLS-terminated) guest connection: at
+/// most one live `Sender`, reconnected when missing or stale, shared across the
+/// connection's requests.
+#[derive(Clone, Default)]
+struct Upstream(Arc<tokio::sync::Mutex<Option<Sender>>>);
+
+impl Upstream {
+    /// Sends one request, reusing the pooled connection (reconnecting via
+    /// `open_tls` when missing or not ready), then calls `shape` with the
+    /// negotiated protocol (`true` = HTTP/2, which needs an absolute URI) to
+    /// build the request and dispatches it. HTTP/2 multiplexes — clone the
+    /// sender and release the lock so concurrent streams run in parallel;
+    /// HTTP/1 is serial, so hold the sender across the send.
+    async fn send(
+        &self,
+        host: &str,
+        addr: &Target,
+        shape: impl FnOnce(bool) -> Request<Body>,
+    ) -> Result<Response<Incoming>, String> {
+        let mut guard = self.0.lock().await;
+        let ready = match guard.as_mut() {
+            Some(Sender::H1(sender)) => sender.ready().await.is_ok(),
+            Some(Sender::H2(sender)) => sender.ready().await.is_ok(),
+            None => false,
+        };
+        if !ready {
+            *guard = Some(open_tls(host, addr).await?);
+        }
+        let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
+        let out = shape(is_h2);
+        let result = if is_h2 {
+            let mut sender = match guard.as_mut() {
+                Some(Sender::H2(s)) => s.clone(),
+                _ => unreachable!(),
+            };
+            drop(guard);
+            sender.send_request(out).await
+        } else {
+            let r = match guard.as_mut() {
+                Some(Sender::H1(s)) => s.send_request(out).await,
+                _ => unreachable!(),
+            };
+            drop(guard);
+            r
+        };
+        result.map_err(|e| e.to_string())
+    }
+}
 
 type SendRequestH1 = hyper::client::conn::http1::SendRequest<Body>;
 
@@ -406,15 +453,26 @@ pub(crate) fn upstream_uri(host: &str, port: u16, path: &str, h2: bool) -> hyper
         .unwrap_or_default()
 }
 
-async fn inspected(
-    d: Arc<Daemon>,
-    s: Arc<Session>,
+/// Decides, cleans, injects, and forwards one inspected request, then logs the
+/// outcome. The shared body of the TLS (`inspected`) and plain (`forward_plain`)
+/// paths; `send` shapes the request for the negotiated protocol and dispatches
+/// it through the path's pooled upstream, reporting its own 403/502.
+#[allow(clippy::too_many_arguments)]
+async fn forward<F, Fut>(
+    d: &Arc<Daemon>,
+    s: &Arc<Session>,
     req: Request<Incoming>,
     host: String,
     port: u16,
-    addr: Target,
-    upstream: Upstream,
-) -> Response<Body> {
+    scheme: &'static str,
+    default_port: u16,
+    plaintext: bool,
+    send: F,
+) -> Response<Body>
+where
+    F: FnOnce(hyper::http::request::Parts, Body, String) -> Fut,
+    Fut: std::future::Future<Output = Result<Response<Incoming>, (StatusCode, String)>>,
+{
     let path = req
         .uri()
         .path_and_query()
@@ -428,50 +486,27 @@ async fn inspected(
     };
     // Headers as the guest sent them: before secrets are added.
     let rec = s.requests.lock().unwrap().start(
-        "https",
+        scheme,
         req.method().as_str(),
         &host,
         port,
         Some(&path),
         httplog::headers(req.headers()),
     );
-    let v = decide(&d, &s, &net).await;
+    let v = decide(d, s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
         let denial = v.denial(&format!(
-            "{} {host}{path}",
+            "{} {scheme}://{host}{path}",
             net.method.as_deref().unwrap_or("")
         ));
-        return deny(&d, &s, &rec, &net, &v, denial);
+        return deny(d, s, &rec, &net, &v, denial);
     }
     let (mut parts, body) = req.into_parts();
-    clean_headers(&mut parts.headers, &host, port, 443);
-    let (used, values) = match inject(&d, &host, false, &v.effects, &mut parts.headers) {
+    clean_headers(&mut parts.headers, &host, port, default_port);
+    let (used, values) = match inject(d, &host, plaintext, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
-        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
-    };
-    let mut guard = upstream.lock().await;
-    let ready = match guard.as_mut() {
-        Some(Sender::H1(sender)) => sender.ready().await.is_ok(),
-        Some(Sender::H2(sender)) => sender.ready().await.is_ok(),
-        None => false,
-    };
-    if !ready {
-        match open_tls(&host, &addr).await {
-            Ok(sender) => *guard = Some(sender),
-            Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
-        }
-    }
-    // The upstream's negotiated protocol decides how we shape the request:
-    // HTTP/2 needs an absolute URI (for `:authority`/`:scheme`); HTTP/1 keeps
-    // the origin-form path. The Host header set by `clean_headers` stays and
-    // agrees with the authority.
-    let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
-    parts.uri = upstream_uri(&host, port, &path, is_h2);
-    parts.version = if is_h2 {
-        hyper::Version::HTTP_2
-    } else {
-        hyper::Version::HTTP_11
+        Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     let body = httplog::Tee::wrap(
         body.boxed(),
@@ -479,38 +514,53 @@ async fn inspected(
         s.requests.clone(),
         httplog::Side::Request,
     );
-    let out = Request::from_parts(parts, body);
-    // HTTP/2 multiplexes: clone the sender and release the lock so concurrent
-    // streams on this guest connection run in parallel. HTTP/1 is serial, so
-    // we hold the one sender across the send.
-    let result = if is_h2 {
-        let mut sender = match guard.as_mut() {
-            Some(Sender::H2(s)) => s.clone(),
-            _ => unreachable!(),
-        };
-        drop(guard);
-        sender.send_request(out).await
-    } else {
-        let r = match guard.as_mut() {
-            Some(Sender::H1(s)) => s.send_request(out).await,
-            _ => unreachable!(),
-        };
-        drop(guard);
-        r
-    };
-    match result {
-        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
-        Err(e) => fail(
-            &d,
-            &s,
-            &rec,
-            &net,
-            &v,
-            StatusCode::BAD_GATEWAY,
-            used,
-            e.to_string(),
-        ),
+    match send(parts, body, path).await {
+        Ok(resp) => responded(d, s, &rec, &net, &v, resp, used, values),
+        Err((status, e)) => fail(d, s, &rec, &net, &v, status, used, e),
     }
+}
+
+/// An inspected request over a TLS-terminated connection, forwarded through the
+/// per-connection `Upstream` pool (h1 or h2 by the upstream's ALPN).
+async fn inspected(
+    d: Arc<Daemon>,
+    s: Arc<Session>,
+    req: Request<Incoming>,
+    host: String,
+    port: u16,
+    addr: Target,
+    upstream: Upstream,
+) -> Response<Body> {
+    forward(
+        &d,
+        &s,
+        req,
+        host.clone(),
+        port,
+        "https",
+        443,
+        false,
+        move |parts, body, path| async move {
+            // Shape the request for the negotiated protocol: HTTP/2 needs an
+            // absolute URI (for `:authority`/`:scheme`); HTTP/1 keeps the
+            // origin-form path. The Host header from `clean_headers` agrees.
+            let uri_host = host.clone();
+            upstream
+                .send(&host, &addr, move |is_h2| {
+                    let mut parts = parts;
+                    parts.uri = upstream_uri(&uri_host, port, &path, is_h2);
+                    parts.version = if is_h2 {
+                        hyper::Version::HTTP_2
+                    } else {
+                        hyper::Version::HTTP_11
+                    };
+                    Request::from_parts(parts, body)
+                })
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e))
+        },
+    )
+    .await
 }
 
 async fn open_tls(host: &str, addr: &Target) -> Result<Sender, String> {
@@ -587,8 +637,9 @@ pub(super) async fn plain_inspected<S>(
     let _ = http1().serve_connection(TokioIo::new(io), svc).await;
 }
 
-/// Decides and forwards one plain HTTP request to `host:port`, reusing a
-/// pooled upstream connection for the origin.
+/// An inspected plain-HTTP request to `host:port`, forwarded through the
+/// per-connection, origin-keyed `PlainPool`. The target is resolved here (a
+/// bad/forbidden one is a 403) since a plain proxy connection is multi-origin.
 async fn forward_plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
@@ -597,51 +648,32 @@ async fn forward_plain(
     port: u16,
     pool: PlainPool,
 ) -> Response<Body> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/".into());
-    let net = NetRequest {
-        host: host.clone(),
+    let (dc, sc) = (d.clone(), s.clone());
+    forward(
+        &d,
+        &s,
+        req,
+        host.clone(),
         port,
-        method: Some(req.method().to_string()),
-        path: Some(path.clone()),
-    };
-    let rec = s.requests.lock().unwrap().start(
         "http",
-        req.method().as_str(),
-        &host,
-        port,
-        Some(&path),
-        httplog::headers(req.headers()),
-    );
-    let v = decide(&d, &s, &net).await;
-    note_verdict(&rec, &v);
-    if !v.allowed {
-        let denial = v.denial(&format!("{} http://{host}{path}", req.method()));
-        return deny(&d, &s, &rec, &net, &v, denial);
-    }
-    let addr = match target(&d, &s, &host, port).await {
-        Ok(a) => a,
-        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
-    };
-    let (mut parts, body) = req.into_parts();
-    clean_headers(&mut parts.headers, &host, port, 80);
-    let (used, values) = match inject(&d, &host, true, &v.effects, &mut parts.headers) {
-        Ok(i) => (i.names, i.values),
-        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
-    };
-    parts.uri = path.parse().unwrap_or_default();
-    let body = httplog::Tee::wrap(
-        body.boxed(),
-        rec.clone(),
-        s.requests.clone(),
-        httplog::Side::Request,
-    );
-    let out = Request::from_parts(parts, body);
-    match pool.send(&d, &s, &host, port, &addr, out).await {
-        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
-        Err(e) => fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
-    }
+        80,
+        true,
+        move |mut parts, body, path| async move {
+            let addr = target(&dc, &sc, &host, port)
+                .await
+                .map_err(|e| (StatusCode::FORBIDDEN, e))?;
+            parts.uri = path.parse().unwrap_or_default();
+            pool.send(
+                &dc,
+                &sc,
+                &host,
+                port,
+                &addr,
+                Request::from_parts(parts, body),
+            )
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))
+        },
+    )
+    .await
 }

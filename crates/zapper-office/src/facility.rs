@@ -101,7 +101,7 @@ impl ServiceHandler for GitServer {
 }
 
 fn add_service(
-    d: &Core,
+    d: &impl ServiceApi,
     run: &FirmRun,
     name: String,
     port: u16,
@@ -120,7 +120,7 @@ fn add_service(
 
 /// The firm's domain, a zone of the run's sessions (its names are the
 /// firm's services, never looked up on the host), and its git server.
-pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
+pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
     let id = d.add_zone(
         &run.domain,
         super::run_sessions(run),
@@ -152,7 +152,7 @@ pub(crate) fn test_cluster(d: &Core, run: &FirmRun, cluster: &Arc<Session>) {
 
 /// The cluster's API and the apps it serves, as services of the firm's
 /// domain on the cluster VM's ports.
-fn register_cluster(d: &Core, run: &FirmRun, cluster: &Session) -> Result<()> {
+fn register_cluster(d: &impl ServiceApi, run: &FirmRun, cluster: &Session) -> Result<()> {
     let dom = &run.domain;
     let to = |port: u32| ServiceTarget::Session {
         id: cluster.id.clone(),
@@ -1073,6 +1073,86 @@ mod tests {
             v["items"][4]["metadata"]["annotations"]
                 ["traefik.ingress.kubernetes.io/router.priority"],
             "1"
+        );
+    }
+
+    /// A fake `ServiceApi` recording what was registered — enough to test the
+    /// firm's service wiring without the daemon's real service registry.
+    #[derive(Default)]
+    struct FakeServices {
+        zones: std::sync::Mutex<Vec<String>>,
+        services: std::sync::Mutex<Vec<(String, u16)>>,
+    }
+
+    impl zapper_core::ServiceApi for FakeServices {
+        fn add_service(&self, spec: zapper_core::ServiceSpec) -> anyhow::Result<u64> {
+            self.services.lock().unwrap().push((spec.name, spec.port));
+            Ok(0)
+        }
+        fn add_zone(
+            &self,
+            domain: &str,
+            _sessions: std::collections::BTreeMap<String, String>,
+            _owner: &str,
+        ) -> anyhow::Result<u64> {
+            self.zones.lock().unwrap().push(domain.to_string());
+            Ok(0)
+        }
+        fn remove_service(&self, _id: u64) -> Option<zapper_core::ServiceInfo> {
+            None
+        }
+        fn services(&self) -> Vec<zapper_core::ServiceInfo> {
+            vec![]
+        }
+        fn add_mcp_server(
+            &self,
+            _name: &str,
+            _sessions: std::collections::BTreeMap<String, String>,
+            _server: std::sync::Arc<dyn zapper_core::McpServer>,
+        ) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        fn remove_mcp_server(&self, _id: u64) -> bool {
+            false
+        }
+    }
+
+    const FIRM: &str = "
+profiles:
+  w:
+    agent: { kind: claude-code }
+firms:
+  acme:
+    roles:
+      ceo: { profile: w, agent: ceo }
+    workers:
+      - { name: ceo, role: ceo }
+    git: { repos: [api] }
+";
+
+    /// `register` depends only on `ServiceApi`: a fake stands in for the real
+    /// registry, and we check it wired up the firm's zone and git service.
+    #[tokio::test]
+    async fn register_wires_the_firms_zone_and_git_service() {
+        let t = crate::test_core(FIRM);
+        let run = crate::test_run(&t.core, "acme");
+        let fake = FakeServices::default();
+        super::register(&fake, &run).unwrap();
+        assert!(
+            fake.zones.lock().unwrap().contains(&run.domain),
+            "zone {} not registered: {:?}",
+            run.domain,
+            fake.zones.lock().unwrap(),
+        );
+        let git = format!("git.{}", run.domain);
+        assert!(
+            fake.services
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, port)| *name == git && *port == 443),
+            "git service {git} missing: {:?}",
+            fake.services.lock().unwrap(),
         );
     }
 }
