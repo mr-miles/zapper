@@ -109,15 +109,17 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         subids,
     })
     .await?;
-    *session.vm.lock().await = Some(child);
+    *session.runtime.vm().lock().await = Some(child);
 
     {
         let (d, s) = (daemon.clone(), session.clone());
         tokio::spawn(async move {
             if let Err(e) = guest_control(&d, &s, control, control_path, spec).await {
                 tracing::warn!(session = %s.id, "guest control: {e:#}");
-                if matches!(*s.status.borrow(), Status::Starting) {
-                    s.status.send_replace(Status::Failed(format!("{e:#}")));
+                if matches!(*s.runtime.status().borrow(), Status::Starting) {
+                    s.runtime
+                        .status()
+                        .send_replace(Status::Failed(format!("{e:#}")));
                 }
             }
         });
@@ -147,14 +149,16 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let mut vm = s.vm.lock().await;
+                let mut vm = s.runtime.vm().lock().await;
                 let Some(child) = vm.as_mut() else { return };
                 if let Ok(Some(status)) = child.try_wait() {
                     *vm = None;
                     drop(vm);
                     let reason = format!("vm exited ({status})");
-                    if matches!(*s.status.borrow(), Status::Starting) {
-                        s.status.send_replace(Status::Failed(reason.clone()));
+                    if matches!(*s.runtime.status().borrow(), Status::Starting) {
+                        s.runtime
+                            .status()
+                            .send_replace(Status::Failed(reason.clone()));
                     }
                     super::stop(&d, &s, &reason).await;
                     return;
@@ -186,7 +190,7 @@ async fn guest_control(
         spec: Box::new(spec),
     })
     .await?;
-    *session.guest.lock().unwrap() = Some(tx.clone());
+    session.runtime.set_guest(tx.clone());
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let mut line = serde_json::to_vec(&msg).unwrap();
@@ -208,15 +212,16 @@ async fn guest_control(
         };
         match msg {
             GuestMsg::Ready => {
-                session.status.send_replace(Status::Running);
+                session.runtime.status().send_replace(Status::Running);
             }
             GuestMsg::Failed { error } => {
                 session
-                    .status
+                    .runtime
+                    .status()
                     .send_replace(Status::Failed(format!("guest setup: {error}")));
             }
             GuestMsg::ExecCheck { id, pid, uid, req } => {
-                let Ok(permit) = session.exec_checks.clone().try_acquire_owned() else {
+                let Some(permit) = session.runtime.exec_permit() else {
                     let _ = tx.try_send(HostMsg::ExecReply { id, allow: false });
                     continue;
                 };

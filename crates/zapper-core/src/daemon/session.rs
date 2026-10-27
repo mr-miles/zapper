@@ -65,7 +65,12 @@ impl SessionStore {
             .read()
             .unwrap()
             .values()
-            .filter(|s| matches!(*s.status.borrow(), Status::Starting | Status::Running))
+            .filter(|s| {
+                matches!(
+                    *s.runtime.status().borrow(),
+                    Status::Starting | Status::Running
+                )
+            })
             .count()
     }
 
@@ -74,7 +79,10 @@ impl SessionStore {
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {
-            if matches!(*s.status.borrow(), Status::Starting | Status::Running) {
+            if matches!(
+                *s.runtime.status().borrow(),
+                Status::Starting | Status::Running
+            ) {
                 bail!("session {id} is still running; stop it first");
             }
         }
@@ -234,6 +242,70 @@ impl Rules {
     }
 }
 
+/// A session's live machinery: its lifecycle status, the Firecracker
+/// process, the control channel to the guest agent, and the counters that
+/// gate shells and exec decisions. All of it is created when the VM boots
+/// and dropped when it stops; the owner of "the session while it runs".
+pub(crate) struct GuestRuntime {
+    status: watch::Sender<Status>,
+    vm: tokio::sync::Mutex<Option<Child>>,
+    /// The control channel to the guest agent, once it connects.
+    guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
+    next_shell: AtomicU64,
+    /// Bounds concurrent exec decisions.
+    exec_checks: Arc<Semaphore>,
+}
+
+impl GuestRuntime {
+    pub fn new() -> Self {
+        Self {
+            status: watch::channel(Status::Starting).0,
+            vm: tokio::sync::Mutex::new(None),
+            guest: Mutex::new(None),
+            next_shell: AtomicU64::new(1),
+            exec_checks: Arc::new(Semaphore::new(64)),
+        }
+    }
+
+    /// The lifecycle-status channel: subscribe to it, borrow it, or send a
+    /// transition through it.
+    pub fn status(&self) -> &watch::Sender<Status> {
+        &self.status
+    }
+
+    /// The Firecracker process handle: set at boot, taken at teardown.
+    pub fn vm(&self) -> &tokio::sync::Mutex<Option<Child>> {
+        &self.vm
+    }
+
+    /// Records the guest's control channel once it connects.
+    pub fn set_guest(&self, tx: mpsc::Sender<HostMsg>) {
+        *self.guest.lock().unwrap() = Some(tx);
+    }
+
+    /// Drops the control channel (teardown).
+    pub fn clear_guest(&self) {
+        *self.guest.lock().unwrap() = None;
+    }
+
+    /// Sends a message to the guest agent, if the channel is up.
+    pub fn send(&self, msg: HostMsg) {
+        if let Some(tx) = self.guest.lock().unwrap().as_ref() {
+            let _ = tx.try_send(msg);
+        }
+    }
+
+    /// The next terminal id.
+    pub fn next_shell(&self) -> u64 {
+        self.next_shell.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A permit for one concurrent exec decision, or `None` over the cap.
+    pub fn exec_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.exec_checks.clone().try_acquire_owned().ok()
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub profile: String,
@@ -243,7 +315,8 @@ pub struct Session {
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
     pub(crate) rules: Rules,
-    pub(crate) status: watch::Sender<Status>,
+    /// The live VM, its control channel and lifecycle status while it runs.
+    pub(crate) runtime: GuestRuntime,
     pub(crate) dir: SessionDir,
     /// The session's CA and the guest-facing server configs minted from it.
     pub(crate) tls: tls::SessionTls,
@@ -255,13 +328,9 @@ pub struct Session {
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
     pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
-    vm: tokio::sync::Mutex<Option<Child>>,
     audit: Mutex<Option<super::record::Writer>>,
-    next_shell: AtomicU64,
     /// Bounds concurrent proxy connections from the guest.
     pub(crate) conns: Arc<Semaphore>,
-    exec_checks: Arc<Semaphore>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
@@ -313,7 +382,7 @@ impl Session {
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
-            status: self.status.borrow().clone(),
+            status: self.runtime.status().borrow().clone(),
             created: self.created,
             expires: self.expires,
             image: self.resolved.engine.image.clone(),
@@ -372,13 +441,13 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(*self.status.borrow(), Status::Running)
+        matches!(*self.runtime.status().borrow(), Status::Running)
     }
 
     /// Whether the session has ended, stopped or failed.
     pub fn ended(&self) -> bool {
         matches!(
-            *self.status.borrow(),
+            *self.runtime.status().borrow(),
             Status::Stopped(_) | Status::Failed(_)
         )
     }
@@ -480,9 +549,7 @@ impl Session {
     }
 
     fn send(&self, msg: HostMsg) {
-        if let Some(tx) = self.guest.lock().unwrap().as_ref() {
-            let _ = tx.try_send(msg);
-        }
+        self.runtime.send(msg);
     }
 
     /// Opens a terminal in the guest.
@@ -493,7 +560,7 @@ impl Session {
         if req.argv.is_empty() {
             req.argv = self.resolved.agent.command.clone();
         }
-        let id = self.next_shell.fetch_add(1, Ordering::Relaxed);
+        let id = self.runtime.next_shell();
         req.id = id;
         let mut stream = UnixStream::connect(self.dir.vsock()).await?;
         stream

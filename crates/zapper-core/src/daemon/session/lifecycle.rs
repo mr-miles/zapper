@@ -1,15 +1,14 @@
 //! A session's life: resolving and registering it, then stopping and tearing
 //! it down. Booting its VM and running its guest control channel is `boot`.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::Semaphore;
 use zapper_policy::proto::HostMsg;
 
-use super::{Counters, NewSession, Rules, Session, SessionDir, Status};
+use super::{Counters, GuestRuntime, NewSession, Rules, Session, SessionDir, Status};
 use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon, EventBody};
 
 /// Creates a session without booting it: its profile resolved, its
@@ -53,7 +52,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         expires: (ttl > 0).then_some(created + ttl as f64),
         workdir: new.workdir.clone(),
         rules: Rules::new(new.shared_layers.clone()),
-        status: watch::channel(Status::Starting).0,
+        runtime: GuestRuntime::new(),
         tls: tls::SessionTls::new(&id)?,
         dir: dir.clone(),
         resolved,
@@ -62,12 +61,8 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         dns: dns::SessionDns::new(),
         terminals: Mutex::new(Default::default()),
         requests: Default::default(),
-        guest: Mutex::new(None),
-        vm: tokio::sync::Mutex::new(None),
         audit: Mutex::new(Some(audit)),
-        next_shell: AtomicU64::new(1),
         conns: Arc::new(Semaphore::new(256)),
-        exec_checks: Arc::new(Semaphore::new(64)),
         labels: new.labels.clone(),
         driver: driven.then(driver::Driver::new),
         daemon: Arc::downgrade(daemon),
@@ -96,7 +91,10 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
     let started = Instant::now();
     if let Err(e) = super::boot::launch(&daemon, &session).await {
         let msg = format!("{e:#}");
-        session.status.send_replace(Status::Failed(msg.clone()));
+        session
+            .runtime
+            .status()
+            .send_replace(Status::Failed(msg.clone()));
         daemon.emit(
             Some(&session),
             EventBody::Session {
@@ -107,14 +105,14 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
         teardown(&daemon, &session, None).await;
         return Err(anyhow!(msg));
     }
-    let mut status = session.status.subscribe();
+    let mut status = session.runtime.status().subscribe();
     let ready = tokio::time::timeout(
         Duration::from_secs(120),
         status.wait_for(|s| !matches!(s, Status::Starting)),
     )
     .await
     .is_ok();
-    let state = session.status.borrow().clone();
+    let state = session.runtime.status().borrow().clone();
     match (ready, state) {
         (true, Status::Running) => {
             let ms = started.elapsed().as_millis();
@@ -153,12 +151,15 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
 /// recordings stay.
 pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &str) {
     {
-        let current = session.status.borrow().clone();
+        let current = session.runtime.status().borrow().clone();
         if matches!(current, Status::Stopped(_)) {
             return;
         }
         if !matches!(current, Status::Failed(_)) {
-            session.status.send_replace(Status::Stopped(reason.into()));
+            session
+                .runtime
+                .status()
+                .send_replace(Status::Stopped(reason.into()));
         }
     }
     session.send(HostMsg::Shutdown);
@@ -169,7 +170,7 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     if let Some(driver) = &session.driver {
         driver.stop();
     }
-    if let Some(mut child) = session.vm.lock().await.take() {
+    if let Some(mut child) = session.runtime.vm().lock().await.take() {
         if tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .is_err()
@@ -178,7 +179,7 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
         }
     }
     crate::subids::release(&session.id);
-    *session.guest.lock().unwrap() = None;
+    session.runtime.clear_guest();
     if let Some(reason) = reason {
         daemon.emit(
             Some(session),
