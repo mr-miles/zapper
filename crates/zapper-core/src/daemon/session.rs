@@ -18,6 +18,7 @@ use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, vm, Daemon, Event, EventBody};
 
+mod boot;
 mod lifecycle;
 mod terminal;
 
