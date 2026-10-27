@@ -27,6 +27,9 @@ pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 /// only when the host and guest kernels have IPv6; otherwise the datapath
 /// stays IPv4-only.
 pub const GATEWAY6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+/// The guest's end of that link; the guest configures it itself (zapper-agent
+/// `init`), so this is the host-side record of the address it must match.
+#[allow(dead_code)]
 pub const GUEST6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 2);
 pub const GUEST_MAC: &str = "06:00:0a:00:02:02";
 pub const TAP: &str = "tap0";

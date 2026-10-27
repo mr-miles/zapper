@@ -5,27 +5,27 @@
 //! file, `POST /v1/config/reload` throws the running config away for the
 //! startup file, and `GET /v1/config/diff` shows what save would change.
 
-pub mod addr;
-pub mod api_error;
+pub(crate) mod addr;
+pub(crate) mod api_error;
 pub(crate) mod approvals;
-pub mod clients;
-pub mod deciders;
+pub(crate) mod clients;
+pub(crate) mod deciders;
 pub(crate) mod dns;
 pub mod driver;
 pub(crate) mod events;
-pub mod gateway;
+pub(crate) mod gateway;
 pub mod harness;
-pub mod httplog;
+pub(crate) mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;
 pub mod record;
-pub mod registry;
-pub mod services;
-pub mod session;
+pub(crate) mod registry;
+pub(crate) mod services;
+pub(crate) mod session;
 mod spec;
 mod summary;
-pub mod tls;
-pub mod vm;
+pub(crate) mod tls;
+pub(crate) mod vm;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
