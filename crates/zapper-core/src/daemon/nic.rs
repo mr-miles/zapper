@@ -100,6 +100,23 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
     if !s.dns.rate_ok() {
         return Some(dns::respond(query, Some(&q), dns::SERVFAIL, None));
     }
+    let (rcode, answer, reason) = resolve_name(d, s, &q).await;
+    // Log every refusal and every A/AAAA answer; a NODATA for another record
+    // type is not an event.
+    if rcode != dns::NOERROR || matches!(q.qtype, dns::TYPE_A | dns::TYPE_AAAA) {
+        event(&q.name, q.qtype, rcode, answer, reason.as_deref());
+    }
+    Some(dns::respond(query, Some(&q), rcode, answer))
+}
+
+/// Decides a parsed, rate-passed query: the response code, a synthetic address
+/// for an existing name of the queried family, and a reason for the log. Does
+/// the host lookup; no event emission or wire encoding.
+async fn resolve_name(
+    d: &Arc<Daemon>,
+    s: &Arc<Session>,
+    q: &dns::Question,
+) -> (u8, Option<IpAddr>, Option<String>) {
     // `ask` decides access, not resolution: a name some request could reach,
     // with or without an approval, is looked up.
     let reachable = {
@@ -108,21 +125,14 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
         resolvable(&Session::layers_of(&layers), &q.name)
     };
     if !reachable {
-        event(
-            &q.name,
-            q.qtype,
-            dns::REFUSED,
-            None,
-            Some("no rule allows this name"),
-        );
-        return Some(dns::respond(query, Some(&q), dns::REFUSED, None));
+        return (dns::REFUSED, None, Some("no rule allows this name".into()));
     }
-    // Services and their zones are answered here, never looked up on the
-    // host.
+    // Services and their zones are answered here, never looked up on the host.
     if let Some(exists) = d.services.resolves(s, &q.name) {
         s.dns.names().remember(&q.name, exists);
     }
     // Allowed: say whether the name exists, from a real lookup on the host.
+    // Read the cache into a local first so its lock isn't held across `look_up`.
     let cached = s.dns.names().cached(&q.name);
     let exists = match cached {
         Some(e) => e,
@@ -131,15 +141,11 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
                 s.dns.names().remember(&q.name, e);
                 e
             }
-            Err(why) => {
-                event(&q.name, q.qtype, dns::SERVFAIL, None, Some(&why));
-                return Some(dns::respond(query, Some(&q), dns::SERVFAIL, None));
-            }
+            Err(why) => return (dns::SERVFAIL, None, Some(why)),
         },
     };
     if !exists {
-        event(&q.name, q.qtype, dns::NXDOMAIN, None, Some("no such name"));
-        return Some(dns::respond(query, Some(&q), dns::NXDOMAIN, None));
+        return (dns::NXDOMAIN, None, Some("no such name".into()));
     }
     // A synthetic address of the queried family; other types get NODATA.
     let answer = match q.qtype {
@@ -147,10 +153,7 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
         dns::TYPE_AAAA => s.dns.names().address6(&q.name).map(IpAddr::V6),
         _ => None,
     };
-    if q.qtype == dns::TYPE_A || q.qtype == dns::TYPE_AAAA {
-        event(&q.name, q.qtype, dns::NOERROR, answer, None);
-    }
-    Some(dns::respond(query, Some(&q), dns::NOERROR, answer))
+    (dns::NOERROR, answer, None)
 }
 
 /// Whether `name` exists, from the host's resolver. `Err` for failures that
