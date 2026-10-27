@@ -1,6 +1,7 @@
 //! Services and zones over a core without VMs: which sessions a name is for,
 //! where `host:port` goes, what resolves without the host, and connecting.
 
+use crate::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 

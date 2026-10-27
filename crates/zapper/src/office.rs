@@ -9,6 +9,10 @@ use zapper_policy::Config;
 
 use crate::client::Client;
 use crate::EXAMPLE;
+// `start` registers the firm config check through ConfigApi when the office
+// feature is off; with it on, `zapper_office::start` does the registration.
+#[cfg(not(feature = "office"))]
+use zapper_core::ConfigApi;
 
 #[cfg(feature = "office")]
 #[path = "firm_cli.rs"]

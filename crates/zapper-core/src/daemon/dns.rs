@@ -15,9 +15,46 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zapper_policy::names;
+
+/// A session's DNS state: its synthetic-name table, a query rate limit, and
+/// a bound on concurrent host lookups. The single owner of what the session's
+/// resolver (`nic`, `proxy`) keeps.
+pub(crate) struct SessionDns {
+    names: Mutex<FakeDns>,
+    rate: Mutex<RateLimit>,
+    lookups: Arc<Semaphore>,
+}
+
+impl SessionDns {
+    pub fn new() -> Self {
+        Self {
+            names: Mutex::new(FakeDns::default()),
+            rate: Mutex::new(RateLimit::default()),
+            lookups: Arc::new(Semaphore::new(8)),
+        }
+    }
+
+    /// The synthetic-name table: names given out by synthetic address, and
+    /// what the host's resolver said about each.
+    pub fn names(&self) -> MutexGuard<'_, FakeDns> {
+        self.names.lock().unwrap()
+    }
+
+    /// Whether another query is within the session's rate limit.
+    pub fn rate_ok(&self) -> bool {
+        self.rate.lock().unwrap().take()
+    }
+
+    /// A permit for one concurrent host lookup, or `None` over the cap.
+    pub fn lookup_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.lookups.clone().try_acquire_owned().ok()
+    }
+}
 
 /// The synthetic IPv4 pool, 198.18.0.0/15 (benchmarking, non-routable).
 const BASE: u32 = u32::from_be_bytes([198, 18, 0, 0]);
@@ -360,5 +397,16 @@ mod tests {
         let mut r = RateLimit::default();
         assert!((0..100).all(|_| r.take()));
         assert!(!r.take());
+    }
+
+    #[test]
+    fn concurrent_lookups_are_bounded() {
+        let dns = SessionDns::new();
+        // Hold every permit; the next lookup is refused until one is freed.
+        let held: Vec<_> = std::iter::from_fn(|| dns.lookup_permit()).take(8).collect();
+        assert_eq!(held.len(), 8, "eight lookups at once");
+        assert!(dns.lookup_permit().is_none(), "the ninth waits");
+        drop(held);
+        assert!(dns.lookup_permit().is_some(), "freed once one finishes");
     }
 }

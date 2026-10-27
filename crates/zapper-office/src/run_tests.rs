@@ -3,6 +3,7 @@
 //! firm's services and zone, and the office port's requests.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use crate::firm::BOARD;
 use base64::Engine as _;
@@ -456,7 +457,7 @@ fn the_tool_lists_are_as_they_were() {
         .collect();
     assert_eq!(
         digest,
-        "611aec4ba4137e4e6138bb770a4a9770ef1985f3649aa2122a622ec58fc6c0a2"
+        "1bc3244834e876b5a9ce71fb6fbc96759558fb343d47cf67fe3146158ae7ad6f"
     );
 }
 

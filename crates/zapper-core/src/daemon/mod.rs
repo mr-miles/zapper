@@ -5,189 +5,47 @@
 //! file, `POST /v1/config/reload` throws the running config away for the
 //! startup file, and `GET /v1/config/diff` shows what save would change.
 
-pub mod addr;
-pub mod api_error;
-pub mod clients;
+pub(crate) mod addr;
+pub(crate) mod api_error;
+pub(crate) mod approvals;
+pub(crate) mod clients;
 pub(crate) mod dbwire;
-pub mod deciders;
+pub(crate) mod deciders;
 pub(crate) mod dns;
 pub mod driver;
-pub mod gateway;
+pub(crate) mod events;
+pub(crate) mod gateway;
 pub mod harness;
-pub mod httplog;
+pub(crate) mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;
 pub mod record;
-pub mod registry;
-pub mod services;
-pub mod session;
-mod spec;
+pub(crate) mod registry;
+pub(crate) mod services;
+pub(crate) mod session;
 mod summary;
-pub mod tls;
-pub mod vm;
+pub(crate) mod tls;
+pub(crate) mod vm;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, oneshot};
-use zapper_policy::proto::GuestEvent;
+use tokio::sync::oneshot;
 use zapper_policy::{expand_home, Action, AnyRule, Config, Kind, SecretSource};
 
 use session::Session;
 
-const RECENT_EVENTS: usize = 2000;
+// The event model and the stream live in `events`; the approval model and
+// the outstanding approvals in `approvals`.
+pub use approvals::{Pending, Remember};
+pub use events::{Event, EventBody};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Event {
-    pub seq: u64,
-    /// Unix time, seconds.
-    pub ts: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    #[serde(flatten)]
-    pub body: EventBody,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum EventBody {
-    Session {
-        state: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-    Net {
-        host: String,
-        port: u16,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        method: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        action: Action,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rule: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        inspected: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<u16>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        secrets: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    Exec {
-        pid: i32,
-        uid: u32,
-        path: String,
-        argv: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        action: Action,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rule: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        /// Time the process waited for the decision.
-        wait_ms: f64,
-    },
-    Ask {
-        id: String,
-        kind: Kind,
-        subject: String,
-    },
-    Answer {
-        id: String,
-        allow: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        remember: Option<String>,
-    },
-    Dns {
-        /// Empty when the query was rejected before its name was read.
-        name: String,
-        qtype: u16,
-        allowed: bool,
-        /// The response code: `noerror`, `nxdomain`, `refused`, `formerr`,
-        /// `notimp` or `servfail`.
-        rcode: String,
-        /// Synthetic address given out.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        answer: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-    Guest {
-        event: GuestEvent,
-    },
-    Shell {
-        id: u64,
-        state: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        argv: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-    },
-    Config {
-        change: String,
-    },
-    /// A service or zone added or removed (`services`).
-    Service {
-        change: String,
-        #[serde(flatten)]
-        service: services::Info,
-    },
-    /// What a driven session's agent did: `started`, `turn_start`,
-    /// `activity`, `steered`, `turn_end`, `exited`, `error`.
-    Driver {
-        event: String,
-        detail: serde_json::Value,
-    },
-    /// A tool called through the MCP gateway (`gateway`).
-    Mcp {
-        server: String,
-        tool: String,
-        ok: bool,
-        ms: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-}
-
-pub fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-}
-
-/// A pending `ask` decision.
-#[derive(Debug, Clone, Serialize)]
-pub struct Pending {
-    pub id: String,
-    pub session: String,
-    pub kind: Kind,
-    pub subject: String,
-    pub created: f64,
-    /// Rule added if the answer is remembered.
-    pub suggestion: AnyRule,
-    #[serde(skip)]
-    tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-/// What an answer to an `ask` is remembered for. Answers are kept in memory:
-/// for the request alone (no `remember`) or in the session's own layer, which
-/// ends with the session. They never change the config.
-pub enum Remember {
-    Session,
-}
+// Generic helpers live in `crate::util` (the clients' shared helpers);
+// re-exported here so the daemon's modules reach them as `super::now` etc.
+pub(crate) use crate::util::{is_session_id, now, random_id, write_private};
 
 pub struct Paths {
     pub state: PathBuf,
@@ -202,31 +60,14 @@ pub struct Daemon {
     pub startup_path: PathBuf,
     pub paths: Paths,
     pub addrs: RwLock<addr::AddressPolicy>,
-    pub sessions: RwLock<BTreeMap<String, Arc<Session>>>,
-    pub events: broadcast::Sender<Event>,
-    recent: Mutex<VecDeque<Event>>,
-    seq: AtomicU64,
-    approvals: Mutex<HashMap<String, Pending>>,
+    pub(crate) sessions: session::SessionStore,
+    pub(crate) events: events::EventBus,
+    approvals: approvals::Approvals,
     pub ui_token: String,
     pub clients: clients::Clients,
     pub services: services::Services,
     pub deciders: deciders::Deciders,
     pub gateway: gateway::Gateway,
-}
-
-pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-
-/// Whether `s` has the form of a session id, as `random_id(6)` makes them.
-pub fn is_session_id(s: &str) -> bool {
-    s.len() == 6 && s.bytes().all(|b| ID_CHARS.contains(&b))
-}
-
-pub fn random_id(len: usize) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| ID_CHARS[rng.gen_range(0..ID_CHARS.len())] as char)
-        .collect()
 }
 
 /// Finds the guest agent binary.
@@ -248,42 +89,6 @@ fn find_agent(configured: &str) -> Result<PathBuf> {
             exe.display()
         )
     })
-}
-
-/// Writes `data` to `path` atomically with mode 0600.
-pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-use std::os::unix::fs::OpenOptionsExt;
-
-/// What `zapper serve` prints when an operator's port is reachable from
-/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
-pub fn exposed_warning(what: &str) -> String {
-    format!(
-        "\n\
-         ################################################################\n\
-         WARNING: {what}, reachable from the network.\n\
-         Whoever has the token controls zapper: sessions, rules, approvals,\n\
-         firms, and the firm's cluster as cluster-admin. It is plain HTTP:\n\
-         use it on a network you trust, or reach it through an SSH tunnel\n\
-         or a TLS proxy. zapper is not built for production. The VMs still\n\
-         can't reach it: the host's own addresses are closed to them.\n\
-         ################################################################\n"
-    )
 }
 
 impl Daemon {
@@ -315,7 +120,7 @@ impl Daemon {
         // VMM directories (disks, sockets) of sessions a previous daemon left
         // behind; audit logs and recordings stay.
         for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-            let _ = std::fs::remove_dir_all(vm::vm_dir(&dir.path()));
+            let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
         }
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;
@@ -332,17 +137,14 @@ impl Daemon {
             bail!("firecracker not found at {}", paths.firecracker.display());
         }
         let addrs = addr::AddressPolicy::new(&d.private_networks)?;
-        let (events, _) = broadcast::channel(1024);
         Ok(Arc::new(Daemon {
             config: RwLock::new(config),
             startup_path,
             paths,
             addrs: RwLock::new(addrs),
-            sessions: RwLock::new(BTreeMap::new()),
-            events,
-            recent: Mutex::new(VecDeque::new()),
-            seq: AtomicU64::new(1),
-            approvals: Mutex::new(HashMap::new()),
+            sessions: session::SessionStore::new(),
+            events: events::EventBus::new(),
+            approvals: approvals::Approvals::new(),
             ui_token: random_id(24),
             clients: clients::Clients::default(),
             services: services::Services::default(),
@@ -352,40 +154,16 @@ impl Daemon {
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {
-        let event = Event {
-            seq: self.seq.fetch_add(1, Ordering::Relaxed),
-            ts: now(),
-            session: session.map(|s| s.id.clone()),
-            body,
-        };
-        if let Some(s) = session {
-            s.record(&event);
-        }
-        {
-            let mut recent = self.recent.lock().unwrap();
-            if recent.len() >= RECENT_EVENTS {
-                recent.pop_front();
-            }
-            recent.push_back(event.clone());
-        }
-        let _ = self.events.send(event);
+        self.events.emit(session, body);
     }
 
     pub fn recent_events(&self, session: Option<&str>) -> Vec<Event> {
-        let recent = self.recent.lock().unwrap();
-        recent
-            .iter()
-            .filter(|e| session.is_none() || e.session.as_deref() == session)
-            .cloned()
-            .collect()
+        self.events.recent(session)
     }
 
     pub fn session(&self, id: &str) -> Result<Arc<Session>> {
         self.sessions
-            .read()
-            .unwrap()
             .get(id)
-            .cloned()
             .ok_or_else(|| anyhow!("no session {id}"))
     }
 
@@ -398,9 +176,8 @@ impl Daemon {
         if !next.daemon.driver {
             let driven: Vec<String> = self
                 .sessions
-                .read()
-                .unwrap()
-                .values()
+                .all()
+                .into_iter()
                 .filter(|s| s.driver.is_some() && s.is_running())
                 .map(|s| s.id.clone())
                 .collect();
@@ -529,18 +306,10 @@ impl Daemon {
             suggestion,
             tx: Arc::new(Mutex::new(Some(tx))),
         };
-        {
-            let mut approvals = self.approvals.lock().unwrap();
-            // A session cannot flood the operator.
-            if approvals
-                .values()
-                .filter(|p| p.session == session.id)
-                .count()
-                >= 32
-            {
-                return false;
-            }
-            approvals.insert(id.clone(), pending);
+        // A session cannot flood the operator (the store caps how many it may
+        // have outstanding).
+        if !self.approvals.register(pending) {
+            return false;
         }
         self.emit(
             Some(session),
@@ -556,7 +325,7 @@ impl Daemon {
             .ok()
             .and_then(Result::ok)
             .unwrap_or(false);
-        if self.approvals.lock().unwrap().remove(&id).is_some() {
+        if self.approvals.take(&id).is_some() {
             self.emit(
                 Some(session),
                 EventBody::Answer {
@@ -570,17 +339,13 @@ impl Daemon {
     }
 
     pub fn approvals(&self) -> Vec<Pending> {
-        let mut v: Vec<_> = self.approvals.lock().unwrap().values().cloned().collect();
-        v.sort_by(|a, b| a.created.total_cmp(&b.created));
-        v
+        self.approvals.list()
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
         let pending = self
             .approvals
-            .lock()
-            .unwrap()
-            .remove(id)
+            .take(id)
             .ok_or_else(|| anyhow!("no pending approval {id}"))?;
         let session = self.session(&pending.session)?;
         if let Some(r) = remember {

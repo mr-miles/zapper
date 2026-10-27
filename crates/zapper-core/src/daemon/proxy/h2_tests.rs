@@ -5,6 +5,7 @@
 //! a 502 — but only *after* the request has been served, decided and injected
 //! over h2, which is exactly the new guest-facing path under test.
 
+use crate::prelude::*;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -18,11 +19,12 @@ use crate::{NewSession, Session};
 
 /// A client that trusts the session CA and offers only h2 over ALPN.
 fn guest_h2(s: &Session) -> tokio_rustls::TlsConnector {
-    let b64: String =
-        s.ca.pem
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect();
+    let b64: String = s
+        .tls
+        .pem()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .unwrap();

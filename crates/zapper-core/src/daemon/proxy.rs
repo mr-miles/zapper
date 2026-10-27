@@ -35,7 +35,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, services, spec, tls, Daemon, EventBody};
+use super::{httplog, services, tls, Daemon, EventBody};
 
 mod inspect;
 // Re-exported for the fuzz targets (crate::fuzz), which exercise these parsers.
@@ -147,7 +147,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
     let (decision, effects) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        evaluate_net(&spec::layers_of(&layers), req)
+        evaluate_net(&Session::layers_of(&layers), req)
     };
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
@@ -375,7 +375,7 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
     let inspect = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&spec::layers_of(&layers), &host, port)
+        needs_inspection(&Session::layers_of(&layers), &host, port)
     };
     // Inspected tunnels are decided per request; others here, once.
     let verdict = if inspect {
@@ -441,8 +441,7 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
 pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: IpAddr, port: u16) {
     let host = s
         .dns
-        .lock()
-        .unwrap()
+        .names()
         .name(ip)
         .map(str::to_string)
         .unwrap_or_else(|| ip.to_string());
@@ -455,7 +454,7 @@ pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: Ip
     let inspect = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&spec::layers_of(&layers), &host, port)
+        needs_inspection(&Session::layers_of(&layers), &host, port)
     };
     let verdict = if inspect {
         None

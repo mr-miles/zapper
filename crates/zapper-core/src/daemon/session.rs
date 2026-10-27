@@ -1,27 +1,33 @@
 //! One sandbox: a microVM, its guest channel, policy layer and audit trail.
+//! The session's state and queries live here; starting and stopping it is in
+//! `lifecycle`, and its interactive terminals in `terminal`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Semaphore};
-use zapper_policy::proto::{
-    Forward, Frame, GuestDisk, GuestFile, GuestMsg, HostMsg, ShellRequest, CONTROL_PORT, MAX_FRAME,
-    MAX_LINE, MCP_PORT, PROXY_PORT, SHELL_PORT,
-};
-use zapper_policy::{
-    evaluate_exec, Action, AnyRule, Config, ExecRequest, ExecRule, Kind, MountMode, Policy,
-    ResolvedProfile, Scope,
-};
+use zapper_policy::proto::{Forward, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT};
+use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
-use super::{now, proxy, spec, tls, vm, Daemon, Event, EventBody};
+use super::{tls, Daemon, Event, EventBody};
+
+mod boot;
+mod lifecycle;
+mod spec;
+mod terminal;
+
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) use lifecycle::register;
+pub(crate) use lifecycle::{create, stop};
+pub(crate) use terminal::pump_shell;
+pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", content = "detail", rename_all = "lowercase")]
@@ -30,6 +36,59 @@ pub enum Status {
     Running,
     Failed(String),
     Stopped(String),
+}
+
+/// The daemon's live sessions, by id. Behind one lock; readers take a cloned
+/// snapshot so the lock is never held across other work.
+pub(crate) struct SessionStore(RwLock<BTreeMap<String, Arc<Session>>>);
+
+impl SessionStore {
+    pub(crate) fn new() -> SessionStore {
+        SessionStore(RwLock::new(BTreeMap::new()))
+    }
+
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.0.read().unwrap().get(id).cloned()
+    }
+
+    pub(crate) fn all(&self) -> Vec<Arc<Session>> {
+        self.0.read().unwrap().values().cloned().collect()
+    }
+
+    pub(crate) fn insert(&self, session: Arc<Session>) {
+        self.0.write().unwrap().insert(session.id.clone(), session);
+    }
+
+    /// How many sessions are starting or running, for the session limit.
+    pub(crate) fn running(&self) -> usize {
+        self.0
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| {
+                matches!(
+                    *s.runtime.status().borrow(),
+                    Status::Starting | Status::Running
+                )
+            })
+            .count()
+    }
+
+    /// Take a stopped session off the list; a starting or running one stays,
+    /// as nothing would manage its VM.
+    pub(crate) fn forget(&self, id: &str) -> Result<()> {
+        let mut sessions = self.0.write().unwrap();
+        if let Some(s) = sessions.get(id) {
+            if matches!(
+                *s.runtime.status().borrow(),
+                Status::Starting | Status::Running
+            ) {
+                bail!("session {id} is still running; stop it first");
+            }
+        }
+        sessions.remove(id);
+        Ok(())
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -42,6 +101,211 @@ pub struct Counters {
     pub shells: AtomicU64,
 }
 
+/// A session's directory and the files and sockets laid out under it: the
+/// single owner of that layout. `vm` (the VMM process), the record and the
+/// driver are handed paths from here rather than joining their own, so the
+/// structure lives in one place.
+#[derive(Clone)]
+pub(crate) struct SessionDir {
+    root: PathBuf,
+}
+
+impl SessionDir {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+    /// The session directory itself: console log, recordings and the audit
+    /// log live here, outside the part the VMM sees.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    /// The part the VMM sees: disks, its config, metrics and sockets.
+    pub fn vm(&self) -> PathBuf {
+        self.root.join("vm")
+    }
+    pub fn root_disk(&self) -> PathBuf {
+        self.vm().join("root.ext4")
+    }
+    pub fn data_disk(&self, i: usize) -> PathBuf {
+        self.vm().join(format!("disk{i}.ext4"))
+    }
+    /// The VM's vsock socket; guest-initiated connections arrive on
+    /// `<vsock>_<port>`.
+    pub fn vsock(&self) -> PathBuf {
+        self.vm().join("v.sock")
+    }
+    pub fn vsock_port(&self, port: u32) -> PathBuf {
+        PathBuf::from(format!("{}_{port}", self.vsock().display()))
+    }
+    /// The daemon's socket for the guest's captured traffic (`netns`).
+    pub fn nic_socket(&self) -> PathBuf {
+        self.vm().join(crate::netns::SOCKET)
+    }
+    /// Firecracker's own config and metrics, under the VMM's directory.
+    pub fn vm_config(&self) -> PathBuf {
+        self.vm().join("vm.json")
+    }
+    pub fn metrics(&self) -> PathBuf {
+        self.vm().join("metrics.json")
+    }
+    pub fn console(&self) -> PathBuf {
+        self.root.join("console.log")
+    }
+    pub fn audit(&self) -> PathBuf {
+        self.root.join("audit.jsonl")
+    }
+    pub fn driver_log(&self) -> PathBuf {
+        self.root.join("driver.jsonl")
+    }
+}
+
+/// A session's rule state: its own policy layer, and the shared layers a
+/// client keeps for it (a firm role, between the session's layer and its
+/// profile's). The owner of the session's rules; `Session` wraps these with
+/// the identity and events they need.
+pub(crate) struct Rules {
+    own: RwLock<Policy>,
+    shared: Vec<(Scope, Arc<RwLock<Policy>>)>,
+}
+
+impl Rules {
+    pub fn new(shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
+        Self {
+            own: RwLock::new(Policy::default()),
+            shared,
+        }
+    }
+
+    /// A clone of the session's own layer.
+    pub fn own(&self) -> Policy {
+        self.own.read().unwrap().clone()
+    }
+
+    /// The rules of the session's own layer.
+    pub fn list(&self) -> Vec<AnyRule> {
+        self.own.read().unwrap().rules()
+    }
+
+    /// Adds a rule to the own layer under a fresh `s-<kind>-<n>` id, so
+    /// session rule ids never clash with config ones.
+    pub fn add(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
+        let mut policy = self.own.write().unwrap();
+        let taken: Vec<String> = policy
+            .rules()
+            .iter()
+            .filter_map(|r| r.id().map(str::to_string))
+            .collect();
+        let kind = rule.kind();
+        let id = (1..)
+            .map(|n| format!("s-{kind}-{n}"))
+            .find(|i| !taken.contains(i))
+            .unwrap();
+        rule.set_id(id);
+        policy.insert(rule.clone(), position);
+        rule
+    }
+
+    /// Replaces the rule with `rule`'s id and puts it first; returns that id.
+    pub fn put(&self, rule: AnyRule) -> String {
+        let id = rule.id().unwrap_or("?").to_string();
+        let mut p = self.own.write().unwrap();
+        p.remove(&id);
+        p.insert(rule, Some(0));
+        id
+    }
+
+    /// Removes a rule from the own layer, returning it if it was there.
+    pub fn remove(&self, id: &str) -> Option<AnyRule> {
+        self.own.write().unwrap().remove(id)
+    }
+
+    /// The session's policy layers, most specific first: own, shared, the
+    /// profile's (from the running config, falling back to those resolved at
+    /// start), then global.
+    pub fn layers(
+        &self,
+        id: &str,
+        profile: &str,
+        resolved: &ResolvedProfile,
+        config: &Config,
+    ) -> Vec<(Scope, Policy)> {
+        let mut v = vec![(Scope::Session(id.to_string()), self.own())];
+        for (scope, policy) in &self.shared {
+            v.push((scope.clone(), policy.read().unwrap().clone()));
+        }
+        match config.resolve(profile) {
+            Ok(p) => v.extend(p.layers),
+            Err(_) => v.extend(resolved.layers.iter().cloned()),
+        }
+        v.push((Scope::Global, config.policy.clone()));
+        v
+    }
+}
+
+/// A session's live machinery: its lifecycle status, the Firecracker
+/// process, the control channel to the guest agent, and the counters that
+/// gate shells and exec decisions. All of it is created when the VM boots
+/// and dropped when it stops; the owner of "the session while it runs".
+pub(crate) struct GuestRuntime {
+    status: watch::Sender<Status>,
+    vm: tokio::sync::Mutex<Option<Child>>,
+    /// The control channel to the guest agent, once it connects.
+    guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
+    next_shell: AtomicU64,
+    /// Bounds concurrent exec decisions.
+    exec_checks: Arc<Semaphore>,
+}
+
+impl GuestRuntime {
+    pub fn new() -> Self {
+        Self {
+            status: watch::channel(Status::Starting).0,
+            vm: tokio::sync::Mutex::new(None),
+            guest: Mutex::new(None),
+            next_shell: AtomicU64::new(1),
+            exec_checks: Arc::new(Semaphore::new(64)),
+        }
+    }
+
+    /// The lifecycle-status channel: subscribe to it, borrow it, or send a
+    /// transition through it.
+    pub fn status(&self) -> &watch::Sender<Status> {
+        &self.status
+    }
+
+    /// The Firecracker process handle: set at boot, taken at teardown.
+    pub fn vm(&self) -> &tokio::sync::Mutex<Option<Child>> {
+        &self.vm
+    }
+
+    /// Records the guest's control channel once it connects.
+    pub fn set_guest(&self, tx: mpsc::Sender<HostMsg>) {
+        *self.guest.lock().unwrap() = Some(tx);
+    }
+
+    /// Drops the control channel (teardown).
+    pub fn clear_guest(&self) {
+        *self.guest.lock().unwrap() = None;
+    }
+
+    /// Sends a message to the guest agent, if the channel is up.
+    pub fn send(&self, msg: HostMsg) {
+        if let Some(tx) = self.guest.lock().unwrap().as_ref() {
+            let _ = tx.try_send(msg);
+        }
+    }
+
+    /// The next terminal id.
+    pub fn next_shell(&self) -> u64 {
+        self.next_shell.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A permit for one concurrent exec decision, or `None` over the cap.
+    pub fn exec_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.exec_checks.clone().try_acquire_owned().ok()
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub profile: String,
@@ -49,36 +313,28 @@ pub struct Session {
     pub expires: Option<f64>,
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
-    /// The session's own policy layer, above its profile. Not saved.
-    pub(crate) policy: RwLock<Policy>,
-    pub(crate) status: watch::Sender<Status>,
-    pub dir: PathBuf,
-    pub(crate) ca: tls::SessionCa,
+    /// The session's rules: its own layer and any shared layers. Not saved.
+    pub(crate) rules: Rules,
+    /// The live VM, its control channel and lifecycle status while it runs.
+    pub(crate) runtime: GuestRuntime,
+    pub(crate) dir: SessionDir,
+    /// The session's CA and the guest-facing server configs minted from it.
+    pub(crate) tls: tls::SessionTls,
     pub(crate) counters: Counters,
     pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
-    /// Names given out by the session's DNS, by synthetic address.
-    pub(crate) dns: Mutex<super::dns::FakeDns>,
-    pub(crate) dns_rate: Mutex<super::dns::RateLimit>,
-    /// Bounds the session's concurrent lookups on the host.
-    pub(crate) dns_lookups: Arc<Semaphore>,
+    /// The session's resolver state: synthetic names, rate limit, lookup cap.
+    pub(crate) dns: super::dns::SessionDns,
     /// The session's HTTP traffic, for inspecting it from the UI.
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
     pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
-    vm: tokio::sync::Mutex<Option<Child>>,
     audit: Mutex<Option<super::record::Writer>>,
-    next_shell: AtomicU64,
     /// Bounds concurrent proxy connections from the guest.
     pub(crate) conns: Arc<Semaphore>,
-    exec_checks: Arc<Semaphore>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
     pub labels: BTreeMap<String, String>,
-    /// Policy layers a client keeps for several sessions (a firm's role),
-    /// between the session's own layer and its profile's.
-    pub(crate) shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// The driver, for a driven agent (`agent.driven`) outside a firm.
     pub driver: Option<Arc<super::driver::Driver>>,
     /// Its daemon, for the events of what clients change in it.
@@ -126,7 +382,7 @@ impl Session {
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
-            status: self.status.borrow().clone(),
+            status: self.runtime.status().borrow().clone(),
             created: self.created,
             expires: self.expires,
             image: self.resolved.engine.image.clone(),
@@ -143,7 +399,7 @@ impl Session {
                 "exits": get(&c.exits), "shells": get(&c.shells),
             }),
             usage: self.usage.lock().unwrap().clone(),
-            rules: self.policy.read().unwrap().rules().len(),
+            rules: self.rules.list().len(),
             firm: self.label("firm").map(str::to_string),
             member: self.label("member").map(str::to_string),
             labels: self.labels.clone(),
@@ -154,7 +410,7 @@ impl Session {
     /// The socket of the session's VM's vsock, for connecting to a port in
     /// the guest (`CONNECT <port>`).
     pub fn vsock_path(&self) -> PathBuf {
-        vm::vsock_path(&self.dir)
+        self.dir.vsock()
     }
 
     /// Opens a host-initiated connection to a port of the session's VM,
@@ -185,13 +441,13 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(*self.status.borrow(), Status::Running)
+        matches!(*self.runtime.status().borrow(), Status::Running)
     }
 
     /// Whether the session has ended, stopped or failed.
     pub fn ended(&self) -> bool {
         matches!(
-            *self.status.borrow(),
+            *self.runtime.status().borrow(),
             Status::Stopped(_) | Status::Failed(_)
         )
     }
@@ -228,62 +484,47 @@ impl Session {
 
     /// Where the audit log can be read (the keeper's copy, if it keeps it).
     pub fn audit_path(&self) -> PathBuf {
-        super::record::view(&self.dir.join("audit.jsonl"))
+        super::record::view(&self.dir.audit())
     }
 
     /// Policy layers, most specific first. Uses the running config, so rule
     /// changes apply to running sessions at once; a profile removed from the
     /// running config falls back to its layers at session start.
     pub fn layers(&self, config: &Config) -> Vec<(Scope, Policy)> {
-        let mut v = vec![(
-            Scope::Session(self.id.clone()),
-            self.policy.read().unwrap().clone(),
-        )];
-        for (scope, policy) in &self.shared_layers {
-            v.push((scope.clone(), policy.read().unwrap().clone()));
-        }
-        match config.resolve(&self.profile) {
-            Ok(p) => v.extend(p.layers),
-            Err(_) => v.extend(self.resolved.layers.iter().cloned()),
-        }
-        v.push((Scope::Global, config.policy.clone()));
-        v
+        self.rules
+            .layers(&self.id, &self.profile, &self.resolved, config)
+    }
+
+    /// A clone of the session's own policy layer.
+    pub fn own_policy(&self) -> Policy {
+        self.rules.own()
+    }
+
+    /// The same layers by reference, in evaluation order, as the policy
+    /// evaluators (`evaluate_net`, `evaluate_exec`, `needs_inspection`,
+    /// `resolvable`) take them. Paired with [`Session::layers`], which owns
+    /// them — the policies are cloned out from behind their locks, so the
+    /// borrowed view is a separate step.
+    pub(crate) fn layers_of(layers: &[(Scope, Policy)]) -> Vec<(Scope, &Policy)> {
+        layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
     /// session rule ids never clash with config ones.
-    pub fn add_rule(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
-        let mut policy = self.policy.write().unwrap();
-        let taken: Vec<String> = policy
-            .rules()
-            .iter()
-            .filter_map(|r| r.id().map(str::to_string))
-            .collect();
-        let kind = rule.kind();
-        let id = (1..)
-            .map(|n| format!("s-{kind}-{n}"))
-            .find(|i| !taken.contains(i))
-            .unwrap();
-        rule.set_id(id);
-        policy.insert(rule.clone(), position);
-        rule
+    pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
+        self.rules.add(rule, position)
     }
 
     /// The rules of the session's own layer.
     pub fn rules(&self) -> Vec<AnyRule> {
-        self.policy.read().unwrap().rules()
+        self.rules.list()
     }
 
     /// Puts a client's rule first in the session's own layer under the id
     /// it has, replacing a rule with that id (an officer's approval, the
     /// network a credential grant needs). It is in the session's events.
     pub fn put_rule(&self, rule: AnyRule) {
-        let id = rule.id().unwrap_or("?").to_string();
-        {
-            let mut p = self.policy.write().unwrap();
-            p.remove(&id);
-            p.insert(rule, Some(0));
-        }
+        let id = self.rules.put(rule);
         self.config_event(format!(
             "rule {id} added to {}",
             Scope::Session(self.id.clone())
@@ -293,7 +534,7 @@ impl Session {
     /// Removes a rule from the session's own layer: it, if it was there,
     /// and an event of the session's.
     pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
-        let rule = self.policy.write().unwrap().remove(id)?;
+        let rule = self.rules.remove(id)?;
         self.config_event(format!(
             "rule {id} removed from {}",
             Scope::Session(self.id.clone())
@@ -308,9 +549,7 @@ impl Session {
     }
 
     fn send(&self, msg: HostMsg) {
-        if let Some(tx) = self.guest.lock().unwrap().as_ref() {
-            let _ = tx.try_send(msg);
-        }
+        self.runtime.send(msg);
     }
 
     /// Opens a terminal in the guest.
@@ -321,9 +560,9 @@ impl Session {
         if req.argv.is_empty() {
             req.argv = self.resolved.agent.command.clone();
         }
-        let id = self.next_shell.fetch_add(1, Ordering::Relaxed);
+        let id = self.runtime.next_shell();
         req.id = id;
-        let mut stream = UnixStream::connect(vm::vsock_path(&self.dir)).await?;
+        let mut stream = UnixStream::connect(self.dir.vsock()).await?;
         stream
             .write_all(format!("CONNECT {SHELL_PORT}\n").as_bytes())
             .await?;
@@ -380,671 +619,9 @@ impl NewSession {
     }
 }
 
-/// Creates a session and boots its VM; returns once the guest is ready.
-/// The guest ports the host connects to over vsock: those the session was
-/// created with, then the profile's `engine.ports` not among them.
-fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
-    let mut v = given.to_vec();
-    for p in &engine.ports {
-        if !v.iter().any(|f| f.vsock_port == *p as u32) {
-            v.push(Forward {
-                vsock_port: *p as u32,
-                tcp_port: *p,
-                nic: engine.network == zapper_policy::NetworkMode::Nic,
-            });
-        }
-    }
-    v
-}
-
-/// Creates a session without booting it: its profile resolved, its
-/// directory and audit log, its rules; listed, as starting.
-pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Session>> {
-    let (mut resolved, max) = {
-        let c = daemon.config.read().unwrap();
-        (c.resolve(&new.profile)?, c.daemon.max_sessions)
-    };
-    if let Some(overlay) = &new.agent_overlay {
-        let mut agent = serde_json::to_value(&resolved.agent)?;
-        zapper_policy::merge(&mut agent, overlay);
-        resolved.agent = serde_json::from_value(agent).context("agent overlay")?;
-    }
-    resolved.mounts.extend(new.mounts.iter().cloned());
-    // The agent's skills and configuration directories, where its harness
-    // reads them.
-    if let Some(h) = super::harness::get(&resolved.agent.kind) {
-        let home = format!("/home/{}", resolved.agent.user);
-        let extra = h.mounts(&resolved.agent, &home);
-        resolved.mounts.extend(extra);
-    }
-    let running = daemon
-        .sessions
-        .read()
-        .unwrap()
-        .values()
-        .filter(|s| matches!(*s.status.borrow(), Status::Starting | Status::Running))
-        .count();
-    if running >= max {
-        bail!("{running} sessions running; daemon.max_sessions is {max}");
-    }
-    let id = super::random_id(6);
-    let dir = daemon.paths.state.join("sessions").join(&id);
-    std::fs::create_dir_all(&dir)?;
-    let audit = super::record::Writer::open(&dir.join("audit.jsonl"))?;
-    // A firm's workers are driven by the office's foreman.
-    let driven = resolved.agent.driven
-        && !new.labels.contains_key("firm")
-        && daemon.config.read().unwrap().daemon.driver;
-    let created = now();
-    let ttl = resolved.engine.ttl_secs;
-    let session = Arc::new(Session {
-        id: id.clone(),
-        profile: new.profile.clone(),
-        created,
-        expires: (ttl > 0).then_some(created + ttl as f64),
-        workdir: new.workdir.clone(),
-        policy: RwLock::new(Policy::default()),
-        status: watch::channel(Status::Starting).0,
-        ca: tls::SessionCa::new(&id)?,
-        dir: dir.clone(),
-        resolved,
-        counters: Counters::default(),
-        usage: Mutex::new(None),
-        dns: Mutex::new(Default::default()),
-        dns_rate: Mutex::new(Default::default()),
-        dns_lookups: Arc::new(Semaphore::new(8)),
-        terminals: Mutex::new(Default::default()),
-        requests: Default::default(),
-        guest: Mutex::new(None),
-        vm: tokio::sync::Mutex::new(None),
-        audit: Mutex::new(Some(audit)),
-        next_shell: AtomicU64::new(1),
-        conns: Arc::new(Semaphore::new(256)),
-        exec_checks: Arc::new(Semaphore::new(64)),
-        labels: new.labels.clone(),
-        shared_layers: new.shared_layers.clone(),
-        driver: driven.then(super::driver::Driver::new),
-        daemon: Arc::downgrade(daemon),
-        extra_files: new.files.clone(),
-        forwards: new.forwards.clone(),
-    });
-    for rule in new.policy.rules() {
-        session.add_rule(rule, None);
-    }
-    daemon
-        .sessions
-        .write()
-        .unwrap()
-        .insert(id.clone(), session.clone());
-    daemon.emit(
-        Some(&session),
-        EventBody::Session {
-            state: "starting".into(),
-            detail: Some(format!("profile {}", new.profile)),
-        },
-    );
-    Ok(session)
-}
-
-pub async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>> {
-    let session = register(&daemon, &new)?;
-    let (id, dir) = (session.id.clone(), session.dir.clone());
-    let ttl = session.resolved.engine.ttl_secs;
-
-    let started = Instant::now();
-    if let Err(e) = boot(&daemon, &session).await {
-        let msg = format!("{e:#}");
-        session.status.send_replace(Status::Failed(msg.clone()));
-        daemon.emit(
-            Some(&session),
-            EventBody::Session {
-                state: "failed".into(),
-                detail: Some(msg.clone()),
-            },
-        );
-        teardown(&daemon, &session, None).await;
-        return Err(anyhow!(msg));
-    }
-    let mut status = session.status.subscribe();
-    let ready = tokio::time::timeout(
-        Duration::from_secs(120),
-        status.wait_for(|s| !matches!(s, Status::Starting)),
-    )
-    .await
-    .is_ok();
-    let state = session.status.borrow().clone();
-    match (ready, state) {
-        (true, Status::Running) => {
-            let ms = started.elapsed().as_millis();
-            daemon.emit(
-                Some(&session),
-                EventBody::Session {
-                    state: "running".into(),
-                    detail: Some(format!("ready in {ms} ms")),
-                },
-            );
-            super::driver::drive(&daemon, &session);
-        }
-        (_, state) => {
-            let msg = match state {
-                Status::Failed(m) => m,
-                _ => "guest did not become ready in 120s".into(),
-            };
-            stop(&daemon, &session, &msg).await;
-            return Err(anyhow!(
-                "session {id}: {msg}; see {}",
-                dir.join("console.log").display()
-            ));
-        }
-    }
-    if ttl > 0 {
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(ttl)).await;
-            stop(&d, &s, "ttl expired").await;
-        });
-    }
-    Ok(session)
-}
-
-async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
-    let dir = &session.dir;
-    let vmdir = vm::vm_dir(dir);
-    std::fs::create_dir_all(&vmdir)?;
-    let engine = &session.resolved.engine;
-    let root = vmdir.join("root.ext4");
-    vm::root_disk(
-        &daemon.paths.images.join(format!("{}.ext4", engine.image)),
-        &root,
-        vm::parse_size(&engine.disk)?,
-    )
-    .await
-    .context("root disk")?;
-    let mut disks = Vec::new();
-    let mut guest_disks = Vec::new();
-    for (i, m) in session.resolved.mounts.iter().enumerate() {
-        let path = vmdir.join(format!("disk{i}.ext4"));
-        let host = vm::mount_disk(m, &session.workdir, &path)
-            .await
-            .with_context(|| format!("mount {}", m.host))?;
-        let ro = m.mode == MountMode::Ro;
-        disks.push((path, ro));
-        let device = format!("/dev/vd{}", (b'b' + i as u8) as char);
-        guest_disks.push(GuestDisk {
-            device,
-            path: m.guest.clone(),
-            read_only: ro,
-        });
-        tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
-    }
-    let spec = {
-        let c = daemon.config.read().unwrap();
-        spec::build(
-            &c,
-            &session.resolved,
-            &session.id,
-            &session.ca.pem,
-            guest_disks,
-            session.extra_files.clone(),
-            forwards(&session.resolved.engine, &session.forwards),
-        )?
-    };
-
-    // Guest-initiated vsock connections arrive on `<uds>_<port>`.
-    let vsock = vm::vsock_path(dir);
-    let control_path = PathBuf::from(format!("{}_{CONTROL_PORT}", vsock.display()));
-    let proxy_path = PathBuf::from(format!("{}_{PROXY_PORT}", vsock.display()));
-    let control = UnixListener::bind(&control_path)?;
-    let proxy = UnixListener::bind(&proxy_path)?;
-    // The MCP gateway, to the servers registered for the session.
-    let mcp = UnixListener::bind(PathBuf::from(format!("{}_{MCP_PORT}", vsock.display())))?;
-    tokio::spawn(super::gateway::serve(daemon.clone(), session.clone(), mcp));
-    let nic = engine.network == zapper_policy::NetworkMode::Nic;
-    if nic {
-        let listener = UnixListener::bind(vmdir.join(crate::netns::SOCKET))?;
-        tokio::spawn(super::nic::serve(daemon.clone(), session.clone(), listener));
-    }
-
-    let subids = daemon.config.read().unwrap().daemon.vmm_subids;
-    let child = vm::start(vm::VmSpec {
-        firecracker: &daemon.paths.firecracker,
-        kernel: daemon.paths.kernels.join(&engine.kernel),
-        initrd: &daemon.paths.initrd,
-        root,
-        disks,
-        engine,
-        dir,
-        id: &session.id,
-        nic,
-        subids,
-    })
-    .await?;
-    *session.vm.lock().await = Some(child);
-
-    {
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            if let Err(e) = guest_control(&d, &s, control, control_path, spec).await {
-                tracing::warn!(session = %s.id, "guest control: {e:#}");
-                if matches!(*s.status.borrow(), Status::Starting) {
-                    s.status.send_replace(Status::Failed(format!("{e:#}")));
-                }
-            }
-        });
-    }
-    {
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = proxy.accept().await else {
-                    break;
-                };
-                let Ok(permit) = s.conns.clone().try_acquire_owned() else {
-                    drop(stream);
-                    continue;
-                };
-                let (d, s) = (d.clone(), s.clone());
-                tokio::spawn(async move {
-                    proxy::serve(d, s, stream).await;
-                    drop(permit);
-                });
-            }
-        });
-    }
-    {
-        // VM exit watcher.
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let mut vm = s.vm.lock().await;
-                let Some(child) = vm.as_mut() else { return };
-                if let Ok(Some(status)) = child.try_wait() {
-                    *vm = None;
-                    drop(vm);
-                    let reason = format!("vm exited ({status})");
-                    if matches!(*s.status.borrow(), Status::Starting) {
-                        s.status.send_replace(Status::Failed(reason.clone()));
-                    }
-                    stop(&d, &s, &reason).await;
-                    return;
-                }
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn guest_control(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    listener: UnixListener,
-    path: PathBuf,
-    spec: zapper_policy::proto::GuestSpec,
-) -> Result<()> {
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(60), listener.accept())
-        .await
-        .context("guest did not connect")??;
-    // Only the first connection is the agent: anything later could be the
-    // workload. Remove the socket so further guest connections are refused.
-    drop(listener);
-    let _ = std::fs::remove_file(&path);
-
-    let (r, mut w) = stream.into_split();
-    let (tx, mut rx) = mpsc::channel::<HostMsg>(256);
-    tx.send(HostMsg::Init {
-        spec: Box::new(spec),
-    })
-    .await?;
-    *session.guest.lock().unwrap() = Some(tx.clone());
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let mut line = serde_json::to_vec(&msg).unwrap();
-            line.push(b'\n');
-            if w.write_all(&line).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut reader = BufReader::new(r);
-    while let Some(line) = read_guest_line(&mut reader).await? {
-        let msg: GuestMsg = match serde_json::from_slice(&line) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(session = %session.id, "bad guest message: {e}");
-                continue;
-            }
-        };
-        match msg {
-            GuestMsg::Ready => {
-                session.status.send_replace(Status::Running);
-            }
-            GuestMsg::Failed { error } => {
-                session
-                    .status
-                    .send_replace(Status::Failed(format!("guest setup: {error}")));
-            }
-            GuestMsg::ExecCheck { id, pid, uid, req } => {
-                let Ok(permit) = session.exec_checks.clone().try_acquire_owned() else {
-                    let _ = tx.try_send(HostMsg::ExecReply { id, allow: false });
-                    continue;
-                };
-                let (d, s, tx) = (daemon.clone(), session.clone(), tx.clone());
-                tokio::spawn(async move {
-                    let allow = decide_exec(&d, &s, pid, uid, req).await;
-                    let _ = tx.send(HostMsg::ExecReply { id, allow }).await;
-                    drop(permit);
-                });
-            }
-            GuestMsg::Event { event } => {
-                use zapper_policy::proto::GuestEvent;
-                match &event {
-                    GuestEvent::Usage { .. } => {
-                        *session.usage.lock().unwrap() = Some(event);
-                        continue;
-                    }
-                    GuestEvent::Exit { .. } => {
-                        session.counters.exits.fetch_add(1, Ordering::Relaxed);
-                    }
-                    _ => {}
-                }
-                daemon.emit(Some(session), EventBody::Guest { event });
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn decide_exec(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    pid: i32,
-    uid: u32,
-    req: ExecRequest,
-) -> bool {
-    let started = Instant::now();
-    let decision = {
-        let c = daemon.config.read().unwrap();
-        let layers = session.layers(&c);
-        evaluate_exec(&spec::layers_of(&layers), &req)
-    };
-    let allow = match decision.action {
-        Action::Allow => true,
-        Action::Deny => false,
-        Action::Ask => {
-            let suggestion = AnyRule::Exec(ExecRule {
-                id: None,
-                action: Action::Allow,
-                path: req.path.clone(),
-                args: None,
-                final_: false,
-                comment: Some("approved".into()),
-            });
-            daemon
-                .ask(
-                    session,
-                    Kind::Exec,
-                    format!("exec {}", req.argv.join(" ")),
-                    suggestion,
-                )
-                .await
-        }
-    };
-    let counter = if allow {
-        &session.counters.exec_allowed
-    } else {
-        &session.counters.exec_denied
-    };
-    counter.fetch_add(1, Ordering::Relaxed);
-    daemon.emit(
-        Some(session),
-        EventBody::Exec {
-            pid,
-            uid,
-            path: req.path,
-            argv: req.argv,
-            cwd: req.cwd,
-            action: if allow { Action::Allow } else { Action::Deny },
-            rule: decision.rule,
-            scope: decision.scope.map(|s| s.to_string()),
-            wait_ms: started.elapsed().as_secs_f64() * 1000.0,
-        },
-    );
-    allow
-}
-
-/// Stops a session's VM and removes its disks; the audit log, console log and
-/// recordings stay.
-pub async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &str) {
-    {
-        let current = session.status.borrow().clone();
-        if matches!(current, Status::Stopped(_)) {
-            return;
-        }
-        if !matches!(current, Status::Failed(_)) {
-            session.status.send_replace(Status::Stopped(reason.into()));
-        }
-    }
-    session.send(HostMsg::Shutdown);
-    teardown(daemon, session, Some(reason)).await;
-}
-
-async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&str>) {
-    if let Some(driver) = &session.driver {
-        driver.stop();
-    }
-    if let Some(mut child) = session.vm.lock().await.take() {
-        if tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-        }
-    }
-    crate::subids::release(&session.id);
-    *session.guest.lock().unwrap() = None;
-    if let Some(reason) = reason {
-        daemon.emit(
-            Some(session),
-            EventBody::Session {
-                state: "stopped".into(),
-                detail: Some(reason.into()),
-            },
-        );
-    }
-    // The VMM's directory: disks and sockets go; its config and metrics are
-    // kept next to the audit log.
-    let vmdir = vm::vm_dir(&session.dir);
-    for f in ["vm.json", "metrics.json"] {
-        let _ = std::fs::rename(vmdir.join(f), session.dir.join(f));
-    }
-    let _ = std::fs::remove_dir_all(vmdir);
-    *session.audit.lock().unwrap() = None;
-}
-
-/// Pumps frames between a client and a guest terminal, recording the
-/// terminal as an asciicast v2 file in the session directory.
-pub async fn pump_shell<C>(
-    daemon: Arc<Daemon>,
-    session: Arc<Session>,
-    client: C,
-    guest: UnixStream,
-    id: u64,
-    argv: Vec<String>,
-    tty: Option<(u16, u16)>,
-) where
-    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    daemon.emit(
-        Some(&session),
-        EventBody::Shell {
-            id,
-            state: "open".into(),
-            argv: Some(argv.clone()),
-            exit_code: None,
-        },
-    );
-    let cast = Arc::new(Mutex::new(Recorder::new(&session.dir, id, tty, &argv)));
-    let term = Arc::new(Terminal::new(id, argv.clone(), tty.unwrap_or((24, 80))));
-    session.terminals.lock().unwrap().insert(id, term.clone());
-    let watch = term.clone();
-    let (mut cr, mut cw) = tokio::io::split(client);
-    let (mut gr, mut gw) = guest.into_split();
-    let rec = cast.clone();
-    let upstream = tokio::spawn(async move {
-        while let Ok(Some(frame)) = read_frame(&mut cr).await {
-            match &frame {
-                Frame::Data(d) => rec.lock().unwrap().write("i", d),
-                Frame::Resize(r, c) => {
-                    rec.lock()
-                        .unwrap()
-                        .write("r", format!("{c}x{r}").as_bytes());
-                    watch.push(TermChunk::Resize(*r, *c));
-                }
-                _ => {}
-            }
-            let mut buf = Vec::new();
-            frame.write_to(&mut buf).ok();
-            if gw.write_all(&buf).await.is_err() {
-                break;
-            }
-        }
-        let _ = gw.shutdown().await;
-    });
-    let mut exit_code = None;
-    while let Ok(Some(frame)) = read_frame(&mut gr).await {
-        match &frame {
-            Frame::Data(d) | Frame::Stderr(d) => {
-                cast.lock().unwrap().write("o", d);
-                term.push(TermChunk::Output(d.clone()));
-            }
-            Frame::Exit(c) => exit_code = Some(*c),
-            _ => {}
-        }
-        let mut buf = Vec::new();
-        frame.write_to(&mut buf).ok();
-        if cw.write_all(&buf).await.is_err() || exit_code.is_some() {
-            break;
-        }
-    }
-    let _ = cw.shutdown().await;
-    upstream.abort();
-    term.push(TermChunk::End(exit_code));
-    daemon.emit(
-        Some(&session),
-        EventBody::Shell {
-            id,
-            state: "closed".into(),
-            argv: None,
-            exit_code,
-        },
-    );
-}
-
-/// What a watcher of a terminal receives.
-#[derive(Debug, Clone)]
-pub enum TermChunk {
-    Output(Vec<u8>),
-    /// Rows, columns.
-    Resize(u16, u16),
-    /// The terminal closed, with the command's exit code if known.
-    End(Option<i32>),
-}
-
-/// A terminal's output so far and its live stream, for read-only watchers.
-pub struct Terminal {
-    pub id: u64,
-    pub argv: Vec<String>,
-    state: Mutex<TermState>,
-    tx: tokio::sync::broadcast::Sender<TermChunk>,
-}
-
-struct TermState {
-    /// Current size.
-    size: (u16, u16),
-    /// Size in effect at the start of `history`.
-    base: (u16, u16),
-    open: bool,
-    history: std::collections::VecDeque<TermChunk>,
-    bytes: usize,
-}
-
-/// Output kept per terminal for watchers who join late.
-const TERMINAL_HISTORY: usize = 2 << 20;
-
-#[derive(Serialize)]
-pub struct TerminalInfo {
-    pub id: u64,
-    pub argv: Vec<String>,
-    pub rows: u16,
-    pub cols: u16,
-    pub open: bool,
-}
-
-impl Terminal {
-    fn new(id: u64, argv: Vec<String>, size: (u16, u16)) -> Self {
-        let state = TermState {
-            size,
-            base: size,
-            open: true,
-            history: Default::default(),
-            bytes: 0,
-        };
-        Terminal {
-            id,
-            argv,
-            state: Mutex::new(state),
-            tx: tokio::sync::broadcast::channel(1024).0,
-        }
-    }
-
-    fn push(&self, chunk: TermChunk) {
-        let mut st = self.state.lock().unwrap();
-        match &chunk {
-            TermChunk::Output(d) => st.bytes += d.len(),
-            TermChunk::Resize(r, c) => st.size = (*r, *c),
-            TermChunk::End(_) => st.open = false,
-        }
-        st.history.push_back(chunk.clone());
-        while st.bytes > TERMINAL_HISTORY {
-            match st.history.pop_front() {
-                Some(TermChunk::Output(d)) => st.bytes -= d.len(),
-                Some(TermChunk::Resize(r, c)) => st.base = (r, c),
-                Some(_) => {}
-                None => break,
-            }
-        }
-        // Sent under the lock, so a watcher subscribing in `watch` sees each
-        // chunk exactly once.
-        let _ = self.tx.send(chunk);
-    }
-
-    /// The kept output, starting with the size it was written at, and a
-    /// receiver for what comes after.
-    pub fn watch(&self) -> (Vec<TermChunk>, tokio::sync::broadcast::Receiver<TermChunk>) {
-        let st = self.state.lock().unwrap();
-        let rx = self.tx.subscribe();
-        let mut snapshot = Vec::with_capacity(st.history.len() + 1);
-        snapshot.push(TermChunk::Resize(st.base.0, st.base.1));
-        snapshot.extend(st.history.iter().cloned());
-        (snapshot, rx)
-    }
-
-    pub fn info(&self) -> TerminalInfo {
-        let st = self.state.lock().unwrap();
-        TerminalInfo {
-            id: self.id,
-            argv: self.argv.clone(),
-            rows: st.size.0,
-            cols: st.size.1,
-            open: st.open,
-        }
-    }
-}
-
 /// One line from the guest's control channel, at most `MAX_LINE` bytes:
-/// `None` at the end, an error for a longer one.
+/// `None` at the end, an error for a longer one. Shared by the guest-control
+/// loop (`lifecycle`) and nothing else.
 pub(crate) async fn read_guest_line(
     reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
 ) -> Result<Option<Vec<u8>>> {
@@ -1062,84 +639,98 @@ pub(crate) async fn read_guest_line(
     Ok(Some(line))
 }
 
-pub async fn read_frame(
-    r: &mut (impl tokio::io::AsyncRead + Unpin),
-) -> std::io::Result<Option<Frame>> {
-    let mut header = [0u8; 5];
-    match r.read_exact(&mut header).await {
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        other => other?,
-    };
-    let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-    if len > MAX_FRAME {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
-    let mut body = vec![0; len];
-    r.read_exact(&mut body).await?;
-    Frame::decode(header[0], body).map(Some)
-}
-
-/// asciicast v2 writer.
-struct Recorder {
-    file: Option<super::record::Writer>,
-    start: Instant,
-}
-
-impl Recorder {
-    fn new(dir: &Path, id: u64, tty: Option<(u16, u16)>, argv: &[String]) -> Self {
-        let file = super::record::Writer::open(&dir.join(format!("shell-{id}.cast"))).ok();
-        let (rows, cols) = tty.unwrap_or((24, 80));
-        let mut r = Recorder {
-            file,
-            start: Instant::now(),
-        };
-        let header = serde_json::json!({ "version": 2, "width": cols, "height": rows, "timestamp": now() as u64, "command": argv.join(" ") });
-        if let Some(f) = r.file.as_mut() {
-            let _ = f.line(header.to_string().as_bytes());
-        }
-        r
-    }
-
-    fn write(&mut self, kind: &str, data: &[u8]) {
-        if let Some(f) = self.file.as_mut() {
-            let t = self.start.elapsed().as_secs_f64();
-            let line = serde_json::json!([t, kind, String::from_utf8_lossy(data)]);
-            let _ = f.line(line.to_string().as_bytes());
-        }
-    }
-}
-
 #[cfg(test)]
-mod forward_tests {
-    use zapper_policy::proto::Forward;
-    use zapper_policy::{Engine, NetworkMode};
+mod tests {
+    use super::*;
+
+    fn net_rule() -> AnyRule {
+        AnyRule::Net(
+            serde_json::from_value(serde_json::json!({ "action": "allow", "host": "x.example" }))
+                .unwrap(),
+        )
+    }
+
+    fn exec_rule() -> AnyRule {
+        AnyRule::Exec(
+            serde_json::from_value(serde_json::json!({ "action": "allow", "path": "/bin/ls" }))
+                .unwrap(),
+        )
+    }
 
     #[test]
-    fn a_profiles_ports_join_the_sessions_forwards_once() {
-        let given = [Forward {
-            vsock_port: 6443,
-            tcp_port: 6443,
-            nic: true,
-        }];
-        let engine = Engine {
-            ports: vec![6443, 8080],
-            ..Engine::default()
-        };
-        let f = super::forwards(&engine, &given);
-        let ports: Vec<(u32, u16, bool)> = f
-            .iter()
-            .map(|f| (f.vsock_port, f.tcp_port, f.nic))
-            .collect();
-        assert_eq!(ports, [(6443, 6443, true), (8080, 8080, true)]);
-        // Without a NIC, to the guest's loopback.
-        let vsock = Engine {
-            ports: vec![8080],
-            network: NetworkMode::Vsock,
-            ..Engine::default()
-        };
-        assert!(!super::forwards(&vsock, &[])[0].nic);
+    fn session_dir_lays_the_vm_files_apart_from_the_logs() {
+        let d = SessionDir::new(PathBuf::from("/s"));
+        assert_eq!(d.root(), Path::new("/s"));
+        // Under the VMM's `vm` subdirectory: disks, sockets, config, metrics.
+        assert_eq!(d.vm(), Path::new("/s/vm"));
+        assert_eq!(d.root_disk(), Path::new("/s/vm/root.ext4"));
+        assert_eq!(d.data_disk(0), Path::new("/s/vm/disk0.ext4"));
+        assert_eq!(d.vsock(), Path::new("/s/vm/v.sock"));
+        assert_eq!(d.vsock_port(5), Path::new("/s/vm/v.sock_5"));
+        assert_eq!(d.nic_socket(), Path::new("/s/vm/nic.sock"));
+        assert_eq!(d.vm_config(), Path::new("/s/vm/vm.json"));
+        assert_eq!(d.metrics(), Path::new("/s/vm/metrics.json"));
+        // Logs, recordings and the audit log stay outside it.
+        assert_eq!(d.console(), Path::new("/s/console.log"));
+        assert_eq!(d.audit(), Path::new("/s/audit.jsonl"));
+        assert_eq!(d.driver_log(), Path::new("/s/driver.jsonl"));
+    }
+
+    #[test]
+    fn rules_mint_per_kind_ids_and_reuse_a_freed_one() {
+        let r = Rules::new(vec![]);
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-2"));
+        // Each kind has its own sequence.
+        assert_eq!(r.add(exec_rule(), None).id(), Some("s-exec-1"));
+        // The lowest free id is reused once one is removed.
+        assert!(r.remove("s-net-1").is_some());
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        // Removing it again finds nothing.
+        assert!(r.remove("s-net-1").is_some());
+        assert!(r.remove("s-net-1").is_none());
+    }
+
+    #[test]
+    fn put_replaces_a_rule_by_id_and_puts_it_first() {
+        let r = Rules::new(vec![]);
+        r.add(net_rule(), None); // s-net-1
+        r.add(net_rule(), None); // s-net-2
+        let replacement: AnyRule = AnyRule::Net(
+            serde_json::from_value(
+                serde_json::json!({ "id": "s-net-1", "action": "deny", "host": "y.example" }),
+            )
+            .unwrap(),
+        );
+        r.put(replacement);
+        let rules = r.list();
+        assert_eq!(rules.len(), 2, "replaced, not added");
+        assert_eq!(rules[0].id(), Some("s-net-1"), "the replacement is first");
+        assert!(
+            matches!(&rules[0], AnyRule::Net(n) if n.action == zapper_policy::Action::Deny),
+            "it is the new rule"
+        );
+    }
+
+    #[test]
+    fn layers_fall_back_to_the_resolved_profile_when_it_leaves_the_config() {
+        let c1 = Config::from_yaml(
+            "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: a.test }\n",
+        )
+        .unwrap();
+        let resolved = c1.resolve("web").unwrap();
+        // A running config that no longer has `web`.
+        let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
+        let layers = Rules::new(vec![]).layers("sid", "web", &resolved, &c2);
+        let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
+        assert_eq!(scopes.last(), Some(&Scope::Global));
+        // The profile layer came from the resolved snapshot, not from c2.
+        assert!(
+            layers
+                .iter()
+                .any(|(s, p)| matches!(s, Scope::Profile(n) if n == "web") && !p.net.is_empty()),
+            "fell back to the resolved web layers: {scopes:?}"
+        );
     }
 }

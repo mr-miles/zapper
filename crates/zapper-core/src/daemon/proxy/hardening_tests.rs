@@ -3,6 +3,7 @@
 //! request whose secret cannot be resolved is refused before it is sent
 //! upstream (the request never leaves without the credential it needed).
 
+use crate::prelude::*;
 use std::sync::Arc;
 
 use bytes::Bytes;

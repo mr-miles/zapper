@@ -4,6 +4,7 @@
 //! money: the board's budget, a hire, funding, and a contract paid for.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -185,6 +186,103 @@ async fn mail_send_fails_when_the_body_cannot_be_journaled() {
     // Nothing was delivered: pat has no mail to read back empty.
     let inbox = ok(&t, &run, "pat", "mail_inbox", json!({})).await;
     assert!(inbox["note"].is_string(), "pat got no message: {inbox}");
+}
+
+/// A plan delivers stage 0 at once and holds the next stage until the first
+/// completes, then releases it — the office driving it, no planner in the loop.
+#[tokio::test]
+async fn a_plan_releases_its_next_stage_on_completion() {
+    let (t, run) = run();
+    let unread = |who: &'static str| {
+        let (t, run) = (&t, &run);
+        async move { ok(t, run, who, "mail_inbox", json!({ "unread": true })).await["unread"].clone() }
+    };
+    let plan = ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-objective",
+            "team": { "builder": { "name": "pat" }, "reviewer": { "name": "sec" } },
+            "stages": [
+                [ { "slot": "builder", "subject": "Build", "body": "build it" } ],
+                [ { "slot": "reviewer", "subject": "Review", "body": "review it" } ],
+            ],
+        }),
+    )
+    .await;
+    assert!(plan["plan"].is_string(), "{plan}");
+    // Stage 0 went to pat; stage 1 is held from sec.
+    assert_eq!(unread("pat").await, json!(1));
+    assert_eq!(unread("sec").await, json!(0));
+
+    // pat completes its assignment.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    let msg = inbox["messages"][0]["id"].as_str().unwrap().to_string();
+    ok(
+        &t,
+        &run,
+        "pat",
+        "mail_reply",
+        json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+    )
+    .await;
+
+    // Stage 1 is now released to sec.
+    assert_eq!(unread("sec").await, json!(1));
+}
+
+/// A role slot binds to a worker of that role on first use and reuses it for
+/// the slot's later tickets (continuity).
+#[tokio::test]
+async fn a_role_slot_binds_and_reuses_the_same_worker() {
+    let (t, run) = run();
+    let unread =
+        ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await["unread"].clone();
+    assert_eq!(unread, json!(0));
+    ok(
+        &t,
+        &run,
+        "ceo",
+        "plan",
+        json!({
+            "source": "t-obj",
+            "team": { "dev": { "role": "eng" } },
+            "stages": [
+                [ { "slot": "dev", "subject": "Build", "body": "build" } ],
+                [ { "slot": "dev", "subject": "Fix", "body": "fix" } ],
+            ],
+        }),
+    )
+    .await;
+    // Stage 0 bound slot `dev` to the one engineer, pat.
+    let inbox = ok(&t, &run, "pat", "mail_inbox", json!({ "unread": true })).await;
+    assert_eq!(
+        inbox["unread"],
+        json!(1),
+        "stage 0 went to the engineer: {inbox}"
+    );
+    let msg = inbox["messages"][0]["id"].as_str().unwrap().to_string();
+    ok(
+        &t,
+        &run,
+        "pat",
+        "mail_reply",
+        json!({ "message": msg, "kind": "report", "close": true, "body": "done" }),
+    )
+    .await;
+    // Stage 1 reused the same slot, so the Fix assignment went to pat again.
+    let inbox2 = ok(&t, &run, "pat", "mail_inbox", json!({})).await;
+    let got_fix = inbox2["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["subject"] == "Fix" && m["to"][0] == "pat");
+    assert!(
+        got_fix,
+        "stage 1 (Fix) reused the same worker pat: {inbox2}"
+    );
 }
 
 #[tokio::test]

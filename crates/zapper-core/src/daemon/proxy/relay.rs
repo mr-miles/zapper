@@ -241,7 +241,7 @@ where
                     .await
                     .map_err(|e| format!("accepting the guest's SSLRequest: {e}"))?;
                 buf.drain(..8);
-                let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+                let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
                 let tls = TlsAcceptor::from(config)
                     .accept(Prefixed::new(buf, guest))
                     .await
@@ -384,7 +384,7 @@ where
     // A TLS client first sends a 32-byte SSLRequest packet; terminate TLS with
     // the session CA, then read its real handshake response over TLS.
     let (mut guest, guest_tls, resp_seq) = if mysql::is_ssl_request(&gpkt) {
-        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
         let tls = TlsAcceptor::from(config)
             .accept(Prefixed::new(std::mem::take(&mut gbuf), guest))
             .await
@@ -489,7 +489,7 @@ where
     let mut guest: Box<dyn services::Io> = if guest_wants_tls {
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let wrapper = tds::TdsTls::new(guest, handshaking.clone());
-        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
         let tls = TlsAcceptor::from(config)
             .accept(wrapper)
             .await
@@ -632,7 +632,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     if first.first() == Some(&0x16) {
-        let config = s.ca.server_config(host).map_err(|e| format!("{e:#}"))?;
+        let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
         let tls = TlsAcceptor::from(config)
             .accept(Prefixed::new(first, io))
             .await

@@ -5,6 +5,7 @@
 //! a name goes for it, and its MCP connections; a VM's side of vsock and
 //! a guest's TLS.
 
+use crate::prelude::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -75,7 +76,7 @@ impl Drop for TestCore {
 /// A connection from `s` to `name:port`, through the proxy.
 pub fn dial(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream {
     let ip = {
-        let mut dns = s.dns.lock().unwrap();
+        let mut dns = s.dns.names();
         dns.remember(name, true);
         std::net::IpAddr::V4(dns.address(name).unwrap())
     };
@@ -85,7 +86,7 @@ pub fn dial(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream
 /// Like `dial`, but the guest reached the name's synthetic IPv6 address.
 pub fn dial6(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream {
     let ip = {
-        let mut dns = s.dns.lock().unwrap();
+        let mut dns = s.dns.names();
         dns.remember(name, true);
         std::net::IpAddr::V6(dns.address6(name).unwrap())
     };
@@ -127,11 +128,12 @@ pub async fn net_event(t: &TestCore, s: &Session, n: usize) -> Value {
 
 /// A TLS client that trusts the session's CA, as the guest does.
 pub fn guest_tls(s: &Session) -> tokio_rustls::TlsConnector {
-    let b64: String =
-        s.ca.pem
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect();
+    let b64: String = s
+        .tls
+        .pem()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .unwrap();

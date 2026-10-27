@@ -1,6 +1,7 @@
 //! Deciders through the proxy: which sessions' `ask`s they get, what the
 //! session is told, and the operator's again once a decider goes.
 
+use crate::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use anyhow::bail;

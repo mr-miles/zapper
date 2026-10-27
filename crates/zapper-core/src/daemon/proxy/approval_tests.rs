@@ -2,6 +2,7 @@
 //! approval the connection waits for. A firm's officers, as a registered
 //! decider, are the office's tests.
 
+use crate::prelude::*;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

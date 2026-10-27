@@ -16,6 +16,7 @@ pub(crate) mod http;
 pub(crate) mod journal;
 pub(crate) mod mail;
 pub(crate) mod ops;
+pub(crate) mod plan;
 pub(crate) mod product;
 pub(crate) mod prompts;
 pub(crate) mod scenario;
@@ -38,6 +39,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use zapper_core::prelude::*;
 
 use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -231,6 +233,8 @@ pub(crate) struct FirmRun {
     pub facility: facility::Facilities,
     /// The office's tools' registration in the gateway.
     pub tools: Mutex<Option<u64>>,
+    /// Staged plans a worker authored with `plan`, released stage by stage.
+    pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,
 }
 
@@ -422,8 +426,12 @@ impl FirmRun {
                 anyhow::bail!("the board's objective can't close while your team is still busy: {}. The firm pauses when it closes and their work would stop half done. End your turn: the post office tells you as soon as they are all idle, and then you close", busy.join(", "));
             }
         }
+        let closing = d.close;
         let sent = self.post.send(&self.journal, d, now())?;
         self.deliver(&sent);
+        if closing {
+            self.on_plan_child_closed(&sent.thread);
+        }
         if sent.objective_done {
             // The board's task is delivered: the simulation holds until the
             // board decides what comes next.
@@ -439,6 +447,100 @@ impl FirmRun {
                 w.queue.lock().unwrap().push(sent.id.clone());
                 w.wake.notify_one();
             }
+        }
+    }
+
+    /// Send a plan stage's children as assignments from the plan's owner,
+    /// parented under the plan's source task; return their thread ids in spec
+    /// order. Each child's slot is resolved to a worker (bound on first use);
+    /// each send is an ordinary assignment, so authority is enforced in `send`
+    /// as for any delegation.
+    pub(crate) fn plan_send_stage(
+        &self,
+        plan: &str,
+        specs: &[plan::ChildSpec],
+    ) -> Result<Vec<String>> {
+        let (owner, source) = {
+            let plans = self.plans.lock().unwrap();
+            match plans.get(plan) {
+                Some(p) => (p.owner.clone(), p.source.clone()),
+                None => return Ok(Vec::new()),
+            }
+        };
+        let mut threads = Vec::with_capacity(specs.len());
+        for s in specs {
+            let worker = self.resolve_slot(plan, &s.slot)?;
+            let mut d = Draft::new(&owner, vec![worker], &s.subject, &s.body, Kind::Assignment);
+            d.due = s.due;
+            d.context = Some(source.clone());
+            threads.push(self.send(d)?.thread);
+        }
+        Ok(threads)
+    }
+
+    /// Resolve a plan slot to a worker, binding it on first use (reused after,
+    /// for continuity): an existing worker for a name, or a free worker of a
+    /// role, distinct from the plan's other bindings (separation of duties).
+    /// Auto-hiring an unstaffed role is not yet wired (it needs the async
+    /// provisioning path) — name a worker or hire one first.
+    fn resolve_slot(&self, plan: &str, slot: &str) -> Result<String> {
+        if let Some(w) = self.plans.lock().unwrap().binding(plan, slot) {
+            return Ok(w);
+        }
+        let def = self
+            .plans
+            .lock()
+            .unwrap()
+            .slot_def(plan, slot)
+            .ok_or_else(|| anyhow!("plan {plan}: no slot {slot}"))?;
+        let chart = self.chart();
+        let worker = if let Some(name) = def.name {
+            if chart.worker(&name).is_none() {
+                bail!("slot {slot}: no worker named {name}");
+            }
+            name
+        } else if let Some(role) = def.role {
+            let bound = self.plans.lock().unwrap().bound_workers(plan);
+            chart
+                .workers
+                .iter()
+                .find(|w| w.role == role && !bound.contains(&w.name))
+                .map(|w| w.name.clone())
+                .ok_or_else(|| anyhow!("slot {slot}: no free worker of role {role} to staff it (auto-hiring an absent role is not yet wired; name a worker or hire one first)"))?
+        } else {
+            bail!("slot {slot}: give a role or a name");
+        };
+        self.plans.lock().unwrap().bind_slot(plan, slot, &worker);
+        Ok(worker)
+    }
+
+    /// A closing reply landed on `thread`; if it is a plan child, advance the
+    /// plan, releasing the next stage when the current one is complete.
+    pub(crate) fn on_plan_child_closed(&self, thread: &str) {
+        let advance = self.plans.lock().unwrap().complete(thread);
+        self.apply_plan_advance(advance);
+    }
+
+    /// Act on a plan state change: release the next stage (send and bind its
+    /// children) or record completion.
+    pub(crate) fn apply_plan_advance(&self, advance: plan::Advance) {
+        match advance {
+            plan::Advance::Release { plan, stage, specs } => {
+                match self.plan_send_stage(&plan, &specs) {
+                    Ok(threads) => self.plans.lock().unwrap().bind(&plan, stage, threads),
+                    Err(e) => {
+                        self.journal.append(
+                            "plan",
+                            json!({ "event": "release_failed", "plan": plan, "stage": stage, "error": format!("{e:#}") }),
+                        );
+                    }
+                }
+            }
+            plan::Advance::Completed { plan } => {
+                self.journal
+                    .append("plan", json!({ "event": "completed", "plan": plan }));
+            }
+            plan::Advance::None => {}
         }
     }
 

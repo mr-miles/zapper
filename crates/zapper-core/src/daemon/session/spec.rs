@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Context, Result};
 use zapper_policy::proto::{GuestDisk, GuestFile, GuestSpec};
 use zapper_policy::{
-    placeholder, render, secret_refs, Config, FsRule, NetworkMode, ResolvedProfile, Scope,
-    SecretMode,
+    placeholder, render, secret_refs, Config, FsRule, NetworkMode, ResolvedProfile, SecretMode,
 };
 
 const CA_PATH: &str = "/usr/local/share/ca-certificates/zapper.crt";
@@ -72,7 +71,7 @@ pub fn build(
             render_secrets(config, v).with_context(|| format!("agent.env.{k}"))?,
         );
     }
-    let harness = super::harness::get(&agent.kind)
+    let harness = crate::daemon::harness::get(&agent.kind)
         .ok_or_else(|| anyhow!("agent.kind {:?} is not a harness zapper knows", agent.kind))?;
     harness.guest(profile, &home, &mut env, &mut files);
     // `files` by guest path, and `config_files` in the harness's config
@@ -131,13 +130,6 @@ pub fn build(
         supervise_exec: true,
         forwards,
     })
-}
-
-/// Policy layers of a session in evaluation order.
-pub fn layers_of(
-    layers: &[(Scope, zapper_policy::Policy)],
-) -> Vec<(Scope, &zapper_policy::Policy)> {
-    layers.iter().map(|(s, p)| (s.clone(), p)).collect()
 }
 
 #[cfg(test)]

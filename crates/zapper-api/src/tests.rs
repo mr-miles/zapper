@@ -7,6 +7,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use zapper_core::prelude::*;
 use zapper_core::testing::TestCore;
 
 use super::Mount;

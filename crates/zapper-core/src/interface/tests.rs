@@ -1,6 +1,7 @@
 //! `Core` over a daemon without VMs (`testing::TestCore`): the config,
 //! rules, approvals and events, and sessions registered without booting.
 
+use crate::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -278,11 +279,15 @@ fn only_a_stopped_session_is_forgotten() {
         assert!(t.core.session(&s.id).is_ok(), "still listed");
     }
     running
-        .status
+        .runtime
+        .status()
         .send_replace(Status::Stopped("stopped by test".into()));
     t.core.forget_session(&running.id).unwrap();
     assert!(t.core.session(&running.id).is_err());
-    starting.status.send_replace(Status::Failed("no VM".into()));
+    starting
+        .runtime
+        .status()
+        .send_replace(Status::Failed("no VM".into()));
     t.core.forget_session(&starting.id).unwrap();
     assert!(t.core.sessions().is_empty());
 }

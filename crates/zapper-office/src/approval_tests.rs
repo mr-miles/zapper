@@ -4,6 +4,7 @@
 //! once the firm stops, its sessions' asks are the operator's again.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use zapper_core::testing::{dial, net_event, net_events};
 use zapper_core::{NewSession, Session};
