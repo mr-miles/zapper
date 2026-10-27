@@ -269,9 +269,24 @@ fn share_with_firecracker(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Handles a `zapper __vmm …` re-exec: `Some(exit code)` when `args` is one,
+/// `None` otherwise. The daemon starts each session's VMM by re-exec'ing the
+/// binary this way (`crate::daemon::vm`). `main` must call this first thing,
+/// before any thread starts, since the shim unshares namespaces, which has
+/// to happen single-threaded.
+pub fn shim(args: &[String]) -> Option<i32> {
+    if args.get(1).map(String::as_str) != Some("__vmm") {
+        return None;
+    }
+    Some(match args.get(2).map(String::as_str) {
+        Some("--probe") => probe(args.get(3).map(String::as_str) == Some("nic")),
+        _ => main(&args[2..]),
+    })
+}
+
 /// `zapper __vmm --probe [nic]`: can this host build the namespaces, and
 /// with `nic` the guest's network?
-pub fn probe(nic: bool) -> i32 {
+fn probe(nic: bool) -> i32 {
     match unshare(false).and_then(|_| if nic { netns::setup(None) } else { Ok(()) }) {
         Ok(()) => 0,
         Err(e) => {
@@ -281,7 +296,7 @@ pub fn probe(nic: bool) -> i32 {
     }
 }
 
-pub fn main(args: &[String]) -> i32 {
+fn main(args: &[String]) -> i32 {
     let Some(a) = Args::parse(args) else {
         eprintln!("usage: zapper __vmm DIR FIRECRACKER CONFIG ID KERNEL INITRD nic|none sub|own");
         return 2;

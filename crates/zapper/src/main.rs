@@ -4,7 +4,7 @@
 
 mod client;
 use zapper_core::prelude::*;
-use zapper_core::{util, vmm};
+use zapper_core::util;
 mod image;
 mod office;
 mod term;
@@ -346,11 +346,7 @@ fn load_config(path: &Path) -> Result<Config> {
 fn main() {
     // The VMM shim must start before any thread does.
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("__vmm") {
-        let code = match args.get(2).map(String::as_str) {
-            Some("--probe") => vmm::probe(args.get(3).map(String::as_str) == Some("nic")),
-            _ => vmm::main(&args[2..]),
-        };
+    if let Some(code) = zapper_core::vmm_shim(&args) {
         std::process::exit(code);
     }
     // Commands whose output is piped into `head` end quietly.
@@ -1350,13 +1346,11 @@ async fn check(config_path: &Path) -> Result<i32> {
     if !d.vmm_subids {
         println!("note   Firecracker runs as this user (daemon.vmm_subids is off)");
     } else {
-        match zapper_core::subids::host() {
-            Ok(ids) => report(
+        match zapper_core::subids_host_range() {
+            Ok((start, end)) => report(
                 true,
                 &format!(
-                    "Firecracker runs as a uid of each session's own ({}–{}, from /etc/subuid)",
-                    ids.uids.start,
-                    ids.uids.start + ids.uids.count.min(4096) - 1
+                    "Firecracker runs as a uid of each session's own ({start}–{end}, from /etc/subuid)"
                 ),
                 "",
             ),
