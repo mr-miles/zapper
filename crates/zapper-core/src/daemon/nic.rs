@@ -13,19 +13,14 @@ use super::session::Session;
 use super::{dns, proxy, Daemon, EventBody};
 
 pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
-        };
-        let Ok(permit) = s.conns.clone().try_acquire_owned() else {
-            continue;
-        };
+    let limit = s.conns.clone();
+    super::accept_loop(listener, limit, move |stream| {
         let (d, s) = (d.clone(), s.clone());
-        tokio::spawn(async move {
+        async move {
             let _ = handle(d, s, stream).await;
-            drop(permit);
-        });
-    }
+        }
+    })
+    .await;
 }
 
 async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std::io::Result<()> {

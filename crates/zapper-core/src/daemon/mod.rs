@@ -48,26 +48,54 @@ pub use events::{Event, EventBody};
 pub(crate) use crate::util::{is_session_id, now, random_id, write_private};
 
 pub struct Paths {
-    pub state: PathBuf,
-    pub images: PathBuf,
-    pub kernels: PathBuf,
-    pub firecracker: PathBuf,
-    pub initrd: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) images: PathBuf,
+    pub(crate) kernels: PathBuf,
+    pub(crate) firecracker: PathBuf,
+    pub(crate) initrd: PathBuf,
 }
 
+// `Daemon` is never re-exported — `Core` (interface.rs) is the only public
+// handle — so its fields are `pub(crate)`, not `pub`.
 pub struct Daemon {
-    pub config: RwLock<Config>,
-    pub startup_path: PathBuf,
-    pub paths: Paths,
-    pub addrs: RwLock<addr::AddressPolicy>,
+    pub(crate) config: RwLock<Config>,
+    pub(crate) startup_path: PathBuf,
+    pub(crate) paths: Paths,
+    pub(crate) addrs: RwLock<addr::AddressPolicy>,
     pub(crate) sessions: session::SessionStore,
     pub(crate) events: events::EventBus,
     approvals: approvals::Approvals,
-    pub ui_token: String,
-    pub clients: clients::Clients,
-    pub services: services::Services,
-    pub deciders: deciders::Deciders,
-    pub gateway: gateway::Gateway,
+    pub(crate) ui_token: String,
+    pub(crate) clients: clients::Clients,
+    pub(crate) services: services::Services,
+    pub(crate) deciders: deciders::Deciders,
+    pub(crate) gateway: gateway::Gateway,
+}
+
+/// Accepts connections on `listener` and serves each with `handle`, running at
+/// most `limit` permits' worth at once; a connection over the limit is dropped
+/// rather than queued. The permit is held until the spawned task ends.
+pub(crate) async fn accept_loop<F, Fut>(
+    listener: tokio::net::UnixListener,
+    limit: Arc<tokio::sync::Semaphore>,
+    handle: F,
+) where
+    F: Fn(tokio::net::UnixStream) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        let Ok(permit) = limit.clone().try_acquire_owned() else {
+            continue;
+        };
+        let fut = handle(stream);
+        tokio::spawn(async move {
+            fut.await;
+            drop(permit);
+        });
+    }
 }
 
 /// Finds the guest agent binary.

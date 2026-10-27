@@ -99,7 +99,7 @@ impl PiConversation {
                 let why = why
                     .clone()
                     .unwrap_or_else(|| "the model request failed".into());
-                if rate_limited(&why) {
+                if super::rate_limited(&why) {
                     Outcome::RateLimited
                 } else {
                     Outcome::Failed(why.chars().take(200).collect())
@@ -119,21 +119,6 @@ impl PiConversation {
         self.error = None;
         t
     }
-}
-
-/// An error message that means "later": the provider's limits or load.
-fn rate_limited(why: &str) -> bool {
-    let w = why.to_ascii_lowercase();
-    [
-        "rate limit",
-        "rate_limit",
-        "429",
-        "overloaded",
-        "529",
-        "too many requests",
-    ]
-    .iter()
-    .any(|k| w.contains(k))
 }
 
 impl Conversation for PiConversation {
@@ -192,10 +177,7 @@ impl Conversation for PiConversation {
             Some("message_end") if v["message"]["role"] == "assistant" => {
                 let m = &v["message"];
                 let u = &m["usage"];
-                self.tokens += ["input", "output", "cacheWrite"]
-                    .iter()
-                    .map(|k| u[*k].as_u64().unwrap_or(0))
-                    .sum::<u64>();
+                self.tokens += super::sum_u64(u, &["input", "output", "cacheWrite"]);
                 for k in ["input", "output", "cacheRead", "cacheWrite"] {
                     let n = self.usage[k].as_u64().unwrap_or(0) + u[k].as_u64().unwrap_or(0);
                     self.usage[k] = json!(n);
@@ -235,7 +217,7 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
     if let Some(m) = &agent.model {
         merge(&mut settings, &json!({ "defaultModel": m }));
     }
-    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap();
+    let pretty = super::pretty;
     let mut files = vec![GuestFile {
         path: format!("{dir}/settings.json"),
         content: pretty(&settings),

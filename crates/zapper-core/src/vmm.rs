@@ -27,7 +27,7 @@ use anyhow::{bail, Context, Result};
 use crate::netns;
 
 /// Directory in the VMM's directory where the new root is built.
-pub const ROOT: &str = ".vmroot";
+const ROOT: &str = ".vmroot";
 
 pub struct Args {
     pub dir: PathBuf,
@@ -247,7 +247,7 @@ fn confine(a: &Args) -> Result<()> {
 
 /// The namespace's uid that Firecracker runs as with `sub`: the session's
 /// subordinate uid on the host. 0 is the daemon user.
-pub const SUB_UID: u32 = 1;
+const SUB_UID: u32 = 1;
 
 /// Lets Firecracker, as `SUB_UID` in the daemon's group, use the session's
 /// VM directory: create its sockets there, use the disks, the config, the

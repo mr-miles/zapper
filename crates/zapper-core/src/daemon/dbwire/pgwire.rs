@@ -19,7 +19,7 @@ pub const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
 
 /// The 8-byte `GSSENCRequest` a client (libpq 12+) may send before the
 /// `SSLRequest`: `Int32(8)` then `Int32(80877104)`.
-pub const GSSENC_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x30];
+const GSSENC_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x30];
 
 /// Whether `buf` begins with a Postgres `GSSENCRequest`.
 pub fn is_gssenc_request(buf: &[u8]) -> bool {
@@ -115,7 +115,7 @@ pub fn message(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
 /// `body` is the message body from [`message`] — the bytes after the length
 /// field, i.e. the subtype `Int32` followed by its data.
 #[derive(Debug, PartialEq)]
-pub enum Auth<'a> {
+enum Auth<'a> {
     /// Subtype 0: authentication complete.
     Ok,
     /// Subtype 10: the server offers SASL mechanisms (NUL-terminated names,
@@ -133,7 +133,7 @@ pub enum Auth<'a> {
 /// Parses an `Authentication*` message body (the bytes after the length field
 /// of an `R` message). `None` if it is truncated or a mechanism name is not
 /// UTF-8.
-pub fn parse_auth(body: &[u8]) -> Option<Auth<'_>> {
+fn parse_auth(body: &[u8]) -> Option<Auth<'_>> {
     let subtype = u32::from_be_bytes(body.get(0..4)?.try_into().ok()?);
     let rest = &body[4..];
     Some(match subtype {
@@ -342,7 +342,7 @@ pub mod scram {
 
 /// Builds a `SASLInitialResponse` (frontend `Byte1('p')`): the mechanism name
 /// (a C string), then `Int32` length of the initial response and its bytes.
-pub fn sasl_initial_response(mechanism: &str, initial: &[u8]) -> Vec<u8> {
+fn sasl_initial_response(mechanism: &str, initial: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(mechanism.as_bytes());
     body.push(0);
@@ -352,7 +352,7 @@ pub fn sasl_initial_response(mechanism: &str, initial: &[u8]) -> Vec<u8> {
 }
 
 /// Builds a `SASLResponse` (frontend `Byte1('p')`): just the response bytes.
-pub fn sasl_response(data: &[u8]) -> Vec<u8> {
+fn sasl_response(data: &[u8]) -> Vec<u8> {
     frame(b'p', data)
 }
 
@@ -369,7 +369,7 @@ fn frame(typ: u8, body: &[u8]) -> Vec<u8> {
 /// length, the 3.0 protocol, then `user` (and `database`, if pinned) as
 /// NUL-terminated key/value pairs, ending with an empty key. Inverse of
 /// [`parse_startup`].
-pub fn startup_message(user: &str, database: Option<&str>) -> Vec<u8> {
+fn startup_message(user: &str, database: Option<&str>) -> Vec<u8> {
     let mut rest = PROTOCOL_V3.to_be_bytes().to_vec();
     let mut kv = |k: &str, v: &str| {
         rest.extend_from_slice(k.as_bytes());

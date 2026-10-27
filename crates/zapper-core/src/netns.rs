@@ -67,13 +67,9 @@ fn ruleset() -> String {
 }
 
 fn tool(name: &str) -> PathBuf {
-    for dir in ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] {
-        let p = Path::new(dir).join(name);
-        if p.is_file() {
-            return p;
-        }
-    }
-    PathBuf::from(name)
+    // sbin first: `ip` and `nft` usually live there.
+    crate::util::find_exe(name, &["/usr/sbin", "/sbin", "/usr/bin", "/bin"])
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn run(name: &str, args: &[&str], stdin: Option<&str>) -> Result<()> {

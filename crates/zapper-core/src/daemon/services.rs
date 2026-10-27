@@ -98,7 +98,7 @@ pub enum Route {
 }
 
 /// `name` as a service name: a host name, or `*.` and one.
-pub fn check_name(name: &str) -> Result<String> {
+fn check_name(name: &str) -> Result<String> {
     let (wild, rest) = match name.strip_prefix("*.") {
         Some(r) => (true, r),
         None => (false, name),

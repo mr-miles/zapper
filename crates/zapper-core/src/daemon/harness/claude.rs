@@ -151,15 +151,14 @@ pub(super) fn claude_activity(event: &Value) -> Option<String> {
 
 /// Tokens of a turn: input, output and cache writes.
 fn claude_tokens(result: &Value) -> u64 {
-    let u = &result["usage"];
-    [
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-    ]
-    .iter()
-    .map(|k| u[*k].as_u64().unwrap_or(0))
-    .sum()
+    super::sum_u64(
+        &result["usage"],
+        &[
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
 }
 
 /// A turn that failed before Claude could work: the API refused it (bad
@@ -174,15 +173,8 @@ fn claude_api_failure(result: &Value) -> Option<String> {
 }
 
 fn claude_rate_limited(result: &Value) -> bool {
-    if result["is_error"] != json!(true) {
-        return false;
-    }
-    let text = result["result"].as_str().unwrap_or("").to_ascii_lowercase();
-    text.contains("rate limit")
-        || text.contains("rate_limit")
-        || text.contains("usage limit")
-        || text.contains("429")
-        || text.contains("overloaded")
+    result["is_error"] == json!(true)
+        && super::rate_limited(result["result"].as_str().unwrap_or(""))
 }
 
 fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>) -> Vec<GuestFile> {
@@ -242,7 +234,7 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
             &json!({ "customApiKeyResponses": { "approved": [tail], "rejected": [] } }),
         );
     }
-    let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap();
+    let pretty = super::pretty;
     let mut files = vec![
         GuestFile {
             path: format!("{home}/.claude/settings.json"),

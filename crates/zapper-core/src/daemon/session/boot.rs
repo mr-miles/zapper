@@ -126,22 +126,17 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     }
     {
         let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = proxy_listener.accept().await else {
-                    break;
-                };
-                let Ok(permit) = s.conns.clone().try_acquire_owned() else {
-                    drop(stream);
-                    continue;
-                };
+        let limit = session.conns.clone();
+        tokio::spawn(crate::daemon::accept_loop(
+            proxy_listener,
+            limit,
+            move |stream| {
                 let (d, s) = (d.clone(), s.clone());
-                tokio::spawn(async move {
+                async move {
                     proxy::serve(d, s, stream).await;
-                    drop(permit);
-                });
-            }
-        });
+                }
+            },
+        ));
     }
     {
         // VM exit watcher.

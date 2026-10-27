@@ -151,6 +151,34 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Sums `keys` from a usage object; a missing key counts as 0. Shared by the
+/// harnesses, which differ only in the key spellings.
+pub(super) fn sum_u64(usage: &Value, keys: &[&str]) -> u64 {
+    keys.iter().map(|k| usage[*k].as_u64().unwrap_or(0)).sum()
+}
+
+/// An error message that means "later": the provider's limits or load. Shared
+/// by both harnesses (Claude adds its own is-error guard at the call site).
+pub(super) fn rate_limited(text: &str) -> bool {
+    let w = text.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "usage limit",
+        "429",
+        "overloaded",
+        "529",
+        "too many requests",
+    ]
+    .iter()
+    .any(|k| w.contains(k))
+}
+
+/// Pretty-prints JSON for a config file.
+pub(super) fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).unwrap()
+}
+
 /// The harness of an `agent.kind`.
 pub fn get(kind: &str) -> Option<&'static dyn Harness> {
     match kind {

@@ -80,6 +80,89 @@ async fn dial_plain(
     Ok(sender)
 }
 
+/// Logs a policy refusal of an inspected request, finishes its record, and
+/// returns the 403 for the guest.
+fn deny(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    denial: String,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: None,
+            secrets: vec![],
+            error: None,
+        },
+    );
+    note_failure(s, rec, 403, None);
+    text(StatusCode::FORBIDDEN, denial)
+}
+
+/// Logs an inspected request that failed to forward, finishes its record, and
+/// returns the error response. `status` is 403 (bad target or secret) or 502
+/// (upstream); `secrets` is whatever had already been injected.
+#[allow(clippy::too_many_arguments)]
+fn fail(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    status: StatusCode,
+    secrets: Vec<String>,
+    error: String,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: None,
+            secrets,
+            error: Some(error.clone()),
+        },
+    );
+    note_failure(s, rec, status.as_u16(), Some(error.clone()));
+    text(status, error)
+}
+
+/// Logs an inspected request's upstream response and returns it to the guest.
+#[allow(clippy::too_many_arguments)]
+fn responded(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    net: &NetRequest,
+    v: &Verdict,
+    resp: Response<Incoming>,
+    used: Vec<String>,
+    values: Vec<String>,
+) -> Response<Body> {
+    log(
+        d,
+        s,
+        NetLog {
+            req: net,
+            verdict: Some(v),
+            inspected: true,
+            status: Some(resp.status().as_u16()),
+            secrets: used.clone(),
+            error: None,
+        },
+    );
+    note_response(s, rec, resp, used, values)
+}
+
 pub(super) async fn mitm<S>(
     d: Arc<Daemon>,
     s: Arc<Session>,
@@ -355,47 +438,17 @@ async fn inspected(
     let v = decide(&d, &s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!(
-                "{} {host}{path}",
-                net.method.as_deref().unwrap_or("")
-            )),
-        );
+        let denial = v.denial(&format!(
+            "{} {host}{path}",
+            net.method.as_deref().unwrap_or("")
+        ));
+        return deny(&d, &s, &rec, &net, &v, denial);
     }
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, 443);
     let (used, values) = match inject(&d, &host, false, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     let mut guard = upstream.lock().await;
     let ready = match guard.as_mut() {
@@ -406,22 +459,7 @@ async fn inspected(
     if !ready {
         match open_tls(&host, &addr).await {
             Ok(sender) => *guard = Some(sender),
-            Err(e) => {
-                log(
-                    &d,
-                    &s,
-                    NetLog {
-                        req: &net,
-                        verdict: Some(&v),
-                        inspected: true,
-                        status: None,
-                        secrets: used,
-                        error: Some(e.clone()),
-                    },
-                );
-                note_failure(&s, &rec, 502, Some(e.clone()));
-                return text(StatusCode::BAD_GATEWAY, e);
-            }
+            Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
         }
     }
     // The upstream's negotiated protocol decides how we shape the request:
@@ -461,37 +499,17 @@ async fn inspected(
         r
     };
     match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.to_string()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.to_string()));
-            text(StatusCode::BAD_GATEWAY, e.to_string())
-        }
+        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
+        Err(e) => fail(
+            &d,
+            &s,
+            &rec,
+            &net,
+            &v,
+            StatusCode::BAD_GATEWAY,
+            used,
+            e.to_string(),
+        ),
     }
 }
 
@@ -601,63 +619,18 @@ async fn forward_plain(
     let v = decide(&d, &s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
-        log(
-            &d,
-            &s,
-            NetLog {
-                req: &net,
-                verdict: Some(&v),
-                inspected: true,
-                status: None,
-                secrets: vec![],
-                error: None,
-            },
-        );
-        note_failure(&s, &rec, 403, None);
-        return text(
-            StatusCode::FORBIDDEN,
-            v.denial(&format!("{} http://{host}{path}", req.method())),
-        );
+        let denial = v.denial(&format!("{} http://{host}{path}", req.method()));
+        return deny(&d, &s, &rec, &net, &v, denial);
     }
     let addr = match target(&d, &s, &host, port).await {
         Ok(a) => a,
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, 80);
     let (used, values) = match inject(&d, &host, true, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 403, Some(e.clone()));
-            return text(StatusCode::FORBIDDEN, e);
-        }
+        Err(e) => return fail(&d, &s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
     parts.uri = path.parse().unwrap_or_default();
     let body = httplog::Tee::wrap(
@@ -667,38 +640,8 @@ async fn forward_plain(
         httplog::Side::Request,
     );
     let out = Request::from_parts(parts, body);
-    let result = pool.send(&d, &s, &host, port, &addr, out).await;
-    match result {
-        Ok(resp) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: Some(resp.status().as_u16()),
-                    secrets: used.clone(),
-                    error: None,
-                },
-            );
-            note_response(&s, &rec, resp, used, values)
-        }
-        Err(e) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &net,
-                    verdict: Some(&v),
-                    inspected: true,
-                    status: None,
-                    secrets: used,
-                    error: Some(e.clone()),
-                },
-            );
-            note_failure(&s, &rec, 502, Some(e.clone()));
-            text(StatusCode::BAD_GATEWAY, e)
-        }
+    match pool.send(&d, &s, &host, port, &addr, out).await {
+        Ok(resp) => responded(&d, &s, &rec, &net, &v, resp, used, values),
+        Err(e) => fail(&d, &s, &rec, &net, &v, StatusCode::BAD_GATEWAY, used, e),
     }
 }

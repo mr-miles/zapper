@@ -38,6 +38,29 @@ pub enum Status {
     Stopped(String),
 }
 
+/// Opens the session's vsock at `path` and asks the guest for `port`,
+/// returning the stream once the guest answers `OK `. A connect/write failure
+/// propagates; a refusal is reported as `refused: <the guest's line>`.
+async fn connect_vsock(path: PathBuf, port: &str, refused: &str) -> Result<UnixStream> {
+    let mut stream = UnixStream::connect(&path).await?;
+    stream
+        .write_all(format!("CONNECT {port}\n").as_bytes())
+        .await?;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < 64 {
+        stream.read_exact(&mut byte).await?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+    }
+    if !line.starts_with(b"OK ") {
+        bail!("{refused}: {}", String::from_utf8_lossy(&line));
+    }
+    Ok(stream)
+}
+
 /// The daemon's live sessions, by id. Behind one lock; readers take a cloned
 /// snapshot so the lock is never held across other work.
 pub(crate) struct SessionStore(RwLock<BTreeMap<String, Arc<Session>>>);
@@ -416,23 +439,12 @@ impl Session {
     /// Opens a host-initiated connection to a port of the session's VM,
     /// over vsock.
     pub async fn connect_port(&self, port: u32) -> Result<UnixStream> {
-        let mut stream = UnixStream::connect(self.vsock_path()).await?;
-        stream
-            .write_all(format!("CONNECT {port}\n").as_bytes())
-            .await?;
-        let mut line = Vec::new();
-        let mut byte = [0u8; 1];
-        while line.len() < 64 {
-            stream.read_exact(&mut byte).await?;
-            if byte[0] == b'\n' {
-                break;
-            }
-            line.push(byte[0]);
-        }
-        if !line.starts_with(b"OK ") {
-            bail!("the VM refused port {port}");
-        }
-        Ok(stream)
+        connect_vsock(
+            self.vsock_path(),
+            &port.to_string(),
+            &format!("the VM refused port {port}"),
+        )
+        .await
     }
 
     /// One of the session's labels.
@@ -562,22 +574,12 @@ impl Session {
         }
         let id = self.runtime.next_shell();
         req.id = id;
-        let mut stream = UnixStream::connect(self.dir.vsock()).await?;
-        stream
-            .write_all(format!("CONNECT {SHELL_PORT}\n").as_bytes())
-            .await?;
-        let mut line = Vec::new();
-        let mut byte = [0u8; 1];
-        while line.len() < 64 {
-            stream.read_exact(&mut byte).await?;
-            if byte[0] == b'\n' {
-                break;
-            }
-            line.push(byte[0]);
-        }
-        if !line.starts_with(b"OK ") {
-            bail!("guest refused terminal: {}", String::from_utf8_lossy(&line));
-        }
+        let mut stream = connect_vsock(
+            self.dir.vsock(),
+            &SHELL_PORT.to_string(),
+            "guest refused terminal",
+        )
+        .await?;
         let mut json = serde_json::to_vec(&req)?;
         json.push(b'\n');
         stream.write_all(&json).await?;

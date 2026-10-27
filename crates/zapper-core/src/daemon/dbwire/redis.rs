@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Builds a RESP array command: `*N\r\n` then each argument as a bulk string
 /// `$len\r\n<bytes>\r\n`.
-pub fn command(args: &[&[u8]]) -> Vec<u8> {
+fn command(args: &[&[u8]]) -> Vec<u8> {
     let mut out = format!("*{}\r\n", args.len()).into_bytes();
     for a in args {
         out.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
