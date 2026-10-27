@@ -19,7 +19,7 @@ The minting code exists in Go in the `agentctl` repository (`internal/ghsetup`, 
 | Access model | **Permission profiles** replace `read`/`write`/`admin` for GitHub repositories. The drive and the cluster keep their levels. |
 | Token lifetime | Installation tokens last one hour. The host refreshes them; the guest never knows. |
 | Changing a grant | A token cannot be edited. Zapper mints a new one for the new permissions and retires the old one. |
-| Token granularity | A token covers **one or more repositories of one owner**, all with the same permissions (`zapper mint` takes `--repo` repeatedly). Which repositories share a token is policy; see [Several repositories in one token](#several-repositories-in-one-token). |
+| Token granularity | **One token per worker**, over every repository they hold a grant on, with the union of those grants' permissions. A worker's requests are not routed to different tokens by URL, because `/graphql` carries no repository in its URL; see [One token per worker](#one-token-per-worker-and-what-it-costs). |
 
 ## 1. Setting the App up: `zapper github`
 
@@ -77,7 +77,8 @@ Nobody picks from a list of everything the App can see, so the CEO cannot widen 
 - A profile is a named map of GitHub App permission names to `read|write|admin`, as the token endpoint takes them. `metadata: read` is always added. Names and levels are checked at config load, and each profile must be within what the installed App has (`GET /app/installations/{id}` returns its `permissions`).
 - `approver: ceo` (optional) says who may decide a request for the profile. It replaces the rule that `admin` on git is the CEO's: the profiles that can change the repository's workflows or administration are the ones to mark.
 - `credentials_request(resource: "git:acme/api", profile: "contributor", reason)`; `credentials_decide` allows or denies that profile, or a lower one. Officers and the CEO see the profile's full permission list in the request, not just its name. The Security tab's matrix shows the profile per worker and repository.
-- A worker holds at most one profile per repository. Asking for another is an **extension** (below).
+- Grants stay per repository and profile: each is requested, decided, recorded, expires and is revoked on its own. What changes is the token (below): it is minted for the **union** of a worker's live grants, so a worker with `contributor` on `acme/api` and `read` on `acme/web` holds `contributor` on both. A worker holds at most one profile per repository; asking for another is an **extension** (below).
+- **The approver is chosen by the resulting token, not the request.** A request is shown with the token it would produce. If that gives any repository the worker already holds a permission it was not approved for there (`contributor` reaching `acme/web`, approved `read`), the request says *widens `acme/web`: contents read → write*, and is decided by the strictest approver among all the permissions in the resulting token (`approver: ceo` if any of them says so). Officers cannot approve what the CEO's profile would give a repository through the back door.
 - The policy owners hold a profile named by `credentials.github.owner_profile` (default: the broadest), as they hold admin today. Leaving the role revokes it.
 - Profile names are a firm-level vocabulary the board and CEO already use in kickoff and mail; the `office-resources` and `office-git` skills describe them instead of `read`/`write`/`admin`.
 
@@ -98,25 +99,25 @@ zapper mint github-app --app acme --repo acme/api --repo acme/web --perm content
 - The daemon runs it as the daemon user with a clean environment and a timeout; stdout is never logged; failure messages never contain the token (the `agentctl` rule). The arguments are composed by the daemon from the grant, never from guest input.
 - The App's private key is read only by this process. The daemon itself never holds it, which keeps a compromised proxy from learning it.
 
-### The per-grant secret
+### The per-worker secret
 
-On approval, the office registers, through `Core`, a secret scoped to that worker's session and not part of the saved startup config (`config save` does not write it; it ends with the session):
+When a worker's first grant is approved, the office registers, through `Core`, a secret scoped
 
 ```yaml
-gh-<worker>-<owner>-<repo>:
-  command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --repo, acme/web, --perm, contents=write, ...]
+gh-<worker>:
+  command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --repo, acme/web, --perm, contents=write, --perm, pull_requests=write]
   mode: proxy
   hosts: [github.com, api.github.com]
 ```
 
-and puts rules on the worker's layer (replacing `network_follows_grant`'s internal git rule), id `credentials-git-acme-api`:
+and puts two rules on the worker's layer (replacing `network_follows_grant`'s internal git rule), ids `credentials-github` and `credentials-github-api`. They name hosts, not paths, because the token is what bounds the worker's reach:
 
-- `github.com:443`, `path: /acme/api.git/**` and `/acme/api/**`, `set_headers: { Authorization: "Bearer {{secret:gh-…}}" }`;
-- `api.github.com:443`, `path: /repos/acme/api/**`, same header.
+- `github.com:443`, `set_headers: { Authorization: "Bearer {{secret:gh-<worker>}}" }` (git over HTTPS);
+- `api.github.com:443`, the same header (REST and `/graphql`).
 
-Both rules inspect the connection (headers need it). The guest's git is configured with `http.https://github.com/.extraHeader = "Authorization: Bearer zapper-secret-gh-…"` so it sends the placeholder, and the proxy swaps in the real token. Git over HTTPS accepts an App token as a Bearer; if a git endpoint insists on Basic `x-access-token:<token>`, a base64 render helper is needed (the token would sit inside a base64 blob the substring matcher cannot see). That is the one thing to verify against real GitHub early.
+Both rules inspect the connection (headers need it), and the proxy **sets** `Authorization` on every request the rule decides, replacing whatever the guest sent. So nothing in the guest holds or names the token: git sends its first request without credentials, the proxy adds the header, and GitHub never answers with the 401 challenge that would make git ask for a password. `gh` refuses to run with no token configured, so the worker's environment sets `GH_TOKEN` to a dummy value that the proxy overwrites. Git over HTTPS accepts an App token as a Bearer; if a git endpoint insists on Basic `x-access-token:<token>`, a base64 render helper is needed (the token would sit inside a base64 blob the substring matcher cannot see). That is the one thing to verify against real GitHub early.
 
-A worker's rules name only that worker's secrets, and a secret is injected only where a rule of the sending session lists it, so one worker cannot spend another's token. GraphQL (`/graphql`) cannot be restricted to a repository by path and is not allowed; REST under `/repos/{o}/{r}/` and git smart-HTTP are.
+A worker's rules name only that worker's secret, and a secret is injected only where a rule of the sending session lists it, so one worker cannot spend another's token.
 
 ### Expiry: the host refreshes, the guest never notices
 
@@ -130,26 +131,28 @@ Tokens last an hour; grants last `credentials.expiry` (24 h by default). They ar
 
 ### Extending or changing a grant
 
-GitHub cannot widen or narrow an existing token. When a worker's profile on a repository changes (an approved extension, a renewal at a new level, or a partial revoke):
+GitHub cannot widen or narrow an existing token. Whenever a worker's set of grants changes (one is added, extended, renewed at a new profile, narrowed, expires or is revoked):
 
-1. Compute the permissions of the new profile.
-2. Mint a new token for it (a new command line, so a new cache entry).
-3. Replace the secret behind the same name, so the rule and the guest's placeholder do not change; in-flight requests finish on the old token.
+1. Compute the union of the worker's live grants: their repositories, and the permissions of their profiles. If there are none, drop the secret and rules and revoke the token; stop here.
+2. Mint a new token for it (a new command line, so a new cache entry; the daemon sorts repositories and permissions so an unchanged set is the same entry).
+3. Replace the command behind the same secret name, so the rules and the worker's environment do not change; in-flight requests finish on the old token.
 4. Revoke the old token at GitHub (`DELETE /installation/token`).
 
-An extension is a single approval of "profile B instead of A", where B must include everything A had (an extension never silently narrows); narrowing is a revocation plus a new grant.
+An extension is a single approval of "profile B instead of A" on a repository, where B must include everything A had (an extension never silently narrows); narrowing is a revocation plus a new grant. Both re-mint the worker's one token.
 
-### Several repositories in one token
+### One token per worker, and what it costs
 
-`zapper mint github-app` takes `--repo` more than once (up to GitHub's limit of 500, all of the `--app` account) and any number of `--perm`. The token it prints is for all of them. The daemon composes the command line in a fixed order (repositories and permissions sorted), so the same set is always the same cache entry.
+`zapper mint github-app` takes `--repo` more than once (up to GitHub's limit of 500, all of the `--app` account) and any number of `--perm`, and prints one token for all of them. Phase 3 mints exactly one such token per worker.
 
-The catch is how GitHub scopes a token: one repository list and one permission map, and **every repository in the token has every permission in it**. A worker with `contributor` on `acme/api` and `read` on `acme/web`, given one token naming both, holds `contributor` on `acme/web` too. A token over several repositories is therefore a statement that they get the same access. Phase 3 groups on that basis:
+**Why one.** A token has one repository list and one permission map, and every repository in it has every permission in it. Several tokens per worker would need the proxy to choose between them for each request. For git and REST it could, by path (`/acme/api.git/**`, `/repos/acme/api/**`). For GraphQL it cannot: `gh` uses `/graphql` for pull requests, issues, projects and most of what it prints, and that endpoint is one URL whatever the query is about. Choosing a token would mean reading the query, and any disagreement between the proxy's reading and GitHub's would be a bypass (proposal 07 rejects SQL inspection for the same reason). Giving `/graphql` a fixed token would make that token the worker's real reach anyway. Since `gh` working without problems is a requirement, the token is the boundary, and a worker has one.
 
-- **Default:** a worker's grants are grouped by profile. Every repository they hold at `contributor` is one token and one secret; their `read` repositories are another. Fewer mints and rules than a token per repository, and no repository gets more than its grant.
-- **Opt-in, `credentials.github.token: worker`:** one token per worker, over all their repositories, with the **union** of their profiles' permissions. Simpler (one secret, one rule set) and it is what "mint a completely new token with the superset" means literally, but the union is more than any single approval granted: it removes the distinction between repositories. The Security tab shows the token's real reach, not the grants, when this is on, and the approver is asked for the union, not the increment.
+**What it costs.** Within one worker, repositories are not separated: a worker with `contributor` on `acme/api` and `read` on `acme/web` can write to both. Three things keep that honest:
 
-An extension (a worker asks for more on a repository, or for another repository) re-mints the token its repository belongs to, or moves the repository to the token that matches its new profile, and retires the old one.
+- the approver sees the token a request would produce, flags a widening, and the strictest approver among its permissions decides (see [Permission profiles](#3-permission-profiles));
+- the Security tab and the journal show each worker's token reach, so the matrix says what the worker can do, not what each grant said on its own;
+- repositories that need different access go to different workers.
 
+The hosts-only rules mean path patterns are no longer a second line of defence. That is deliberate: a path boundary that GraphQL walks around would only suggest a separation that is not there.
 
 ## 5. What changes in the code
 
@@ -159,8 +162,8 @@ An extension (a worker asks for more on a repository, or for another repository)
 | `zapper` CLI | `zapper github setup\|status`, `zapper mint github-app` |
 | `zapper-policy` config | `SecretSource::Command`; profile and `git.github` config in the firm schema (`firm.rs`) with validation |
 | `zapper-core` proxy | resolve a `Command` secret with the cache, margin, single-flight and fail-closed rules; session-scoped secrets registered and dropped with the session |
-| `zapper-office` `access.rs` | profiles instead of `Level` for `git:`; extension; per-(worker, repo) secrets; revoke at GitHub; `resource_in` accepts `owner/name`; `approver` replaces "admin is the CEO's" |
-| `facility.rs` | skip bare repositories, `pre-receive` hook, per-worker git passwords and the `git.<domain>` service for GitHub firms; `credentials_for` writes the `extraHeader`; services advertise `https://github.com/<owner>/<repo>.git` |
+| `zapper-office` `access.rs` | profiles instead of `Level` for `git:`; extension; one token per worker over the union of their grants, re-minted when the set changes; the widening check and its approver; revoke at GitHub; `resource_in` accepts `owner/name`; `approver` replaces "admin is the CEO's" |
+| `facility.rs` | skip bare repositories, `pre-receive` hook, per-worker git passwords and the `git.<domain>` service for GitHub firms; `credentials_for` sets a dummy `GH_TOKEN` so `gh` runs; services advertise `https://github.com/<owner>/<repo>.git` |
 | Kickoff UI, `firm up` | `repos` / `--repo`, checked against the installation |
 | Office UI Git tab, `git.rs` | needs a new source: a host-side mirror clone, or the GitHub API |
 | Skills and prompts | `office-resources`, `office-git`, `security-review`: profiles, branch + pull-request flow, 401 handling |
@@ -169,7 +172,7 @@ An extension (a worker asks for more on a repository, or for another repository)
 ## 6. Security
 
 - The App's private key is read by one short-lived process; the daemon holds only tokens, in memory. Tokens never reach the guest, a log, or the journal (the journal records the secret's name, profile, repository and expiry).
-- Reach is the intersection of the installation (the operator's choice of repositories), the board's named repositories, the grant's profile, and the rule's path. Each can only narrow the one before.
+- Reach is the intersection of the installation (the operator's choice of repositories), the board's named repositories, and the worker's token (the union of their grants). The rules' hosts are not a boundary: with `/graphql` open, the token is. The records and the Security tab show each worker's token reach, not only their grants.
 - The proxy invariants stand: a secret is injected only into TLS requests to its `hosts`, by a rule that lists it, in the sending session.
 - Attribution: GitHub's own logs show the App, not the worker. zapper's record stays authoritative for who did what (the one limitation proposal 01 already accepted).
 - `repository` and `permission` strings that come from a worker's request are matched against the config's profiles and the named repositories before they reach a command line; nothing a worker types is passed to `zapper mint` unchecked.
@@ -185,6 +188,6 @@ An extension (a worker asks for more on a repository, or for another repository)
 ## Open questions
 
 - **`main` protection.** Without the `pre-receive` hook, "only the merger pushes `main`" rests on GitHub rulesets. Do you want zapper to verify and require one (refuse a firm whose default branch is unprotected), or only warn?
-- **Grouping.** Tokens grouped by profile (the default) or one per worker with the union of permissions (opt-in)? The union is simpler and matches "superset", but a repository then holds permissions that were approved for another.
+- **Widening.** A request that raises a repository's permissions only through the union is routed to the strictest approver among the token's permissions. Is that the right rule, or should widening always go to the CEO?
 - **Several owners.** A firm with repositories under two owners would need two installations and two sets of tokens; this proposal refuses it, as `agentctl` does. Is that acceptable?
-- **GraphQL.** Blocked here. `gh pr create` and similar use it; workers may need REST-only flows or an explicit, wider rule for that host.
+- **Narrower workers.** Because a worker's repositories share one access level, work that needs `read` on one repository and `write` on another is best split across workers. Is that acceptable, or do you need per-repository access inside one worker (which GraphQL rules out without parsing query bodies)?
