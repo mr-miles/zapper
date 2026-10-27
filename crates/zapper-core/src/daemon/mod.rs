@@ -8,6 +8,7 @@
 pub mod addr;
 pub mod api_error;
 pub mod clients;
+pub(crate) mod dbwire;
 pub mod deciders;
 pub(crate) mod dns;
 pub mod driver;
