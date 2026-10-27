@@ -71,6 +71,13 @@ pub struct Record {
     pub done: bool,
 }
 
+impl Record {
+    /// Milliseconds since the record was started.
+    fn elapsed_ms(&self) -> f64 {
+        self.start.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 pub type Shared = Arc<Mutex<Record>>;
 
 #[derive(Default)]
@@ -189,7 +196,7 @@ pub fn finish(log: &Mutex<RequestLog>, rec: &Shared) {
             return;
         }
         r.done = true;
-        let elapsed = r.start.elapsed().as_secs_f64() * 1000.0;
+        let elapsed = r.elapsed_ms();
         r.total_ms.get_or_insert(elapsed);
         r.req_body.data.len() + r.resp_body.data.len()
     };
@@ -198,7 +205,7 @@ pub fn finish(log: &Mutex<RequestLog>, rec: &Shared) {
 
 pub fn mark_ttfb(rec: &Shared) {
     let mut r = rec.lock().unwrap();
-    r.ttfb_ms = Some(r.start.elapsed().as_secs_f64() * 1000.0);
+    r.ttfb_ms = Some(r.elapsed_ms());
 }
 
 fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -220,7 +227,7 @@ fn summary(r: &Record) -> Value {
         "status": r.status, "action": r.action, "rule": r.rule, "error": r.error,
         "type": header(&r.resp_headers, "content-type"),
         "req_size": r.req_body.total, "resp_size": r.resp_body.total,
-        "ttfb_ms": r.ttfb_ms, "total_ms": r.total_ms.or_else(|| (!r.done).then(|| r.start.elapsed().as_secs_f64() * 1000.0)),
+        "ttfb_ms": r.ttfb_ms, "total_ms": r.total_ms.or_else(|| (!r.done).then(|| r.elapsed_ms())),
         "done": r.done, "inspected": r.path.is_some(),
     })
 }

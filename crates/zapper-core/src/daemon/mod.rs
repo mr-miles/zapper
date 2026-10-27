@@ -248,8 +248,13 @@ impl Daemon {
                 }
             }
         }
-        self.change("config replaced", |c| {
-            *c = new;
+        self.set_config("config replaced", new)
+    }
+
+    /// Replaces the whole running config, validated and applied atomically.
+    fn set_config(&self, what: &str, config: Config) -> Result<()> {
+        self.change(what, |c| {
+            *c = config;
             Ok(())
         })
     }
@@ -309,10 +314,7 @@ impl Daemon {
     /// Replaces the running config with the startup file.
     pub fn reload(&self) -> Result<()> {
         let config = Config::from_yaml(&self.startup_yaml())?;
-        self.change("reloaded from startup", |c| {
-            *c = config;
-            Ok(())
-        })
+        self.set_config("reloaded from startup", config)
     }
 
     /// Waits for an operator's answer to an `ask`; denies on timeout.

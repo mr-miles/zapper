@@ -377,9 +377,8 @@ async fn run(
                     timeouts = 0;
                     let why = format!("{MAX_TIMEOUTS} turns in a row ran past {limit}");
                     // As long as a turn, up to ten minutes.
-                    backoff_until = Instant::now() + turn_timeout.min(Duration::from_secs(600));
-                    report.event("error", json!({ "error": why }));
-                    driver.set(Status::Error, Some(why));
+                    let backoff = turn_timeout.min(Duration::from_secs(600));
+                    backoff_until = rest(&driver, report.as_ref(), why, backoff);
                 } else {
                     driver.set(Status::Idle, None);
                 }
@@ -403,9 +402,7 @@ async fn run(
                         "the agent exited {} times in ten minutes (last code {code:?})",
                         restarts.len()
                     );
-                    report.event("error", json!({ "error": why }));
-                    driver.set(Status::Error, Some(why));
-                    backoff_until = Instant::now() + Duration::from_secs(120);
+                    backoff_until = rest(&driver, report.as_ref(), why, Duration::from_secs(120));
                     restarts.clear();
                 } else {
                     driver.set(Status::Idle, None);
@@ -413,6 +410,19 @@ async fn run(
             }
         }
     }
+}
+
+/// Logs an error, moves the driver to `Error`, and returns a fresh backoff
+/// deadline `backoff` from now. Shared by the turn loop's give-up branches.
+fn rest(
+    driver: &Driver,
+    report: &dyn Report,
+    why: String,
+    backoff: Duration,
+) -> tokio::time::Instant {
+    report.event("error", json!({ "error": why }));
+    driver.set(Status::Error, Some(why));
+    tokio::time::Instant::now() + backoff
 }
 
 /// The session's events, from the driver.

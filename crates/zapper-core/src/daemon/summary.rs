@@ -24,6 +24,15 @@ fn opt<T>(v: &Option<T>, f: impl Fn(&T) -> String) -> String {
     v.as_ref().map(f).unwrap_or_default()
 }
 
+/// `""` for an empty list, else `{prefix}a,b,c{suffix}`.
+fn joined(prefix: &str, items: &[String], suffix: &str) -> String {
+    if items.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}{}{suffix}", items.join(","))
+    }
+}
+
 impl EventBody {
     pub fn verdict(&self) -> Option<&'static str> {
         let yes = |b: bool| Some(if b { "allow" } else { "deny" });
@@ -63,11 +72,7 @@ impl EventBody {
                 method.as_deref().unwrap_or("connect"),
                 path.as_deref().unwrap_or(""),
                 opt(status, |s| format!(" → {s}")),
-                if secrets.is_empty() {
-                    String::new()
-                } else {
-                    format!("  [secrets: {}]", secrets.join(","))
-                },
+                joined("  [secrets: ", secrets, "]"),
                 opt(error, |e| format!("  {e}")),
                 if *inspected { "" } else { "  (tunnel)" },
             ),
@@ -137,16 +142,15 @@ impl EventBody {
                 service.name,
                 opt(&service.port, |p| format!(":{p}")),
                 service.to,
-                if service.sessions.is_empty() {
-                    String::new()
-                } else {
-                    let labels: Vec<String> = service
+                joined(
+                    " for ",
+                    &service
                         .sessions
                         .iter()
                         .map(|(k, v)| format!("{k}={v}"))
-                        .collect();
-                    format!(" for {}", labels.join(","))
-                },
+                        .collect::<Vec<_>>(),
+                    "",
+                ),
                 service.owner,
             ),
             EventBody::Driver { event, detail } => {
