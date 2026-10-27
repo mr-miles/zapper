@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use zapper_policy::{expand_home, Engine, Mount, MountMode};
 
+use super::session::SessionDir;
+
 /// Guest CID; every VM has its own vsock device, so they can share it.
 pub const GUEST_CID: u32 = 3;
 /// Serial console output kept per session; the rest is dropped.
@@ -141,24 +143,15 @@ pub struct VmSpec<'a> {
     /// Extra disks, attached as `/dev/vdb`, `/dev/vdc`, …
     pub disks: Vec<(PathBuf, bool)>,
     pub engine: &'a Engine,
-    /// The session directory; the VMM gets its `vm` subdirectory.
-    pub dir: &'a Path,
+    /// The session's directory layout; the VMM works under its `vm`
+    /// subdirectory.
+    pub dir: &'a SessionDir,
     pub id: &'a str,
     /// Give the guest a NIC, captured in the VMM's network namespace
     /// (`crate::netns`).
     pub nic: bool,
     /// Run Firecracker as a subordinate uid of its own (`daemon.vmm_subids`).
     pub subids: bool,
-}
-
-/// The part of a session directory the VMM sees: disks, its config,
-/// metrics and sockets. Logs, recordings and the audit log stay outside it.
-pub fn vm_dir(session_dir: &Path) -> PathBuf {
-    session_dir.join("vm")
-}
-
-pub fn vsock_path(session_dir: &Path) -> PathBuf {
-    vm_dir(session_dir).join("v.sock")
 }
 
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
@@ -182,8 +175,8 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
         "boot-source": { "kernel_image_path": spec.kernel, "initrd_path": spec.initrd, "boot_args": boot_args.trim() },
         "drives": drives,
         "machine-config": { "vcpu_count": spec.engine.vcpus, "mem_size_mib": spec.engine.memory_mib, "smt": false },
-        "vsock": { "guest_cid": GUEST_CID, "uds_path": vsock_path(spec.dir) },
-        "metrics": { "metrics_path": vm_dir(spec.dir).join("metrics.json") },
+        "vsock": { "guest_cid": GUEST_CID, "uds_path": spec.dir.vsock() },
+        "metrics": { "metrics_path": spec.dir.metrics() },
         "entropy": {},
     });
     if spec.nic {
@@ -192,10 +185,10 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     if !spec.kernel.exists() {
         bail!("kernel {} not found", spec.kernel.display());
     }
-    let vmdir = vm_dir(spec.dir);
-    let config_path = vmdir.join("vm.json");
+    let vmdir = spec.dir.vm();
+    let config_path = spec.dir.vm_config();
     tokio::fs::write(&config_path, serde_json::to_vec_pretty(&config)?).await?;
-    tokio::fs::write(vmdir.join("metrics.json"), b"").await?;
+    tokio::fs::write(spec.dir.metrics(), b"").await?;
     // The VMM runs confined in its own namespaces, set up by this binary's
     // `__vmm` mode (`crate::vmm`).
     // Firecracker as a uid of the session's own where the host has
@@ -250,7 +243,7 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
             return Err(e.context("mapping the VMM's subordinate ids"));
         }
     }
-    let console = spec.dir.join("console.log");
+    let console = spec.dir.console();
     for stream in [
         child
             .stdout

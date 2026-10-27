@@ -42,10 +42,9 @@ fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
 
 pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let dir = &session.dir;
-    let vmdir = vm::vm_dir(dir);
-    std::fs::create_dir_all(&vmdir)?;
+    std::fs::create_dir_all(dir.vm())?;
     let engine = &session.resolved.engine;
-    let root = vmdir.join("root.ext4");
+    let root = dir.root_disk();
     vm::root_disk(
         &daemon.paths.images.join(format!("{}.ext4", engine.image)),
         &root,
@@ -56,7 +55,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     let mut disks = Vec::new();
     let mut guest_disks = Vec::new();
     for (i, m) in session.resolved.mounts.iter().enumerate() {
-        let path = vmdir.join(format!("disk{i}.ext4"));
+        let path = dir.data_disk(i);
         let host = vm::mount_disk(m, &session.workdir, &path)
             .await
             .with_context(|| format!("mount {}", m.host))?;
@@ -84,17 +83,15 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     };
 
     // Guest-initiated vsock connections arrive on `<uds>_<port>`.
-    let vsock = vm::vsock_path(dir);
-    let control_path = PathBuf::from(format!("{}_{CONTROL_PORT}", vsock.display()));
-    let proxy_path = PathBuf::from(format!("{}_{PROXY_PORT}", vsock.display()));
+    let control_path = dir.vsock_port(CONTROL_PORT);
     let control = UnixListener::bind(&control_path)?;
-    let proxy_listener = UnixListener::bind(&proxy_path)?;
+    let proxy_listener = UnixListener::bind(dir.vsock_port(PROXY_PORT))?;
     // The MCP gateway, to the servers registered for the session.
-    let mcp = UnixListener::bind(PathBuf::from(format!("{}_{MCP_PORT}", vsock.display())))?;
+    let mcp = UnixListener::bind(dir.vsock_port(MCP_PORT))?;
     tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
     let nic_on = engine.network == zapper_policy::NetworkMode::Nic;
     if nic_on {
-        let listener = UnixListener::bind(vmdir.join(crate::netns::SOCKET))?;
+        let listener = UnixListener::bind(dir.nic_socket())?;
         tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
     }
 

@@ -3,7 +3,7 @@
 //! `lifecycle`, and its interactive terminals in `terminal`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use zapper_policy::proto::{Forward, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
-use super::{tls, vm, Daemon, Event, EventBody};
+use super::{tls, Daemon, Event, EventBody};
 
 mod boot;
 mod lifecycle;
@@ -93,6 +93,64 @@ pub struct Counters {
     pub shells: AtomicU64,
 }
 
+/// A session's directory and the files and sockets laid out under it: the
+/// single owner of that layout. `vm` (the VMM process), the record and the
+/// driver are handed paths from here rather than joining their own, so the
+/// structure lives in one place.
+#[derive(Clone)]
+pub(crate) struct SessionDir {
+    root: PathBuf,
+}
+
+impl SessionDir {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+    /// The session directory itself: console log, recordings and the audit
+    /// log live here, outside the part the VMM sees.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    /// The part the VMM sees: disks, its config, metrics and sockets.
+    pub fn vm(&self) -> PathBuf {
+        self.root.join("vm")
+    }
+    pub fn root_disk(&self) -> PathBuf {
+        self.vm().join("root.ext4")
+    }
+    pub fn data_disk(&self, i: usize) -> PathBuf {
+        self.vm().join(format!("disk{i}.ext4"))
+    }
+    /// The VM's vsock socket; guest-initiated connections arrive on
+    /// `<vsock>_<port>`.
+    pub fn vsock(&self) -> PathBuf {
+        self.vm().join("v.sock")
+    }
+    pub fn vsock_port(&self, port: u32) -> PathBuf {
+        PathBuf::from(format!("{}_{port}", self.vsock().display()))
+    }
+    /// The daemon's socket for the guest's captured traffic (`netns`).
+    pub fn nic_socket(&self) -> PathBuf {
+        self.vm().join(crate::netns::SOCKET)
+    }
+    /// Firecracker's own config and metrics, under the VMM's directory.
+    pub fn vm_config(&self) -> PathBuf {
+        self.vm().join("vm.json")
+    }
+    pub fn metrics(&self) -> PathBuf {
+        self.vm().join("metrics.json")
+    }
+    pub fn console(&self) -> PathBuf {
+        self.root.join("console.log")
+    }
+    pub fn audit(&self) -> PathBuf {
+        self.root.join("audit.jsonl")
+    }
+    pub fn driver_log(&self) -> PathBuf {
+        self.root.join("driver.jsonl")
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub profile: String,
@@ -103,7 +161,7 @@ pub struct Session {
     /// The session's own policy layer, above its profile. Not saved.
     pub(crate) policy: RwLock<Policy>,
     pub(crate) status: watch::Sender<Status>,
-    pub dir: PathBuf,
+    pub(crate) dir: SessionDir,
     pub(crate) ca: tls::SessionCa,
     /// Per-host rustls server configs for inspected connections, minted from
     /// `ca` on first use (the proxy's guest-facing TLS; `tls::server_config`).
@@ -224,7 +282,7 @@ impl Session {
     /// The socket of the session's VM's vsock, for connecting to a port in
     /// the guest (`CONNECT <port>`).
     pub fn vsock_path(&self) -> PathBuf {
-        vm::vsock_path(&self.dir)
+        self.dir.vsock()
     }
 
     /// Opens a host-initiated connection to a port of the session's VM,
@@ -298,7 +356,7 @@ impl Session {
 
     /// Where the audit log can be read (the keeper's copy, if it keeps it).
     pub fn audit_path(&self) -> PathBuf {
-        super::record::view(&self.dir.join("audit.jsonl"))
+        super::record::view(&self.dir.audit())
     }
 
     /// Policy layers, most specific first. Uses the running config, so rule
@@ -402,7 +460,7 @@ impl Session {
         }
         let id = self.next_shell.fetch_add(1, Ordering::Relaxed);
         req.id = id;
-        let mut stream = UnixStream::connect(vm::vsock_path(&self.dir)).await?;
+        let mut stream = UnixStream::connect(self.dir.vsock()).await?;
         stream
             .write_all(format!("CONNECT {SHELL_PORT}\n").as_bytes())
             .await?;

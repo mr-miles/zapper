@@ -10,8 +10,8 @@ use tokio::sync::{watch, Semaphore};
 use zapper_policy::proto::HostMsg;
 use zapper_policy::Policy;
 
-use super::{Counters, NewSession, Session, Status};
-use crate::daemon::{driver, harness, now, random_id, record, tls, vm, Daemon, EventBody};
+use super::{Counters, NewSession, Session, SessionDir, Status};
+use crate::daemon::{driver, harness, now, random_id, record, tls, Daemon, EventBody};
 
 /// Creates a session without booting it: its profile resolved, its
 /// directory and audit log, its rules; listed, as starting.
@@ -38,9 +38,9 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         bail!("{running} sessions running; daemon.max_sessions is {max}");
     }
     let id = random_id(6);
-    let dir = daemon.paths.state.join("sessions").join(&id);
-    std::fs::create_dir_all(&dir)?;
-    let audit = record::Writer::open(&dir.join("audit.jsonl"))?;
+    let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&id));
+    std::fs::create_dir_all(dir.root())?;
+    let audit = record::Writer::open(&dir.audit())?;
     // A firm's workers are driven by the office's foreman.
     let driven = resolved.agent.driven
         && !new.labels.contains_key("firm")
@@ -95,7 +95,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
 
 pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>> {
     let session = register(&daemon, &new)?;
-    let (id, dir) = (session.id.clone(), session.dir.clone());
+    let id = session.id.clone();
     let ttl = session.resolved.engine.ttl_secs;
 
     let started = Instant::now();
@@ -140,7 +140,7 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
             stop(&daemon, &session, &msg).await;
             return Err(anyhow!(
                 "session {id}: {msg}; see {}",
-                dir.join("console.log").display()
+                session.dir.console().display()
             ));
         }
     }
@@ -195,10 +195,9 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     }
     // The VMM's directory: disks and sockets go; its config and metrics are
     // kept next to the audit log.
-    let vmdir = vm::vm_dir(&session.dir);
-    for f in ["vm.json", "metrics.json"] {
-        let _ = std::fs::rename(vmdir.join(f), session.dir.join(f));
-    }
-    let _ = std::fs::remove_dir_all(vmdir);
+    let sd = &session.dir;
+    let _ = std::fs::rename(sd.vm_config(), sd.root().join("vm.json"));
+    let _ = std::fs::rename(sd.metrics(), sd.root().join("metrics.json"));
+    let _ = std::fs::remove_dir_all(sd.vm());
     *session.audit.lock().unwrap() = None;
 }

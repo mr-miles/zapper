@@ -471,7 +471,7 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         daemon: Arc::downgrade(daemon),
         session: Arc::downgrade(session),
     });
-    let file = super::record::Writer::open(&session.dir.join("driver.jsonl")).ok();
+    let file = super::record::Writer::open(&session.dir.driver_log()).ok();
     let file = Mutex::new(file);
     let transcript = Box::new(move |v: Value| {
         if let Some(f) = file.lock().unwrap().as_mut() {

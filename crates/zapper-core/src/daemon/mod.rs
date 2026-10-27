@@ -119,7 +119,7 @@ impl Daemon {
         // VMM directories (disks, sockets) of sessions a previous daemon left
         // behind; audit logs and recordings stay.
         for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-            let _ = std::fs::remove_dir_all(vm::vm_dir(&dir.path()));
+            let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
         }
         // The record: through the keeper, if configured; it must answer.
         record::init(&state, d.keeper.as_ref())?;

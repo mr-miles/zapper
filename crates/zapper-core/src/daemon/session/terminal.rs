@@ -37,7 +37,12 @@ pub(crate) async fn pump_shell<C>(
             exit_code: None,
         },
     );
-    let cast = Arc::new(Mutex::new(Recorder::new(&session.dir, id, tty, &argv)));
+    let cast = Arc::new(Mutex::new(Recorder::new(
+        session.dir.root(),
+        id,
+        tty,
+        &argv,
+    )));
     let term = Arc::new(Terminal::new(id, argv.clone(), tty.unwrap_or((24, 80))));
     session.terminals.lock().unwrap().insert(id, term.clone());
     let watch = term.clone();

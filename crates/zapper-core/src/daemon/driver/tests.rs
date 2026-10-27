@@ -377,7 +377,7 @@ fn driven(t: &crate::testing::TestCore, overlay: Option<Value>) -> Arc<crate::Se
 /// with the scripted Claude behind each.
 fn guest(s: &crate::Session, seen: Arc<Seen>) {
     use tokio::io::AsyncReadExt;
-    let path = crate::daemon::vm::vsock_path(&s.dir);
+    let path = s.dir.vsock();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
     tokio::spawn(async move {
@@ -438,11 +438,11 @@ async fn a_driven_session_runs_its_agent_over_a_terminal_channel() {
         assert!(names.contains(&want), "{want}: {names:?}");
     }
     assert!(events.iter().all(|e| e["session"] == s.id.as_str()));
-    let audit = std::fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
+    let audit = std::fs::read_to_string(s.dir.audit()).unwrap();
     assert!(audit.contains(r#""event":"turn_end""#), "{audit}");
 
     // The agent's output, in the session's driver.jsonl.
-    let transcript = std::fs::read_to_string(s.dir.join("driver.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(s.dir.driver_log()).unwrap();
     let types: Vec<Value> = transcript
         .lines()
         .map(|l| serde_json::from_str::<Value>(l).unwrap()["type"].clone())
