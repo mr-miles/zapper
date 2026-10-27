@@ -130,6 +130,7 @@ fn unshare(sub: bool) -> Result<()> {
         bail!("unshare(user, net, mount): {e} (unprivileged user namespaces disabled? see docs/network.md)");
     }
     if sub {
+        // Wait up to ~10s (2000 × 5ms) for the daemon to write our id maps.
         for _ in 0..2000 {
             if !std::fs::read_to_string("/proc/self/uid_map")?
                 .trim()

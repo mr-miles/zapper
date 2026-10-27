@@ -198,6 +198,7 @@ impl Daemon {
     /// Applies a change to the running config if the result is valid.
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
         let mut next = self.config.read().unwrap().clone();
+        let old_networks = next.daemon.private_networks.clone();
         let out = f(&mut next)?;
         next.normalize();
         next.validate()?;
@@ -217,7 +218,10 @@ impl Daemon {
             }
         }
         self.clients.check(&next)?;
-        if next.daemon.private_networks != self.config.read().unwrap().daemon.private_networks {
+        // Derived state: rebuild the address policy only when this change
+        // touched the private networks (compared against the clone basis, not
+        // a second lock read).
+        if next.daemon.private_networks != old_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
         *self.config.write().unwrap() = next;

@@ -149,6 +149,12 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
 
 /// Stops a session's VM and removes its disks; the audit log, console log and
 /// recordings stay.
+///
+/// Status invariant: `Failed` is terminal and never overwritten with
+/// `Stopped`; an already-`Stopped` session returns early. `teardown` is
+/// idempotent and also reached from the launch-failure path (which sets
+/// `Failed` directly, without sending `Shutdown`, since the guest never came
+/// up).
 pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &str) {
     {
         let current = session.runtime.status().borrow().clone();

@@ -160,6 +160,7 @@ pub async fn map(ids: &SubIds, pid: u32, n: u32) -> Result<()> {
     let own = std::fs::read_link("/proc/self/ns/user")?;
     let theirs = format!("/proc/{pid}/ns/user");
     let mut entered = false;
+    // Wait up to ~5s (1000 × 5ms) for the VMM to enter its user namespace.
     for _ in 0..1000 {
         match std::fs::read_link(&theirs) {
             Ok(ns) if ns != own => {

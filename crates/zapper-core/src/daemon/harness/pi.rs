@@ -94,6 +94,9 @@ impl PiConversation {
     }
 
     fn end(&mut self, aborted: bool) -> TurnEnd {
+        // `stop == "error"` is the sentinel `read()` sets for a failed turn
+        // (message_end/auto_retry_end/response with an error); `self.error`
+        // carries the message.
         let outcome = match (&self.stop, &self.error) {
             (Some(s), why) if s == "error" => {
                 let why = why

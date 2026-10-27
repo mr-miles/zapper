@@ -146,9 +146,12 @@ fn obfuscate(password: &str) -> Vec<u8> {
 
 /// Builds a LOGIN7 payload for SQL authentication.
 pub fn login7(user: &str, password: &str, database: Option<&str>, server: &str) -> Vec<u8> {
+    // A LOGIN7 packet is a 36-byte fixed header, then 58 bytes of
+    // offset/length descriptors, then the variable data; descriptor offsets
+    // are measured from the packet start, so the data begins at 36 + 58 = 94.
     const FIXED: usize = 36;
     const OFFSETS: usize = 58;
-    let data_start = FIXED + OFFSETS; // 94
+    let data_start = FIXED + OFFSETS;
 
     let host = utf16("zapper");
     let user_u = utf16(user);
@@ -167,13 +170,9 @@ pub fn login7(user: &str, password: &str, database: Option<&str>, server: &str) 
     };
     let host = place(&mut data, &host);
     let user = place(&mut data, &user_u);
-    // Password offset uses the obfuscated bytes but its length is in characters.
-    let pass = {
-        let off = (data_start + data.len()) as u16;
-        let cch = (pass.len() / 2) as u16;
-        data.extend_from_slice(&pass);
-        (off, cch)
-    };
+    // Obfuscation is byte-for-byte, so `place`'s char count (bytes / 2) is
+    // still correct for the obfuscated password.
+    let pass = place(&mut data, &pass);
     let app = place(&mut data, &app);
     let srv = place(&mut data, &srv);
     let clt = place(&mut data, &clt);
@@ -270,11 +269,17 @@ fn error_token(b: &[u8]) -> String {
 /// the TLS record layer then protects the TDS PDUs directly.
 pub struct TdsTls<S> {
     inner: S,
+    /// True while the PRELOGIN handshake is framed; cleared once TLS is up.
     handshaking: Arc<AtomicBool>,
+    /// The framed packet being written, and how far it has drained.
     wbuf: Vec<u8>,
     wpos: usize,
+    /// Caller bytes to report as written once `wbuf` drains (the payload
+    /// length, not the framed length).
     wclaim: usize,
+    /// Bytes read from the inner stream but not yet de-framed.
     racc: Vec<u8>,
+    /// De-framed payload ready for the caller, and how far it has been read.
     rout: Vec<u8>,
     rpos: usize,
 }
@@ -295,6 +300,28 @@ impl<S> TdsTls<S> {
     fn framing(&self) -> bool {
         self.handshaking.load(Ordering::Relaxed)
     }
+    /// Reports `wclaim` caller bytes as written and clears the drained write
+    /// buffer.
+    fn take_claim(&mut self) -> usize {
+        let claim = self.wclaim;
+        self.wbuf.clear();
+        self.wpos = 0;
+        claim
+    }
+}
+
+impl<S: AsyncWrite + Unpin> TdsTls<S> {
+    /// Writes `wbuf[wpos..]` to the inner stream until drained or it is not
+    /// ready.
+    fn poll_flush_wbuf(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        while self.wpos < self.wbuf.len() {
+            match Pin::new(&mut self.inner).poll_write(cx, &self.wbuf[self.wpos..])? {
+                Poll::Ready(n) => self.wpos += n,
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for TdsTls<S> {
@@ -303,38 +330,25 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TdsTls<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        let me = &mut *self;
         // Finish flushing any framed packet still in flight.
-        while self.wpos < self.wbuf.len() {
-            let me = &mut *self;
-            match Pin::new(&mut me.inner).poll_write(cx, &me.wbuf[me.wpos..])? {
-                Poll::Ready(n) => me.wpos += n,
-                Poll::Pending => return Poll::Pending,
-            }
+        if me.poll_flush_wbuf(cx)?.is_pending() {
+            return Poll::Pending;
         }
-        if !self.wbuf.is_empty() {
-            let claim = self.wclaim;
-            self.wbuf.clear();
-            self.wpos = 0;
-            return Poll::Ready(Ok(claim));
+        if !me.wbuf.is_empty() {
+            return Poll::Ready(Ok(me.take_claim()));
         }
-        if !self.framing() {
-            return Pin::new(&mut self.inner).poll_write(cx, buf);
+        if !me.framing() {
+            return Pin::new(&mut me.inner).poll_write(cx, buf);
         }
         // Start a new PRELOGIN-framed packet carrying this write.
-        self.wbuf = frame(PKT_PRELOGIN, buf);
-        self.wpos = 0;
-        self.wclaim = buf.len();
-        while self.wpos < self.wbuf.len() {
-            let me = &mut *self;
-            match Pin::new(&mut me.inner).poll_write(cx, &me.wbuf[me.wpos..])? {
-                Poll::Ready(n) => me.wpos += n,
-                Poll::Pending => return Poll::Pending,
-            }
+        me.wbuf = frame(PKT_PRELOGIN, buf);
+        me.wpos = 0;
+        me.wclaim = buf.len();
+        if me.poll_flush_wbuf(cx)?.is_pending() {
+            return Poll::Pending;
         }
-        let claim = self.wclaim;
-        self.wbuf.clear();
-        self.wpos = 0;
-        Poll::Ready(Ok(claim))
+        Poll::Ready(Ok(me.take_claim()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

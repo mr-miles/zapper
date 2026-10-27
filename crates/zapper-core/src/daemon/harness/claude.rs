@@ -138,6 +138,8 @@ pub(super) fn claude_activity(event: &Value) -> Option<String> {
     .find_map(|k| input[*k].as_str())
     .map(|s| {
         let s = s.lines().next().unwrap_or("");
+        // Show a path's basename, but keep a value with spaces whole — it is a
+        // command or prose, not a path.
         let s = s
             .rsplit('/')
             .next()
@@ -221,6 +223,8 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
     // Pre-approve the API key (placeholder or value) so Claude Code does not
     // ask about it.
     if let Some(key) = api_key {
+        // The last 20 characters of the key, by char not byte (reverse, take,
+        // reverse back) — what Claude Code records as the approved-key suffix.
         let tail: String = key
             .chars()
             .rev()

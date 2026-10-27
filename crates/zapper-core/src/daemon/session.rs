@@ -229,6 +229,8 @@ impl Rules {
     }
 
     /// Replaces the rule with `rule`'s id and puts it first; returns that id.
+    /// Callers always pass an id'd rule (an officer's approval, a grant); the
+    /// `"?"` fallback never fires.
     pub fn put(&self, rule: AnyRule) -> String {
         let id = rule.id().unwrap_or("?").to_string();
         let mut p = self.own.write().unwrap();
