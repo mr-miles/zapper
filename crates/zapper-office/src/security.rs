@@ -1156,7 +1156,7 @@ impl Decider for Officers {
 }
 
 /// Makes the officers the decider of the run's sessions' `ask`s.
-pub fn register(d: &Core, run: &Arc<FirmRun>) {
+pub fn register(d: &impl ApprovalApi, run: &Arc<FirmRun>) {
     let id = d.add_decider(
         super::run_sessions(run),
         Arc::new(Officers {
@@ -1167,7 +1167,7 @@ pub fn register(d: &Core, run: &Arc<FirmRun>) {
 }
 
 /// Hands the run's sessions' `ask`s back, when the firm stops.
-pub fn unregister(d: &Core, run: &FirmRun) {
+pub fn unregister(d: &impl ApprovalApi, run: &FirmRun) {
     let id = run.security.lock().unwrap().decider.take();
     if let Some(id) = id {
         d.remove_decider(id);
@@ -1471,4 +1471,88 @@ pub fn promote_target(run: &FirmRun, rule: &str) -> Result<(Scope, NetRule)> {
     let mut r = st.rule.clone();
     r.id = None;
     Ok((Scope::Profile(profile), r))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    const FIRM: &str = "
+profiles:
+  w:
+    agent: { kind: claude-code }
+firms:
+  acme:
+    roles:
+      ceo: { profile: w, agent: ceo }
+    workers:
+      - { name: ceo, role: ceo }
+    git: { repos: [api] }
+";
+
+    /// A fake `ApprovalApi` recording the deciders added and removed — enough
+    /// to test the officers' registration without the daemon's real registry.
+    #[derive(Default)]
+    struct FakeApprovals {
+        next: AtomicU64,
+        added: std::sync::Mutex<Vec<u64>>,
+        removed: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl ApprovalApi for FakeApprovals {
+        fn add_decider(
+            &self,
+            _sessions: BTreeMap<String, String>,
+            _decider: Arc<dyn Decider>,
+        ) -> u64 {
+            let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+            self.added.lock().unwrap().push(id);
+            id
+        }
+        fn remove_decider(&self, id: u64) -> bool {
+            self.removed.lock().unwrap().push(id);
+            true
+        }
+        fn approvals(&self) -> Vec<zapper_core::Pending> {
+            vec![]
+        }
+        fn answer(
+            &self,
+            _id: &str,
+            _allow: bool,
+            _remember: Option<zapper_core::Remember>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `register`/`unregister` depend only on `ApprovalApi`: a fake stands in
+    /// for the real decider registry, and we check they register the officers
+    /// as a decider (keeping its id on the run) and hand it back on stop.
+    #[tokio::test]
+    async fn register_wires_a_decider_that_unregister_removes() {
+        let t = crate::test_core(FIRM);
+        let run = crate::test_run(&t.core, "acme");
+        let fake = FakeApprovals::default();
+
+        super::register(&fake, &run);
+        assert_eq!(
+            run.security.lock().unwrap().decider,
+            Some(1),
+            "the decider's id is kept on the run",
+        );
+        assert_eq!(&*fake.added.lock().unwrap(), &[1], "one decider added");
+
+        super::unregister(&fake, &run);
+        assert_eq!(
+            &*fake.removed.lock().unwrap(),
+            &[1],
+            "the same decider is handed back",
+        );
+        assert!(
+            run.security.lock().unwrap().decider.is_none(),
+            "the run no longer holds a decider",
+        );
+    }
 }
