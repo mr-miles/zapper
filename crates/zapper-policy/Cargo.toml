@@ -10,3 +10,4 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 globset.workspace = true
+time = { version = "0.3", features = ["parsing"] }

@@ -230,6 +230,19 @@ pub enum SecretSource {
     },
     /// Inline value. Saved into the startup file as is; prefer `env` or `file`.
     Value { value: String },
+    /// Minted by a host command that prints the credential, as
+    /// `{"value": "...", "expires_at": "<RFC 3339>"}` or a bare value kept
+    /// for `ttl_secs`. Refreshed before it expires; see [`crate::mint`].
+    /// `zapper` as the first word is this binary.
+    Command {
+        command: Vec<String>,
+        /// Kill the command after this long (default 30).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+        /// How long a bare value lasts (default 300).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u64>,
+    },
 }
 
 impl SecretSource {
@@ -255,6 +268,20 @@ impl SecretSource {
                 }
             }
             SecretSource::Value { value } => Ok(value.clone()),
+            SecretSource::Command { .. } => crate::mint::resolve(&self.mint_spec().unwrap())
+                .with_context(|| "minting the secret"),
+        }
+    }
+
+    /// For a `command` secret: what to run, and for how long.
+    pub fn mint_spec(&self) -> Option<crate::mint::Spec> {
+        match self {
+            SecretSource::Command {
+                command,
+                timeout_secs,
+                ttl_secs,
+            } => Some(crate::mint::Spec::new(command, *timeout_secs, *ttl_secs)),
+            _ => None,
         }
     }
 }
@@ -966,6 +993,21 @@ impl Config {
             }
         }
         for (name, s) in &self.secrets {
+            if let SecretSource::Command {
+                command,
+                timeout_secs,
+                ttl_secs,
+            } = &s.source
+            {
+                if command.first().is_none_or(|c| c.trim().is_empty()) {
+                    errors.push(format!("secret {name}: command needs a program to run"));
+                }
+                if *timeout_secs == Some(0) || *ttl_secs == Some(0) {
+                    errors.push(format!(
+                        "secret {name}: timeout_secs and ttl_secs must be above zero"
+                    ));
+                }
+            }
             match s.mode {
                 SecretMode::Proxy if s.hosts.is_empty() => errors.push(format!(
                     "secret {name}: a proxy secret needs hosts it may be sent to"
@@ -1167,6 +1209,41 @@ mod tests {
                 "{port}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn command_secrets_are_parsed_and_checked() {
+        use super::Config;
+        let ok = "secrets:\n  gh: { command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --perm, contents=write], hosts: [github.com, api.github.com], timeout_secs: 20 }\n";
+        let c = Config::from_yaml(ok).unwrap();
+        let spec = c.secrets["gh"].source.mint_spec().unwrap();
+        assert_eq!(spec.argv[0], "zapper");
+        assert_eq!(spec.timeout, std::time::Duration::from_secs(20));
+        assert!(!c.has_inline_secrets(), "a command holds no secret itself");
+        assert_eq!(Config::from_yaml(&c.to_yaml()).unwrap(), c, "round trips");
+
+        let err = |y: &str| {
+            format!(
+                "{:#}",
+                Config::from_yaml(y)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default()
+            )
+        };
+        assert!(err("secrets:\n  gh: { command: [], hosts: [h] }\n").contains("needs a program"));
+        assert!(
+            err("secrets:\n  gh: { command: [\"\"], hosts: [h] }\n").contains("needs a program")
+        );
+        assert!(
+            err("secrets:\n  gh: { command: [x], hosts: [h], ttl_secs: 0 }\n")
+                .contains("above zero")
+        );
+        assert!(err("secrets:\n  gh: { command: [x] }\n").contains("needs hosts"));
+        assert!(
+            !err("secrets:\n  gh: { command: [x], value: y, hosts: [h] }\n").is_empty(),
+            "a secret has one source"
+        );
     }
 
     #[test]
