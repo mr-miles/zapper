@@ -27,10 +27,6 @@ pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 /// only when the host and guest kernels have IPv6; otherwise the datapath
 /// stays IPv4-only.
 pub const GATEWAY6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
-/// The guest's end of that link; the guest configures it itself (zapper-agent
-/// `init`), so this is the host-side record of the address it must match.
-#[allow(dead_code)]
-pub const GUEST6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 2);
 pub const GUEST_MAC: &str = "06:00:0a:00:02:02";
 pub const TAP: &str = "tap0";
 const TCP_PORT: u16 = 15001;
@@ -185,7 +181,12 @@ fn serve_dns(udp: UdpSocket, socket: PathBuf) {
 
 /// The destination the guest dialled, before the redirect.
 fn original_dst(conn: &TcpStream, v6: bool) -> io::Result<SocketAddr> {
+    // SO_ORIGINAL_DST is the netfilter option (absent from libc) that recovers
+    // the pre-redirect destination of a REDIRECTed connection.
     const SO_ORIGINAL_DST: libc::c_int = 80;
+    // SAFETY: each getsockopt is given a zeroed sockaddr of the matching family
+    // and its size in `len`; the result is read only after checking the return
+    // code, and the socket fd is owned by `conn` for the call.
     if v6 {
         let mut addr: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;

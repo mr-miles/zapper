@@ -261,6 +261,8 @@ pub(crate) fn body_json(c: &Captured, h: &[(String, String)], values: &[String])
     let mut v = json!({ "total": c.total, "kept": c.data.len(), "truncated": truncated, "encoding": (!encoding.is_empty()).then_some(encoding) });
     match std::str::from_utf8(shown) {
         Ok(t) => v["text"] = json!(redact(t, values)),
+        // Valid UTF-8 except for a multi-byte char chopped off by truncation
+        // (at most 4 bytes, so within the tail): show it lossily, not base64.
         Err(e) if e.valid_up_to() > shown.len().saturating_sub(4) && truncated => {
             v["text"] = json!(redact(&String::from_utf8_lossy(shown), values))
         }

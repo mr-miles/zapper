@@ -166,34 +166,37 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
             true
         }
         Action::Deny => false,
-        // A decider's `ask` doesn't hold the request: it may take minutes.
-        Action::Ask if decider.is_some() => {
-            match decider.unwrap().ask(s, req) {
-                Ok(r) => pending = Some(r),
-                Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
+        Action::Ask => match &decider {
+            // A decider's `ask` doesn't hold the request: it may take minutes.
+            Some(dc) => {
+                match dc.ask(s, req) {
+                    Ok(r) => pending = Some(r),
+                    Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
+                }
+                false
             }
-            false
-        }
-        Action::Ask => {
-            let subject = match (&req.method, &req.path) {
-                (Some(m), Some(p)) => format!("{m} https://{}:{}{p}", req.host, req.port),
-                _ => format!("connect {}:{}", req.host, req.port),
-            };
-            let suggestion = AnyRule::Net(NetRule {
-                id: None,
-                action: Action::Allow,
-                host: req.host.clone(),
-                ports: vec![req.port],
-                methods: vec![],
-                path: None,
-                protocol: Default::default(),
-                secrets: vec![],
-                set_headers: Default::default(),
-                final_: false,
-                comment: Some("approved".into()),
-            });
-            d.ask(s, Kind::Net, subject, suggestion).await
-        }
+            // No decider: the operator answers; the suggested rule remembers a yes.
+            None => {
+                let subject = match (&req.method, &req.path) {
+                    (Some(m), Some(p)) => format!("{m} https://{}:{}{p}", req.host, req.port),
+                    _ => format!("connect {}:{}", req.host, req.port),
+                };
+                let suggestion = AnyRule::Net(NetRule {
+                    id: None,
+                    action: Action::Allow,
+                    host: req.host.clone(),
+                    ports: vec![req.port],
+                    methods: vec![],
+                    path: None,
+                    protocol: Default::default(),
+                    secrets: vec![],
+                    set_headers: Default::default(),
+                    final_: false,
+                    comment: Some("approved".into()),
+                });
+                d.ask(s, Kind::Net, subject, suggestion).await
+            }
+        },
     };
     Verdict {
         decision,

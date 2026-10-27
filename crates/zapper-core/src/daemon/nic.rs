@@ -24,6 +24,8 @@ pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
 }
 
 async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std::io::Result<()> {
+    // The capture shim's one-line command (`TCP <ip> <port>` or `DNS <len>`)
+    // fits well under 64 bytes; read that much, then the protocol takes over.
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     while line.len() < 64 {
@@ -43,6 +45,7 @@ async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std:
             proxy::transparent(d, s, stream, ip, port).await;
         }
         ["DNS", len] => {
+            // A DNS query over UDP fits in one ~MTU-sized datagram (1500).
             let len: usize = len.parse().unwrap_or(0);
             if len == 0 || len > 1500 {
                 return Ok(());
