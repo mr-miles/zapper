@@ -24,7 +24,14 @@ pub use daemon::harness;
 /// `zapper-keeper` as a separate user.
 pub use daemon::record;
 pub use interface::{
-    Core, Decider, Event, EventBody, McpServer, NewSession, Pending, Referral, Remember,
-    RuleKeeper, RuleRemoval, ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget,
-    Session, SessionInfo, Status, TermChunk, TerminalInfo,
+    ApprovalApi, ConfigApi, Core, Decider, Event, EventApi, EventBody, McpServer, NewSession,
+    Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi, ServiceHandler,
+    ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi, SessionInfo, Status,
+    TermChunk, TerminalInfo,
 };
+
+/// The `Core` API traits, so a consumer can `use zapper_core::prelude::*;`
+/// and call any of them on a `Core` (or depend on one narrow trait).
+pub mod prelude {
+    pub use crate::interface::{ApprovalApi, ConfigApi, EventApi, RuleApi, ServiceApi, SessionApi};
+}

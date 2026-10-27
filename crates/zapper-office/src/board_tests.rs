@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use zapper_core::prelude::*;
 use zapper_core::testing::TestCore;
 
 const FIRM: &str = "

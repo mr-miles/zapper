@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use zapper_core::prelude::*;
 
 use serde_json::Value;
 use zapper_core::testing::TestCore;

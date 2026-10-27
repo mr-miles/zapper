@@ -1,6 +1,7 @@
 //! The MCP gateway over a core without VMs: which servers a session gets,
 //! and MCP on a connection as the agent's bridge carries it.
 
+use crate::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 

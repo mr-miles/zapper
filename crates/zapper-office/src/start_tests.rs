@@ -2,6 +2,7 @@
 //! fit beside the running ones, and the list of runs says how the live one
 //! is doing.
 
+use zapper_core::prelude::*;
 use zapper_core::testing::TestCore;
 use zapper_core::NewSession;
 use zapper_policy::Policy;

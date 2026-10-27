@@ -3,6 +3,7 @@
 //! the host and everything that happens recorded.
 
 mod client;
+use zapper_core::prelude::*;
 use zapper_core::{util, vmm};
 mod image;
 mod office;

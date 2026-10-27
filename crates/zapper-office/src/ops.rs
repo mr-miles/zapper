@@ -5,6 +5,7 @@
 //! every call.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};

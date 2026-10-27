@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
+use zapper_core::prelude::*;
 
 use crate::firm::{Firm, Worker, BOARD};
 use anyhow::{anyhow, bail, Context, Result};

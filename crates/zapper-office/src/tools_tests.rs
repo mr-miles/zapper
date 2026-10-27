@@ -4,6 +4,7 @@
 //! money: the board's budget, a hire, funding, and a contract paid for.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

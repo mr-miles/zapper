@@ -1,6 +1,7 @@
 //! The driver against a scripted Claude Code on the guest's side of the
 //! terminal channel, in memory: no VM.
 
+use crate::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

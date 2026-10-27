@@ -1,6 +1,7 @@
 //! The guest's DNS server over a core without VMs: what the session's
 //! queries are answered with, by name.
 
+use crate::prelude::*;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 

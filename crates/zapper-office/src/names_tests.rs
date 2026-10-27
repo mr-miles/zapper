@@ -5,6 +5,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zapper_core::testing::{dial, echoing_vm, guest_tls, net_event, query_dns, TestCore};

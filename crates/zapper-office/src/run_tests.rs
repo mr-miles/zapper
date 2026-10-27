@@ -3,6 +3,7 @@
 //! firm's services and zone, and the office port's requests.
 
 use std::sync::Arc;
+use zapper_core::prelude::*;
 
 use crate::firm::BOARD;
 use base64::Engine as _;

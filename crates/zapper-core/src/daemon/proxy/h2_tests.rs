@@ -5,6 +5,7 @@
 //! a 502 — but only *after* the request has been served, decided and injected
 //! over h2, which is exactly the new guest-facing path under test.
 
+use crate::prelude::*;
 use std::sync::Arc;
 
 use base64::Engine as _;

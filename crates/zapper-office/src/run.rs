@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};

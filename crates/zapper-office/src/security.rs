@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
+use zapper_core::prelude::*;
 use zapper_core::{Core, Decider, Referral, Session};
 
 use crate::firm::{parse_duration, BOARD};

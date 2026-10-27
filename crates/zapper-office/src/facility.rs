@@ -8,6 +8,7 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;

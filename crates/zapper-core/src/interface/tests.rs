@@ -1,6 +1,7 @@
 //! `Core` over a daemon without VMs (`testing::TestCore`): the config,
 //! rules, approvals and events, and sessions registered without booting.
 
+use crate::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 

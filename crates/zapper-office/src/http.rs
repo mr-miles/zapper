@@ -5,6 +5,7 @@
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
+use zapper_core::prelude::*;
 
 use crate::firm::BOARD;
 use axum::extract::{Path, Query, State};

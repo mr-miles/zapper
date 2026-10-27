@@ -5,6 +5,7 @@
 //! a name goes for it, and its MCP connections; a VM's side of vsock and
 //! a guest's TLS.
 
+use crate::prelude::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

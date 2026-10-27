@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use zapper_core::prelude::*;
 
 use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Result};
