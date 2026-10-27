@@ -166,11 +166,8 @@ pub struct Session {
     pub(crate) tls: tls::SessionTls,
     pub(crate) counters: Counters,
     pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
-    /// Names given out by the session's DNS, by synthetic address.
-    pub(crate) dns: Mutex<super::dns::FakeDns>,
-    pub(crate) dns_rate: Mutex<super::dns::RateLimit>,
-    /// Bounds the session's concurrent lookups on the host.
-    pub(crate) dns_lookups: Arc<Semaphore>,
+    /// The session's resolver state: synthetic names, rate limit, lookup cap.
+    pub(crate) dns: super::dns::SessionDns,
     /// The session's HTTP traffic, for inspecting it from the UI.
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.

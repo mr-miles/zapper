@@ -99,7 +99,7 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
             return Some(dns::respond(query, None, rej.rcode, None));
         }
     };
-    if !s.dns_rate.lock().unwrap().take() {
+    if !s.dns.rate_ok() {
         return Some(dns::respond(query, Some(&q), dns::SERVFAIL, None));
     }
     // `ask` decides access, not resolution: a name some request could reach,
@@ -122,15 +122,15 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
     // Services and their zones are answered here, never looked up on the
     // host.
     if let Some(exists) = d.services.resolves(s, &q.name) {
-        s.dns.lock().unwrap().remember(&q.name, exists);
+        s.dns.names().remember(&q.name, exists);
     }
     // Allowed: say whether the name exists, from a real lookup on the host.
-    let cached = s.dns.lock().unwrap().cached(&q.name);
+    let cached = s.dns.names().cached(&q.name);
     let exists = match cached {
         Some(e) => e,
         None => match look_up(s, &q.name).await {
             Ok(e) => {
-                s.dns.lock().unwrap().remember(&q.name, e);
+                s.dns.names().remember(&q.name, e);
                 e
             }
             Err(why) => {
@@ -145,8 +145,8 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
     }
     // A synthetic address of the queried family; other types get NODATA.
     let answer = match q.qtype {
-        dns::TYPE_A => s.dns.lock().unwrap().address(&q.name).map(IpAddr::V4),
-        dns::TYPE_AAAA => s.dns.lock().unwrap().address6(&q.name).map(IpAddr::V6),
+        dns::TYPE_A => s.dns.names().address(&q.name).map(IpAddr::V4),
+        dns::TYPE_AAAA => s.dns.names().address6(&q.name).map(IpAddr::V6),
         _ => None,
     };
     if q.qtype == dns::TYPE_A || q.qtype == dns::TYPE_AAAA {
@@ -158,7 +158,7 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
 /// Whether `name` exists, from the host's resolver. `Err` for failures that
 /// say nothing about the name, which aren't cached.
 async fn look_up(s: &Session, name: &str) -> Result<bool, String> {
-    let Ok(_permit) = s.dns_lookups.clone().try_acquire_owned() else {
+    let Some(_permit) = s.dns.lookup_permit() else {
         return Err("too many lookups at once".into());
     };
     match tokio::time::timeout(

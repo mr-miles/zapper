@@ -76,7 +76,7 @@ impl Drop for TestCore {
 /// A connection from `s` to `name:port`, through the proxy.
 pub fn dial(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream {
     let ip = {
-        let mut dns = s.dns.lock().unwrap();
+        let mut dns = s.dns.names();
         dns.remember(name, true);
         std::net::IpAddr::V4(dns.address(name).unwrap())
     };
@@ -86,7 +86,7 @@ pub fn dial(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream
 /// Like `dial`, but the guest reached the name's synthetic IPv6 address.
 pub fn dial6(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStream {
     let ip = {
-        let mut dns = s.dns.lock().unwrap();
+        let mut dns = s.dns.names();
         dns.remember(name, true);
         std::net::IpAddr::V6(dns.address6(name).unwrap())
     };

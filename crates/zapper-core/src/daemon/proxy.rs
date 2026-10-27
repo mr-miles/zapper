@@ -370,8 +370,7 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
 pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: IpAddr, port: u16) {
     let host = s
         .dns
-        .lock()
-        .unwrap()
+        .names()
         .name(ip)
         .map(str::to_string)
         .unwrap_or_else(|| ip.to_string());
