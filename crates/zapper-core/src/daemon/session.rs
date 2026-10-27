@@ -638,3 +638,99 @@ pub(crate) async fn read_guest_line(
     }
     Ok(Some(line))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn net_rule() -> AnyRule {
+        AnyRule::Net(
+            serde_json::from_value(serde_json::json!({ "action": "allow", "host": "x.example" }))
+                .unwrap(),
+        )
+    }
+
+    fn exec_rule() -> AnyRule {
+        AnyRule::Exec(
+            serde_json::from_value(serde_json::json!({ "action": "allow", "path": "/bin/ls" }))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn session_dir_lays_the_vm_files_apart_from_the_logs() {
+        let d = SessionDir::new(PathBuf::from("/s"));
+        assert_eq!(d.root(), Path::new("/s"));
+        // Under the VMM's `vm` subdirectory: disks, sockets, config, metrics.
+        assert_eq!(d.vm(), Path::new("/s/vm"));
+        assert_eq!(d.root_disk(), Path::new("/s/vm/root.ext4"));
+        assert_eq!(d.data_disk(0), Path::new("/s/vm/disk0.ext4"));
+        assert_eq!(d.vsock(), Path::new("/s/vm/v.sock"));
+        assert_eq!(d.vsock_port(5), Path::new("/s/vm/v.sock_5"));
+        assert_eq!(d.nic_socket(), Path::new("/s/vm/nic.sock"));
+        assert_eq!(d.vm_config(), Path::new("/s/vm/vm.json"));
+        assert_eq!(d.metrics(), Path::new("/s/vm/metrics.json"));
+        // Logs, recordings and the audit log stay outside it.
+        assert_eq!(d.console(), Path::new("/s/console.log"));
+        assert_eq!(d.audit(), Path::new("/s/audit.jsonl"));
+        assert_eq!(d.driver_log(), Path::new("/s/driver.jsonl"));
+    }
+
+    #[test]
+    fn rules_mint_per_kind_ids_and_reuse_a_freed_one() {
+        let r = Rules::new(vec![]);
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-2"));
+        // Each kind has its own sequence.
+        assert_eq!(r.add(exec_rule(), None).id(), Some("s-exec-1"));
+        // The lowest free id is reused once one is removed.
+        assert!(r.remove("s-net-1").is_some());
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        // Removing it again finds nothing.
+        assert!(r.remove("s-net-1").is_some());
+        assert!(r.remove("s-net-1").is_none());
+    }
+
+    #[test]
+    fn put_replaces_a_rule_by_id_and_puts_it_first() {
+        let r = Rules::new(vec![]);
+        r.add(net_rule(), None); // s-net-1
+        r.add(net_rule(), None); // s-net-2
+        let replacement: AnyRule = AnyRule::Net(
+            serde_json::from_value(
+                serde_json::json!({ "id": "s-net-1", "action": "deny", "host": "y.example" }),
+            )
+            .unwrap(),
+        );
+        r.put(replacement);
+        let rules = r.list();
+        assert_eq!(rules.len(), 2, "replaced, not added");
+        assert_eq!(rules[0].id(), Some("s-net-1"), "the replacement is first");
+        assert!(
+            matches!(&rules[0], AnyRule::Net(n) if n.action == zapper_policy::Action::Deny),
+            "it is the new rule"
+        );
+    }
+
+    #[test]
+    fn layers_fall_back_to_the_resolved_profile_when_it_leaves_the_config() {
+        let c1 = Config::from_yaml(
+            "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: a.test }\n",
+        )
+        .unwrap();
+        let resolved = c1.resolve("web").unwrap();
+        // A running config that no longer has `web`.
+        let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
+        let layers = Rules::new(vec![]).layers("sid", "web", &resolved, &c2);
+        let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
+        assert_eq!(scopes.last(), Some(&Scope::Global));
+        // The profile layer came from the resolved snapshot, not from c2.
+        assert!(
+            layers
+                .iter()
+                .any(|(s, p)| matches!(s, Scope::Profile(n) if n == "web") && !p.net.is_empty()),
+            "fell back to the resolved web layers: {scopes:?}"
+        );
+    }
+}

@@ -398,4 +398,15 @@ mod tests {
         assert!((0..100).all(|_| r.take()));
         assert!(!r.take());
     }
+
+    #[test]
+    fn concurrent_lookups_are_bounded() {
+        let dns = SessionDns::new();
+        // Hold every permit; the next lookup is refused until one is freed.
+        let held: Vec<_> = std::iter::from_fn(|| dns.lookup_permit()).take(8).collect();
+        assert_eq!(held.len(), 8, "eight lookups at once");
+        assert!(dns.lookup_permit().is_none(), "the ninth waits");
+        drop(held);
+        assert!(dns.lookup_permit().is_some(), "freed once one finishes");
+    }
 }

@@ -229,6 +229,23 @@ mod tests {
         server_config(ca.leaf("10.0.0.1").unwrap()).unwrap();
     }
 
+    #[test]
+    fn session_tls_caches_a_config_per_host_case_insensitively() {
+        let tls = SessionTls::new("t").unwrap();
+        assert!(tls.pem().starts_with("-----BEGIN CERTIFICATE-----"));
+        let a = tls.server_config("API.example.com").unwrap();
+        let b = tls.server_config("api.example.com").unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "the same host, any case, is one cached config"
+        );
+        let c = tls.server_config("other.example").unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "a different host is a different config"
+        );
+    }
+
     /// Both the guest-facing and upstream configs offer HTTP/2 and HTTP/1.1,
     /// so inspected connections can speak either, h2 preferred.
     #[test]

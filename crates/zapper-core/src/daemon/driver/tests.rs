@@ -322,6 +322,33 @@ async fn a_turn_that_runs_too_long_drops_the_process() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn turns_that_keep_timing_out_make_the_driver_rest() {
+    let r = rig(Some(Duration::from_secs(60)), false);
+    // Each `hang` turn times out; a turn that went through would reset the
+    // count, but none does, so MAX_TIMEOUTS in a row make the driver rest.
+    for n in 1..=super::MAX_TIMEOUTS {
+        r.driver.prompt("hang").unwrap();
+        until("a timed-out turn", || {
+            r.rec.named("turn_end").len() == n as usize
+        })
+        .await;
+    }
+    until("resting", || r.driver.status() == Status::Error).await;
+    let ends = r.rec.named("turn_end");
+    assert!(ends.iter().all(|e| e["outcome"] == "timed_out"), "{ends:?}");
+    let info = r.driver.info();
+    assert!(
+        info["error"]
+            .as_str()
+            .unwrap()
+            .contains("in a row ran past"),
+        "{info}"
+    );
+    r.driver.stop();
+    r.task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_agent_that_keeps_exiting_rests_then_tries_again() {
     let r = rig(None, true);
     r.driver.prompt("hello").unwrap();
