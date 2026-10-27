@@ -1,12 +1,38 @@
-//! Outstanding operator approvals: a session asks, the operator or a decider
-//! answers (the `ask`/`answer` orchestration is on Daemon). This holds the
-//! pending ones; a session can only have so many at once, so it can't flood
-//! the operator.
+//! Operator approvals: the pending-decision model and the outstanding ones.
+//! A session asks, the operator or a decider answers (the `ask`/`answer`
+//! orchestration is on Daemon). A session can only have so many outstanding at
+//! once, so it can't flood the operator.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use super::Pending;
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+use zapper_policy::{AnyRule, Kind};
+
+/// A pending `ask` decision.
+#[derive(Debug, Clone, Serialize)]
+pub struct Pending {
+    pub id: String,
+    pub session: String,
+    pub kind: Kind,
+    pub subject: String,
+    pub created: f64,
+    /// Rule added if the answer is remembered.
+    pub suggestion: AnyRule,
+    /// Fired with the answer; set by `ask`, taken by `answer` (both on Daemon).
+    #[serde(skip)]
+    pub(super) tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+/// What an answer to an `ask` is remembered for. Answers are kept in memory:
+/// for the request alone (no `remember`) or in the session's own layer, which
+/// ends with the session. They never change the config.
+pub enum Remember {
+    Session,
+}
 
 /// How many approvals one session may have outstanding at once.
 const MAX_PER_SESSION: usize = 32;

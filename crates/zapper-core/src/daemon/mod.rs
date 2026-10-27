@@ -30,163 +30,22 @@ pub mod vm;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use zapper_policy::proto::GuestEvent;
 use zapper_policy::{expand_home, Action, AnyRule, Config, Kind, SecretSource};
 
 use session::Session;
 
-const RECENT_EVENTS: usize = 2000;
+// The event model and the stream live in `events`; the approval model and
+// the outstanding approvals in `approvals`.
+pub use approvals::{Pending, Remember};
+pub use events::{Event, EventBody};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Event {
-    pub seq: u64,
-    /// Unix time, seconds.
-    pub ts: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    #[serde(flatten)]
-    pub body: EventBody,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum EventBody {
-    Session {
-        state: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-    Net {
-        host: String,
-        port: u16,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        method: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        action: Action,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rule: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        inspected: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<u16>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        secrets: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    Exec {
-        pid: i32,
-        uid: u32,
-        path: String,
-        argv: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        action: Action,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rule: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
-        /// Time the process waited for the decision.
-        wait_ms: f64,
-    },
-    Ask {
-        id: String,
-        kind: Kind,
-        subject: String,
-    },
-    Answer {
-        id: String,
-        allow: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        remember: Option<String>,
-    },
-    Dns {
-        /// Empty when the query was rejected before its name was read.
-        name: String,
-        qtype: u16,
-        allowed: bool,
-        /// The response code: `noerror`, `nxdomain`, `refused`, `formerr`,
-        /// `notimp` or `servfail`.
-        rcode: String,
-        /// Synthetic address given out.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        answer: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-    Guest {
-        event: GuestEvent,
-    },
-    Shell {
-        id: u64,
-        state: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        argv: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-    },
-    Config {
-        change: String,
-    },
-    /// A service or zone added or removed (`services`).
-    Service {
-        change: String,
-        #[serde(flatten)]
-        service: services::Info,
-    },
-    /// What a driven session's agent did: `started`, `turn_start`,
-    /// `activity`, `steered`, `turn_end`, `exited`, `error`.
-    Driver {
-        event: String,
-        detail: serde_json::Value,
-    },
-    /// A tool called through the MCP gateway (`gateway`).
-    Mcp {
-        server: String,
-        tool: String,
-        ok: bool,
-        ms: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-}
-
-pub fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-}
-
-/// A pending `ask` decision.
-#[derive(Debug, Clone, Serialize)]
-pub struct Pending {
-    pub id: String,
-    pub session: String,
-    pub kind: Kind,
-    pub subject: String,
-    pub created: f64,
-    /// Rule added if the answer is remembered.
-    pub suggestion: AnyRule,
-    #[serde(skip)]
-    tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-/// What an answer to an `ask` is remembered for. Answers are kept in memory:
-/// for the request alone (no `remember`) or in the session's own layer, which
-/// ends with the session. They never change the config.
-pub enum Remember {
-    Session,
-}
+// Generic helpers live in `crate::util` (the clients' shared helpers);
+// re-exported here so the daemon's modules reach them as `super::now` etc.
+pub(crate) use crate::util::{is_session_id, now, random_id, write_private};
 
 pub struct Paths {
     pub state: PathBuf,
@@ -211,21 +70,6 @@ pub struct Daemon {
     pub gateway: gateway::Gateway,
 }
 
-pub const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-
-/// Whether `s` has the form of a session id, as `random_id(6)` makes them.
-pub fn is_session_id(s: &str) -> bool {
-    s.len() == 6 && s.bytes().all(|b| ID_CHARS.contains(&b))
-}
-
-pub fn random_id(len: usize) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| ID_CHARS[rng.gen_range(0..ID_CHARS.len())] as char)
-        .collect()
-}
-
 /// Finds the guest agent binary.
 fn find_agent(configured: &str) -> Result<PathBuf> {
     if !configured.is_empty() {
@@ -245,42 +89,6 @@ fn find_agent(configured: &str) -> Result<PathBuf> {
             exe.display()
         )
     })
-}
-
-/// Writes `data` to `path` atomically with mode 0600.
-pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-use std::os::unix::fs::OpenOptionsExt;
-
-/// What `zapper serve` prints when an operator's port is reachable from
-/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
-pub fn exposed_warning(what: &str) -> String {
-    format!(
-        "\n\
-         ################################################################\n\
-         WARNING: {what}, reachable from the network.\n\
-         Whoever has the token controls zapper: sessions, rules, approvals,\n\
-         firms, and the firm's cluster as cluster-admin. It is plain HTTP:\n\
-         use it on a network you trust, or reach it through an SSH tunnel\n\
-         or a TLS proxy. zapper is not built for production. The VMs still\n\
-         can't reach it: the host's own addresses are closed to them.\n\
-         ################################################################\n"
-    )
 }
 
 impl Daemon {
