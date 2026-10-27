@@ -10,7 +10,7 @@ use tokio::net::{UnixListener, UnixStream};
 use zapper_policy::resolvable;
 
 use super::session::Session;
-use super::{dns, proxy, spec, Daemon, EventBody};
+use super::{dns, proxy, Daemon, EventBody};
 
 pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
     loop {
@@ -107,7 +107,7 @@ pub(crate) async fn query_dns(d: &Arc<Daemon>, s: &Arc<Session>, query: &[u8]) -
     let reachable = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        resolvable(&spec::layers_of(&layers), &q.name)
+        resolvable(&Session::layers_of(&layers), &q.name)
     };
     if !reachable {
         event(

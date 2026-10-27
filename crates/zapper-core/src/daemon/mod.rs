@@ -22,7 +22,6 @@ pub mod record;
 pub(crate) mod registry;
 pub(crate) mod services;
 pub(crate) mod session;
-mod spec;
 mod summary;
 pub(crate) mod tls;
 pub(crate) mod vm;

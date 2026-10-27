@@ -34,7 +34,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, spec, tls, Daemon, EventBody};
+use super::{httplog, tls, Daemon, EventBody};
 
 mod dial;
 mod inject;
@@ -141,7 +141,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
     let (decision, effects) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        evaluate_net(&spec::layers_of(&layers), req)
+        evaluate_net(&Session::layers_of(&layers), req)
     };
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
@@ -304,7 +304,7 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
     let inspect = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&spec::layers_of(&layers), &host, port)
+        needs_inspection(&Session::layers_of(&layers), &host, port)
     };
     // Inspected tunnels are decided per request; others here, once.
     let verdict = if inspect {
@@ -384,7 +384,7 @@ pub async fn transparent(d: Arc<Daemon>, s: Arc<Session>, io: UnixStream, ip: Ip
     let inspect = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&spec::layers_of(&layers), &host, port)
+        needs_inspection(&Session::layers_of(&layers), &host, port)
     };
     let verdict = if inspect {
         None

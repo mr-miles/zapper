@@ -20,6 +20,7 @@ use super::{tls, vm, Daemon, Event, EventBody};
 
 mod boot;
 mod lifecycle;
+mod spec;
 mod terminal;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -317,6 +318,15 @@ impl Session {
         }
         v.push((Scope::Global, config.policy.clone()));
         v
+    }
+
+    /// The same layers by reference, in evaluation order, as the policy
+    /// evaluators (`evaluate_net`, `evaluate_exec`, `needs_inspection`,
+    /// `resolvable`) take them. Paired with [`Session::layers`], which owns
+    /// them — the policies are cloned out from behind their locks, so the
+    /// borrowed view is a separate step.
+    pub(crate) fn layers_of(layers: &[(Scope, Policy)]) -> Vec<(Scope, &Policy)> {
+        layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so

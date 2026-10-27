@@ -20,8 +20,9 @@ use zapper_policy::proto::{
 };
 use zapper_policy::{evaluate_exec, Action, AnyRule, ExecRequest, ExecRule, Kind, MountMode};
 
+use super::spec;
 use super::{read_guest_line, Session, Status};
-use crate::daemon::{gateway, nic, proxy, spec, vm, Daemon, EventBody};
+use crate::daemon::{gateway, nic, proxy, vm, Daemon, EventBody};
 
 /// The guest ports the host connects to over vsock: those the session was
 /// created with, then the profile's `engine.ports` not among them.
@@ -259,7 +260,7 @@ async fn decide_exec(
     let decision = {
         let c = daemon.config.read().unwrap();
         let layers = session.layers(&c);
-        evaluate_exec(&spec::layers_of(&layers), &req)
+        evaluate_exec(&Session::layers_of(&layers), &req)
     };
     let allow = match decision.action {
         Action::Allow => true,
