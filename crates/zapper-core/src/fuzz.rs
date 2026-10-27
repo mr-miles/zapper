@@ -213,7 +213,16 @@ pub fn headers(data: &[u8]) {
     for hop in ["connection", "proxy-authorization", "keep-alive", "upgrade"] {
         assert!(h.get(hop).is_none(), "{hop}");
     }
-    if proxy::inject_with(config, host, plaintext, &effects, &mut h).is_err() {
+    if proxy::inject_with(
+        config,
+        &Default::default(),
+        host,
+        plaintext,
+        &effects,
+        &mut h,
+    )
+    .is_err()
+    {
         return;
     }
     for (n, was) in names.iter().zip(before) {

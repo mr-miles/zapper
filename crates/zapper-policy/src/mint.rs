@@ -117,6 +117,12 @@ pub fn resolve(spec: &Spec) -> Result<String> {
     GLOBAL.get(spec)
 }
 
+/// The cached value if there is a usable one; never runs the command. For
+/// whoever must revoke what was minted before it is forgotten.
+pub fn peek(spec: &Spec) -> Option<String> {
+    GLOBAL.peek(spec)
+}
+
 /// Drops a cached value, so the next use mints again (a grant changed).
 pub fn forget(spec: &Spec) {
     GLOBAL.forget(spec)
@@ -145,6 +151,16 @@ impl MintCache {
 
     pub fn forget(&self, spec: &Spec) {
         self.entries.lock().unwrap().remove(&spec.key());
+    }
+
+    pub fn peek(&self, spec: &Spec) -> Option<String> {
+        let now = (self.clock)();
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&spec.key())
+            .filter(|e| e.valid(now))
+            .map(|e| e.value.clone())
     }
 
     pub fn last_error(&self, spec: &Spec) -> Option<String> {
@@ -511,6 +527,18 @@ mod tests {
         // And a recovered GitHub recovers the secret.
         r.fail.store(false, Ordering::SeqCst);
         assert_eq!(r.cache.get(&r.spec).unwrap(), "tok2");
+    }
+
+    #[test]
+    fn peeking_never_runs_the_command() {
+        let r = rig(3600);
+        assert_eq!(r.cache.peek(&r.spec), None);
+        assert_eq!(r.mints.load(Ordering::SeqCst), 0);
+        r.cache.get(&r.spec).unwrap();
+        assert_eq!(r.cache.peek(&r.spec).as_deref(), Some("tok1"));
+        r.now.fetch_add(3600, Ordering::SeqCst);
+        assert_eq!(r.cache.peek(&r.spec), None, "not past its expiry");
+        assert_eq!(r.mints.load(Ordering::SeqCst), 1);
     }
 
     #[test]

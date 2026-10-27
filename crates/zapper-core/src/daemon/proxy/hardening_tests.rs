@@ -255,3 +255,106 @@ async fn a_failing_command_secret_refuses_the_request() {
     );
     assert!(!ev.to_string().contains("LEAKED_STDOUT"), "{ev}");
 }
+
+fn gh_secret(script: &str) -> zapper_policy::Secret {
+    zapper_policy::Secret {
+        source: zapper_policy::SecretSource::Command {
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            timeout_secs: None,
+            ttl_secs: Some(600),
+        },
+        mode: zapper_policy::SecretMode::Proxy,
+        hosts: vec!["api.example".into()],
+        plaintext: false,
+        user: None,
+        database: None,
+        mechanism: None,
+    }
+}
+
+/// A session's own secret is used by that session's rules, injected like any
+/// other, and is nowhere in the config.
+#[tokio::test]
+async fn a_session_secret_is_injected_for_its_own_session_only() {
+    let t = TestCore::new("profiles:\n  web:\n    policy:\n      net: []\n");
+    let (a, b) = (session(&t), session(&t));
+    service(&t, "api.example", true);
+    let rule = || {
+        zapper_policy::AnyRule::Net(zapper_policy::NetRule {
+            id: Some("gh".into()),
+            action: zapper_policy::Action::Allow,
+            host: "api.example".into(),
+            ports: vec![443],
+            methods: vec![],
+            path: None,
+            secrets: vec![],
+            set_headers: [(
+                "Authorization".to_string(),
+                "Bearer {{secret:gh-a}}".to_string(),
+            )]
+            .into(),
+            final_: false,
+            comment: None,
+            protocol: Default::default(),
+        })
+    };
+    a.put_secret("gh-a", gh_secret("echo own_token")).unwrap();
+    a.put_rule(rule());
+    b.put_rule(rule());
+
+    // The session that has the secret uses it (the service target then stops it).
+    send_with_placeholder(&t, &a, "gh-a").await;
+    let ev = net_event(&t, &a, 0).await;
+    assert!(
+        ev["error"].as_str().unwrap().contains("is a service"),
+        "{ev}"
+    );
+    assert!(
+        ev["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x == "gh-a"),
+        "{ev}"
+    );
+
+    // Another session whose rule names it has no such secret: refused.
+    assert_eq!(
+        send_with_placeholder(&t, &b, "gh-a").await,
+        StatusCode::FORBIDDEN
+    );
+    let ev = net_event(&t, &b, 0).await;
+    assert!(
+        ev["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown secret gh-a"),
+        "{ev}"
+    );
+
+    assert!(
+        !t.core.config().to_yaml().contains("gh-a"),
+        "the config never holds it"
+    );
+    assert_eq!(a.secret_names(), ["gh-a"]);
+    assert!(a.remove_secret("gh-a"));
+    assert!(!a.remove_secret("gh-a"));
+}
+
+#[tokio::test]
+async fn a_session_secret_cannot_take_a_config_secrets_name_or_be_a_guest_secret() {
+    let t = TestCore::new("secrets:\n  claude: { value: x, hosts: [api.example] }\nprofiles:\n  web:\n    policy:\n      net: []\n");
+    let s = session(&t);
+    let e = s
+        .put_secret("claude", gh_secret("echo x"))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("in the config"), "{e}");
+    let mut guest = gh_secret("echo x");
+    guest.mode = zapper_policy::SecretMode::Guest;
+    assert!(s.put_secret("gh-x", guest).is_err());
+    let mut no_hosts = gh_secret("echo x");
+    no_hosts.hosts.clear();
+    assert!(s.put_secret("gh-x", no_hosts).is_err());
+    assert!(s.put_secret("Bad_Name", gh_secret("echo x")).is_err());
+}
