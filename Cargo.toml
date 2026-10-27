@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zapper-policy", "crates/zapper-core", "crates/zapper-api", "crates/zapper-office", "crates/zapper", "crates/zapper-agent", "crates/zapper-keeper", "crates/zapper-inspect", "crates/zapper-runs"]
+members = ["crates/zapper-policy", "crates/zapper-core", "crates/zapper-api", "crates/zapper-office", "crates/zapper", "crates/zapper-agent", "crates/zapper-keeper", "crates/zapper-inspect", "crates/zapper-runs", "crates/zapper-github"]
 exclude = ["fuzz"]
 
 [workspace.package]

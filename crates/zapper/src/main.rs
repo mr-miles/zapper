@@ -3,6 +3,7 @@
 //! the host and everything that happens recorded.
 
 mod client;
+mod github;
 use zapper_core::prelude::*;
 use zapper_core::util;
 mod image;
@@ -187,6 +188,16 @@ enum Cmd {
     Record {
         #[command(subcommand)]
         cmd: RecordCmd,
+    },
+    /// GitHub Apps: set one up for an account, and look at it.
+    Github {
+        #[command(subcommand)]
+        cmd: github::GithubCmd,
+    },
+    /// Print a short-lived credential for the daemon to hold (the source of a secret).
+    Mint {
+        #[command(subcommand)]
+        cmd: github::MintCmd,
     },
     /// Services: names sessions use that the daemon connects itself.
     Service {
@@ -822,6 +833,8 @@ async fn run(cli: Cli) -> Result<i32> {
             }
         },
         Cmd::Office(cmd) => return office::run(&c, cmd, cli.json).await,
+        Cmd::Github { cmd } => return github::github(cmd).await,
+        Cmd::Mint { cmd } => return github::mint(cmd).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
