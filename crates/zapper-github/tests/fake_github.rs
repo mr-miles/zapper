@@ -129,10 +129,17 @@ async fn handle(
                     reply(404, json!({ "message": "Not Found" }))
                 }
                 ("POST", "/app/installations/42/access_tokens") => {
+                    let granted: Vec<Value> = body["repositories"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|n| n.as_str() != Some("dropped"))
+                        .map(|n| json!({ "name": n }))
+                        .collect();
                     seen.lock().unwrap().token_requests.push(body);
                     reply(
                         201,
-                        json!({ "token": TOKEN, "expires_at": "2030-01-01T00:00:00Z" }),
+                        json!({ "token": TOKEN, "expires_at": "2030-01-01T00:00:00Z", "repositories": granted }),
                     )
                 }
                 ("GET", "/app/installations/42") => reply(
@@ -198,7 +205,7 @@ fn perms(p: &[(&str, &str)]) -> BTreeMap<String, String> {
 async fn mints_a_token_limited_to_one_repository_and_its_permissions() {
     let (gh, seen) = fake().await;
     let scope = Scope::new(
-        "acme/api",
+        &["acme/api"],
         perms(&[("contents", "write"), ("pull_requests", "write")]),
     )
     .unwrap();
@@ -218,9 +225,75 @@ async fn mints_a_token_limited_to_one_repository_and_its_permissions() {
 }
 
 #[tokio::test]
+async fn one_token_can_cover_several_repositories() {
+    let (gh, seen) = fake().await;
+    let scope = Scope::new(
+        &["acme/web", "acme/api", "ACME/Web"],
+        perms(&[("contents", "write")]),
+    )
+    .unwrap();
+    assert_eq!(scope.repos, ["api", "web"], "sorted, each once");
+    assert_eq!(scope.full_names(), ["acme/api", "acme/web"]);
+    gh.mint(&app_from("test-key-pkcs1.pem"), &scope)
+        .await
+        .unwrap();
+    let sent = seen.lock().unwrap().token_requests.clone();
+    assert_eq!(sent[0]["repositories"], json!(["api", "web"]));
+    assert_eq!(
+        sent[0]["permissions"],
+        json!({ "contents": "write", "metadata": "read" })
+    );
+}
+
+#[tokio::test]
+async fn a_token_that_covers_fewer_repositories_than_asked_is_an_error() {
+    let (gh, _) = fake().await;
+    let scope = Scope::new(
+        &["acme/api", "acme/dropped"],
+        perms(&[("contents", "read")]),
+    )
+    .unwrap();
+    let e = format!(
+        "{:#}",
+        gh.mint(&app_from("test-key-pkcs1.pem"), &scope)
+            .await
+            .unwrap_err()
+    );
+    assert!(e.contains("does not cover dropped"), "{e}");
+}
+
+#[test]
+fn repositories_must_share_one_owner_and_be_few_enough() {
+    let ok = perms(&[("contents", "read")]);
+    let e = Scope::new(&["acme/api", "other/web"], ok.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("one owner") && e.contains("acme") && e.contains("other"),
+        "{e}"
+    );
+    assert!(
+        Scope::new(&["acme/api", "Acme/web"], ok.clone()).is_ok(),
+        "owners compare without case"
+    );
+    let none: [&str; 0] = [];
+    assert!(Scope::new(&none, ok.clone())
+        .unwrap_err()
+        .to_string()
+        .contains("at least one"));
+    let many: Vec<String> = (0..=zapper_github::MAX_REPOS)
+        .map(|i| format!("acme/r{i}"))
+        .collect();
+    assert!(Scope::new(&many, ok)
+        .unwrap_err()
+        .to_string()
+        .contains("at most 500"));
+}
+
+#[tokio::test]
 async fn a_pkcs8_key_signs_too() {
     let (gh, _) = fake().await;
-    let scope = Scope::new("acme/api", perms(&[("contents", "read")])).unwrap();
+    let scope = Scope::new(&["acme/api"], perms(&[("contents", "read")])).unwrap();
     gh.mint(&app_from("test-key-pkcs8.pem"), &scope)
         .await
         .unwrap();
@@ -229,7 +302,7 @@ async fn a_pkcs8_key_signs_too() {
 #[tokio::test]
 async fn a_repository_the_app_is_not_installed_on_says_so() {
     let (gh, seen) = fake().await;
-    let scope = Scope::new("acme/missing", perms(&[("contents", "read")])).unwrap();
+    let scope = Scope::new(&["acme/missing"], perms(&[("contents", "read")])).unwrap();
     let e = format!(
         "{:#}",
         gh.mint(&app_from("test-key-pkcs1.pem"), &scope)
@@ -256,7 +329,7 @@ async fn a_wrong_key_is_rejected_by_github_not_trusted() {
         return;
     };
     let app = App::from_pem(ISSUER, None, &other).unwrap();
-    let scope = Scope::new("acme/api", perms(&[("contents", "read")])).unwrap();
+    let scope = Scope::new(&["acme/api"], perms(&[("contents", "read")])).unwrap();
     let e = format!("{:#}", gh.mint(&app, &scope).await.unwrap_err());
     assert!(e.contains("HTTP 401") && e.contains("bad signature"), "{e}");
 }
@@ -321,10 +394,10 @@ fn scopes_are_checked_before_anything_is_sent() {
     for bad in [
         "api", "acme/", "/api", "acme/a b", "acme/..", "-x/api", "a/b/c",
     ] {
-        assert!(Scope::new(bad, ok.clone()).is_err(), "{bad}");
+        assert!(Scope::new(&[bad], ok.clone()).is_err(), "{bad}");
     }
     assert!(
-        Scope::new("acme/api", BTreeMap::new()).is_err(),
+        Scope::new(&["acme/api"], BTreeMap::new()).is_err(),
         "no permissions would mean all of them"
     );
     for bad in [
@@ -333,7 +406,7 @@ fn scopes_are_checked_before_anything_is_sent() {
         ("a b", "read"),
         ("", "read"),
     ] {
-        assert!(Scope::new("acme/api", perms(&[bad])).is_err(), "{bad:?}");
+        assert!(Scope::new(&["acme/api"], perms(&[bad])).is_err(), "{bad:?}");
     }
 }
 

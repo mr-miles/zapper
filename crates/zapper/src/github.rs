@@ -59,14 +59,15 @@ impl Who {
 
 #[derive(Subcommand)]
 pub enum MintCmd {
-    /// Print `{"value": ..., "expires_at": ...}`: a token for one repository, from an account's App. Run by the daemon.
+    /// Print `{"value": ..., "expires_at": ...}`: a token for one or more of an account's repositories, from its App. Run by the daemon.
     GithubApp {
         /// The account whose App to use (its credentials file is that account's).
         #[arg(long)]
         app: String,
-        /// The repository, OWNER/NAME.
-        #[arg(long)]
-        repo: String,
+        /// A repository, OWNER/NAME; repeat for more, all of the account's. Every
+        /// repository gets every permission.
+        #[arg(long = "repo", value_name = "OWNER/NAME", required = true)]
+        repos: Vec<String>,
         /// A permission as name=read|write|admin; repeat for more.
         #[arg(long = "perm", value_name = "NAME=LEVEL", required = true)]
         perms: Vec<String>,
@@ -162,7 +163,7 @@ async fn status(owner: &str) -> Result<i32> {
 }
 
 pub async fn mint(cmd: MintCmd) -> Result<i32> {
-    let MintCmd::GithubApp { app, repo, perms } = cmd;
+    let MintCmd::GithubApp { app, repos, perms } = cmd;
     let mut permissions = BTreeMap::new();
     for p in &perms {
         let (k, v) = p
@@ -170,9 +171,12 @@ pub async fn mint(cmd: MintCmd) -> Result<i32> {
             .with_context(|| format!("{p:?}: want NAME=LEVEL"))?;
         permissions.insert(k.to_string(), v.to_string());
     }
-    let scope = Scope::new(&repo, permissions)?;
+    let scope = Scope::new(&repos, permissions)?;
     if !scope.owner.eq_ignore_ascii_case(&app) {
-        bail!("{repo} is not in {app}'s account: a token comes from one installation");
+        bail!(
+            "{} is not in {app}'s account: a token comes from one installation",
+            scope.full_names().join(", ")
+        );
     }
     let file = owner_file(&app)?;
     if !file.exists() {

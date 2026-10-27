@@ -19,7 +19,7 @@ The minting code exists in Go in the `agentctl` repository (`internal/ghsetup`, 
 | Access model | **Permission profiles** replace `read`/`write`/`admin` for GitHub repositories. The drive and the cluster keep their levels. |
 | Token lifetime | Installation tokens last one hour. The host refreshes them; the guest never knows. |
 | Changing a grant | A token cannot be edited. Zapper mints a new one for the new permissions and retires the old one. |
-| Token granularity | One token per **(worker, repository)**, not one per worker; see [Why not one superset token](#why-not-one-superset-token-per-worker). |
+| Token granularity | A token covers **one or more repositories of one owner**, all with the same permissions (`zapper mint` takes `--repo` repeatedly). Which repositories share a token is policy; see [Several repositories in one token](#several-repositories-in-one-token). |
 
 ## 1. Setting the App up: `zapper github`
 
@@ -91,7 +91,7 @@ Proposal 01's generic hook, as specified there, plus the GitHub minting as its f
 
 ```
 SecretSource::Command { run: [String], timeout, ttl_fallback }   // the command prints {"value": "...", "expires_at": "<rfc3339>"} or a bare value
-zapper mint github-app --app acme --repo acme/api --perm contents=write --perm pull_requests=write
+zapper mint github-app --app acme --repo acme/api --repo acme/web --perm contents=write --perm pull_requests=write
 ```
 
 - `zapper mint` is a thin wrapper over a library (`zapper-github`): load the credentials file, sign the JWT (`iat` backdated 60 s, `exp` 9 min), `GET /repos/{o}/{r}/installation`, `POST /app/installations/{id}/access_tokens {repositories, permissions}`, print `{value, expires_at}`. It is what `agentctl gh-token-helper` does, minus the on-disk cache (the daemon caches).
@@ -104,7 +104,7 @@ On approval, the office registers, through `Core`, a secret scoped to that worke
 
 ```yaml
 gh-<worker>-<owner>-<repo>:
-  command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --perm, contents=write, ...]
+  command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --repo, acme/web, --perm, contents=write, ...]
   mode: proxy
   hosts: [github.com, api.github.com]
 ```
@@ -139,11 +139,17 @@ GitHub cannot widen or narrow an existing token. When a worker's profile on a re
 
 An extension is a single approval of "profile B instead of A", where B must include everything A had (an extension never silently narrows); narrowing is a revocation plus a new grant.
 
-### Why not one superset token per worker
+### Several repositories in one token
 
-Proposal 01 suggested minting one token per worker scoped to "the repos and permission level its grant allows". With several repositories and profiles that is wrong in one direction: a token has one `repositories` list and one `permissions` map applied to **all** of them. A worker with `contributor` on `acme/api` and `read` on `acme/web`, given one token for both, would hold `contributor` on `acme/web` as well. The superset the token carries is the union, and the union grants more than any single approval did.
+`zapper mint github-app` takes `--repo` more than once (up to GitHub's limit of 500, all of the `--app` account) and any number of `--perm`. The token it prints is for all of them. The daemon composes the command line in a fixed order (repositories and permissions sorted), so the same set is always the same cache entry.
 
-So the unit is the **(worker, repository)** pair: a worker with grants on two repositories gets two tokens and two secrets, each exactly its profile. "A completely new token containing the superset" applies per repository, when the profile on that repository is extended. An optimisation merges repositories into one token only when their profiles are identical. If you would rather have one token per worker and accept the union, say so; the rest is unchanged.
+The catch is how GitHub scopes a token: one repository list and one permission map, and **every repository in the token has every permission in it**. A worker with `contributor` on `acme/api` and `read` on `acme/web`, given one token naming both, holds `contributor` on `acme/web` too. A token over several repositories is therefore a statement that they get the same access. Phase 3 groups on that basis:
+
+- **Default:** a worker's grants are grouped by profile. Every repository they hold at `contributor` is one token and one secret; their `read` repositories are another. Fewer mints and rules than a token per repository, and no repository gets more than its grant.
+- **Opt-in, `credentials.github.token: worker`:** one token per worker, over all their repositories, with the **union** of their profiles' permissions. Simpler (one secret, one rule set) and it is what "mint a completely new token with the superset" means literally, but the union is more than any single approval granted: it removes the distinction between repositories. The Security tab shows the token's real reach, not the grants, when this is on, and the approver is asked for the union, not the increment.
+
+An extension (a worker asks for more on a repository, or for another repository) re-mints the token its repository belongs to, or moves the repository to the token that matches its new profile, and retires the old one.
+
 
 ## 5. What changes in the code
 
@@ -179,6 +185,6 @@ So the unit is the **(worker, repository)** pair: a worker with grants on two re
 ## Open questions
 
 - **`main` protection.** Without the `pre-receive` hook, "only the merger pushes `main`" rests on GitHub rulesets. Do you want zapper to verify and require one (refuse a firm whose default branch is unprotected), or only warn?
-- **One token per (worker, repository) or per worker.** See above; the per-pair design is safer, the per-worker one simpler.
+- **Grouping.** Tokens grouped by profile (the default) or one per worker with the union of permissions (opt-in)? The union is simpler and matches "superset", but a repository then holds permissions that were approved for another.
 - **Several owners.** A firm with repositories under two owners would need two installations and two sets of tokens; this proposal refuses it, as `agentctl` does. Is that acceptable?
 - **GraphQL.** Blocked here. `gh pr create` and similar use it; workers may need REST-only flows or an explicit, wider rule for that host.

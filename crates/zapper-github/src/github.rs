@@ -20,25 +20,62 @@ pub const API_ENV: &str = "ZAPPER_GITHUB_API_URL";
 /// GitHub's permission levels, weakest first.
 const LEVELS: [&str; 3] = ["read", "write", "admin"];
 
-/// What a token may do: one repository and its permissions.
+/// GitHub's limit on the repositories one token can name.
+pub const MAX_REPOS: usize = 500;
+
+/// What a token may do: the same permissions on each of one owner's
+/// repositories. A token has one repository list and one permission map, so
+/// every repository in it has every permission: put repositories together only
+/// when they are meant to have the same access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub owner: String,
-    pub repo: String,
+    /// Repository names without the owner, sorted, each once.
+    pub repos: Vec<String>,
     /// App permission names to `read|write|admin`. `metadata: read` is added.
     pub permissions: BTreeMap<String, String>,
 }
 
 impl Scope {
-    /// `owner/name` and permissions, checked.
-    pub fn new(repo: &str, permissions: BTreeMap<String, String>) -> Result<Scope> {
-        let (owner, name) = split_repo(repo)?;
+    /// `owner/name` repositories (all of one owner) and permissions, checked.
+    pub fn new<S: AsRef<str>>(repos: &[S], permissions: BTreeMap<String, String>) -> Result<Scope> {
         check_permissions(&permissions)?;
+        let mut owner: Option<String> = None;
+        let mut names: Vec<String> = Vec::new();
+        for r in repos {
+            let (o, name) = split_repo(r.as_ref())?;
+            match &owner {
+                Some(first) if !first.eq_ignore_ascii_case(&o) => bail!(
+                    "all repositories must have one owner, since a token comes from one installation (got {first} and {o})"
+                ),
+                Some(_) => {}
+                None => owner = Some(o),
+            }
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+        let owner = owner.ok_or_else(|| anyhow!("at least one repository is required"))?;
+        if names.len() > MAX_REPOS {
+            bail!(
+                "a token can name at most {MAX_REPOS} repositories, got {}",
+                names.len()
+            );
+        }
+        names.sort_by_key(|n| n.to_ascii_lowercase());
         Ok(Scope {
             owner,
-            repo: name,
+            repos: names,
             permissions,
         })
+    }
+
+    /// `owner/name` for each repository.
+    pub fn full_names(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .map(|r| format!("{}/{r}", self.owner))
+            .collect()
     }
 }
 
@@ -193,17 +230,17 @@ impl GitHub {
         Ok(None)
     }
 
-    /// A token for one repository with the scope's permissions (plus
-    /// `metadata: read`, which GitHub requires), from the installation on the
-    /// repository's owner.
+    /// A token for the scope's repositories with its permissions (plus
+    /// `metadata: read`, which GitHub requires), from the installation on
+    /// their owner. Every repository gets every permission.
     pub async fn mint(&self, app: &App, scope: &Scope) -> Result<Token> {
-        let full = format!("{}/{}", scope.owner, scope.repo);
-        let inst = self.installation_for_repo(app, &full).await?;
+        let first = format!("{}/{}", scope.owner, scope.repos[0]);
+        let inst = self.installation_for_repo(app, &first).await?;
         let mut perms = scope.permissions.clone();
         perms
             .entry("metadata".into())
             .or_insert_with(|| "read".into());
-        let body = json!({ "repositories": [scope.repo], "permissions": perms });
+        let body = json!({ "repositories": scope.repos, "permissions": perms });
         let v = self
             .call(
                 Method::POST,
@@ -216,6 +253,29 @@ impl GitHub {
         let expires = v["expires_at"].as_str().unwrap_or_default();
         if token.is_empty() || expires.is_empty() {
             bail!("GitHub returned no token");
+        }
+        // A token that quietly covers fewer repositories than asked for
+        // would fail later and confusingly: say so now.
+        if let Some(granted) = v["repositories"].as_array() {
+            let has = |name: &str| {
+                granted.iter().any(|r| {
+                    r["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+            };
+            let missing: Vec<&str> = scope
+                .repos
+                .iter()
+                .map(String::as_str)
+                .filter(|n| !has(n))
+                .collect();
+            if !missing.is_empty() {
+                bail!(
+                    "GitHub's token does not cover {} (is the App installed on them?)",
+                    missing.join(", ")
+                );
+            }
         }
         Ok(Token {
             value: token.into(),
