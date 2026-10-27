@@ -6,6 +6,8 @@
 //! helpers directly; `stream()` and `handle()` enter it via mitm/plain/
 //! plain_inspected.
 
+use std::collections::HashMap;
+
 use super::*;
 
 enum Sender {
@@ -14,6 +16,69 @@ enum Sender {
 }
 
 type Upstream = Arc<tokio::sync::Mutex<Option<Sender>>>;
+
+type SendRequestH1 = hyper::client::conn::http1::SendRequest<Body>;
+
+/// Pooled plain-HTTP/1 upstreams for one guest connection, keyed by origin, so
+/// the connection's requests reuse upstream connections instead of opening one
+/// per request (which a connection-rate firewall may ban). The TLS path pools
+/// via `Upstream`; this is the `http://` and captured-plain-HTTP path, keyed by
+/// origin because one proxy connection can carry several.
+#[derive(Clone, Default)]
+pub(super) struct PlainPool(Arc<tokio::sync::Mutex<HashMap<(String, u16), SendRequestH1>>>);
+
+impl PlainPool {
+    /// Sends `out` to `target` for origin `host:port`, reusing a live pooled
+    /// HTTP/1 connection when there is one, else dialing a fresh one. A service
+    /// (in-process duplex, not a real upstream to rate-limit) is never pooled.
+    async fn send(
+        &self,
+        d: &Daemon,
+        s: &Arc<Session>,
+        host: &str,
+        port: u16,
+        target: &Target,
+        out: Request<Body>,
+    ) -> Result<Response<Incoming>, String> {
+        if !matches!(target, Target::Addr(_)) {
+            return dial_plain(d, s, target)
+                .await?
+                .send_request(out)
+                .await
+                .map_err(|e| e.to_string());
+        }
+        let key = (host.to_string(), port);
+        let mut pool = self.0.lock().await;
+        let ready = match pool.get_mut(&key) {
+            Some(sender) => sender.ready().await.is_ok(),
+            None => false,
+        };
+        if !ready {
+            pool.insert(key.clone(), dial_plain(d, s, target).await?);
+        }
+        // The guest connection is served serially, so at most one request per
+        // origin is in flight; holding the lock across the send keeps reuse
+        // correct (the next request waits for the sender to be ready again
+        // rather than opening another connection).
+        let r = pool.get_mut(&key).unwrap().send_request(out).await;
+        drop(pool);
+        r.map_err(|e| e.to_string())
+    }
+}
+
+/// Dials a fresh plain-HTTP/1 upstream to `target`, spawning its connection.
+async fn dial_plain(
+    d: &Daemon,
+    s: &Arc<Session>,
+    target: &Target,
+) -> Result<SendRequestH1, String> {
+    let tcp = dial_target(d, s, target).await.map_err(|e| e.to_string())?;
+    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(conn);
+    Ok(sender)
+}
 
 pub(super) async fn mitm<S>(
     d: Arc<Daemon>,
@@ -467,6 +532,7 @@ pub(super) async fn plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
+    pool: PlainPool,
 ) -> Response<Body> {
     let uri = req.uri().clone();
     if uri.scheme_str() != Some("http") {
@@ -481,7 +547,7 @@ pub(super) async fn plain(
     else {
         return text(StatusCode::BAD_REQUEST, "bad request target");
     };
-    forward_plain(d, s, req, host, port).await
+    forward_plain(d, s, req, host, port, pool).await
 }
 
 /// Inspects plain HTTP on a captured connection to `host:port`.
@@ -494,20 +560,24 @@ pub(super) async fn plain_inspected<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // One pool for this captured connection's requests (all to one origin).
+    let pool = PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s, host) = (d.clone(), s.clone(), host.clone());
-        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port).await) }
+        let (d, s, host, pool) = (d.clone(), s.clone(), host.clone(), pool.clone());
+        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, pool).await) }
     });
     let _ = http1().serve_connection(TokioIo::new(io), svc).await;
 }
 
-/// Decides and forwards one plain HTTP request to `host:port`.
+/// Decides and forwards one plain HTTP request to `host:port`, reusing a
+/// pooled upstream connection for the origin.
 async fn forward_plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
     host: String,
     port: u16,
+    pool: PlainPool,
 ) -> Response<Body> {
     let path = req
         .uri()
@@ -597,18 +667,7 @@ async fn forward_plain(
         httplog::Side::Request,
     );
     let out = Request::from_parts(parts, body);
-    let result = async {
-        let tcp = dial_target(&d, &s, &addr)
-            .await
-            .map_err(|e| e.to_string())?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
-                .await
-                .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        sender.send_request(out).await.map_err(|e| e.to_string())
-    }
-    .await;
+    let result = pool.send(&d, &s, &host, port, &addr, out).await;
     match result {
         Ok(resp) => {
             log(

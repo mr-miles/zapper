@@ -81,9 +81,11 @@ fn http2() -> hyper::server::conn::http2::Builder<TokioExecutor> {
 }
 
 pub async fn serve(daemon: Arc<Daemon>, session: Arc<Session>, stream: UnixStream) {
+    // Pooled upstreams for the plain-HTTP requests on this guest connection.
+    let pool = inspect::PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s) = (daemon.clone(), session.clone());
-        async move { Ok::<_, Infallible>(handle(d, s, req).await) }
+        let (d, s, pool) = (daemon.clone(), session.clone(), pool.clone());
+        async move { Ok::<_, Infallible>(handle(d, s, req, pool).await) }
     });
     let _ = http1()
         .serve_connection(TokioIo::new(stream), svc)
@@ -91,11 +93,16 @@ pub async fn serve(daemon: Arc<Daemon>, session: Arc<Session>, stream: UnixStrea
         .await;
 }
 
-async fn handle(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Response<Body> {
+async fn handle(
+    d: Arc<Daemon>,
+    s: Arc<Session>,
+    req: Request<Incoming>,
+    pool: inspect::PlainPool,
+) -> Response<Body> {
     if req.method() == Method::CONNECT {
         connect(d, s, req).await
     } else {
-        inspect::plain(d, s, req).await
+        inspect::plain(d, s, req, pool).await
     }
 }
 
