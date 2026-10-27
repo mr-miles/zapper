@@ -151,6 +151,89 @@ impl SessionDir {
     }
 }
 
+/// A session's rule state: its own policy layer, and the shared layers a
+/// client keeps for it (a firm role, between the session's layer and its
+/// profile's). The owner of the session's rules; `Session` wraps these with
+/// the identity and events they need.
+pub(crate) struct Rules {
+    own: RwLock<Policy>,
+    shared: Vec<(Scope, Arc<RwLock<Policy>>)>,
+}
+
+impl Rules {
+    pub fn new(shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
+        Self {
+            own: RwLock::new(Policy::default()),
+            shared,
+        }
+    }
+
+    /// A clone of the session's own layer.
+    pub fn own(&self) -> Policy {
+        self.own.read().unwrap().clone()
+    }
+
+    /// The rules of the session's own layer.
+    pub fn list(&self) -> Vec<AnyRule> {
+        self.own.read().unwrap().rules()
+    }
+
+    /// Adds a rule to the own layer under a fresh `s-<kind>-<n>` id, so
+    /// session rule ids never clash with config ones.
+    pub fn add(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
+        let mut policy = self.own.write().unwrap();
+        let taken: Vec<String> = policy
+            .rules()
+            .iter()
+            .filter_map(|r| r.id().map(str::to_string))
+            .collect();
+        let kind = rule.kind();
+        let id = (1..)
+            .map(|n| format!("s-{kind}-{n}"))
+            .find(|i| !taken.contains(i))
+            .unwrap();
+        rule.set_id(id);
+        policy.insert(rule.clone(), position);
+        rule
+    }
+
+    /// Replaces the rule with `rule`'s id and puts it first; returns that id.
+    pub fn put(&self, rule: AnyRule) -> String {
+        let id = rule.id().unwrap_or("?").to_string();
+        let mut p = self.own.write().unwrap();
+        p.remove(&id);
+        p.insert(rule, Some(0));
+        id
+    }
+
+    /// Removes a rule from the own layer, returning it if it was there.
+    pub fn remove(&self, id: &str) -> Option<AnyRule> {
+        self.own.write().unwrap().remove(id)
+    }
+
+    /// The session's policy layers, most specific first: own, shared, the
+    /// profile's (from the running config, falling back to those resolved at
+    /// start), then global.
+    pub fn layers(
+        &self,
+        id: &str,
+        profile: &str,
+        resolved: &ResolvedProfile,
+        config: &Config,
+    ) -> Vec<(Scope, Policy)> {
+        let mut v = vec![(Scope::Session(id.to_string()), self.own())];
+        for (scope, policy) in &self.shared {
+            v.push((scope.clone(), policy.read().unwrap().clone()));
+        }
+        match config.resolve(profile) {
+            Ok(p) => v.extend(p.layers),
+            Err(_) => v.extend(resolved.layers.iter().cloned()),
+        }
+        v.push((Scope::Global, config.policy.clone()));
+        v
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub profile: String,
@@ -158,8 +241,8 @@ pub struct Session {
     pub expires: Option<f64>,
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
-    /// The session's own policy layer, above its profile. Not saved.
-    pub(crate) policy: RwLock<Policy>,
+    /// The session's rules: its own layer and any shared layers. Not saved.
+    pub(crate) rules: Rules,
     pub(crate) status: watch::Sender<Status>,
     pub(crate) dir: SessionDir,
     /// The session's CA and the guest-facing server configs minted from it.
@@ -183,9 +266,6 @@ pub struct Session {
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
     pub labels: BTreeMap<String, String>,
-    /// Policy layers a client keeps for several sessions (a firm's role),
-    /// between the session's own layer and its profile's.
-    pub(crate) shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// The driver, for a driven agent (`agent.driven`) outside a firm.
     pub driver: Option<Arc<super::driver::Driver>>,
     /// Its daemon, for the events of what clients change in it.
@@ -250,7 +330,7 @@ impl Session {
                 "exits": get(&c.exits), "shells": get(&c.shells),
             }),
             usage: self.usage.lock().unwrap().clone(),
-            rules: self.policy.read().unwrap().rules().len(),
+            rules: self.rules.list().len(),
             firm: self.label("firm").map(str::to_string),
             member: self.label("member").map(str::to_string),
             labels: self.labels.clone(),
@@ -342,19 +422,13 @@ impl Session {
     /// changes apply to running sessions at once; a profile removed from the
     /// running config falls back to its layers at session start.
     pub fn layers(&self, config: &Config) -> Vec<(Scope, Policy)> {
-        let mut v = vec![(
-            Scope::Session(self.id.clone()),
-            self.policy.read().unwrap().clone(),
-        )];
-        for (scope, policy) in &self.shared_layers {
-            v.push((scope.clone(), policy.read().unwrap().clone()));
-        }
-        match config.resolve(&self.profile) {
-            Ok(p) => v.extend(p.layers),
-            Err(_) => v.extend(self.resolved.layers.iter().cloned()),
-        }
-        v.push((Scope::Global, config.policy.clone()));
-        v
+        self.rules
+            .layers(&self.id, &self.profile, &self.resolved, config)
+    }
+
+    /// A clone of the session's own policy layer.
+    pub fn own_policy(&self) -> Policy {
+        self.rules.own()
     }
 
     /// The same layers by reference, in evaluation order, as the policy
@@ -368,38 +442,20 @@ impl Session {
 
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
     /// session rule ids never clash with config ones.
-    pub fn add_rule(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
-        let mut policy = self.policy.write().unwrap();
-        let taken: Vec<String> = policy
-            .rules()
-            .iter()
-            .filter_map(|r| r.id().map(str::to_string))
-            .collect();
-        let kind = rule.kind();
-        let id = (1..)
-            .map(|n| format!("s-{kind}-{n}"))
-            .find(|i| !taken.contains(i))
-            .unwrap();
-        rule.set_id(id);
-        policy.insert(rule.clone(), position);
-        rule
+    pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
+        self.rules.add(rule, position)
     }
 
     /// The rules of the session's own layer.
     pub fn rules(&self) -> Vec<AnyRule> {
-        self.policy.read().unwrap().rules()
+        self.rules.list()
     }
 
     /// Puts a client's rule first in the session's own layer under the id
     /// it has, replacing a rule with that id (an officer's approval, the
     /// network a credential grant needs). It is in the session's events.
     pub fn put_rule(&self, rule: AnyRule) {
-        let id = rule.id().unwrap_or("?").to_string();
-        {
-            let mut p = self.policy.write().unwrap();
-            p.remove(&id);
-            p.insert(rule, Some(0));
-        }
+        let id = self.rules.put(rule);
         self.config_event(format!(
             "rule {id} added to {}",
             Scope::Session(self.id.clone())
@@ -409,7 +465,7 @@ impl Session {
     /// Removes a rule from the session's own layer: it, if it was there,
     /// and an event of the session's.
     pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
-        let rule = self.policy.write().unwrap().remove(id)?;
+        let rule = self.rules.remove(id)?;
         self.config_event(format!(
             "rule {id} removed from {}",
             Scope::Session(self.id.clone())

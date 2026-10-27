@@ -376,10 +376,7 @@ impl RuleApi for Core {
                 .map(|(n, p)| (Scope::Profile(n.clone()), p.policy.clone())),
         );
         for s in self.d.sessions.all() {
-            layers.push((
-                Scope::Session(s.id.clone()),
-                s.policy.read().unwrap().clone(),
-            ));
+            layers.push((Scope::Session(s.id.clone()), s.own_policy()));
         }
         for k in self.d.clients.rule_keepers.read().unwrap().iter() {
             layers.extend(k.layers());

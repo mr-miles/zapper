@@ -2,15 +2,14 @@
 //! it down. Booting its VM and running its guest control channel is `boot`.
 
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::{watch, Semaphore};
 use zapper_policy::proto::HostMsg;
-use zapper_policy::Policy;
 
-use super::{Counters, NewSession, Session, SessionDir, Status};
+use super::{Counters, NewSession, Rules, Session, SessionDir, Status};
 use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon, EventBody};
 
 /// Creates a session without booting it: its profile resolved, its
@@ -53,7 +52,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         created,
         expires: (ttl > 0).then_some(created + ttl as f64),
         workdir: new.workdir.clone(),
-        policy: RwLock::new(Policy::default()),
+        rules: Rules::new(new.shared_layers.clone()),
         status: watch::channel(Status::Starting).0,
         tls: tls::SessionTls::new(&id)?,
         dir: dir.clone(),
@@ -70,7 +69,6 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         conns: Arc::new(Semaphore::new(256)),
         exec_checks: Arc::new(Semaphore::new(64)),
         labels: new.labels.clone(),
-        shared_layers: new.shared_layers.clone(),
         driver: driven.then(driver::Driver::new),
         daemon: Arc::downgrade(daemon),
         extra_files: new.files.clone(),
