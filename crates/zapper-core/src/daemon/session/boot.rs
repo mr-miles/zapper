@@ -75,7 +75,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
             &c,
             &session.resolved,
             &session.id,
-            &session.ca.pem,
+            session.tls.pem(),
             guest_disks,
             session.extra_files.clone(),
             forwards(&session.resolved.engine, &session.forwards),

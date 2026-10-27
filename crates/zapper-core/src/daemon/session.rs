@@ -2,7 +2,7 @@
 //! The session's state and queries live here; starting and stopping it is in
 //! `lifecycle`, and its interactive terminals in `terminal`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -162,10 +162,8 @@ pub struct Session {
     pub(crate) policy: RwLock<Policy>,
     pub(crate) status: watch::Sender<Status>,
     pub(crate) dir: SessionDir,
-    pub(crate) ca: tls::SessionCa,
-    /// Per-host rustls server configs for inspected connections, minted from
-    /// `ca` on first use (the proxy's guest-facing TLS; `tls::server_config`).
-    tls_configs: Mutex<HashMap<String, Arc<rustls::ServerConfig>>>,
+    /// The session's CA and the guest-facing server configs minted from it.
+    pub(crate) tls: tls::SessionTls,
     pub(crate) counters: Counters,
     pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
     /// Names given out by the session's DNS, by synthetic address.
@@ -232,22 +230,6 @@ pub struct SessionInfo {
 }
 
 impl Session {
-    /// The rustls server config for terminating an inspected connection to
-    /// `host`: a leaf minted from the session's CA and assembled into a
-    /// server config on first use, then cached.
-    pub(crate) fn server_config(&self, host: &str) -> Result<Arc<rustls::ServerConfig>> {
-        let host = host.to_ascii_lowercase();
-        if let Some(c) = self.tls_configs.lock().unwrap().get(&host) {
-            return Ok(c.clone());
-        }
-        let config = tls::server_config(self.ca.leaf(&host)?)?;
-        self.tls_configs
-            .lock()
-            .unwrap()
-            .insert(host, config.clone());
-        Ok(config)
-    }
-
     pub fn info(&self) -> SessionInfo {
         let c = &self.counters;
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);

@@ -278,7 +278,7 @@ pub async fn connect(
         }
         Target::Handler { tls: true, handler } => {
             let (a, b) = tokio::io::duplex(256 * 1024);
-            let config = s.server_config(host)?;
+            let config = s.tls.server_config(host)?;
             let (s, handler) = (s.clone(), handler.clone());
             tokio::spawn(async move {
                 let Ok(Ok(tls)) = tokio::time::timeout(

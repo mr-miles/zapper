@@ -4,7 +4,8 @@
 //! and never written to disk; the guest trusts only that CA. Leaf
 //! certificates are minted per host on first use.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
@@ -72,6 +73,40 @@ impl SessionCa {
             ],
             key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
         })
+    }
+}
+
+/// A session's TLS: its own CA, and the per-host server configs minted from
+/// it for inspected connections, cached on first use. The single owner of a
+/// session's guest-facing TLS state.
+pub(crate) struct SessionTls {
+    ca: SessionCa,
+    configs: Mutex<HashMap<String, Arc<ServerConfig>>>,
+}
+
+impl SessionTls {
+    pub fn new(session: &str) -> Result<Self> {
+        Ok(Self {
+            ca: SessionCa::new(session)?,
+            configs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// The CA certificate the guest is given to trust (PEM).
+    pub fn pem(&self) -> &str {
+        &self.ca.pem
+    }
+
+    /// The server config for terminating an inspected connection to `host`:
+    /// a leaf minted from the CA and assembled on first use, then cached.
+    pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
+        let host = host.to_ascii_lowercase();
+        if let Some(c) = self.configs.lock().unwrap().get(&host) {
+            return Ok(c.clone());
+        }
+        let config = server_config(self.ca.leaf(&host)?)?;
+        self.configs.lock().unwrap().insert(host, config.clone());
+        Ok(config)
     }
 }
 

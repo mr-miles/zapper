@@ -128,11 +128,12 @@ pub async fn net_event(t: &TestCore, s: &Session, n: usize) -> Value {
 
 /// A TLS client that trusts the session's CA, as the guest does.
 pub fn guest_tls(s: &Session) -> tokio_rustls::TlsConnector {
-    let b64: String =
-        s.ca.pem
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect();
+    let b64: String = s
+        .tls
+        .pem()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .unwrap();
