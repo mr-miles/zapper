@@ -1,6 +1,6 @@
 # Real GitHub repositories through a GitHub App
 
-A firm works in the GitHub repository the board names, and each worker reaches it with a short-lived token that the host mints from a GitHub App, scoped to what that worker's approved grant allows. The token lives in the host's secret store; the guest sees only a placeholder. This narrows [proposal 01](01-persistent-outputs.md)'s "real GitHub repos" section into something buildable, adds what it left open (setting the App up, naming the repository, permission profiles, expiry, changing a grant), and fixes a flaw in how it scoped tokens.
+A firm works in the GitHub repository the board names, and each worker reaches it with a short-lived token that the host mints from a GitHub App, scoped to what that worker's approved grant allows. The token lives in the host's secret store; the guest sees only a placeholder. This narrows [proposal 01](01-persistent-outputs.md)'s "real GitHub repos" section into something buildable, adds what it left open (setting the App up, naming the repository, GitHub levels, expiry, changing a grant), and fixes a flaw in how it scoped tokens.
 
 The minting code exists in Go in the `agentctl` repository (`internal/ghsetup`, `internal/ghtoken`). This proposal ports it to Rust inside zapper; nothing at runtime depends on `agentctl`.
 
@@ -16,10 +16,10 @@ The minting code exists in Go in the `agentctl` repository (`internal/ghsetup`, 
 |---|---|
 | Language | Rust, in zapper. `ring` (already a dependency) signs the App JWT (RS256, PKCS#1 key as GitHub issues it); the existing hyper + rustls client does the HTTP. No new crypto or HTTP dependency. |
 | Which repositories | Every repository the firm's App reaches when a run starts. The firm's config names the App's credentials file (`git.github.config: acme.yaml`, a plain file name in `~/.config/zapper/github-apps`); the account is the one the App is installed on, and zapper lists its repositories from GitHub at each run's start. The installation is what limits them, so the operator chooses "only select repositories" when installing. A run may start with none. |
-| Access model | **Permission profiles** replace `read`/`write`/`admin` for GitHub repositories. The drive and the cluster keep their levels. |
+| Access model | **Named GitHub levels** (each a group of GitHub App permissions) replace `read`/`write`/`admin` for GitHub repositories, in the same `level` field. The drive and the cluster keep their levels. |
 | Token lifetime | Installation tokens last one hour. The host refreshes them; the guest never knows. |
 | Changing a grant | A token cannot be edited. Zapper mints a new one for the new permissions and retires the old one. |
-| Token granularity | **One repository per worker.** A worker's GitHub access is one repository at one profile, and its token is for that repository alone. With one token there is nothing for the proxy to choose between, so `gh`'s `/graphql` works; see [One repository per worker](#one-repository-per-worker). |
+| Token granularity | **One repository per worker.** A worker's GitHub access is one repository at one level, and its token is for that repository alone. With one token there is nothing for the proxy to choose between, so `gh`'s `/graphql` works; see [One repository per worker](#one-repository-per-worker). |
 
 ## 1. Setting the App up: `zapper github`
 
@@ -38,7 +38,7 @@ zapper github status [--org acme]         # App, installation, the permissions i
 3. **Install**: with the App's JWT call `GET /orgs/{org}/installation` (`/users/{user}/installation`). If it is installed, report the installation id and its permissions and repository selection. If not, print `https://github.com/apps/<slug>/installations/new`, open it, and poll that endpoint until it appears or the user cancels.
 4. **Report** which repositories the installation can reach (`GET /installation/repositories` with a throwaway installation token) and warn if it is installed on *all* repositories: choose "only selected repositories" so the App's reach is a deliberate ceiling.
 
-The manifest asks for the permissions the profiles may need (the union of the configured profiles' permissions). Anything missing from the installed App's permissions is reported by `status` and by config validation, so a profile that can never be minted fails early.
+The manifest asks for the permissions the levels may need (the union of the configured levels' permissions). Anything missing from the installed App's permissions is reported by `status` and by config validation, so a level that can never be minted fails early.
 
 The credentials file keeps `agentctl`'s layout (`github.appId`, `clientId`, `appSlug`, `privateKey` or an absolute `privateKeyPath`; client and webhook secrets are not stored). It sits under the daemon user's config directory, which no VM mounts. The key is read only by the minting process (below) and is never logged.
 
@@ -69,25 +69,40 @@ The resource of a repository is `git:owner/name` (`resource_in` accepts it in an
 
 The App's installation is the outer limit: the operator picks which repositories the App is installed on, and a firm can only work in those.
 
-## 3. Permission profiles
+## 3. GitHub levels
 
 ```yaml
     credentials:
       github:
-        profiles:
-          read:        { contents: read, issues: read, pull_requests: read, actions: read, workflows: read }
-          contributor: { contents: write, pull_requests: write, issues: write }
-          maintainer:  { contents: write, pull_requests: write, issues: write, workflows: write, approver: ceo }
+        levels:
+          read:
+            contents: read
+            pull_requests: read
+            issues: read
+            actions: read
+            checks: read
+            statuses: read
+            artifact_metadata: read
+          write:
+            contents: write
+            pull_requests: write
+            issues: write
+            actions: read
+            checks: read
+            statuses: read
+            artifact_metadata: read
 ```
 
-- A profile is a named map of GitHub App permission names to `read|write|admin`, as the token endpoint takes them. `metadata: read` is always added. Names and levels are checked at config load, and each profile must be within what the installed App has (`GET /app/installations/{id}` returns its `permissions`).
-- `approver: ceo` (optional) says who may decide a request for the profile. It replaces the rule that `admin` on git is the CEO's: the profiles that can change the repository's workflows or administration are the ones to mark.
-- `credentials_request(resource: "git:acme/api", profile: "contributor", reason)`; `credentials_decide` allows or denies that profile, or a lower one. Officers and the CEO see the profile's full permission list in the request, not just its name. The Security tab's matrix shows the profile per worker and repository.
-- **A worker holds one GitHub repository at a time**, at one profile. A `credentials_request` for a second repository is refused with the one they hold and a pointer: work on another repository is assigned to a worker for that repository. Asking for another profile on the repository they hold is an **extension** (below).
-- The policy owners hold a profile named by `credentials.github.owner_profile` (default: the broadest), as they hold admin today. Leaving the role revokes it.
-- Profile names are a firm-level vocabulary the board and CEO already use in kickoff and mail; the `office-resources` and `office-git` skills describe them instead of `read`/`write`/`admin`.
+- `workflows` appears in no level: GitHub accepts only `workflows: write`, and workflow changes are the board's. Reading workflow files needs `contents: read`; watching runs and checks needs `actions`, `checks` and `statuses` at `read`.
+- A level is a named map of GitHub App permission names to `read|write|admin`, as the token endpoint takes them. `metadata: read` is always added. Names and permissions are checked at config load, and each level must be within what the installed App has (`GET /app/installations/{id}` returns its `permissions`).
+- Every GitHub level is decided like any request: a security officer first (the CEO if there is none), escalated to the CEO and then the board. No GitHub level counts as admin.
+- Changes to GitHub Actions workflows (`.github/workflows/`) are the board's. Workers never change them: work that needs one sends the patch to the board, which applies it (the `office-git` skill).
+- `credentials_request(resource: "git", repo: "acme/api", level: "write", reason)`; `credentials_decide` grants that level as asked or denies it. Officers and the CEO see the level's full permission list in the request, not just its name. A background check may grant one GitHub repository at a level, as it grants other resources. The Security tab's matrix shows the level per worker and repository.
+- **A worker holds one GitHub repository at a time**, at one level. A `credentials_request` for a second repository is refused with the one they hold and a pointer: work on another repository is assigned to a worker for that repository. Asking for another level on the repository they hold is an **extension** (below).
+- The policy owners hold the level named `read` on every repository, on one token, and no more: a higher level would be on that token for every repository, so work that needs more goes to a worker. A firm in GitHub must define `read`. Leaving the role revokes it.
+- GitHub level names are a firm-level vocabulary the board and CEO already use in kickoff and mail; the `office-resources` and `office-git` skills describe them in place of `read`/`write`/`admin` for GitHub repositories.
 
-`main` protection moves to GitHub. The internal server's `pre-receive` hook has no equivalent on github.com; the operator sets a branch ruleset on `main` (require a pull request, restrict who can push), and the profiles then separate "can push branches" from "can administer rulesets and workflows". `zapper github status` warns when a named repository's default branch is unprotected. The Level-based `office-git` rules ("pushing `main` needs admin") are rewritten around the ruleset: workers push branches and open pull requests; the merger is whoever holds a profile that can merge. This is a change of the product's behaviour, not just plumbing, and is called out in Open questions.
+`main` protection moves to GitHub. The internal server's `pre-receive` hook has no equivalent on github.com; the operator sets a branch ruleset on `main` (require a pull request, restrict who can push), and the levels then separate "can push branches" from "can administer rulesets". `zapper github status` warns when a named repository's default branch is unprotected. The Level-based `office-git` rules ("pushing `main` needs admin") are rewritten around the ruleset: nobody pushes `main`; all work is done on a branch, pushed to GitHub, and opened as a pull request whose checks the author watches with `gh pr checks --watch` until they pass; the board merges every pull request. This is a change of the product's behaviour, not just plumbing, and is called out in Open questions.
 
 ## 4. A grant mints a token and mounts it
 
@@ -136,14 +151,14 @@ Tokens last an hour; grants last `credentials.expiry` (24 h by default). They ar
 
 ### Extending or changing a grant
 
-GitHub cannot widen or narrow an existing token. Whenever a worker's grant changes (extended, renewed at a new profile, narrowed, expired or revoked):
+GitHub cannot widen or narrow an existing token. Whenever a worker's grant changes (extended, renewed at a new level, narrowed, expired or revoked):
 
-1. Take the permissions of the grant's new profile (the repository is the same). If the grant is gone, drop the secret and rules and revoke the token; stop here.
-2. Mint a new token for it (a new command line, so a new cache entry; the daemon sorts the permissions so an unchanged profile is the same entry).
+1. Take the permissions of the grant's new level (the repository is the same). If the grant is gone, drop the secret and rules and revoke the token; stop here.
+2. Mint a new token for it (a new command line, so a new cache entry; the daemon sorts the permissions so an unchanged level is the same entry).
 3. Replace the command behind the same secret name, so the rules and the worker's environment do not change; in-flight requests finish on the old token.
 4. Revoke the old token at GitHub (`DELETE /installation/token`).
 
-An extension is a single approval of "profile B instead of A" on the same repository, where B must include everything A had (an extension never silently narrows); narrowing is a revocation plus a new grant. Moving a worker to another repository is a revocation and a new grant, and a new token.
+An extension is a single approval of "level B instead of A" on the same repository, where B must include everything A had (an extension never silently narrows); narrowing is a revocation plus a new grant. Moving a worker to another repository is a revocation and a new grant, and a new token.
 
 ### One repository per worker
 
@@ -153,7 +168,7 @@ An extension is a single approval of "profile B instead of A" on the same reposi
 
 **What it means.**
 
-- A worker's reach is exactly its grant: one repository, one profile. The Security tab's matrix and the journal show it as it is.
+- A worker's reach is exactly its grant: one repository, one level. The Security tab's matrix and the journal show it as it is.
 - Work that needs different access to different repositories goes to different workers, each with its own repository, and they hand work to each other by mail and branches as the firm already does.
 - The rules name hosts, not paths: the token is the boundary, and a path pattern that GraphQL walks around would only suggest a separation that is not there.
 - A firm has one repository owner. The CEO and the officers hold every repository of the firm with one token, which comes from one installation; a firm for another owner is another firm in its own config.
@@ -164,29 +179,29 @@ An extension is a single approval of "profile B instead of A" on the same reposi
 |---|---|
 | `zapper-github` (new crate) | JWT, installation lookup, token mint and revoke, repository check/list, manifest flow, credentials file. Tests against a fake GitHub (`httptest`-style, as in `agentctl`'s tests). |
 | `zapper` CLI | `zapper github setup\|status`, `zapper mint github-app` |
-| `zapper-policy` config | `SecretSource::Command`; profile and `git.github` config in the firm schema (`firm.rs`) with validation |
+| `zapper-policy` config | `SecretSource::Command`; GitHub levels and `git.github` config in the firm schema (`firm.rs`) with validation |
 | `zapper-core` proxy | resolve a `Command` secret with the cache, margin, single-flight and fail-closed rules; session-scoped secrets registered and dropped with the session |
-| `zapper-office` `access.rs` | profiles instead of `Level` for `git:`; one GitHub repository grant per worker; extension; the token re-minted when the grant changes; revoke at GitHub; `resource_in` accepts `owner/name`; `approver` replaces "admin is the CEO's" |
+| `zapper-office` `access.rs` | named GitHub levels for `git:owner/name`; one GitHub repository grant per worker; extension; the token re-minted when the grant changes; revoke at GitHub; `resource_in` accepts `owner/name`; the policy owners hold `read` on every repository and no more |
 | `facility.rs` | skip bare repositories, `pre-receive` hook, per-worker git passwords and the `git.<domain>` service for GitHub firms; `credentials_for` sets a dummy `GH_TOKEN` so `gh` runs; services advertise `https://github.com/<owner>/<repo>.git` |
 | `firm up` | `--repo`, to name repositories outright instead of listing the owner's |
 | Office UI Git tab, `git.rs` | needs a new source: a host-side mirror clone, or the GitHub API |
-| Skills and prompts | `office-resources`, `office-git`, `security-review`: profiles, branch + pull-request flow, 401 handling |
+| Skills and prompts | `office-resources`, `office-git`, `security-review`: GitHub levels, branch + pull-request flow, 401 handling |
 | Docs | `docs/network.md` and `docs/security.md`: `github.com` is resolved on the host, leaving the "firm services are never resolved on the host" model for these firms |
 
 ## 6. Security
 
-- The App's private key is read by one short-lived process; the daemon holds only tokens, in memory. Tokens never reach the guest, a log, or the journal (the journal records the secret's name, profile, repository and expiry).
-- Reach is the intersection of the installation (the operator's choice of repositories), the board's named repositories, and the worker's grant: one repository at one profile. The rules' hosts are not a boundary; the token is.
+- The App's private key is read by one short-lived process; the daemon holds only tokens, in memory. Tokens never reach the guest, a log, or the journal (the journal records the secret's name, level, repository and expiry).
+- Reach is the intersection of the installation (the operator's choice of repositories), the board's named repositories, and the worker's grant: one repository at one level. The rules' hosts are not a boundary; the token is.
 - The proxy invariants stand: a secret is injected only into TLS requests to its `hosts`, by a rule that lists it, in the sending session.
 - Attribution: GitHub's own logs show the App, not the worker. zapper's record stays authoritative for who did what (the one limitation proposal 01 already accepted).
-- `repository` and `permission` strings that come from a worker's request are matched against the config's profiles and the named repositories before they reach a command line; nothing a worker types is passed to `zapper mint` unchecked.
+- `repository` and `permission` strings that come from a worker's request are matched against the config's levels and the named repositories before they reach a command line; nothing a worker types is passed to `zapper mint` unchecked.
 
 ## Phases
 
 1. **`zapper-github` + `zapper github` + `zapper mint`**: against a fake GitHub, then a real test App. Verify git over HTTPS with a Bearer token and `gh`/REST through the proxy first, since everything depends on it.
 2. **`SecretSource::Command`** with cache, margin and fail-closed behaviour, tested with fake commands (expiring tokens, failing refresh, burst of requests).
-3. **Firm config, profiles, the repositories listed when a run starts; grants mint and mount tokens; extension and revocation.** Retire the internal-git paths for GitHub firms.
-4. **UI and skills**: profile display in the Security tab, rewritten `office-git`.
+3. **Firm config, GitHub levels, the repositories listed when a run starts; grants mint and mount tokens; extension and revocation.** Retire the internal-git paths for GitHub firms.
+4. **UI and skills**: level display in the Security tab, rewritten `office-git`.
 5. **Git tab history** from a mirror.
 
 ## Open questions

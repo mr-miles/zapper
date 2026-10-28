@@ -1061,7 +1061,7 @@ mod tests {
         let yaml = |git: &str| {
             format!("profiles: {{ w: {{}} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, agent: ceo }} }}\n    workers: [{{ name: barbara, role: ceo }}]\n{git}")
         };
-        let github = "    git: { github: { config: acme.yaml } }\n    credentials:\n      github:\n        owner_profile: read\n        profiles: { read: { permissions: { contents: read } } }\n";
+        let github = "    git: { github: { config: acme.yaml } }\n    credentials:\n      github:\n        levels: { read: { contents: read } }\n";
         let with = |y: String, repos: Option<Vec<&str>>| {
             let c = zapper_policy::Config::from_yaml(&y).unwrap();
             let firm = crate::firm::get(&c, "acme").unwrap();

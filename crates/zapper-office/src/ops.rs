@@ -836,7 +836,7 @@ static TOOLS: &[Tool] = &[
         name: "credentials_request",
         shown: |_| true,
         description: "Ask for access to one of the firm's resources, with a reason: a git repository (read: fetch; write: push branches; admin: also main and tags; each repository is its own grant), the cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
-        props: || json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "description": "read, write or admin; for a GitHub repository, the name of a profile (see `credentials`)" }, "repo": s("For git: the repository's name, e.g. product, or owner/name for a GitHub repository (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
+        props: || json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "description": "read, write or admin; for a GitHub repository, one of the firm's GitHub levels (see `credentials`)" }, "repo": s("For git: the repository's name, e.g. product, or owner/name for a GitHub repository (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
         required: &["resource", "level", "reason"],
         run: Run::Sync(|c| {
             let level = c.args.req("level")?;
@@ -890,7 +890,7 @@ static TOOLS: &[Tool] = &[
         name: "credentials_decide",
         shown: |p| p.owner,
         description: "Decide a credential request: grant (at most the level asked, for the least time that does the job) or deny with a note. Default expiry is the firm's.",
-        props: || json!({ "request": s("p-3"), "grant": { "type": "boolean" }, "level": { "type": "string", "enum": ["read", "write", "admin"], "description": "A lower level than asked, for a non-GitHub resource. A GitHub profile is granted as asked or denied." }, "expires_in": s("e.g. 8h"), "note": s("Why; the requester reads it") }),
+        props: || json!({ "request": s("p-3"), "grant": { "type": "boolean" }, "level": { "type": "string", "enum": ["read", "write", "admin"], "description": "A lower level than asked, for a non-GitHub resource. A GitHub level is granted as asked or denied." }, "expires_in": s("e.g. 8h"), "note": s("Why; the requester reads it") }),
         required: &["request", "grant", "note"],
         run: Run::Sync(|c| {
             let level = c.args.opt("level");

@@ -1,8 +1,8 @@
 //! A worker's GitHub access: their grant becomes a token, held by the
 //! daemon and put into the worker's requests to GitHub at the network.
 //!
-//! A worker holds one repository at one profile (the policy owners hold every
-//! repository of the firm at the owner profile), and their token is minted
+//! A worker holds one repository at one level (the policy owners hold every
+//! repository of the firm at the level `read`), and their token is minted
 //! for exactly that: `zapper mint github-app` as a secret of their session
 //! (`gh-<worker>`), refreshed ahead of its hour by the proxy. Two rules on
 //! the worker's layer set `Authorization` on every request to `github.com`
@@ -111,19 +111,19 @@ const HOSTS: [&str; 2] = ["github.com", "api.github.com"];
 
 /// The repositories and permissions of a worker's live GitHub grants: what
 /// their one token is minted for. A worker holds one repository, so this is
-/// that grant's profile; the policy owners hold all of them at one profile.
+/// that grant's level; the policy owners hold all of them at one level.
 /// If grants ever differed, the permissions are the highest of each.
 fn scope(run: &FirmRun, worker: &str) -> Option<(Vec<String>, BTreeMap<String, String>)> {
     let grants = super::access::github_grants(run, worker);
     if grants.is_empty() {
         return None;
     }
-    let profiles = &run.config.credentials.github.profiles;
+    let levels = &run.config.credentials.github.levels;
     let mut perms: BTreeMap<String, String> = BTreeMap::new();
     let mut repos = Vec::new();
-    for (resource, profile) in &grants {
+    for (resource, level) in &grants {
         repos.push(resource.strip_prefix("git:")?.to_string());
-        for (k, v) in &profiles.get(profile)?.permissions {
+        for (k, v) in &levels.get(level)?.permissions {
             let rank = |l: &str| ["read", "write", "admin"].iter().position(|x| *x == l);
             match perms.get(k) {
                 Some(have) if rank(have) >= rank(v) => {}

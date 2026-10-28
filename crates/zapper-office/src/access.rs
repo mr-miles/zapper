@@ -139,36 +139,41 @@ pub fn is_github(resource: &str) -> bool {
         .is_some_and(|r| r.contains('/'))
 }
 
-/// What a grant or a request is for: a level, and for a GitHub repository
-/// the profile too. The level of a profile is its class (read, write, or
-/// admin for one the CEO must approve): it orders and routes, while the
-/// profile says what the worker may do.
+/// What a grant or a request is for: its level, by name (`read`, `write`,
+/// `admin`, or for a GitHub repository one of the firm's GitHub levels), and
+/// its class. A GitHub level's class is read, write, or admin for one the
+/// CEO must approve: it orders and routes, while the level says what the
+/// worker may do.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Want {
-    pub level: Level,
-    pub profile: Option<String>,
+    pub level: String,
+    pub class: Level,
 }
 
 impl Want {
-    /// `write`, or `profile contributor`.
-    pub fn name(&self) -> String {
-        match &self.profile {
-            Some(p) => format!("profile {p}"),
-            None => self.level.name().to_string(),
+    fn of(class: Level) -> Want {
+        Want {
+            level: class.name().into(),
+            class,
         }
+    }
+
+    /// `write`, or `contributor`.
+    pub fn name(&self) -> String {
+        self.level.clone()
     }
 }
 
-/// What is meant by `s` on a (canonical) resource: a level, or a profile of
-/// the firm's for a GitHub repository.
+/// What is meant by `s` on a (canonical) resource: read, write or admin, or
+/// one of the firm's GitHub levels for a GitHub repository.
 pub fn want(run: &FirmRun, resource: &str, s: &str) -> Result<Want> {
     let s = s.trim();
     if is_github(resource) {
-        let profiles = &run.config.credentials.github.profiles;
-        let p = profiles.get(s).ok_or_else(|| {
+        let levels = &run.config.credentials.github.levels;
+        let p = levels.get(s).ok_or_else(|| {
             anyhow!(
-                "{resource} is asked for as a profile: {}",
-                profiles
+                "{resource} levels: {}",
+                levels
                     .iter()
                     .map(|(n, p)| format!("{n} ({})", p.summary()))
                     .collect::<Vec<_>>()
@@ -176,8 +181,8 @@ pub fn want(run: &FirmRun, resource: &str, s: &str) -> Result<Want> {
             )
         })?;
         return Ok(Want {
-            level: p.class(),
-            profile: Some(s.to_string()),
+            level: s.to_string(),
+            class: p.class(),
         });
     }
     let level = Level::parse(s)?;
@@ -191,10 +196,7 @@ pub fn want(run: &FirmRun, resource: &str, s: &str) -> Result<Want> {
             }
         );
     }
-    Ok(Want {
-        level,
-        profile: None,
-    })
+    Ok(Want::of(level))
 }
 
 /// The highest level a resource has: drive spaces stop at write.
@@ -210,10 +212,11 @@ fn max_level(resource: &str) -> Level {
 pub struct Grant {
     pub worker: String,
     pub resource: String,
-    pub level: Level,
-    /// For a GitHub repository, the profile the level is the class of.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
+    /// read, write or admin, or for a GitHub repository its GitHub level.
+    pub level: String,
+    /// What the level counts as: itself, or a GitHub level's class.
+    #[serde(skip)]
+    pub class: Level,
     pub by: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub note: String,
@@ -238,11 +241,12 @@ pub struct Request {
     pub id: String,
     pub worker: String,
     pub resource: String,
-    pub level: Level,
-    /// For a GitHub repository, the profile asked for.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    /// What the profile allows, for whoever decides.
+    /// read, write or admin, or for a GitHub repository its GitHub level.
+    pub level: String,
+    /// What the level counts as: itself, or a GitHub level's class.
+    #[serde(skip)]
+    pub class: Level,
+    /// What a GitHub level allows, for whoever decides.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub detail: String,
     pub reason: String,
@@ -261,16 +265,6 @@ pub struct Request {
     pub decider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<Value>,
-}
-
-impl Request {
-    /// What was asked for: a level, or `profile <name>`.
-    pub fn wanted(&self) -> String {
-        match &self.profile {
-            Some(p) => format!("profile {p}"),
-            None => self.level.name().to_string(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -304,22 +298,22 @@ pub fn level(run: &FirmRun, worker: &str, resource: &str) -> Level {
         .get(worker)
         .and_then(|g| g.get(resource))
         .filter(|g| g.expires.is_none_or(|e| e > now()))
-        .map(|g| g.level)
+        .map(|g| g.class)
         .unwrap_or(Level::None)
 }
 
-/// The profile a worker holds on a GitHub repository now.
-pub fn profile(run: &FirmRun, worker: &str, resource: &str) -> Option<String> {
+/// The level a worker holds on a resource now, by name.
+pub fn level_name(run: &FirmRun, worker: &str, resource: &str) -> Option<String> {
     let a = run.access.lock().unwrap();
     a.grants
         .get(worker)
         .and_then(|g| g.get(resource))
         .filter(|g| g.expires.is_none_or(|e| e > now()))
-        .and_then(|g| g.profile.clone())
+        .map(|g| g.level.clone())
 }
 
 /// The GitHub repositories a worker holds a grant on now, with their
-/// profiles.
+/// levels.
 pub fn github_grants(run: &FirmRun, worker: &str) -> Vec<(String, String)> {
     let a = run.access.lock().unwrap();
     a.grants
@@ -327,17 +321,24 @@ pub fn github_grants(run: &FirmRun, worker: &str) -> Vec<(String, String)> {
         .into_iter()
         .flatten()
         .filter(|(_, g)| g.expires.is_none_or(|e| e > now()))
-        .filter_map(|(r, g)| g.profile.clone().map(|p| (r.clone(), p)))
         .filter(|(r, _)| is_github(r))
+        .map(|(r, g)| (r.clone(), g.level.clone()))
         .collect()
 }
 
 /// A worker works in one GitHub repository (their token is for it alone,
 /// because `gh`'s GraphQL can't be sent to a token by repository). The
-/// policy owners hold them all.
+/// policy owners hold them all at `read`, on one token, and nothing more:
+/// a higher level would be on that token for every repository.
 fn check_one_repository(run: &FirmRun, worker: &str, resource: &str) -> Result<()> {
-    if !is_github(resource) || is_owner(run, worker) {
+    if !is_github(resource) {
         return Ok(());
+    }
+    if is_owner(run, worker) {
+        bail!(
+            "{worker} is a policy owner and holds {} on every GitHub repository, and no more; work that needs more goes to a worker",
+            crate::firm::OWNER_LEVEL
+        );
     }
     match github_grants(run, worker).into_iter().find(|(r, _)| r != resource) {
         Some((held, _)) => bail!(
@@ -387,12 +388,11 @@ fn put(
     request: Option<&str>,
     tell: bool,
 ) {
-    let level = want.level;
     let g = Grant {
         worker: worker.into(),
         resource: resource.into(),
-        level,
-        profile: want.profile.clone(),
+        level: want.level.clone(),
+        class: want.class,
         by: by.into(),
         note: note.trim().chars().take(2000).collect(),
         granted: now(),
@@ -501,25 +501,23 @@ pub fn reapply(d: &Core, run: &Arc<FirmRun>, worker: &str) {
 }
 
 /// The policy owners' own access: admin on git and the cluster, write on
-/// every drive space, for as long as they hold the role.
+/// every drive space, the level `read` on every GitHub repository, for as
+/// long as they hold the role.
 pub fn owner_access(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str) {
     for r in every_resource(run) {
-        let owner_profile = run.config.credentials.github.owner_profile.clone();
-        let want = match owner_profile.filter(|_| is_github(&r)) {
-            Some(p) => Want {
-                level: run
+        let want = if is_github(&r) {
+            Want {
+                level: crate::firm::OWNER_LEVEL.into(),
+                class: run
                     .config
                     .credentials
                     .github
-                    .profiles
-                    .get(&p)
-                    .map_or(Level::Admin, |x| x.class()),
-                profile: Some(p),
-            },
-            None => Want {
-                level: max_level(&r),
-                profile: None,
-            },
+                    .levels
+                    .get(crate::firm::OWNER_LEVEL)
+                    .map_or(Level::Read, |x| x.class()),
+            }
+        } else {
+            Want::of(max_level(&r))
         };
         put(
             d,
@@ -594,7 +592,7 @@ fn request_text(q: &Request) -> String {
         "Credential request {} — {} asks for {} on {}{}.\n{}{}Reason (the requester's words):\n{}\nDecide with credentials_decide(request: \"{}\", grant, level?, expires_in?, note), or hand it up with credentials_escalate.\n",
         q.id,
         q.worker,
-        q.wanted(),
+        q.level,
         q.resource,
         q.renews
             .map(|e| format!(
@@ -605,7 +603,7 @@ fn request_text(q: &Request) -> String {
         if q.detail.is_empty() {
             String::new()
         } else {
-            format!("The profile allows: {}. A GitHub request is granted as asked or denied; they can ask for a narrower profile.\n", q.detail)
+            format!("The level allows: {}. A GitHub request is granted as asked or denied; they can ask for a narrower level.\n", q.detail)
         },
         if q.assignments.is_empty() {
             "Their open assignments: none.\n".to_string()
@@ -625,13 +623,14 @@ fn request_text(q: &Request) -> String {
 
 fn notify_decider(run: &FirmRun, q: &Request, extra: &str) {
     match &q.decider {
-        Some(d) => run.notice(d, &format!("Credential request {}: {} {} for {}", q.id, q.resource, q.wanted(), q.worker), &format!("[Automatic notice] {extra}{}", request_text(q))),
-        None => run.notice(BOARD, &format!("Credential request {}: {} {} for {}", q.id, q.resource, q.wanted(), q.worker), &format!("[Automatic notice] {extra}A credential request needs the board's decision.\n\n{}\nDecide it in the UI's Security tab, or with `zapper firm credentials`.\n", request_text(q))),
+        Some(d) => run.notice(d, &format!("Credential request {}: {} {} for {}", q.id, q.resource, q.level, q.worker), &format!("[Automatic notice] {extra}{}", request_text(q))),
+        None => run.notice(BOARD, &format!("Credential request {}: {} {} for {}", q.id, q.resource, q.level, q.worker), &format!("[Automatic notice] {extra}A credential request needs the board's decision.\n\n{}\nDecide it in the UI's Security tab, or with `zapper firm credentials`.\n", request_text(q))),
     }
 }
 
 /// A worker asks for access; returns the request's id. `level` is read,
-/// write or admin, or for a GitHub repository the name of a profile.
+/// write or admin, or for a GitHub repository one of the firm's GitHub
+/// levels.
 pub fn request(
     run: &FirmRun,
     worker: &str,
@@ -641,17 +640,17 @@ pub fn request(
 ) -> Result<String> {
     let resource = self::resource(run, resource)?;
     let want = self::want(run, &resource, level)?;
-    let level = want.level;
+    let level = want.class;
     if reason.trim().is_empty() {
         bail!("give a reason: what your work needs it for");
     }
     check_one_repository(run, worker, &resource)?;
     // The same again: a renewal, once the grant is about to expire. A GitHub
-    // repository compares profiles, not levels: another profile is an
-    // extension (or a narrowing), and is asked for like a new grant.
+    // repository compares levels by name: another level is an extension (or
+    // a narrowing), and is asked for like a new grant.
     let held = self::level(run, worker, &resource);
-    let repeat = if want.profile.is_some() {
-        held > Level::None && profile(run, worker, &resource) == want.profile
+    let repeat = if is_github(&resource) {
+        held > Level::None && level_name(run, worker, &resource) == Some(want.level.clone())
     } else {
         held >= level
     };
@@ -670,7 +669,7 @@ pub fn request(
                 if now() < from {
                     bail!(
                         "you have {} on {resource} until {}; renew it from {}",
-                        profile(run, worker, &resource).unwrap_or_else(|| held.name().into()),
+                        level_name(run, worker, &resource).unwrap_or_else(|| held.name().into()),
                         super::prompts::when(e),
                         super::prompts::when(from)
                     );
@@ -679,7 +678,7 @@ pub fn request(
             }
             _ => bail!(
                 "you already have {} on {resource}",
-                profile(run, worker, &resource).unwrap_or_else(|| held.name().into())
+                level_name(run, worker, &resource).unwrap_or_else(|| held.name().into())
             ),
         }
     } else {
@@ -702,10 +701,10 @@ pub fn request(
                 && q.resource == resource
                 && matches!(q.state.as_str(), "pending" | "escalated")
         }) {
-            if q.profile != want.profile {
+            if q.level != want.level {
                 bail!(
                     "you already asked for {} on {resource} (request {}); wait for it to be decided",
-                    q.wanted(),
+                    q.level,
                     q.id
                 );
             }
@@ -715,15 +714,20 @@ pub fn request(
         let q = Request {
             id: format!("p-{}", a.counter),
             worker: worker.into(),
+            detail: if is_github(&resource) {
+                run.config
+                    .credentials
+                    .github
+                    .levels
+                    .get(&want.level)
+                    .map(|p| p.summary())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
             resource,
-            level,
-            detail: want
-                .profile
-                .as_ref()
-                .and_then(|p| run.config.credentials.github.profiles.get(p))
-                .map(|p| p.summary())
-                .unwrap_or_default(),
-            profile: want.profile.clone(),
+            level: want.level.clone(),
+            class: level,
             reason: reason.trim().chars().take(2000).collect(),
             created: now(),
             renews,
@@ -785,28 +789,34 @@ pub fn decide(
     if !grant && note.trim().is_empty() {
         bail!("give a reason for the denial; the requester reads it");
     }
-    // A GitHub request is granted as asked, or denied: the profile is a
-    // group of permissions, not a rung to step down. Otherwise a lower level
-    // may be granted.
-    let lvl = if q.profile.is_some() {
+    // A GitHub request is granted as asked, or denied: its level is a group
+    // of permissions, not a rung to step down. Otherwise a lower level may be
+    // granted.
+    let github = is_github(&q.resource);
+    let want = if github {
         if level.is_some() {
-            bail!("a GitHub request is granted as asked or denied; they can ask for a narrower profile");
+            bail!(
+                "a GitHub request is granted as asked or denied; they can ask for a narrower level"
+            );
         }
-        q.level
+        Want {
+            level: q.level.clone(),
+            class: q.class,
+        }
     } else {
         match level {
-            Some(l) => Level::parse(l)?,
-            None => q.level,
+            Some(l) => Want::of(Level::parse(l)?),
+            None => Want::of(q.class),
         }
     };
-    if grant && q.profile.is_none() && (lvl == Level::None || lvl > q.level) {
-        bail!("grant at most what was asked ({})", q.level.name());
+    if grant && !github && (want.class == Level::None || want.class > q.class) {
+        bail!("grant at most what was asked ({})", q.level);
     }
     let expires = match expires_in {
         Some(e) => Some(now() + parse_duration(e)?.as_secs_f64()),
         None => Some(now() + parse_duration(&run.config.credentials.expiry)?.as_secs_f64()),
     };
-    let decision = json!({ "by": by, "grant": grant, "level": lvl, "profile": q.profile, "expires": if grant { expires } else { None }, "note": note.trim(), "at": now() });
+    let decision = json!({ "by": by, "grant": grant, "level": want.level, "expires": if grant { expires } else { None }, "note": note.trim(), "at": now() });
     {
         let mut a = run.access.lock().unwrap();
         let r = a.requests.get_mut(id).expect("request");
@@ -820,10 +830,7 @@ pub fn decide(
             run,
             &q.worker,
             &q.resource,
-            &Want {
-                level: lvl,
-                profile: q.profile.clone(),
-            },
+            &want,
             by,
             note,
             expires,
@@ -836,14 +843,14 @@ pub fn decide(
             &format!("Access denied: {}", q.resource),
             &format!(
                 "[Automatic notice] {by} denied your request {id} for {} on {}: {}\n",
-                q.wanted(),
+                q.level,
                 q.resource,
                 note.trim()
             ),
         );
     }
     Ok(
-        json!({ "request": id, "state": if grant { "granted" } else { "denied" }, "level": lvl, "profile": q.profile, "expires": expires }),
+        json!({ "request": id, "state": if grant { "granted" } else { "denied" }, "level": want.level, "expires": expires }),
     )
 }
 
@@ -912,12 +919,13 @@ pub fn revoke(
 }
 
 /// A grant made when a hire is cleared: resource, level, expiry.
-pub type Clearance = (String, Level, f64);
+pub type Clearance = (String, Want, f64);
 
 /// Checks the grants an officer (or the board) gives with a background
 /// check, all before any is made: the resources exist, levels are within
-/// them, admin on git and the cluster is only the CEO's or the board's to
-/// give, and an officer hire (a policy owner once cleared) gets none.
+/// them (a GitHub level for a GitHub repository, at most one of those), admin on
+/// git and the cluster is only the CEO's or the board's to give, and an
+/// officer hire (a policy owner once cleared) gets none.
 pub fn check_clearance(
     run: &FirmRun,
     by: &str,
@@ -939,14 +947,11 @@ pub fn check_clearance(
     let mut out: Vec<Clearance> = Vec::new();
     for g in list {
         let r = resource(run, g["resource"].as_str().unwrap_or(""))?;
-        if is_github(&r) {
-            bail!("access to {r} is asked for with credentials_request (it is a profile, decided with the request), not given with a background check");
+        let want = want(run, &r, g["level"].as_str().unwrap_or(""))?;
+        if is_github(&r) && out.iter().any(|(x, ..)| is_github(x)) {
+            bail!("a worker works in one GitHub repository: grant one of them");
         }
-        let level = Level::parse(g["level"].as_str().unwrap_or(""))?;
-        if level == Level::None || level > max_level(&r) {
-            bail!("{r} levels go up to {}", max_level(&r).name());
-        }
-        if level == Level::Admin
+        if want.class == Level::Admin
             && !r.starts_with("drive:")
             && by != BOARD
             && ceo.as_deref() != Some(by)
@@ -961,7 +966,7 @@ pub fn check_clearance(
         if out.iter().any(|(x, ..)| *x == r) {
             bail!("{r} is in the grants twice");
         }
-        out.push((r, level, expires));
+        out.push((r, want, expires));
     }
     Ok(out)
 }
@@ -979,16 +984,13 @@ pub fn grant_at_clearance(
         return;
     }
     let note = format!("cleared with background check {screening}");
-    for (r, level, expires) in grants {
+    for (r, want, expires) in grants {
         put(
             d,
             run,
             worker,
             r,
-            &Want {
-                level: *level,
-                profile: None,
-            },
+            want,
             by,
             &note,
             Some(*expires),
@@ -1045,9 +1047,7 @@ pub fn board_grant(
         None,
         true,
     );
-    Ok(
-        json!({ "worker": worker, "resource": resource, "level": want.level, "profile": want.profile, "expires": expires }),
-    )
+    Ok(json!({ "worker": worker, "resource": resource, "level": want.level, "expires": expires }))
 }
 
 /// Requests `from` was to decide (they left, or stopped being an officer):
@@ -1063,7 +1063,7 @@ pub fn reassign(run: &FirmRun, from: &str) {
         .cloned()
         .collect();
     for q in mine {
-        let next = first_decider(run, &q.worker, &q.resource, q.level)
+        let next = first_decider(run, &q.worker, &q.resource, q.class)
             .filter(|d| d != from)
             .or_else(|| next_decider(run, Some(from), &q.worker));
         let q = {
@@ -1166,27 +1166,22 @@ pub fn tick(d: &Core, run: &Arc<FirmRun>) {
     }
 }
 
-/// The profiles a firm in GitHub grants: what each allows, and who decides.
-fn github_profiles(run: &FirmRun) -> Value {
+/// The levels a firm in GitHub grants, and what each allows.
+fn github_levels(run: &FirmRun) -> Value {
     if !run.config.git_github() {
         return Value::Null;
     }
-    let profiles: serde_json::Map<String, Value> = run
+    let levels: serde_json::Map<String, Value> = run
         .config
         .credentials
         .github
-        .profiles
+        .levels
         .iter()
-        .map(|(n, p)| {
-            (
-                n.clone(),
-                json!({ "allows": p.summary(), "decided_by": if p.approver.is_some() { "the CEO" } else { "a security officer" } }),
-            )
-        })
+        .map(|(n, p)| (n.clone(), json!({ "allows": p.summary() })))
         .collect();
     json!({
-        "note": "For a GitHub repository, ask with credentials_request(resource: git, repo: owner/name, level: <profile>). You work in one repository at a time, and your token has exactly that profile's permissions on it. A different profile on the same repository replaces the one you hold.",
-        "profiles": profiles,
+        "note": "For a GitHub repository, ask with credentials_request(resource: git, repo: owner/name, level: <one of these>). You work in one repository at a time, and your token has exactly that level's permissions on it. A different level on the same repository replaces the one you hold.",
+        "levels": levels,
     })
 }
 
@@ -1203,7 +1198,7 @@ pub fn mine(run: &FirmRun, worker: &str) -> Value {
         "grants": grants, "requests": requests,
         "resources": every_resource(run),
         "levels": { "git:<repo>": "read (fetch), write (push branches), admin (also main and tags)", "cluster": "read (view dev), write (deploy to dev), admin (also prod)", "drive:<space>": "read (list, fetch), write (also publish)" },
-        "github_profiles": github_profiles(run),
+        "github_levels": github_levels(run),
     })
 }
 

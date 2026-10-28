@@ -1,4 +1,4 @@
-//! A firm in GitHub: a grant is a profile on one repository, decided like any
+//! A firm in GitHub: a grant is a level on one repository, decided like any
 //! other; it mints the worker's token (a command, here a script that logs how
 //! it was called), puts it in their session with the rules that use it, and
 //! takes it all back, revoking the token at GitHub, when the grant goes.
@@ -85,7 +85,6 @@ firms:
     git: {{ github: {{ config: acme.yaml }} }}
     credentials:
       github:
-        owner_profile: maintainer
         mint:
           - sh
           - -c
@@ -94,10 +93,9 @@ firms:
             echo \"$@\" >> {log}
             printf '{{\"value\":\"ghs_%s\",\"expires_at\":\"2099-01-01T00:00:00Z\"}}' \"$(wc -l < {log} | tr -d ' ')\"
           - mint
-        profiles:
-          read: {{ permissions: {{ contents: read, issues: read, workflows: read }} }}
-          contributor: {{ permissions: {{ contents: write, pull_requests: write, issues: write }} }}
-          maintainer: {{ permissions: {{ contents: write, workflows: write, administration: write }}, approver: ceo }}
+        levels:
+          read: {{ actions: read, artifact_metadata: read, checks: read, contents: read, issues: read, pull_requests: read, statuses: read }}
+          write: {{ contents: write, pull_requests: write, issues: write, actions: read, checks: read, statuses: read, artifact_metadata: read }}
 ",
         log = log.display(),
         fail = fail.display(),
@@ -113,7 +111,7 @@ firms:
 }
 
 /// The arguments of each time the minter ran for the CEO (who holds the
-/// owner profile on every repository from the start), or for anyone else,
+/// level `read` on every repository from the start), or for anyone else,
 /// once there are `n` of them.
 fn mints(log: &PathBuf, ceo: bool, n: usize) -> Vec<String> {
     let until = Instant::now() + Duration::from_secs(10);
@@ -161,25 +159,18 @@ fn rule_ids(run: &FirmRun, worker: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_grant_mints_the_workers_token_for_their_repository_and_profile() {
+async fn a_grant_mints_the_workers_token_for_their_repository_and_level() {
     let (t, run, log) = firm("grant");
-    let id = access::request(
-        &run,
-        "pat",
-        "git:ACME/API",
-        "contributor",
-        "building the api",
-    )
-    .unwrap();
-    // A contributor is for an officer or the CEO, who decides it as asked.
+    let id = access::request(&run, "pat", "git:ACME/API", "write", "building the api").unwrap();
+    // A GitHub level is for an officer (or the CEO), who decides it as asked.
     let q = run.access.lock().unwrap().requests[&id].clone();
     assert_eq!(
-        (q.resource.as_str(), q.profile.as_deref()),
-        ("git:Acme/api", Some("contributor"))
+        (q.resource.as_str(), q.level.as_str()),
+        ("git:Acme/api", "write")
     );
     assert_eq!(
         q.detail,
-        "contents: write, issues: write, pull_requests: write"
+        "actions: read, artifact_metadata: read, checks: read, contents: write, issues: write, pull_requests: write, statuses: read"
     );
     assert_eq!(q.decider.as_deref(), Some("ceo"));
     assert!(
@@ -191,13 +182,13 @@ async fn a_grant_mints_the_workers_token_for_their_repository_and_profile() {
     access::decide(&t.core, &run, "ceo", &id, true, None, None, "ok").unwrap();
 
     assert_eq!(
-        access::profile(&run, "pat", "git:Acme/api").as_deref(),
-        Some("contributor")
+        access::level_name(&run, "pat", "git:Acme/api").as_deref(),
+        Some("write")
     );
-    // Minted for that repository and exactly that profile (sorted).
+    // Minted for that repository and exactly that level (sorted).
     assert_eq!(
         mints(&log, false, 1),
-        ["--app acme.yaml --repo Acme/api --perm contents=write --perm issues=write --perm pull_requests=write"]
+        ["--app acme.yaml --repo Acme/api --perm actions=read --perm artifact_metadata=read --perm checks=read --perm contents=write --perm issues=write --perm pull_requests=write --perm statuses=read"]
     );
     // In the worker's session: the secret, and the two rules that use it.
     assert_eq!(session(&run, "pat").secret_names(), ["gh-pat"]);
@@ -217,16 +208,7 @@ async fn a_grant_mints_the_workers_token_for_their_repository_and_profile() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_works_in_one_repository_and_the_owners_hold_them_all() {
     let (t, run, log) = firm("one");
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        "git:acme/api",
-        "contributor",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:acme/api", "write", None, "x").unwrap();
     let e = access::board_grant(&t.core, &run, "pat", "git:acme/web", "read", None, "x")
         .unwrap_err()
         .to_string();
@@ -243,18 +225,28 @@ async fn a_worker_works_in_one_repository_and_the_owners_hold_them_all() {
         .to_string();
     assert!(e.contains("name the repository"), "{e}");
 
-    // The CEO holds both, at the owner profile, with one token.
+    // The CEO holds both, at the level `read`, with one token.
     access::owner_access(&t.core, &run, "ceo", "board");
     assert_eq!(
         mints(&log, true, 1),
-        ["--app acme.yaml --repo Acme/api --repo acme/web --perm administration=write --perm contents=write --perm workflows=write"],
+        ["--app acme.yaml --repo Acme/api --repo acme/web --perm actions=read --perm artifact_metadata=read --perm checks=read --perm contents=read --perm issues=read --perm pull_requests=read --perm statuses=read"],
         "one token for both repositories"
     );
     assert_eq!(session(&run, "ceo").secret_names(), ["gh-ceo"]);
+
+    // And no more: a higher level would be on that token for every repository.
+    let e = access::request(&run, "ceo", "git:acme/api", "write", "x")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("policy owner"), "{e}");
+    let e = access::board_grant(&t.core, &run, "ceo", "git:acme/api", "write", None, "x")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("policy owner"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_changed_profile_is_a_new_token_and_the_old_one_is_revoked_at_github() {
+async fn a_changed_level_is_a_new_token_and_the_old_one_is_revoked_at_github() {
     let (t, run, log) = firm("extend");
     access::board_grant(&t.core, &run, "pat", "git:acme/api", "read", None, "x").unwrap();
     assert_eq!(mints(&log, false, 1).len(), 1);
@@ -268,21 +260,20 @@ async fn a_changed_profile_is_a_new_token_and_the_old_one_is_revoked_at_github()
         .to_string();
     assert!(renewing.contains("you have read"), "{renewing}");
 
-    // Another profile on the same repository: an extension, decided like a grant.
-    let id = access::request(&run, "pat", "git:acme/api", "contributor", "needs to push").unwrap();
-    assert!(
-        access::request(&run, "pat", "git:acme/api", "maintainer", "more")
-            .unwrap_err()
-            .to_string()
-            .contains("already asked")
+    // Another level on the same repository: an extension, decided like a grant.
+    let id = access::request(&run, "pat", "git:acme/api", "write", "needs to push").unwrap();
+    assert_eq!(
+        access::request(&run, "pat", "git:acme/api", "write", "again").unwrap(),
+        id,
+        "asked again while pending: the same request"
     );
     access::decide(&t.core, &run, "ceo", &id, true, None, None, "ok").unwrap();
 
     assert!(mints(&log, false, 2)[1]
-        .contains("--perm contents=write --perm issues=write --perm pull_requests=write"));
+        .contains("--perm actions=read --perm artifact_metadata=read --perm checks=read --perm contents=write --perm issues=write --perm pull_requests=write --perm statuses=read"));
     assert_eq!(
-        access::profile(&run, "pat", "git:Acme/api").as_deref(),
-        Some("contributor")
+        access::level_name(&run, "pat", "git:Acme/api").as_deref(),
+        Some("write")
     );
     assert_eq!(
         session(&run, "pat").secret_names(),
@@ -295,19 +286,13 @@ async fn a_changed_profile_is_a_new_token_and_the_old_one_is_revoked_at_github()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_ceos_profile_goes_to_the_ceo_and_a_revoked_grant_takes_everything_back() {
+async fn a_revoked_grant_takes_everything_back() {
     let (t, run, log) = firm("revoke");
-    let id = access::request(
-        &run,
-        "pat",
-        "git:acme/api",
-        "maintainer",
-        "must edit workflows",
-    )
-    .unwrap();
+    let id = access::request(&run, "pat", "git:acme/api", "write", "needs to push").unwrap();
     assert_eq!(
         run.access.lock().unwrap().requests[&id].decider.as_deref(),
-        Some("ceo")
+        Some("ceo"),
+        "no officers: the CEO decides"
     );
     access::decide(&t.core, &run, "ceo", &id, true, None, None, "ok").unwrap();
     assert_eq!(mints(&log, false, 1).len(), 1);
@@ -331,16 +316,7 @@ async fn the_ceos_profile_goes_to_the_ceo_and_a_revoked_grant_takes_everything_b
 async fn a_token_that_cannot_be_made_is_told_to_the_worker() {
     let (t, run, log) = firm("fail");
     std::fs::write(log.with_extension("fail"), "").unwrap();
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        "git:acme/api",
-        "contributor",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:acme/api", "write", None, "x").unwrap();
     wait_for("the failure is recorded", || {
         journal(&run)
             .iter()
@@ -368,7 +344,7 @@ async fn a_token_that_cannot_be_made_is_told_to_the_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gh_and_git_are_set_up_without_a_credential_and_the_profiles_are_listed() {
+async fn gh_and_git_are_set_up_without_a_credential_and_the_levels_are_listed() {
     let (_t, run, _log) = firm("files");
     let files = crate::facility::credentials_for(&run, "pat", "eng", "/home/pat").unwrap();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -395,25 +371,48 @@ async fn gh_and_git_are_set_up_without_a_credential_and_the_profiles_are_listed(
     );
 
     let mine = access::mine(&run, "pat");
-    let p = &mine["github_profiles"]["profiles"];
-    assert_eq!(p["contributor"]["decided_by"], "a security officer");
-    assert_eq!(p["maintainer"]["decided_by"], "the CEO");
+    let p = &mine["github_levels"]["levels"];
+    assert_eq!(
+        p["write"]["allows"],
+        "actions: read, artifact_metadata: read, checks: read, contents: write, issues: write, pull_requests: write, statuses: read"
+    );
     assert!(mine["resources"]
         .as_array()
         .unwrap()
         .iter()
         .any(|r| r == "git:Acme/api"));
 
-    // A background check can't hand out a profile.
+    // A background check grants a level, on one repository.
+    let ok = access::check_clearance(
+        &run,
+        "ceo",
+        false,
+        &serde_json::json!([{ "resource": "git:acme/api", "level": "write" }]),
+    )
+    .unwrap();
+    assert_eq!(ok[0].0, "git:Acme/api");
+    assert_eq!(ok[0].1.level, "write");
     let e = access::check_clearance(
         &run,
         "ceo",
         false,
-        &serde_json::json!([{ "resource": "git:acme/api", "level": "read" }]),
+        &serde_json::json!([{ "resource": "git:acme/api", "level": "admin" }]),
     )
     .unwrap_err()
     .to_string();
-    assert!(e.contains("credentials_request"), "{e}");
+    assert!(e.contains("levels: "), "{e}");
+    let e = access::check_clearance(
+        &run,
+        "ceo",
+        false,
+        &serde_json::json!([
+            { "resource": "git:acme/api", "level": "write" },
+            { "resource": "git:acme/web", "level": "write" },
+        ]),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("one GitHub repository"), "{e}");
 }
 
 fn mint_spec(run: &FirmRun, worker: &str) -> zapper_policy::mint::Spec {

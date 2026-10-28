@@ -626,18 +626,19 @@ pub struct Credentials {
     pub github: GithubCredentials,
 }
 
-/// Access to a GitHub repository is a named profile: a group of GitHub App
-/// permissions. A worker holds one repository at one profile, and the token
+/// The level the policy owners hold on every GitHub repository of the firm.
+pub const OWNER_LEVEL: &str = "read";
+
+/// Access to a GitHub repository is a named level: a group of GitHub App
+/// permissions. A worker holds one repository at one level, and the token
 /// minted for them has exactly those permissions on that repository.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubCredentials {
-    /// Profile name to what it grants.
-    pub profiles: BTreeMap<String, GithubProfile>,
-    /// The profile the policy owners (the CEO and the officers) hold on every
-    /// repository of the firm.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_profile: Option<String>,
+    /// Level name to what it grants. There must be one named `read`: the
+    /// policy owners (the CEO and the officers) hold it on every repository
+    /// of the firm.
+    pub levels: BTreeMap<String, GithubLevel>,
     /// The command that mints a token, before `--app`, `--repo` and `--perm`
     /// are added: `[zapper, mint, github-app]` if unset.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -650,28 +651,22 @@ impl GithubCredentials {
     }
 }
 
+/// A GitHub level: GitHub App permission names to `read`, `write` or
+/// `admin`, as the token request takes them (`contents`, `pull_requests`,
+/// `issues`, `workflows`, ...). `metadata: read` is always added.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GithubProfile {
-    /// GitHub App permission names to `read`, `write` or `admin`, as the
-    /// token request takes them (`contents`, `pull_requests`, `issues`,
-    /// `workflows`, ...). `metadata: read` is always added.
+#[serde(transparent)]
+pub struct GithubLevel {
     pub permissions: BTreeMap<String, String>,
-    /// Who decides a request for this profile: `ceo` for the CEO, else a
-    /// security officer first. Mark the profiles that can change workflows
-    /// or the repository's settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approver: Option<String>,
 }
 
-impl GithubProfile {
-    /// How much it is, for ordering and display only: admin if the CEO must
-    /// approve it, write if any permission is write or admin, else read.
+impl GithubLevel {
+    /// How much it is, for ordering and routing: write if any permission is
+    /// write or admin, else read. Security officers decide every GitHub
+    /// level.
     pub fn class(&self) -> crate::access::Level {
         use crate::access::Level;
-        if self.approver.is_some() {
-            Level::Admin
-        } else if self.permissions.values().any(|v| v != "read") {
+        if self.permissions.values().any(|v| v != "read") {
             Level::Write
         } else {
             Level::Read
@@ -1072,29 +1067,22 @@ until someone funds them, every access request and background check goes to the 
                     err(format!("git.github.config: {e}"));
                 }
                 let creds = &self.credentials.github;
-                if creds.profiles.is_empty() {
+                if creds.levels.is_empty() {
                     err(
-                        "credentials.github.profiles: a firm in GitHub needs at least one profile"
+                        "credentials.github.levels: a firm in GitHub needs at least one level"
                             .into(),
                     );
                 }
-                for (p, prof) in &creds.profiles {
+                for (p, prof) in &creds.levels {
                     if !valid_worker_name(p) {
-                        err(format!("credentials.github.profiles: {p:?} must be lowercase letters, digits and dashes"));
+                        err(format!("credentials.github.levels: {p:?} must be lowercase letters, digits and dashes"));
                     }
                     if let Err(e) = zapper_github::check_permissions(&prof.permissions) {
-                        err(format!("credentials.github.profiles.{p}: {e}"));
-                    }
-                    if prof.approver.as_deref().is_some_and(|a| a != "ceo") {
-                        err(format!(
-                            "credentials.github.profiles.{p}.approver: only `ceo`"
-                        ));
+                        err(format!("credentials.github.levels.{p}: {e}"));
                     }
                 }
-                match &creds.owner_profile {
-                    Some(o) if creds.profiles.contains_key(o) => {}
-                    Some(o) => err(format!("credentials.github.owner_profile: no profile {o:?}")),
-                    None => err("credentials.github.owner_profile: name the profile the CEO and the officers hold".into()),
+                if !creds.levels.is_empty() && !creds.levels.contains_key(OWNER_LEVEL) {
+                    err(format!("credentials.github.levels: define {OWNER_LEVEL:?}, the level the CEO and the officers hold on every repository"));
                 }
                 if creds.mint.iter().any(|a| a.trim().is_empty()) {
                     err("credentials.github.mint: no empty words".into());
@@ -1273,11 +1261,9 @@ firms:
     const GH: &str = "    git: { github: { config: acme.yaml } }
     credentials:
       github:
-        owner_profile: maintainer
-        profiles:
-          read: { permissions: { contents: read, issues: read, workflows: read } }
-          contributor: { permissions: { contents: write, pull_requests: write, issues: write } }
-          maintainer: { permissions: { contents: write, workflows: write, administration: write }, approver: ceo }
+        levels:
+          read: { actions: read, artifact_metadata: read, checks: read, contents: read, issues: read, pull_requests: read, statuses: read }
+          write: { contents: write, pull_requests: write, issues: write, actions: read, checks: read, statuses: read, artifact_metadata: read }
 ";
 
     #[test]
@@ -1294,13 +1280,12 @@ firms:
             "its repositories are listed from GitHub when a run starts"
         );
         assert!(f.git_resources().is_empty());
-        let p = &f.credentials.github.profiles;
+        let p = &f.credentials.github.levels;
         assert_eq!(p["read"].class(), crate::access::Level::Read);
-        assert_eq!(p["contributor"].class(), crate::access::Level::Write);
-        assert_eq!(p["maintainer"].class(), crate::access::Level::Admin);
+        assert_eq!(p["write"].class(), crate::access::Level::Write);
         assert_eq!(
             p["read"].summary(),
-            "contents: read, issues: read, workflows: read"
+            "actions: read, artifact_metadata: read, checks: read, contents: read, issues: read, pull_requests: read, statuses: read"
         );
         // Repositories are not config.
         let named = GH.replace(
@@ -1334,21 +1319,19 @@ firms:
             assert!(e.contains("git.github.config"), "{name}: {e}");
         }
         assert!(bad("{ config: acme.yaml }", "{}").contains("git.github.config"));
-        assert!(bad("owner_profile: maintainer", "owner_profile: root").contains("no profile"));
-        assert!(bad("        owner_profile: maintainer\n", "").contains("owner_profile"));
+        assert!(bad("read: {", "look: {").contains("\"read\""));
         assert!(bad("contents: read, issues", "contents: owner, issues").contains("bad permission"));
-        assert!(bad("approver: ceo", "approver: officer").contains("only `ceo`"));
-        assert!(bad("read: {", "Read: {").contains("lowercase"));
-        // Both kinds of git, no profiles, or profiles without GitHub.
+        assert!(bad("write: {", "Write: {").contains("lowercase"));
+        // Both kinds of git, no levels, or levels without GitHub.
         assert!(bad(
             "{ github: { config: acme.yaml } }",
             "{ repos: [x], github: { config: acme.yaml } }"
         )
         .contains("not both"));
-        let no_profiles = "    git: { github: { config: acme.yaml } }\n";
+        let no_levels = "    git: { github: { config: acme.yaml } }\n";
         assert!(
-            format!("{:#}", firm(&format!("{BASE}{no_profiles}")).unwrap_err())
-                .contains("at least one profile")
+            format!("{:#}", firm(&format!("{BASE}{no_levels}")).unwrap_err())
+                .contains("at least one level")
         );
         let stray = GH.replace("git: { github: { config: acme.yaml } }", "git: {}");
         assert!(

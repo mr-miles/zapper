@@ -457,7 +457,7 @@ fn the_tool_lists_are_as_they_were() {
         .collect();
     assert_eq!(
         digest,
-        "d46f3687014add8bea2145a3a467178151bfe30095063d50393bceaa55893080"
+        "cf15fd7a69b026d990f4d591141900b746f5f38f5e3107014b5abfdcbbc18f60"
     );
 }
 
