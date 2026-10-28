@@ -45,6 +45,8 @@ Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, 
 - Ask for write, not admin. Branches, review and who merges to `main`: the office-git skill.
 - Code lives in git, never on the drive.
 
+If the repositories are `https://github.com/<owner>/<name>.git` instead, the firm works on GitHub: its levels are named by the firm (`credentials()` lists them and what each allows) in place of read, write and admin, you hold one repository at a time, and `git` and `gh` work without a login once you hold it. You never push `main` or change `.github/workflows/`: work goes through a pull request (the office-git skill).
+
 ## The cluster
 
 k3s with Traefik as ingress, and two namespaces: `dev`, where everyone builds and tests, and `prod`, which the product's ingress serves. You get the API (`https://cluster.<domain>:6443`), not the node.

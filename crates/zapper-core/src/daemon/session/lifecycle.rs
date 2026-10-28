@@ -51,6 +51,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         expires: (ttl > 0).then_some(created + ttl as f64),
         workdir: new.workdir.clone(),
         rules: Rules::new(new.shared_layers.clone()),
+        secrets: Default::default(),
         runtime: GuestRuntime::new(),
         tls: tls::SessionTls::new(&id)?,
         dir: dir.clone(),

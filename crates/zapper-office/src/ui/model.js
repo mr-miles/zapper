@@ -163,7 +163,7 @@ function apply(M, e) {
       const ev = str(e.event);
       if (ev === 'requested' && e.request && typeof e.request.id === 'string') {
         const q = e.request;
-        M.credReqs.set(q.id, { id: q.id, worker: str(q.worker), resource: str(q.resource), level: str(q.level), reason: str(q.reason), state: str(q.state), decider: q.decider ? str(q.decider) : null, ts, decision: null });
+        M.credReqs.set(q.id, { id: q.id, worker: str(q.worker), resource: str(q.resource), level: str(q.level), detail: str(q.detail), reason: str(q.reason), state: str(q.state), decider: q.decider ? str(q.decider) : null, ts, decision: null });
       } else if (ev === 'decided') {
         const q = M.credReqs.get(str(e.id));
         if (q) { q.state = e.decision && e.decision.grant ? 'granted' : 'denied'; q.decision = e.decision || null; }

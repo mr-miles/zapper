@@ -9,6 +9,7 @@
 
 mod config;
 mod eval;
+pub mod mint;
 pub mod names;
 pub mod proto;
 mod template;

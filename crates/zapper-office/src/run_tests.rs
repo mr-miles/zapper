@@ -99,12 +99,12 @@ fn the_ceo_holds_every_repository_and_others_nothing() {
 #[test]
 fn a_git_grant_is_per_repository_with_its_own_network_rule() {
     let (t, run) = run();
-    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
     assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
 
-    access::board_grant(&t.core, &run, "pat", "git:web", Level::Read, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:web", "read", None, "test").unwrap();
     assert_eq!(
         ids(&credential_rules(&run, "pat")),
         ["credentials-git-api", "credentials-git-web"]
@@ -116,7 +116,7 @@ fn a_git_grant_is_per_repository_with_its_own_network_rule() {
     assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
 
     // With two repositories, plain `git` names none of them.
-    let e = access::board_grant(&t.core, &run, "pat", "git", Level::Read, None, "test")
+    let e = access::board_grant(&t.core, &run, "pat", "git", "read", None, "test")
         .unwrap_err()
         .to_string();
     assert!(e.contains("name the repository"), "{e}");
@@ -175,7 +175,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
-    access::board_grant(&t.core, &run, "pat", "git:api", Level::Read, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", "read", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
     let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
     assert_eq!(status, 403);
@@ -193,7 +193,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
         "asking to push is a push"
     );
 
-    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
 
     // Other repositories: their own grant; unknown ones aren't there.
@@ -457,7 +457,7 @@ fn the_tool_lists_are_as_they_were() {
         .collect();
     assert_eq!(
         digest,
-        "1bc3244834e876b5a9ce71fb6fbc96759558fb343d47cf67fe3146158ae7ad6f"
+        "cf15fd7a69b026d990f4d591141900b746f5f38f5e3107014b5abfdcbbc18f60"
     );
 }
 

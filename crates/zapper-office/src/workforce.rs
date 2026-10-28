@@ -1186,7 +1186,7 @@ pub(super) fn join(
         json!({ "event": "move", "from": by, "to": name, "tokens": budget, "reason": why }),
     );
     // Their git identity; their grant decides what it may do.
-    if run.config.git.is_some() {
+    if run.config.git_internal() {
         run.facility
             .git_passwords
             .lock()

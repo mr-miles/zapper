@@ -58,8 +58,10 @@ fn expects_name(e: Expects) -> &'static str {
 
 /// Services a worker can reach, for its preamble.
 pub struct Services {
-    /// The firm's repositories' URLs.
+    /// The firm's own repositories' URLs.
     pub git: Vec<String>,
+    /// Its GitHub repositories' URLs.
+    pub github: Vec<String>,
     pub kube: Option<String>,
     pub product: Option<String>,
 }
@@ -129,6 +131,21 @@ pub fn onboard(run: &super::FirmRun, worker: &str) {
             "git:<name> for each repository ({})",
             all.join(", ")
         )),
+    }
+    if !run.config.github_repos().is_empty() {
+        let levels: Vec<&str> = run
+            .config
+            .credentials
+            .github
+            .levels
+            .keys()
+            .map(String::as_str)
+            .collect();
+        resources.push(format!(
+            "git:<owner>/<name> for a GitHub repository ({}; one at a time, at one of the levels {})",
+            run.config.github_repos().join(", "),
+            levels.join(", ")
+        ));
     }
     if !run.config.facilities.is_empty() {
         resources.push("cluster (namespaces dev and prod)".to_string());
@@ -307,6 +324,20 @@ run's budget with budget_request, as the budget skill describes.\n",
             "Git repositories: {} (each with its own grant: credentials_request(resource: git, repo: <name>))",
             all.join(", ")
         )),
+    }
+    if !services.github.is_empty() {
+        let levels: Vec<String> = config
+            .credentials
+            .github
+            .levels
+            .iter()
+            .map(|(n, l)| format!("{n} ({})", l.summary()))
+            .collect();
+        lines.push(format!(
+            "GitHub repositories: {} (one at a time, with a grant: credentials_request(resource: git, repo: <owner>/<name>, level: <level>); the levels: {}). Work reaches main only through a pull request, which the board merges; never push main or change .github/workflows (the office-git skill)",
+            services.github.join(", "),
+            levels.join("; ")
+        ));
     }
     if let Some(k) = &services.kube {
         lines.push(format!("Kubernetes: {k}, namespaces dev and prod (with a grant, kubectl is configured for you)"));
@@ -641,6 +672,7 @@ mod tests {
         };
         let services = Services {
             git: vec![],
+            github: vec![],
             kube: None,
             product: None,
         };
@@ -681,6 +713,7 @@ mod tests {
         };
         let services = Services {
             git: vec![],
+            github: vec![],
             kube: None,
             product: None,
         };

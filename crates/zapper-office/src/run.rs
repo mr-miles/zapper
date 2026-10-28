@@ -158,6 +158,10 @@ pub struct StartOptions {
     pub ceo_prompt: Option<String>,
     /// The board's own articles for the charter: every worker reads them.
     pub articles: Option<String>,
+    /// The GitHub repositories to work in, `owner/name`, instead of the
+    /// config's (a firm with `git.github`). Each is checked against the
+    /// owner's GitHub App when the run starts.
+    pub repos: Option<Vec<String>>,
     /// The charter's terms, instead of the config's.
     pub security_share: Option<f64>,
     pub max_concurrent: Option<u32>,
@@ -373,6 +377,22 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
     if articles.len() > MAX_PROMPT {
         bail!("keep the board's articles under {MAX_PROMPT} bytes");
     }
+    if let Some(repos) = o.repos.as_ref().filter(|r| !r.is_empty()) {
+        // Repositories given outright are checked against the App when the
+        // run starts; without them it lists the account's from GitHub.
+        let Some(gh) = firm.git.as_mut().and_then(|g| g.github.as_mut()) else {
+            bail!("repos is for a firm whose git is in GitHub (git.github)");
+        };
+        let mut named: Vec<String> = Vec::new();
+        for r in repos {
+            let r = r.trim();
+            zapper_github::split_repo(r)?;
+            if !named.iter().any(|n| n.eq_ignore_ascii_case(r)) {
+                named.push(r.to_string());
+            }
+        }
+        gh.repos = named;
+    }
     if let Some(share) = o.security_share {
         firm.budget.security_share = share;
     }
@@ -525,9 +545,15 @@ fn create_run(
 /// role layer, and their grants applied.
 #[cfg(test)]
 pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
+    test_run_with(d, name, &StartOptions::default())
+}
+
+/// `test_run` with the board's start options.
+#[cfg(test)]
+pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmRun> {
     let config = d.config();
     let firm = firm::get(&config, name).unwrap();
-    let started = with_options(name, firm, &config, &StartOptions::default()).unwrap();
+    let started = with_options(name, firm, &config, o).unwrap();
     let (run, _boots) = create_run(d, name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
     for w in run.rts() {
@@ -575,6 +601,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         scenario,
     } = with_options(name, firm, &config, opts)?;
     check_resources(d, &config, &firm)?;
+    let firm = super::github::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;
     }
@@ -874,6 +901,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     for t in tasks {
         let _ = t.await;
     }
+    super::github::revoke_all(run).await;
     facility::stop(d, run).await;
     security::unregister(d, run);
     ops::unregister(d, run);
@@ -1028,5 +1056,40 @@ mod tests {
             ..Default::default()
         };
         assert!(with(loose).is_err());
+    }
+    #[test]
+    fn repositories_may_be_given_outright() {
+        let yaml = |git: &str| {
+            format!("profiles: {{ w: {{}} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, agent: ceo }} }}\n    workers: [{{ name: barbara, role: ceo }}]\n{git}")
+        };
+        let github = "    git: { github: { config: acme.yaml } }\n    credentials:\n      github:\n        levels: { read: { contents: read } }\n";
+        let with = |y: String, repos: Option<Vec<&str>>| {
+            let c = zapper_policy::Config::from_yaml(&y).unwrap();
+            let firm = crate::firm::get(&c, "acme").unwrap();
+            let o = super::StartOptions {
+                repos: repos.map(|r| r.into_iter().map(String::from).collect()),
+                ..Default::default()
+            };
+            super::with_options("acme", firm, &c, &o).map(|s| s.firm.github_repos())
+        };
+        // Given, they are used as they are (once each); a run with none lists the
+        // owner's from GitHub when it starts, so none here is fine.
+        assert_eq!(
+            with(
+                yaml(github),
+                Some(vec![" acme/api ", "ACME/API", "Acme/web"])
+            )
+            .unwrap(),
+            ["acme/api", "Acme/web"]
+        );
+        assert!(with(yaml(github), None).unwrap().is_empty());
+        // Only OWNER/NAME (whose owner is checked against the App's account
+        // when the run starts).
+        assert!(with(yaml(github), Some(vec!["api"])).is_err());
+        // A firm with its own git server has none to name.
+        let e = with(yaml("    git: {}\n"), Some(vec!["acme/api"]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("git.github"), "{e}");
     }
 }

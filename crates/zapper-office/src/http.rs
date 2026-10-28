@@ -155,6 +155,8 @@ async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
         "board": firm.board.name,
         "product_port": firm.product_port,
         "dashboard_port": firm.dashboard_port,
+        // Whether it has repositories of its own (`git.repos`), for the Git tab.
+        "local_git": firm.git_internal(),
         "chart": firm.workers.iter().map(|w| json!({
             "name": w.name, "role": w.role, "title": firm.title_of(&w.name), "reports_to": w.reports_to,
             "officer": firm.is_officer(&w.name), "avatar": firm.roles.get(&w.role).map(|r| json!(r.avatar)),
@@ -565,10 +567,7 @@ async fn credentials_decide(
     let grant = v["grant"]
         .as_bool()
         .ok_or_else(|| bad("grant: true or false"))?;
-    let level = v["level"]
-        .as_str()
-        .map(super::access::Level::parse)
-        .transpose()?;
+    let level = v["level"].as_str();
     Ok(Json(super::access::decide(
         &d,
         &run,
@@ -586,7 +585,7 @@ async fn credentials_grant(State(d): D, Path(f): Path<String>, text: String) -> 
     let v = body(&text)?;
     let run = d.office().active(&f)?;
     let s = |k: &str| v[k].as_str().ok_or_else(|| bad(format!("{k} is required")));
-    let level = super::access::Level::parse(s("level")?)?;
+    let level = s("level")?;
     Ok(Json(super::access::board_grant(
         &d,
         &run,

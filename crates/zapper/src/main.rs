@@ -3,6 +3,7 @@
 //! the host and everything that happens recorded.
 
 mod client;
+mod github;
 use zapper_core::prelude::*;
 use zapper_core::util;
 mod image;
@@ -187,6 +188,16 @@ enum Cmd {
     Record {
         #[command(subcommand)]
         cmd: RecordCmd,
+    },
+    /// GitHub Apps: set one up for an account, and look at it.
+    Github {
+        #[command(subcommand)]
+        cmd: github::GithubCmd,
+    },
+    /// Print a short-lived credential for the daemon to hold (the source of a secret).
+    Mint {
+        #[command(subcommand)]
+        cmd: github::MintCmd,
     },
     /// Services: names sessions use that the daemon connects itself.
     Service {
@@ -822,6 +833,8 @@ async fn run(cli: Cli) -> Result<i32> {
             }
         },
         Cmd::Office(cmd) => return office::run(&c, cmd, cli.json).await,
+        Cmd::Github { cmd } => return github::github(cmd).await,
+        Cmd::Mint { cmd } => return github::mint(cmd).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
@@ -1772,6 +1785,25 @@ mod tests {
                 "{role}: {h:?}"
             );
         }
+    }
+
+    /// `examples/github-firm`: the shopping list company on GitHub, with no
+    /// repository of its own and the levels read and write, neither of which
+    /// changes workflows.
+    #[cfg(feature = "office")]
+    #[test]
+    fn the_github_firm_example_loads() {
+        let c = example("github-firm");
+        let octo = &zapper_office::firm::all(&c)["octo"];
+        assert_eq!(octo.workers.len(), 1);
+        assert!(octo.git_github() && !octo.git_internal());
+        let levels = &octo.credentials.github.levels;
+        assert_eq!(levels.keys().collect::<Vec<_>>(), ["read", "write"]);
+        assert!(levels
+            .values()
+            .all(|l| !l.permissions.contains_key("workflows")));
+        assert!(levels["read"].permissions.values().all(|v| v == "read"));
+        assert_eq!(levels["write"].permissions["contents"], "write");
     }
 
     /// `examples/research-firm`: Ada alone, who may hire a research

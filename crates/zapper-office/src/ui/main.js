@@ -4,7 +4,7 @@
 // ────────────────────────────── tabs ──────────────────────────────
 
 function showTab(t) {
-  if (!TABS.some(([x]) => x === t)) t = 'overview';
+  if (!TABS.some(([x]) => x === t) || !tabShown(t)) t = 'overview';
   if (t === 'runs' && S.tab !== 'runs') { S.prevTab = S.tab; RUNS.at = 0; }
   S.tab = t;
   for (const s of document.querySelectorAll('section.tab')) s.classList.toggle('on', s.id === 'tab-' + t);
@@ -138,6 +138,7 @@ async function loadFirm() {
   try { info = await api(F()); } catch (e) { toast(e.message, true); return; }
   if (firm !== S.firm) return;
   S.info = info;
+  syncTabs();
   if (S.mode === 'live' && gen === S.gen) {
     // The live view follows the active run only: a stopped one is discarded
     // here (its mail, unread marks, budget) and lives on in Runs and replay.
