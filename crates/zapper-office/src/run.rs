@@ -901,6 +901,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     for t in tasks {
         let _ = t.await;
     }
+    super::github::revoke_all(run).await;
     facility::stop(d, run).await;
     security::unregister(d, run);
     ops::unregister(d, run);

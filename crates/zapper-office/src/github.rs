@@ -286,6 +286,36 @@ pub fn sync(d: &Core, run: &Arc<FirmRun>, worker: &str) {
     }
 }
 
+/// The run is stopping: every token it minted is revoked at GitHub and
+/// forgotten, rather than left to lapse within the hour. Called once the
+/// workers' sessions are stopped, so nothing mints another; each revocation
+/// gets ten seconds.
+pub async fn revoke_all(run: &Arc<FirmRun>) {
+    let applied: Vec<(String, Applied)> = run.facility.github.lock().unwrap().drain().collect();
+    let revokes = applied.into_iter().filter_map(|(worker, a)| {
+        let token = mint::peek(&a.spec);
+        mint::forget(&a.spec);
+        token.map(|value| async move {
+            let token = zapper_github::Token {
+                value,
+                expires_at: String::new(),
+            };
+            let gh = zapper_github::GitHub::default();
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(10), gh.revoke(&token))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
+            (worker, result)
+        })
+    });
+    for (worker, result) in futures_util::future::join_all(revokes).await {
+        run.journal.append(
+            "credentials",
+            json!({ "event": "github", "action": if result.is_ok() { "token revoked" } else { "token revoke failed" }, "worker": worker, "reason": "the run stopped", "error": result.err().map(|e| format!("{e:#}")) }),
+        );
+    }
+}
+
 /// The token couldn't be made: the grant stands, but nothing reaches GitHub.
 fn failed(run: &FirmRun, worker: &str, why: &str) {
     run.journal.append(

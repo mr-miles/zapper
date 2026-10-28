@@ -1,0 +1,138 @@
+# A company that builds software on GitHub: Ada, the CEO, starts alone,
+# hires a product manager to write the specification of a shopping list app,
+# then engineers to build it in a repository of yours on GitHub. Their access
+# is a token the host mints from your GitHub App for one repository at one
+# level; nothing in the VMs holds it. All work goes through pull requests,
+# whose checks the engineers watch with gh, and you, the board, merge them.
+# See README.md beside this file.
+#
+# A complete config, to run instead of config/zapper.yaml:
+#   zapper --config examples/github-firm/zapper.yaml serve
+# Relative paths resolve against this file's directory. Downloads, images,
+# state and the Claude token are the main config's, under your home.
+
+daemon:
+  firecracker: ~/.local/share/zapper/bin/firecracker
+  images: ~/.local/share/zapper/images
+  kernels: ~/.local/share/zapper/kernels
+  state: ~/.local/state/zapper
+  ui: 127.0.0.1:7878
+  ask_timeout_secs: 60
+  max_sessions: 16
+
+# Your Claude subscription's token, as config/zapper.yaml sets it up: from
+# `claude setup-token`, in a 0600 file. The VMs never see it.
+secrets:
+  claude:
+    file: ~/.config/zapper/claude-token
+    hosts: [api.anthropic.com]
+
+policy:
+  defaults: { net: deny, exec: allow }
+
+profiles:
+  # Claude Code (image: make image IMAGE=office, which has Node.js, git, gh
+  # and a headless Chromium). The Claude API is allowed with the token the
+  # host adds; any other host is asked about, and in a firm the CEO (who
+  # holds security here) or the board decides.
+  claude:
+    engine:
+      image: office
+      kernel: vmlinux-6.1
+      vcpus: 2
+      memory_mib: 4096
+      disk: 16GiB
+      network: nic
+    agent:
+      kind: claude-code
+      command: [claude]
+      user: agent
+      workdir: /work
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+        PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+        NODE_PATH: /usr/local/lib/node_modules
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw }
+    policy:
+      net:
+        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+        # GitHub comes with a grant (credentials_request), which allows it
+        # in the worker's own layer with their token; never a network ask.
+        - { action: deny, host: github.com, comment: with a GitHub grant only }
+        - { action: deny, host: api.github.com, comment: with a GitHub grant only }
+      defaults: { net: ask }
+
+  # Engineers also install packages from npm.
+  claude-engineer:
+    extends: claude
+    policy:
+      net:
+        - { action: allow, host: registry.npmjs.org, ports: [443], comment: npm packages }
+
+firms:
+  octo:
+    description: A CEO, a product manager and engineers building a shopping list app on GitHub
+    # The repository's skills: the playbooks any role may use.
+    skills_dir: ../../config/skills
+    # The repository's agent definitions: each role's brief and own skills.
+    agents_dir: ../../config/agents
+    # A run budget, in tokens: hiring needs one. The seed is what Ada has to
+    # scope the task; she asks the board for the rest.
+    budget: { seed: 1000000, max_concurrent: 3 }
+    # The firm's code is on GitHub: `config` names the App's credentials
+    # file in ~/.config/zapper/github-apps, which `zapper github setup` wrote
+    # (named after the account: change acme.yaml to yours). When a run
+    # starts, the account is the one the App is installed on, and the
+    # repositories are those it reaches there.
+    git:
+      github: { config: acme.yaml }
+    credentials:
+      # board: where the CEO publishes the board pack for the board.
+      spaces: [general, product, engineering, board]
+      github:
+        # The levels a repository is granted at, each a set of the App's
+        # permissions. The CEO holds read on every repository; a worker
+        # holds one repository at one level. None has workflows: changes
+        # to GitHub Actions workflows are the board's.
+        levels:
+          read:
+            contents: read
+            pull_requests: read
+            issues: read
+            actions: read
+            checks: read
+            statuses: read
+            artifact_metadata: read
+          write:
+            contents: write
+            pull_requests: write
+            issues: write
+            actions: read
+            checks: read
+            statuses: read
+            artifact_metadata: read
+    # Names for hires, in order, when the hirer doesn't pick one.
+    names: [priya, sam, leo, mia]
+    roles:
+      ceo:
+        profile: claude
+        title: CEO
+        model: claude-sonnet-5-5
+        agent: ceo
+        # No officer role: with one, Ada would have to hire a security
+        # officer before anyone else. She holds security herself.
+        hires: [product-manager, engineer]
+      product-manager:
+        profile: claude
+        title: Product Manager
+        model: claude-sonnet-5-5
+        agent: product-manager
+      engineer:
+        profile: claude-engineer
+        title: Software Engineer
+        model: claude-sonnet-5-5
+        agent: software-engineer
+    # The founder; everyone else is hired during the run.
+    workers:
+      - { name: ada, role: ceo }

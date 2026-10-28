@@ -313,6 +313,35 @@ async fn a_revoked_grant_takes_everything_back() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_the_run_revokes_every_token_at_github() {
+    let (t, run, _log) = firm("down");
+    access::board_grant(&t.core, &run, "pat", "git:acme/api", "write", None, "x").unwrap();
+    access::owner_access(&t.core, &run, "ceo", "board");
+    let specs = [mint_spec(&run, "pat"), mint_spec(&run, "ceo")];
+    wait_for("both minted", || {
+        specs.iter().all(|s| zapper_policy::mint::peek(s).is_some())
+    });
+    let tokens: Vec<String> = specs
+        .iter()
+        .map(|s| zapper_policy::mint::peek(s).unwrap())
+        .collect();
+
+    crate::run::down(&t.core, &run, "test").await;
+    for s in &specs {
+        assert_eq!(zapper_policy::mint::peek(s), None, "forgotten");
+    }
+    let seen = github().lock().unwrap().clone();
+    assert!(tokens.iter().all(|x| seen.contains(x)), "{seen:?}");
+    let revoked: Vec<String> = journal(&run)
+        .iter()
+        .filter(|e| e["action"] == "token revoked" && e["reason"] == "the run stopped")
+        .map(|e| e["worker"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(revoked.len(), 2, "{revoked:?}");
+    assert!(revoked.contains(&"pat".into()) && revoked.contains(&"ceo".into()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_token_that_cannot_be_made_is_told_to_the_worker() {
     let (t, run, log) = firm("fail");
     std::fs::write(log.with_extension("fail"), "").unwrap();
@@ -362,13 +391,34 @@ async fn gh_and_git_are_set_up_without_a_credential_and_the_levels_are_listed() 
         .any(|f| f.content.contains("ghs_") || f.path.ends_with(".git-credentials")));
 
     let services = crate::facility::services_for(&run, "eng");
+    assert!(services.git.is_empty(), "no repositories of its own");
     assert_eq!(
-        services.git,
+        services.github,
         [
             "https://github.com/Acme/api.git",
             "https://github.com/acme/web.git"
         ]
     );
+    // The preamble names them and the firm's levels, and how work reaches main.
+    let p = crate::prompts::preamble(
+        "acme",
+        &run.config,
+        &run.config,
+        "pat",
+        &services,
+        "",
+        None,
+        "",
+    );
+    assert!(
+        p.contains("GitHub repositories: https://github.com/Acme/api.git"),
+        "{p}"
+    );
+    assert!(
+        p.contains("write (actions: read, artifact_metadata: read, checks: read, contents: write"),
+        "{p}"
+    );
+    assert!(p.contains("which the board merges"), "{p}");
 
     let mine = access::mine(&run, "pat");
     let p = &mine["github_levels"]["levels"];

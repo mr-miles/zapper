@@ -966,12 +966,12 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .git_repos()
             .iter()
             .map(|r| format!("https://git.{d}/{r}.git"))
-            .chain(
-                run.config
-                    .github_repos()
-                    .iter()
-                    .map(|r| format!("https://github.com/{r}.git")),
-            )
+            .collect(),
+        github: run
+            .config
+            .github_repos()
+            .iter()
+            .map(|r| format!("https://github.com/{r}.git"))
             .collect(),
         kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
         product: cluster.then(|| format!("http://apps.{d}")),

@@ -36,7 +36,7 @@ pub enum FirmCmd {
         #[arg(long, value_name = "FILE")]
         articles: Option<std::path::PathBuf>,
         /// A GitHub repository to work in, OWNER/NAME; repeat for more (a
-        /// firm with `git.github`). Checked against the owner's GitHub App.
+        /// firm with `git.github`), instead of all its App reaches.
         #[arg(long = "repo", value_name = "OWNER/NAME")]
         repo: Vec<String>,
         /// Security's share of every grant, from 0 to 1.
