@@ -81,6 +81,13 @@ For an allowed connection, the daemon:
 
 If a rule for the host has `methods`, `path`, `secrets` or `set_headers`, the connection is inspected instead. For TLS, the daemon completes the handshake with a certificate from the session's CA, which the guest trusts. It then decides each request on its method and path, sets `Host` to the decided name, adds secrets, and forwards the request over a verified TLS connection. Plain HTTP is inspected the same way, without the TLS step.
 
+Before an inspected request is decided:
+
+- **Its path is put in the form the upstream acts on**: percent-encoded unreserved characters (letters, digits, `-._~`) are decoded, other escapes are written in capitals, and `.` and `..` segments are resolved. Rules match that path, and it is the path forwarded, so a `deny` on `/admin/*` also stops `/x/../admin/users` and `/%61dmin/users`. A path whose meaning depends on how the upstream decodes it is refused with `400`: a dot segment behind an encoded slash or backslash (`..%2f`), a backslash, a control character, an encoded NUL or a bad escape. An encoded slash elsewhere stays as sent (`group%2Frepo` is one segment). The query is not changed.
+- **A method override is refused with `403`**: an `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` or `X-Goog-HTTP-Method-Override` header, or a `_method`, `_HttpMethod` or `$httpmethod` query parameter, that names another method than the request's own. Some upstreams run the named method, so a `GET`-only rule would otherwise let a `DELETE` through. Naming the request's own method passes.
+
+A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched.
+
 ### vsock mode
 
 The guest has loopback only. `HTTP_PROXY` and `HTTPS_PROXY` point at `127.0.0.1:3128`, which the agent forwards over vsock to the daemon. The daemon serves the HTTP proxy protocol: a `CONNECT host:port` is handled like a captured connection to that name, and an absolute `http://` request is decided and forwarded on its own.
@@ -138,6 +145,7 @@ make test-e2e                 # the NIC, root and vsock groups in docs/testing.m
 - A program that connects to an address without looking up a name is decided on that address. Its TLS server name then has to equal the address.
 - A server-first protocol such as SSH waits up to 300 ms for its first bytes, while the daemon checks whether the client is starting TLS.
 - A NIC adds about 0.4 s to session start, for the namespace and its nftables rules.
+- Masking catches a secret's value as it was sent, not encoded otherwise (base64, URL-encoded, split by the upstream), nor in a body the upstream compresses although asked not to. Values shorter than 8 bytes are not masked.
 
 ## References
 

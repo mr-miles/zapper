@@ -42,6 +42,7 @@ mod inspect;
 #[cfg(feature = "fuzz")]
 pub(crate) use inspect::{clean_headers, inject_with, upstream_uri};
 mod relay;
+mod sanitize;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -256,15 +257,23 @@ fn note_response(
     values: Vec<String>,
 ) -> Response<Body> {
     httplog::mark_ttfb(rec);
+    // A secret the proxy added never comes back to the guest.
+    let masked = sanitize::mask_values(&values);
+    let (mut parts, body) = resp.into_parts();
+    sanitize::mask_headers(&mut parts.headers, &masked);
     {
         let mut r = rec.lock().unwrap();
-        r.status = Some(resp.status().as_u16());
-        r.resp_headers = httplog::headers(resp.headers());
+        r.status = Some(parts.status.as_u16());
+        r.resp_headers = httplog::headers(&parts.headers);
         r.secrets = used;
         r.redact = values;
     }
     let (rec, log) = (rec.clone(), s.requests.clone());
-    resp.map(|b| httplog::Tee::wrap(b.boxed(), rec, log, httplog::Side::Response))
+    let body = sanitize::Masked::wrap(body.boxed(), masked);
+    Response::from_parts(
+        parts,
+        httplog::Tee::wrap(body, rec, log, httplog::Side::Response),
+    )
 }
 
 struct NetLog<'a> {
