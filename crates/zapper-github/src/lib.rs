@@ -11,7 +11,7 @@ mod github;
 mod http;
 pub mod setup;
 
-pub use app::{apps_dir, owner_file, valid_login, App};
+pub use app::{app_file, apps_dir, owner_file, valid_login, App};
 pub use github::{
     check_permissions, expires_unix, split_repo, GitHub, Installation, Scope, Token, API_ENV,
     MAX_REPOS,

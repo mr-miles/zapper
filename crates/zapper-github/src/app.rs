@@ -38,6 +38,26 @@ pub fn owner_file(owner: &str) -> Result<PathBuf> {
     Ok(apps_dir().join(format!("{}.yaml", owner.to_ascii_lowercase())))
 }
 
+/// A credentials file named in a config: a plain file name `<name>.yaml`
+/// (letters, digits, `-`, `_` and `.`), taken as it is, in [`apps_dir`]. No
+/// path, so a config can't point outside that directory.
+pub fn app_file(name: &str) -> Result<PathBuf> {
+    let stem = name.strip_suffix(".yaml").unwrap_or("");
+    let ok = !stem.is_empty()
+        && name.len() <= 100
+        && !stem.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    if !ok {
+        bail!(
+            "{name:?} is not a credentials file name: a plain NAME.yaml in {}",
+            apps_dir().display()
+        );
+    }
+    Ok(apps_dir().join(name))
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct Github {

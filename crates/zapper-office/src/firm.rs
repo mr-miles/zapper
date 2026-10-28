@@ -32,8 +32,9 @@ pub struct Firm {
     pub roles: BTreeMap<String, Role>,
     pub workers: Vec<Worker>,
     pub security: Security,
-    /// Git repositories per run, each empty at the start, at
-    /// `https://git.<domain>/<name>.git`; `{}` is one, `product`.
+    /// Git repositories per run: the firm's own, each empty at the start, at
+    /// `https://git.<domain>/<name>.git` (`{}` is one, `product`), or real
+    /// GitHub repositories reached with a GitHub App (`github: {}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<GitService>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -550,6 +551,32 @@ pub struct GitService {
     /// repository (`git:<name>`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    /// Real GitHub repositories instead of the firm's own server. Not with
+    /// `repos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubGit>,
+}
+
+/// A firm that works in the GitHub repositories of one account, through that
+/// account's GitHub App (`zapper github setup`). Its repositories are the ones
+/// the App reaches when a run starts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubGit {
+    /// The App's credentials file, a plain `NAME.yaml` in
+    /// `~/.config/zapper/github-apps`, as it is named there. An App belongs
+    /// to one account, which is where it is installed: the firm's
+    /// repositories are that account's.
+    pub config: String,
+    /// The account the App is installed on, as GitHub spells it; found when
+    /// a run starts. Not config.
+    #[serde(skip)]
+    pub owner: String,
+    /// The repositories, `owner/name`, listed from GitHub when the run
+    /// starts. Not config. Access is granted per repository
+    /// (`git:owner/name`).
+    #[serde(skip)]
+    pub repos: Vec<String>,
 }
 
 /// The repository a firm with `git: {}` has.
@@ -594,11 +621,77 @@ pub struct Credentials {
     /// The shared drive's spaces: a flat list of names. Every artifact is
     /// published into one, and grants are per space.
     pub spaces: Vec<String>,
+    /// How GitHub repositories are granted (a firm with `git.github`).
+    #[serde(skip_serializing_if = "GithubCredentials::is_empty")]
+    pub github: GithubCredentials,
+}
+
+/// Access to a GitHub repository is a named profile: a group of GitHub App
+/// permissions. A worker holds one repository at one profile, and the token
+/// minted for them has exactly those permissions on that repository.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubCredentials {
+    /// Profile name to what it grants.
+    pub profiles: BTreeMap<String, GithubProfile>,
+    /// The profile the policy owners (the CEO and the officers) hold on every
+    /// repository of the firm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_profile: Option<String>,
+    /// The command that mints a token, before `--app`, `--repo` and `--perm`
+    /// are added: `[zapper, mint, github-app]` if unset.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mint: Vec<String>,
+}
+
+impl GithubCredentials {
+    fn is_empty(&self) -> bool {
+        *self == GithubCredentials::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubProfile {
+    /// GitHub App permission names to `read`, `write` or `admin`, as the
+    /// token request takes them (`contents`, `pull_requests`, `issues`,
+    /// `workflows`, ...). `metadata: read` is always added.
+    pub permissions: BTreeMap<String, String>,
+    /// Who decides a request for this profile: `ceo` for the CEO, else a
+    /// security officer first. Mark the profiles that can change workflows
+    /// or the repository's settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+}
+
+impl GithubProfile {
+    /// How much it is, for ordering and display only: admin if the CEO must
+    /// approve it, write if any permission is write or admin, else read.
+    pub fn class(&self) -> crate::access::Level {
+        use crate::access::Level;
+        if self.approver.is_some() {
+            Level::Admin
+        } else if self.permissions.values().any(|v| v != "read") {
+            Level::Write
+        } else {
+            Level::Read
+        }
+    }
+
+    /// `contents: write, issues: read`, for a person to read.
+    pub fn summary(&self) -> String {
+        self.permissions
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl Default for Credentials {
     fn default() -> Self {
         Credentials {
+            github: GithubCredentials::default(),
             expiry: "24h".into(),
             spaces: [
                 "general",
@@ -661,13 +754,43 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 }
 
 impl Firm {
-    /// The firm's git repositories, in config order; none without `git`.
+    /// The repositories of the firm's own git server, in config order; none
+    /// without `git`, and none in a firm that works in GitHub.
     pub fn git_repos(&self) -> Vec<String> {
         match &self.git {
             None => vec![],
+            Some(g) if g.github.is_some() => vec![],
             Some(g) if g.repos.is_empty() => vec![DEFAULT_REPO.to_string()],
             Some(g) => g.repos.clone(),
         }
+    }
+
+    /// Whether the firm runs its own git server.
+    pub fn git_internal(&self) -> bool {
+        self.git.as_ref().is_some_and(|g| g.github.is_none())
+    }
+
+    /// The firm's GitHub repositories, `owner/name`.
+    pub fn github_repos(&self) -> Vec<String> {
+        self.git
+            .as_ref()
+            .and_then(|g| g.github.as_ref())
+            .map(|g| g.repos.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether the firm works in GitHub repositories.
+    pub fn git_github(&self) -> bool {
+        self.git.as_ref().is_some_and(|g| g.github.is_some())
+    }
+
+    /// The resources of the firm's git, `git:<name>` or `git:<owner>/<name>`.
+    pub fn git_resources(&self) -> Vec<String> {
+        self.git_repos()
+            .into_iter()
+            .chain(self.github_repos())
+            .map(|r| format!("git:{r}"))
+            .collect()
     }
 
     pub fn domain(&self, firm: &str) -> String {
@@ -936,6 +1059,52 @@ until someone funds them, every access request and background check goes to the 
                 err(format!("git.repos: {r:?} must be a unique name of lowercase letters, digits and dashes"));
             }
         }
+        match self
+            .git
+            .as_ref()
+            .and_then(|g| g.github.as_ref().map(|gh| (g, gh)))
+        {
+            Some((g, gh)) => {
+                if !g.repos.is_empty() {
+                    err("git: give repos (the firm's own server) or github, not both".into());
+                }
+                if let Err(e) = zapper_github::app_file(&gh.config) {
+                    err(format!("git.github.config: {e}"));
+                }
+                let creds = &self.credentials.github;
+                if creds.profiles.is_empty() {
+                    err(
+                        "credentials.github.profiles: a firm in GitHub needs at least one profile"
+                            .into(),
+                    );
+                }
+                for (p, prof) in &creds.profiles {
+                    if !valid_worker_name(p) {
+                        err(format!("credentials.github.profiles: {p:?} must be lowercase letters, digits and dashes"));
+                    }
+                    if let Err(e) = zapper_github::check_permissions(&prof.permissions) {
+                        err(format!("credentials.github.profiles.{p}: {e}"));
+                    }
+                    if prof.approver.as_deref().is_some_and(|a| a != "ceo") {
+                        err(format!(
+                            "credentials.github.profiles.{p}.approver: only `ceo`"
+                        ));
+                    }
+                }
+                match &creds.owner_profile {
+                    Some(o) if creds.profiles.contains_key(o) => {}
+                    Some(o) => err(format!("credentials.github.owner_profile: no profile {o:?}")),
+                    None => err("credentials.github.owner_profile: name the profile the CEO and the officers hold".into()),
+                }
+                if creds.mint.iter().any(|a| a.trim().is_empty()) {
+                    err("credentials.github.mint: no empty words".into());
+                }
+            }
+            None if self.credentials.github != GithubCredentials::default() => {
+                err("credentials.github is for a firm with git.github".into());
+            }
+            None => {}
+        }
         if self.product_port.is_some() && self.facilities.is_empty() {
             err("product_port needs a cluster facility".into());
         }
@@ -1099,6 +1268,93 @@ firms:
         let e = firm(&format!("{BASE}    git: {{ repos: [api, api] }}\n")).unwrap_err();
         assert!(format!("{e:#}").contains("git.repos"), "{e:#}");
         assert!(firm(&format!("{BASE}    git: {{ repos: [Api] }}\n")).is_err());
+    }
+
+    const GH: &str = "    git: { github: { config: acme.yaml } }
+    credentials:
+      github:
+        owner_profile: maintainer
+        profiles:
+          read: { permissions: { contents: read, issues: read, workflows: read } }
+          contributor: { permissions: { contents: write, pull_requests: write, issues: write } }
+          maintainer: { permissions: { contents: write, workflows: write, administration: write }, approver: ceo }
+";
+
+    #[test]
+    fn a_firm_in_github() {
+        let c = firm(&format!("{BASE}{GH}")).unwrap();
+        let f = get(&c, "acme").unwrap();
+        assert!(f.git_github() && !f.git_internal());
+        assert!(f.git_repos().is_empty(), "no server of its own");
+        let gh = f.git.as_ref().unwrap().github.as_ref().unwrap();
+        assert_eq!(gh.config, "acme.yaml");
+        assert!(gh.owner.is_empty(), "found when a run starts");
+        assert!(
+            f.github_repos().is_empty(),
+            "its repositories are listed from GitHub when a run starts"
+        );
+        assert!(f.git_resources().is_empty());
+        let p = &f.credentials.github.profiles;
+        assert_eq!(p["read"].class(), crate::access::Level::Read);
+        assert_eq!(p["contributor"].class(), crate::access::Level::Write);
+        assert_eq!(p["maintainer"].class(), crate::access::Level::Admin);
+        assert_eq!(
+            p["read"].summary(),
+            "contents: read, issues: read, workflows: read"
+        );
+        // Repositories are not config.
+        let named = GH.replace(
+            "{ config: acme.yaml }",
+            "{ config: acme.yaml, repos: [Acme/api] }",
+        );
+        assert!(format!("{:#}", firm(&format!("{BASE}{named}")).unwrap_err()).contains("repos"));
+        // It round-trips.
+        assert_eq!(firm(&c.to_yaml()).unwrap(), c);
+    }
+
+    #[test]
+    fn a_firm_in_github_is_checked() {
+        let bad = |from: &str, to: &str| {
+            format!(
+                "{:#}",
+                firm(&format!("{BASE}{}", GH.replace(from, to))).unwrap_err()
+            )
+        };
+        // The config is a plain file name, as it is in the apps directory.
+        for name in [
+            "../acme.yaml",
+            "a/acme.yaml",
+            "acme",
+            "acme.yml",
+            ".yaml",
+            "\"\"",
+            "ac me.yaml",
+        ] {
+            let e = bad("config: acme.yaml", &format!("config: {name}"));
+            assert!(e.contains("git.github.config"), "{name}: {e}");
+        }
+        assert!(bad("{ config: acme.yaml }", "{}").contains("git.github.config"));
+        assert!(bad("owner_profile: maintainer", "owner_profile: root").contains("no profile"));
+        assert!(bad("        owner_profile: maintainer\n", "").contains("owner_profile"));
+        assert!(bad("contents: read, issues", "contents: owner, issues").contains("bad permission"));
+        assert!(bad("approver: ceo", "approver: officer").contains("only `ceo`"));
+        assert!(bad("read: {", "Read: {").contains("lowercase"));
+        // Both kinds of git, no profiles, or profiles without GitHub.
+        assert!(bad(
+            "{ github: { config: acme.yaml } }",
+            "{ repos: [x], github: { config: acme.yaml } }"
+        )
+        .contains("not both"));
+        let no_profiles = "    git: { github: { config: acme.yaml } }\n";
+        assert!(
+            format!("{:#}", firm(&format!("{BASE}{no_profiles}")).unwrap_err())
+                .contains("at least one profile")
+        );
+        let stray = GH.replace("git: { github: { config: acme.yaml } }", "git: {}");
+        assert!(
+            format!("{:#}", firm(&format!("{BASE}{stray}")).unwrap_err())
+                .contains("is for a firm with git.github")
+        );
     }
 
     #[test]

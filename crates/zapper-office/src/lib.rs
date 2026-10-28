@@ -12,6 +12,7 @@ pub(crate) mod facility;
 pub mod firm;
 pub(crate) mod foreman;
 pub(crate) mod git;
+mod github;
 pub(crate) mod http;
 pub(crate) mod journal;
 pub(crate) mod mail;
@@ -28,12 +29,12 @@ mod history;
 mod run;
 
 pub(crate) use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
-#[cfg(test)]
-pub(crate) use run::test_run;
 pub(crate) use run::{
     board_send, default_company, down, effective_model, pause, up_with, Agents, StartOptions,
 };
 pub(crate) use run::{chart, mem_available_mib, pause_for, worker_json};
+#[cfg(test)]
+pub(crate) use run::{test_run, test_run_with};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -732,6 +733,9 @@ pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
 
 #[cfg(test)]
 mod approval_tests;
+
+#[cfg(test)]
+mod github_tests;
 
 #[cfg(test)]
 mod names_tests;

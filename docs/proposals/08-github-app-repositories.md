@@ -15,7 +15,7 @@ The minting code exists in Go in the `agentctl` repository (`internal/ghsetup`, 
 | | |
 |---|---|
 | Language | Rust, in zapper. `ring` (already a dependency) signs the App JWT (RS256, PKCS#1 key as GitHub issues it); the existing hyper + rustls client does the HTTP. No new crypto or HTTP dependency. |
-| Who names the repository | The board, in the kickoff instructions (`owner/name`). zapper does not offer a list to pick from. It uses the App to **check** the name (is the App installed there?) and to suggest near matches on a typo. |
+| Which repositories | Every repository the firm's App reaches when a run starts. The firm's config names the App's credentials file (`git.github.config: acme.yaml`, a plain file name in `~/.config/zapper/github-apps`); the account is the one the App is installed on, and zapper lists its repositories from GitHub at each run's start. The installation is what limits them, so the operator chooses "only select repositories" when installing. A run may start with none. |
 | Access model | **Permission profiles** replace `read`/`write`/`admin` for GitHub repositories. The drive and the cluster keep their levels. |
 | Token lifetime | Installation tokens last one hour. The host refreshes them; the guest never knows. |
 | Changing a grant | A token cannot be edited. Zapper mints a new one for the new permissions and retires the old one. |
@@ -42,26 +42,32 @@ The manifest asks for the permissions the profiles may need (the union of the co
 
 The credentials file keeps `agentctl`'s layout (`github.appId`, `clientId`, `appSlug`, `privateKey` or an absolute `privateKeyPath`; client and webhook secrets are not stored). It sits under the daemon user's config directory, which no VM mounts. The key is read only by the minting process (below) and is never logged.
 
-## 2. The board names the repository
+## 2. The firm's repositories are the ones the App reaches
 
-The firm's config says where repositories come from, not which:
+The firm's config names the App's credentials file, not the account and not the repositories:
 
 ```yaml
 firms:
   acme:
     git:
-      github: { app: acme }          # the owner's credentials file; the repositories come from the kickoff
+      github: { config: acme.yaml }   # a plain file name in ~/.config/zapper/github-apps, exactly as it is there
 ```
 
 `git: { repos: [...] }` (the internal server) and `git: { github: ... }` are mutually exclusive.
 
-The kickoff names the repository: a `repos` field in the Kickoff tab and `zapper firm up acme --repo acme/api` (repeatable). The board may also just say it in the instructions to the CEO; since the grants need a canonical name, the CEO's first `credentials_request` for `git:acme/api` is validated the same way. Either way, zapper checks the name at the point it first appears:
+When a run starts, zapper finds the account the App is installed on (`GET /app/installations`; the name is as GitHub spells it) and lists the repositories the App reaches there (a `metadata: read` token over the installation, as `zapper github status` does), and that is the firm's list for the run. An App belongs to one account (a different account has its own App), so an App installed nowhere, or on several accounts, stops the start. It is checked before any VM boots:
 
-- `GET /repos/{owner}/{name}/installation` must succeed (the App is installed there); otherwise the request is refused with "the App is not installed on acme/api" plus up to three near names from `GET /installation/repositories`.
-- Each repository's owner needs the App installed (`zapper github setup --org <owner>`). A firm may name repositories of several owners, since a worker's token comes from the installation on its own repository's owner.
-- The resource becomes `git:acme/api` (`resource_in` accepts `owner/name`; plain `git` still works when the firm has exactly one).
+- no credentials file at that name, or an App installed nowhere or on several accounts, stops the start, with what to do about it;
+- a list of more than 500 repositories stops it too, since the CEO's and the officers' one token can name at most 500: limit the installation to the repositories agents should reach;
+- a run may start with none, and then there is nothing to grant.
 
-Nobody picks from a list of everything the App can see, so the CEO cannot widen a firm to a repository the board did not name; the App's installation is the outer limit, the firm's named repositories the next, the profile the next.
+`zapper firm up --repo OWNER/NAME` (repeatable) names the repositories outright instead of listing them: each must be one the App reaches in its account, and is spelled as GitHub spells it.
+
+All of a firm's repositories have one owner: the account its App is installed on. Firms for different accounts are different firms, each with its own config and its own App.
+
+The resource of a repository is `git:owner/name` (`resource_in` accepts it in any case; plain `git` still works when the firm has exactly one).
+
+The App's installation is the outer limit: the operator picks which repositories the App is installed on, and a firm can only work in those.
 
 ## 3. Permission profiles
 
@@ -91,7 +97,7 @@ Proposal 01's generic hook, as specified there, plus the GitHub minting as its f
 
 ```
 SecretSource::Command { run: [String], timeout, ttl_fallback }   // the command prints {"value": "...", "expires_at": "<rfc3339>"} or a bare value
-zapper mint github-app --app acme --repo acme/api --perm contents=write --perm pull_requests=write
+zapper mint github-app --app acme.yaml --repo acme/api --perm contents=write --perm pull_requests=write
 ```
 
 - `zapper mint` is a thin wrapper over a library (`zapper-github`): load the credentials file, sign the JWT (`iat` backdated 60 s, `exp` 9 min), `GET /repos/{o}/{r}/installation`, `POST /app/installations/{id}/access_tokens {repositories, permissions}`, print `{value, expires_at}`. It is what `agentctl gh-token-helper` does, minus the on-disk cache (the daemon caches).
@@ -104,7 +110,7 @@ When a worker's grant is approved, the office registers, through `Core`, a secre
 
 ```yaml
 gh-<worker>:
-  command: [zapper, mint, github-app, --app, acme, --repo, acme/api, --perm, contents=write, --perm, pull_requests=write]
+  command: [zapper, mint, github-app, --app, acme.yaml, --repo, acme/api, --perm, contents=write, --perm, pull_requests=write]
   mode: proxy
   hosts: [github.com, api.github.com]
 ```
@@ -150,7 +156,7 @@ An extension is a single approval of "profile B instead of A" on the same reposi
 - A worker's reach is exactly its grant: one repository, one profile. The Security tab's matrix and the journal show it as it is.
 - Work that needs different access to different repositories goes to different workers, each with its own repository, and they hand work to each other by mail and branches as the firm already does.
 - The rules name hosts, not paths: the token is the boundary, and a path pattern that GraphQL walks around would only suggest a separation that is not there.
-- Repositories of different owners work: each worker's token comes from the installation on its own repository's owner, so a firm may name `acme/api` and `other/web` if the App is installed on both owners.
+- A firm has one repository owner. The CEO and the officers hold every repository of the firm with one token, which comes from one installation; a firm for another owner is another firm in its own config.
 
 ## 5. What changes in the code
 
@@ -162,7 +168,7 @@ An extension is a single approval of "profile B instead of A" on the same reposi
 | `zapper-core` proxy | resolve a `Command` secret with the cache, margin, single-flight and fail-closed rules; session-scoped secrets registered and dropped with the session |
 | `zapper-office` `access.rs` | profiles instead of `Level` for `git:`; one GitHub repository grant per worker; extension; the token re-minted when the grant changes; revoke at GitHub; `resource_in` accepts `owner/name`; `approver` replaces "admin is the CEO's" |
 | `facility.rs` | skip bare repositories, `pre-receive` hook, per-worker git passwords and the `git.<domain>` service for GitHub firms; `credentials_for` sets a dummy `GH_TOKEN` so `gh` runs; services advertise `https://github.com/<owner>/<repo>.git` |
-| Kickoff UI, `firm up` | `repos` / `--repo`, checked against the installation |
+| `firm up` | `--repo`, to name repositories outright instead of listing the owner's |
 | Office UI Git tab, `git.rs` | needs a new source: a host-side mirror clone, or the GitHub API |
 | Skills and prompts | `office-resources`, `office-git`, `security-review`: profiles, branch + pull-request flow, 401 handling |
 | Docs | `docs/network.md` and `docs/security.md`: `github.com` is resolved on the host, leaving the "firm services are never resolved on the host" model for these firms |
@@ -179,8 +185,8 @@ An extension is a single approval of "profile B instead of A" on the same reposi
 
 1. **`zapper-github` + `zapper github` + `zapper mint`**: against a fake GitHub, then a real test App. Verify git over HTTPS with a Bearer token and `gh`/REST through the proxy first, since everything depends on it.
 2. **`SecretSource::Command`** with cache, margin and fail-closed behaviour, tested with fake commands (expiring tokens, failing refresh, burst of requests).
-3. **Firm config, profiles, kickoff repository check; grants mint and mount tokens; extension and revocation.** Retire the internal-git paths for GitHub firms.
-4. **UI and skills**: kickoff field, profile display in the Security tab, rewritten `office-git`.
+3. **Firm config, profiles, the repositories listed when a run starts; grants mint and mount tokens; extension and revocation.** Retire the internal-git paths for GitHub firms.
+4. **UI and skills**: profile display in the Security tab, rewritten `office-git`.
 5. **Git tab history** from a mirror.
 
 ## Open questions

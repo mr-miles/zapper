@@ -565,10 +565,7 @@ async fn credentials_decide(
     let grant = v["grant"]
         .as_bool()
         .ok_or_else(|| bad("grant: true or false"))?;
-    let level = v["level"]
-        .as_str()
-        .map(super::access::Level::parse)
-        .transpose()?;
+    let level = v["level"].as_str();
     Ok(Json(super::access::decide(
         &d,
         &run,
@@ -586,7 +583,7 @@ async fn credentials_grant(State(d): D, Path(f): Path<String>, text: String) -> 
     let v = body(&text)?;
     let run = d.office().active(&f)?;
     let s = |k: &str| v[k].as_str().ok_or_else(|| bad(format!("{k} is required")));
-    let level = super::access::Level::parse(s("level")?)?;
+    let level = s("level")?;
     Ok(Json(super::access::board_grant(
         &d,
         &run,

@@ -127,12 +127,23 @@ impl std::fmt::Debug for Token {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Installation {
     pub id: u64,
+    /// The account the App is installed on, as GitHub spells it.
+    #[serde(default, deserialize_with = "account_login")]
+    pub account: Option<String>,
     /// `all` or `selected`.
     #[serde(default)]
     pub repository_selection: String,
     /// What the App was granted on this installation: the ceiling for tokens.
     #[serde(default)]
     pub permissions: BTreeMap<String, String>,
+}
+
+/// `account: { login }` as the account's login.
+fn account_login<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let v = Option::<Value>::deserialize(d)?;
+    Ok(v.and_then(|a| a["login"].as_str().map(str::to_string)))
 }
 
 pub struct GitHub {
@@ -199,6 +210,36 @@ impl GitHub {
                 anyhow!("finding the App's installation on {owner}/{name} (is the App installed there?): {e}")
             })?;
         Ok(serde_json::from_value(v)?)
+    }
+
+    /// Where the App is installed. An App belongs to one account (a different
+    /// account has its own App), so this is that account's installation, with
+    /// its name as GitHub spells it. An App installed nowhere, or on several
+    /// accounts, is an error that says so.
+    pub async fn the_installation(&self, app: &App) -> Result<Installation> {
+        let v = self
+            .call(
+                Method::GET,
+                "/app/installations?per_page=100",
+                &Self::jwt(app)?,
+                None,
+            )
+            .await?;
+        let mut all: Vec<Installation> = serde_json::from_value(v)?;
+        match all.len() {
+            0 => bail!("the GitHub App is not installed on any account: install it (https://github.com/apps/{}/installations/new)", app.slug.as_deref().unwrap_or("<app>")),
+            1 => {
+                let i = all.remove(0);
+                if i.account.is_none() {
+                    bail!("GitHub did not say which account the App is installed on");
+                }
+                Ok(i)
+            }
+            _ => bail!(
+                "the GitHub App is installed on several accounts ({}); an App belongs to one account, so make one for each",
+                all.iter().filter_map(|i| i.account.as_deref()).collect::<Vec<_>>().join(", ")
+            ),
+        }
     }
 
     /// The App's installation on an account, which may be an organisation or

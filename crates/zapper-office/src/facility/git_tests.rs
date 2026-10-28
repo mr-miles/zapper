@@ -11,7 +11,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 
-use super::super::access::{self, Level};
+use super::super::access;
 use super::super::{test_run, FirmRun};
 
 const FIRM: &str = "
@@ -107,7 +107,7 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
-    access::board_grant(&t.core, &run, "pat", "git:api", Level::Read, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", "read", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), refs).await;
     assert!(allowed(&r), "{r:?}");
     let (status, text) = git(&run, "pat", Some("pat:pw"), push).await;
@@ -126,7 +126,7 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
         "asking to push is a push"
     );
 
-    access::board_grant(&t.core, &run, "pat", "git:api", Level::Write, None, "test").unwrap();
+    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), push).await;
     assert!(allowed(&r), "{r:?}");
 

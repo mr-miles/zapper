@@ -35,6 +35,8 @@ struct Seen {
     revoked: Vec<String>,
     /// Lookups of the installation on the account `late`, which appears on the third.
     late_lookups: u32,
+    /// What `GET /app/installations` lists, when a test sets it.
+    installations: Option<Vec<Value>>,
 }
 
 /// Checks a JWT the way GitHub does.
@@ -150,6 +152,16 @@ async fn handle(
                     200,
                     json!({ "id": 42, "repository_selection": "selected", "permissions": { "contents": "write" } }),
                 ),
+                ("GET", p)
+                    if p.starts_with("/app/installations")
+                        && !p.contains("access_tokens")
+                        && p.trim_end_matches(|c: char| c != '/') == "/app/" =>
+                {
+                    let list = seen.lock().unwrap().installations.clone().unwrap_or_else(|| {
+                        vec![json!({ "id": 42, "account": { "login": "Acme" }, "repository_selection": "selected", "permissions": { "contents": "write" } })]
+                    });
+                    reply(200, Value::Array(list))
+                }
                 ("GET", "/orgs/late/installation") => {
                     let mut s = seen.lock().unwrap();
                     s.late_lookups += 1;
@@ -260,6 +272,62 @@ async fn a_token_that_covers_fewer_repositories_than_asked_is_an_error() {
             .unwrap_err()
     );
     assert!(e.contains("does not cover dropped"), "{e}");
+}
+
+#[tokio::test]
+async fn an_app_belongs_to_the_one_account_it_is_installed_on() {
+    let (gh, seen) = fake().await;
+    let app = app_from("test-key-pkcs1.pem");
+    let i = gh.the_installation(&app).await.unwrap();
+    assert_eq!(
+        (i.id, i.account.as_deref()),
+        (42, Some("Acme")),
+        "the name as GitHub spells it"
+    );
+
+    seen.lock().unwrap().installations = Some(vec![]);
+    let e = format!("{:#}", gh.the_installation(&app).await.unwrap_err());
+    assert!(
+        e.contains("not installed on any account") && e.contains("acme-agents/installations/new"),
+        "{e}"
+    );
+
+    seen.lock().unwrap().installations = Some(vec![
+        json!({ "id": 1, "account": { "login": "Acme" } }),
+        json!({ "id": 2, "account": { "login": "Other" } }),
+    ]);
+    let e = format!("{:#}", gh.the_installation(&app).await.unwrap_err());
+    assert!(
+        e.contains("several accounts (Acme, Other)") && e.contains("one for each"),
+        "{e}"
+    );
+
+    seen.lock().unwrap().installations = Some(vec![json!({ "id": 3 })]);
+    assert!(
+        gh.the_installation(&app).await.is_err(),
+        "an installation with no account is not trusted"
+    );
+}
+
+#[test]
+fn a_config_names_a_plain_credentials_file() {
+    for ok in ["acme.yaml", "Acme-Corp.yaml", "my_org.v2.yaml"] {
+        assert!(zapper_github::app_file(ok).unwrap().ends_with(ok), "{ok}");
+    }
+    for bad in [
+        "",
+        "acme",
+        "acme.yml",
+        ".yaml",
+        ".hidden.yaml",
+        "../acme.yaml",
+        "a/b.yaml",
+        "/etc/acme.yaml",
+        "ac me.yaml",
+        "acme.yaml\n",
+    ] {
+        assert!(zapper_github::app_file(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]

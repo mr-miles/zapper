@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::json;
-use zapper_github::{owner_file, setup, App, GitHub, Scope};
+use zapper_github::{app_file, owner_file, setup, App, GitHub, Scope};
 
 #[derive(Subcommand)]
 pub enum GithubCmd {
@@ -61,8 +61,8 @@ impl Who {
 pub enum MintCmd {
     /// Print `{"value": ..., "expires_at": ...}`: a token for one or more of an account's repositories, from its App. Run by the daemon.
     GithubApp {
-        /// The account whose App to use (its credentials file is that account's).
-        #[arg(long)]
+        /// The App's credentials file, a plain NAME.yaml in ~/.config/zapper/github-apps.
+        #[arg(long, value_name = "FILE")]
         app: String,
         /// A repository, OWNER/NAME; repeat for more, all of the account's. Every
         /// repository gets every permission.
@@ -172,16 +172,12 @@ pub async fn mint(cmd: MintCmd) -> Result<i32> {
         permissions.insert(k.to_string(), v.to_string());
     }
     let scope = Scope::new(&repos, permissions)?;
-    if !scope.owner.eq_ignore_ascii_case(&app) {
-        bail!(
-            "{} is not in {app}'s account: a token comes from one installation",
-            scope.full_names().join(", ")
-        );
-    }
-    let file = owner_file(&app)?;
+    // GitHub finds the installation by the repository's owner, so a
+    // repository the App isn't installed on is refused there.
+    let file = app_file(&app)?;
     if !file.exists() {
         bail!(
-            "no GitHub App for {app}: {} doesn't exist; create it with `zapper github setup`",
+            "no GitHub App at {}; create it with `zapper github setup`",
             file.display()
         );
     }

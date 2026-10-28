@@ -1792,6 +1792,7 @@ dependencies = [
  "tower",
  "tracing",
  "zapper-core",
+ "zapper-github",
  "zapper-policy",
  "zapper-runs",
 ]
