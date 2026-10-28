@@ -252,9 +252,9 @@ async fn a_changed_level_is_a_new_token_and_the_old_one_is_revoked_at_github() {
     assert_eq!(mints(&log, false, 1).len(), 1);
     let first = mint_spec(&run, "pat");
     wait_for("the first token is minted", || {
-        zapper_policy::mint::peek(&first).is_some()
+        zapper_core::mint::peek(&first).is_some()
     });
-    let old_token = zapper_policy::mint::peek(&first).unwrap();
+    let old_token = zapper_core::mint::peek(&first).unwrap();
     let renewing = access::request(&run, "pat", "git:acme/api", "read", "again")
         .unwrap_err()
         .to_string();
@@ -297,13 +297,13 @@ async fn a_revoked_grant_takes_everything_back() {
     access::decide(&t.core, &run, "ceo", &id, true, None, None, "ok").unwrap();
     assert_eq!(mints(&log, false, 1).len(), 1);
     let spec = mint_spec(&run, "pat");
-    wait_for("minted", || zapper_policy::mint::peek(&spec).is_some());
-    let token = zapper_policy::mint::peek(&spec).unwrap();
+    wait_for("minted", || zapper_core::mint::peek(&spec).is_some());
+    let token = zapper_core::mint::peek(&spec).unwrap();
 
     access::revoke(&t.core, &run, "ceo", "pat", "git:acme/api", "done").unwrap();
     assert!(session(&run, "pat").secret_names().is_empty());
     assert!(rule_ids(&run, "pat").is_empty());
-    assert_eq!(zapper_policy::mint::peek(&spec), None, "forgotten");
+    assert_eq!(zapper_core::mint::peek(&spec), None, "forgotten");
     wait_for("revoked at GitHub", || {
         github().lock().unwrap().contains(&token)
     });
@@ -319,16 +319,16 @@ async fn stopping_the_run_revokes_every_token_at_github() {
     access::owner_access(&t.core, &run, "ceo", "board");
     let specs = [mint_spec(&run, "pat"), mint_spec(&run, "ceo")];
     wait_for("both minted", || {
-        specs.iter().all(|s| zapper_policy::mint::peek(s).is_some())
+        specs.iter().all(|s| zapper_core::mint::peek(s).is_some())
     });
     let tokens: Vec<String> = specs
         .iter()
-        .map(|s| zapper_policy::mint::peek(s).unwrap())
+        .map(|s| zapper_core::mint::peek(s).unwrap())
         .collect();
 
     crate::run::down(&t.core, &run, "test").await;
     for s in &specs {
-        assert_eq!(zapper_policy::mint::peek(s), None, "forgotten");
+        assert_eq!(zapper_core::mint::peek(s), None, "forgotten");
     }
     let seen = github().lock().unwrap().clone();
     assert!(tokens.iter().all(|x| seen.contains(x)), "{seen:?}");
@@ -390,6 +390,10 @@ async fn gh_and_git_are_set_up_without_a_credential_and_the_levels_are_listed() 
         .iter()
         .any(|f| f.content.contains("ghs_") || f.path.ends_with(".git-credentials")));
 
+    // `gh` wants a token to start: a placeholder, in every worker's env.
+    let role = &run.config.roles["eng"];
+    let o = crate::run::agent_overlay(&run, &run.rt("pat").unwrap(), role, false, String::new());
+    assert_eq!(o["env"]["GITHUB_TOKEN"], crate::github::PLACEHOLDER_TOKEN);
     let services = crate::facility::services_for(&run, "eng");
     assert!(services.git.is_empty(), "no repositories of its own");
     assert_eq!(

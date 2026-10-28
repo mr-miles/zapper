@@ -7,6 +7,7 @@ mod daemon;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;
 mod interface;
+pub mod mint;
 pub(crate) mod netns;
 pub(crate) mod subids;
 #[cfg(any(test, feature = "test-util"))]

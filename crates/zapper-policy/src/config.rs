@@ -268,8 +268,9 @@ impl SecretSource {
                 }
             }
             SecretSource::Value { value } => Ok(value.clone()),
-            SecretSource::Command { .. } => crate::mint::resolve(&self.mint_spec().unwrap())
-                .with_context(|| "minting the secret"),
+            SecretSource::Command { .. } => {
+                bail!("a command secret is minted by the daemon, not read")
+            }
         }
     }
 

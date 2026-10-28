@@ -16,8 +16,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::json;
+use zapper_core::mint;
 use zapper_core::Core;
-use zapper_policy::{mint, Action, AnyRule, NetRule, Secret, SecretMode, SecretSource};
+use zapper_policy::{Action, AnyRule, NetRule, Secret, SecretMode, SecretSource};
 
 use super::FirmRun;
 
@@ -97,13 +98,18 @@ pub async fn resolve_repositories(
 #[derive(Clone)]
 pub struct Applied {
     session: String,
-    spec: mint::Spec,
+    spec: zapper_policy::mint::Spec,
 }
 
 /// The session secret of a worker's token.
 pub fn secret_name(worker: &str) -> String {
     format!("gh-{worker}")
 }
+
+/// What the VM holds in place of a GitHub token (`GITHUB_TOKEN`, `gh`'s
+/// login): `gh` wants one to start, and the proxy replaces the header it
+/// becomes with the worker's real token.
+pub const PLACEHOLDER_TOKEN: &str = "replaced-by-the-proxy";
 
 const RULE_GIT: &str = "credentials-github";
 const RULE_API: &str = "credentials-github-api";
@@ -140,7 +146,11 @@ fn scope(run: &FirmRun, worker: &str) -> Option<(Vec<String>, BTreeMap<String, S
 /// The command that mints the worker's token. Repositories and permissions
 /// are sorted, so an unchanged grant is the same command and the same cached
 /// token. `--app` is the credentials file the firm's config names.
-fn spec(run: &FirmRun, repos: &[String], perms: &BTreeMap<String, String>) -> mint::Spec {
+fn spec(
+    run: &FirmRun,
+    repos: &[String],
+    perms: &BTreeMap<String, String>,
+) -> zapper_policy::mint::Spec {
     let mut argv: Vec<String> = match &run.config.credentials.github.mint {
         m if m.is_empty() => ["zapper", "mint", "github-app"].map(String::from).to_vec(),
         m => m.clone(),
@@ -159,7 +169,7 @@ fn spec(run: &FirmRun, repos: &[String], perms: &BTreeMap<String, String>) -> mi
     for (k, v) in perms {
         argv.extend(["--perm".into(), format!("{k}={v}")]);
     }
-    mint::Spec::new(&argv, None, None)
+    zapper_policy::mint::Spec::new(&argv, None, None)
 }
 
 fn rules(worker: &str, comment: &str) -> Vec<AnyRule> {
@@ -268,18 +278,25 @@ pub fn sync(d: &Core, run: &Arc<FirmRun>, worker: &str) {
             // App lacks, a repository it isn't installed on) is reported to
             // the worker instead of failing their first push.
             let (run, worker) = (run.clone(), worker.to_string());
-            let prewarm = move || {
-                match mint::resolve(&spec) {
+            let prewarm = async move {
+                match mint::resolve(&spec).await {
                     Ok(_) => revoke_at_github(&run, &worker, old_token),
                     Err(e) => failed(&run, &worker, &format!("{e:#}")),
                 };
             };
             match tokio::runtime::Handle::try_current() {
                 Ok(h) => {
-                    h.spawn_blocking(prewarm);
+                    h.spawn(prewarm);
                 }
                 Err(_) => {
-                    std::thread::spawn(prewarm);
+                    std::thread::spawn(move || {
+                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            rt.block_on(prewarm);
+                        }
+                    });
                 }
             }
         }
@@ -347,7 +364,7 @@ fn revoke_at_github(run: &Arc<FirmRun>, worker: &str, token: Option<String>) {
             json!({ "event": "github", "action": if result.is_ok() { "token revoked" } else { "token revoke failed" }, "worker": worker, "error": result.err().map(|e| format!("{e:#}")) }),
         );
     };
-    // Called from threads that aren't in the runtime (the mint's).
+    // Called from outside the runtime too (a test, a thread of its own).
     match tokio::runtime::Handle::try_current() {
         Ok(h) => {
             h.spawn(revoke);

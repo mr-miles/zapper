@@ -220,6 +220,7 @@ pub fn headers(data: &[u8]) {
         plaintext,
         &effects,
         &mut h,
+        &Default::default(),
     )
     .is_err()
     {

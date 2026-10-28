@@ -598,7 +598,7 @@ impl Session {
             .filter(|o| o.source != secret.source)
             .and_then(|o| o.source.mint_spec())
         {
-            zapper_policy::mint::forget(&spec);
+            crate::mint::forget(&spec);
         }
         self.config_event(format!("secret {name} set for session {}", self.id));
         Ok(())
@@ -610,7 +610,7 @@ impl Session {
             return false;
         };
         if let Some(spec) = old.source.mint_spec() {
-            zapper_policy::mint::forget(&spec);
+            crate::mint::forget(&spec);
         }
         self.config_event(format!("secret {name} removed from session {}", self.id));
         true
