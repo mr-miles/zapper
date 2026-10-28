@@ -26,7 +26,7 @@ Each office worker runs in a zapper session, and zapper assumes that whatever ru
 | Policy for each connection and, when inspected, each request | Host proxy | Yes |
 | Address checks: loopback, link-local, metadata and host addresses are unreachable, private ranges only if listed. The host resolves names and connects to the address it checked | Host proxy | Yes |
 | A TLS client's server name must equal the name the connection was decided on | Host proxy | Yes |
-| `proxy` secrets reach the guest as placeholders. Their values go into allowed requests to the secret's `hosts`, over TLS, or over plain HTTP if the secret sets `plaintext: true`, and are masked in the responses to them | Host proxy | Yes |
+| `proxy` secrets reach the guest as placeholders. Their values go into allowed requests to the secret's `hosts`, over TLS, or over plain HTTP if the secret sets `plaintext: true`, and are masked in the responses to them. `aws` secrets' keys sign allowed requests on the host; the guest holds a fake key | Host proxy | Yes |
 | An inspected request is judged on the path the upstream will act on (decoded and with dot segments resolved, and forwarded so), a path that upstreams may read differently is refused, and so is a request whose override header or parameter names another method ([network: connections](network.md#connections)) | Host proxy | Yes |
 | Each session has its own CA, kept in memory and trusted by that session's guest | Host | Yes |
 | Host directories are copied into per-session disks, so host files stay unchanged | Host | Yes |

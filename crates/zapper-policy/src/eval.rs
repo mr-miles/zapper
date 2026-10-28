@@ -311,6 +311,64 @@ mod tests {
     use super::*;
     use crate::Config;
 
+    /// Host patterns for one AWS service stop at that service, and no
+    /// pattern ending in a domain matches a look-alike that merely contains
+    /// it (the cases OneCLI tests for its AWS grants).
+    #[test]
+    fn aws_host_patterns_reach_only_what_they_name() {
+        // A whole-account secret: every AWS host, nothing else.
+        let all = "*.amazonaws.com";
+        for host in [
+            "s3.us-east-1.amazonaws.com",
+            "iam.amazonaws.com",
+            "S3.EU-WEST-2.AMAZONAWS.COM",
+            "sts.amazonaws.com.",
+        ] {
+            assert!(host_matches(all, host), "{host}");
+        }
+        for host in [
+            "s3.us-east-1.amazonaws.com.evil.test",
+            "amazonaws.com.evil.test",
+            "evilamazonaws.com",
+            "amazonaws.com",
+        ] {
+            assert!(!host_matches(all, host), "{host}");
+        }
+        // S3 alone, path-style and virtual-hosted: not its sibling services.
+        let s3 = ["s3.*.amazonaws.com", "*.s3.*.amazonaws.com"];
+        let any = |host: &str| s3.iter().any(|p| host_matches(p, host));
+        for host in [
+            "s3.us-east-1.amazonaws.com",
+            "bucket.s3.eu-west-2.amazonaws.com",
+            "s3.dualstack.us-east-1.amazonaws.com",
+        ] {
+            assert!(any(host), "{host}");
+        }
+        for host in [
+            "s3tables.us-east-1.amazonaws.com",
+            "s3-control.us-east-1.amazonaws.com",
+            "s3express-control.us-east-1.amazonaws.com",
+            "ec2.us-east-1.amazonaws.com",
+            "iam.amazonaws.com",
+            "sts.us-east-1.amazonaws.com",
+            "s3.us-east-1.amazonaws.com.evil.test",
+            "bucket.s3.us-east-1.amazonaws.com.evil.test",
+        ] {
+            assert!(!any(host), "{host}");
+        }
+        // The tempting `s3*` does swallow the siblings: what not to write.
+        assert!(host_matches(
+            "s3*.amazonaws.com",
+            "s3tables.us-east-1.amazonaws.com"
+        ));
+        // A secret's hosts match the same way.
+        let secret: crate::Secret =
+            serde_yaml::from_str("{ file: /x, mode: aws, hosts: ['s3.*.amazonaws.com'] }").unwrap();
+        assert!(secret.allows_host("s3.us-east-1.amazonaws.com"));
+        assert!(!secret.allows_host("s3tables.us-east-1.amazonaws.com"));
+        assert!(!secret.allows_host("s3.us-east-1.amazonaws.com.evil.test"));
+    }
+
     const CONFIG: &str = r#"
 secrets:
   gh: { value: "real-token", hosts: ["api.github.com"] }

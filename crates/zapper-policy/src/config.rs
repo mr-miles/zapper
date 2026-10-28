@@ -164,6 +164,12 @@ pub enum SecretMode {
     /// relays the session. Bound to `hosts` + `user` (+ optional `database`);
     /// reached by a database `protocol:` net rule. Proposal 07.
     DbAuth,
+    /// AWS credentials the proxy signs with (SigV4). The value is
+    /// credential_process JSON: `{"AccessKeyId", "SecretAccessKey",
+    /// "SessionToken"?}`. `{{secret:NAME}}` in the guest's env becomes a fake
+    /// access key id (`aws_key_id`), which the guest's SDK signs with; the
+    /// proxy re-signs allowed requests to `hosts` with the real keys.
+    Aws,
 }
 
 impl SecretMode {
@@ -966,6 +972,13 @@ impl Config {
                         errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
                     }
                 }
+                for s in r.set_headers.values().flat_map(|v| crate::secret_refs(v)) {
+                    if matches!(self.secrets.get(&s), Some(x) if x.mode == SecretMode::Aws) {
+                        errors.push(format!(
+                            "{scope}: rule {id}: aws secret {s} signs requests; it can't be a header's value"
+                        ));
+                    }
+                }
                 let dbauth = |n: &str| matches!(self.secrets.get(n), Some(s) if s.mode == SecretMode::DbAuth);
                 match r.db_relay() {
                     Some(proto) => {
@@ -1033,6 +1046,9 @@ impl Config {
                         }
                     }
                 }
+                SecretMode::Aws if s.hosts.is_empty() => errors.push(format!(
+                    "secret {name}: an aws secret needs hosts it may sign for (e.g. \"*.amazonaws.com\")"
+                )),
                 _ => {}
             }
             if s.mode != SecretMode::DbAuth
@@ -1041,6 +1057,16 @@ impl Config {
                 errors.push(format!(
                     "secret {name}: user/database/mechanism apply only to a dbauth secret"
                 ));
+            }
+        }
+        let mut key_ids: BTreeMap<String, &str> = BTreeMap::new();
+        for (name, s) in &self.secrets {
+            if s.mode == SecretMode::Aws {
+                if let Some(other) = key_ids.insert(crate::aws_key_id(name), name) {
+                    errors.push(format!(
+                        "secrets {other} and {name}: their fake AWS key ids collide; rename one"
+                    ));
+                }
             }
         }
         for name in self.profiles.keys() {
@@ -1245,6 +1271,34 @@ mod tests {
             !err("secrets:\n  gh: { command: [x], value: y, hosts: [h] }\n").is_empty(),
             "a secret has one source"
         );
+    }
+
+    #[test]
+    fn aws_secrets_are_validated() {
+        use super::Config;
+        let err = |y: &str| {
+            Config::from_yaml(y)
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default()
+        };
+        Config::from_yaml("secrets:\n  aws: { file: /x, mode: aws, hosts: ['*.amazonaws.com'] }\npolicy:\n  net:\n    - { host: '*.amazonaws.com', ports: [443], methods: [GET], secrets: [aws], action: allow }\n").unwrap();
+        assert!(
+            err("secrets:\n  aws: { file: /x, mode: aws }\n").contains("an aws secret needs hosts")
+        );
+        // It signs; it is never a header's value.
+        assert!(err("secrets:\n  aws: { file: /x, mode: aws, hosts: [h] }\npolicy:\n  net:\n    - { host: h, set_headers: { x-key: '{{secret:aws}}' }, action: allow }\n")
+            .contains("signs requests"));
+        // Fake key ids are 20 characters, and tell names apart.
+        let id = crate::aws_key_id("aws");
+        assert_eq!(id.len(), 20);
+        assert!(
+            crate::is_aws_fake_key_id(&id)
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        );
+        assert_ne!(id, crate::aws_key_id("aws2"));
     }
 
     #[test]

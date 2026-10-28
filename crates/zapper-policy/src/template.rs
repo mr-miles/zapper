@@ -3,6 +3,30 @@ pub fn placeholder(name: &str) -> String {
     format!("zapper-secret-{name}")
 }
 
+/// The fake AWS access key id an `aws` secret's guest signs with: 20
+/// characters, `ZAPPER` and fourteen derived from the name, so the proxy
+/// knows which secret a signature asks for.
+pub fn aws_key_id(name: &str) -> String {
+    // FNV-1a, 64 bits, in base 36: stable, and enough to tell names apart
+    // (collisions are refused by validation).
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut digits = Vec::new();
+    for _ in 0..14 {
+        digits.push(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"[(h % 36) as usize]);
+        h /= 36;
+    }
+    format!("ZAPPER{}", String::from_utf8(digits).unwrap())
+}
+
+/// Whether an access key id is one of zapper's fakes.
+pub fn is_aws_fake_key_id(id: &str) -> bool {
+    id.len() == 20 && id.starts_with("ZAPPER")
+}
+
 /// Names referenced as `{{secret:NAME}}` in a template.
 pub fn secret_refs(template: &str) -> Vec<String> {
     let mut out = Vec::new();

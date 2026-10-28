@@ -36,6 +36,8 @@ fn render_secrets(
                 String::new()
             })
         }
+        // The fake key the guest's SDK signs with; the proxy signs again.
+        Some(s) if s.mode == SecretMode::Aws => zapper_policy::aws_key_id(name),
         Some(_) => placeholder(name),
         None => {
             err.get_or_insert(anyhow!("unknown secret {name}"));
@@ -180,6 +182,26 @@ mod tests {
     use super::*;
     use crate::daemon::harness::MANAGED_SETTINGS;
     use serde_json::Value;
+
+    #[test]
+    fn an_aws_secret_is_its_fake_key_in_the_env() {
+        let config = Config::from_yaml("secrets:\n  aws: { value: '{}', mode: aws, hosts: [h] }\nprofiles:\n  c:\n    agent: { kind: claude-code, env: { AWS_ACCESS_KEY_ID: '{{secret:aws}}', AWS_SECRET_ACCESS_KEY: '{{secret:aws}}' } }\n").unwrap();
+        let profile = config.resolve("c").unwrap();
+        let spec = build(
+            &config,
+            &HashMap::new(),
+            &profile,
+            "s",
+            "",
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let id = zapper_policy::aws_key_id("aws");
+        assert_eq!(spec.env["AWS_ACCESS_KEY_ID"], id);
+        assert_eq!(spec.env["AWS_SECRET_ACCESS_KEY"], id);
+    }
 
     #[test]
     fn permission_mode_goes_to_managed_settings() {

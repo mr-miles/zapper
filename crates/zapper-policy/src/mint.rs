@@ -57,7 +57,18 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// `{"value", "expires_at"}` or a bare value that lives for `ttl`.
+fn rfc3339(t: &str, field: &str) -> Result<u64> {
+    Ok(
+        time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| anyhow!("{field} is not an RFC 3339 time"))?
+            .unix_timestamp()
+            .max(0) as u64,
+    )
+}
+
+/// `{"value", "expires_at"}`, AWS credential_process JSON (`AccessKeyId`,
+/// `SecretAccessKey`, `SessionToken`?, `Expiration`?: the value is that
+/// JSON, for an `aws` secret), or a bare value that lives for `ttl`.
 pub fn parse_output(text: &str, ttl: Duration, now: u64) -> Result<Minted> {
     let text = text.trim();
     if text.is_empty() {
@@ -66,15 +77,28 @@ pub fn parse_output(text: &str, ttl: Duration, now: u64) -> Result<Minted> {
     if text.starts_with('{') {
         let v: serde_json::Value = serde_json::from_str(text)
             .map_err(|_| anyhow!("the command's output is not valid JSON"))?;
+        if v.get("AccessKeyId").is_some() {
+            let field = |k: &str| v[k].as_str().filter(|s| !s.is_empty());
+            let (Some(id), Some(key)) = (field("AccessKeyId"), field("SecretAccessKey")) else {
+                bail!("the command's AWS credentials need AccessKeyId and SecretAccessKey");
+            };
+            let mut creds = serde_json::json!({ "AccessKeyId": id, "SecretAccessKey": key });
+            if let Some(t) = field("SessionToken") {
+                creds["SessionToken"] = t.into();
+            }
+            let expires = match field("Expiration") {
+                Some(t) => rfc3339(t, "Expiration")?,
+                None => now + ttl.as_secs(),
+            };
+            return Ok(Minted {
+                value: creds.to_string(),
+                expires,
+            });
+        }
         let value = v["value"].as_str().filter(|s| !s.is_empty());
         let value = value.ok_or_else(|| anyhow!("the command's JSON has no \"value\""))?;
         let expires = match v["expires_at"].as_str() {
-            Some(t) => {
-                time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339)
-                    .map_err(|_| anyhow!("expires_at is not an RFC 3339 time"))?
-                    .unix_timestamp()
-                    .max(0) as u64
-            }
+            Some(t) => rfc3339(t, "expires_at")?,
             None => now + ttl.as_secs(),
         };
         return Ok(Minted {
@@ -94,6 +118,38 @@ pub fn parse_output(text: &str, ttl: Duration, now: u64) -> Result<Minted> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aws_credential_process_output_is_a_value_that_expires() {
+        let m = parse_output(
+            r#"{"Version":1,"AccessKeyId":"ASIA1","SecretAccessKey":"sk","SessionToken":"tok","Expiration":"2030-01-01T00:00:00Z"}"#,
+            DEFAULT_TTL,
+            5,
+        )
+        .unwrap();
+        assert_eq!(m.expires, 1_893_456_000);
+        let v: serde_json::Value = serde_json::from_str(&m.value).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"AccessKeyId":"ASIA1","SecretAccessKey":"sk","SessionToken":"tok"})
+        );
+        // Long-lived keys live for the ttl; a missing half is an error that
+        // doesn't show the other.
+        let m = parse_output(
+            r#"{"AccessKeyId":"AKIA1","SecretAccessKey":"sk"}"#,
+            Duration::from_secs(60),
+            100,
+        )
+        .unwrap();
+        assert_eq!(m.expires, 160);
+        let e = parse_output(
+            r#"{"AccessKeyId":"AKIA1","SessionToken":"topsecret"}"#,
+            DEFAULT_TTL,
+            0,
+        )
+        .unwrap_err();
+        assert!(!format!("{e:#}").contains("topsecret"));
+    }
 
     #[test]
     fn output_is_json_or_a_bare_value() {

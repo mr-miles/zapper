@@ -537,3 +537,132 @@ async fn an_injected_secret_is_masked_in_the_response() {
     // The upstream did get the value.
     assert_eq!(seen.len(), "Bearer the-secret-value-123".len());
 }
+
+/// A plain-HTTP echo at `api.example:80` and an `aws` secret, `aws`, whose
+/// keys (with a session token) are the documentation's examples.
+fn aws_core(rules: &str) -> (TestCore, Arc<Session>) {
+    let creds = r#"{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","SessionToken":"the-session-token-1"}"#;
+    let t = TestCore::new(&format!(
+        "secrets:\n  aws: {{ value: '{creds}', mode: aws, hosts: [api.example], plaintext: true }}\nprofiles:\n  web:\n    policy:\n      net:\n{rules}"
+    ));
+    let s = session(&t);
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "api.example".into(),
+            port: 80,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Handler {
+                tls: false,
+                handler: Arc::new(HttpEcho),
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    (t, s)
+}
+
+/// What an SDK holding the fake key sends.
+fn fake_signed() -> Vec<(&'static str, String)> {
+    let fake = zapper_policy::aws_key_id("aws");
+    vec![
+        ("x-amz-date", "20991231T000000Z".into()),
+        ("x-amz-content-sha256", "UNSIGNED-PAYLOAD".into()),
+        (
+            "authorization",
+            format!("AWS4-HMAC-SHA256 Credential={fake}/20991231/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}", "0".repeat(64)),
+        ),
+    ]
+}
+
+/// A request the guest signed with the fake key reaches AWS signed with the
+/// real one, the token added; the guest sees neither.
+#[tokio::test]
+async fn a_request_signed_with_the_fake_aws_key_is_signed_again() {
+    let (t, s) = aws_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], secrets: [aws] }\n");
+    let (status, headers, body) = request(&t, &s, Method::GET, "/bucket/key", &fake_signed()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Credential=AKIAIOSFODNN7EXAMPLE/"), "{body}");
+    assert!(
+        body.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"),
+        "{body}"
+    );
+    assert!(!body.contains(&"0".repeat(64)), "{body}");
+    assert!(!body.contains("ZAPPER"), "{body}");
+    // The token was sent, and masked on the way back.
+    assert!(
+        body.contains("x-amz-security-token: *******************"),
+        "{body}"
+    );
+    assert!(!headers["x-seen-authorization"]
+        .to_str()
+        .unwrap()
+        .contains("ZAPPER"));
+    let ev = net_event(&t, &s, 0).await;
+    assert!(ev["secrets"].to_string().contains("aws"), "{ev}");
+}
+
+/// The fake key signs nothing a rule doesn't list it for, and nowhere its
+/// secret may not go.
+#[tokio::test]
+async fn the_fake_aws_key_signs_only_where_a_rule_lists_its_secret() {
+    let (t, s) =
+        aws_core("        - { action: allow, host: api.example, ports: [80], methods: [GET] }\n");
+    let (status, _, body) = request(&t, &s, Method::GET, "/bucket/key", &fake_signed()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.contains("no rule allowing this request lists"),
+        "{body}"
+    );
+    // A request signed with keys of the guest's own is left as it is.
+    let (t, s) = aws_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], secrets: [aws] }\n");
+    let own = vec![(
+        "authorization",
+        "AWS4-HMAC-SHA256 Credential=AKIAOWNKEY000000000/20991231/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc".to_string(),
+    )];
+    let (status, _, body) = request(&t, &s, Method::GET, "/x", &own).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Credential=AKIAOWNKEY000000000/"), "{body}");
+}
+
+/// A rule broader than the secret's hosts doesn't widen where it signs: a
+/// sibling host the rule allows is refused the real keys.
+#[tokio::test]
+async fn the_fake_aws_key_signs_only_for_the_secrets_hosts() {
+    let (t, s) = aws_core("        - { action: allow, host: \"*.example\", ports: [80], methods: [GET], secrets: [aws] }\n");
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "sibling.example".into(),
+            port: 80,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Handler {
+                tls: false,
+                handler: Arc::new(HttpEcho),
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    let io = dial(&t, &s, "sibling.example", 80);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("http://sibling.example/x");
+    for (k, v) in fake_signed() {
+        req = req.header(k, v);
+    }
+    let resp = sender
+        .send_request(req.body(Empty::<Bytes>::new()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let ev = net_event(&t, &s, 0).await;
+    assert!(
+        ev["error"]
+            .as_str()
+            .unwrap()
+            .contains("may not sign for sibling.example"),
+        "{ev}"
+    );
+}

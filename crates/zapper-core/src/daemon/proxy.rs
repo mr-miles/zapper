@@ -41,6 +41,7 @@ mod inspect;
 // Re-exported for the fuzz targets (crate::fuzz), which exercise these parsers.
 #[cfg(feature = "fuzz")]
 pub(crate) use inspect::{clean_headers, inject_with, upstream_uri};
+mod aws;
 mod relay;
 mod sanitize;
 
