@@ -504,11 +504,15 @@ where
     F: FnOnce(hyper::http::request::Parts, Body, String) -> Fut,
     Fut: std::future::Future<Output = Result<Response<Incoming>, (StatusCode, String)>>,
 {
-    let path = req
+    let sent = req
         .uri()
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
+    // Rules judge the path the upstream will act on, and that is the path
+    // forwarded; one whose meaning depends on the upstream is refused.
+    let normalized = super::sanitize::normalize_path(&sent);
+    let path = normalized.clone().unwrap_or_else(|_| sent.clone());
     let net = NetRequest {
         host: host.clone(),
         port,
@@ -524,6 +528,27 @@ where
         Some(&path),
         httplog::headers(req.headers()),
     );
+    let refused = match normalized {
+        Err(why) => Some((StatusCode::BAD_REQUEST, format!("{why}: {sent}"))),
+        Ok(_) => super::sanitize::method_override(req.method().as_str(), &path, req.headers())
+            .map(|why| (StatusCode::FORBIDDEN, why)),
+    };
+    if let Some((status, why)) = refused {
+        log(
+            d,
+            s,
+            NetLog {
+                req: &net,
+                verdict: None,
+                inspected: true,
+                status: None,
+                secrets: vec![],
+                error: Some(why.clone()),
+            },
+        );
+        note_failure(s, &rec, status.as_u16(), Some(why.clone()));
+        return text(status, why);
+    }
     let v = decide(d, s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
@@ -539,6 +564,14 @@ where
         Ok(i) => (i.names, i.values),
         Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };
+    // A response carrying a secret's value back must be readable to be
+    // masked: ask for it uncompressed.
+    if !values.is_empty() {
+        parts.headers.insert(
+            hyper::header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+    }
     let body = httplog::Tee::wrap(
         body.boxed(),
         rec.clone(),
