@@ -6,7 +6,7 @@
 //! helpers directly; `stream()` and `handle()` enter it via mitm/plain/
 //! plain_inspected.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 
@@ -316,6 +316,7 @@ pub(crate) struct Injected {
     pub(crate) values: Vec<String>,
 }
 
+#[cfg(test)]
 pub(super) fn inject(
     d: &Daemon,
     host: &str,
@@ -323,12 +324,41 @@ pub(super) fn inject(
     effects: &NetEffects,
     headers: &mut hyper::HeaderMap,
 ) -> Result<Injected, String> {
-    inject_with(&d.config.read().unwrap(), host, plaintext, effects, headers)
+    inject_with(
+        &d.config.read().unwrap(),
+        &BTreeMap::new(),
+        host,
+        plaintext,
+        effects,
+        headers,
+    )
 }
 
-/// `inject` with the config given.
+/// `inject` for a session's request: the config's secrets, then the
+/// session's own.
+pub(super) fn inject_for(
+    d: &Daemon,
+    s: &Session,
+    host: &str,
+    plaintext: bool,
+    effects: &NetEffects,
+    headers: &mut hyper::HeaderMap,
+) -> Result<Injected, String> {
+    let own = s.secrets.read().unwrap().clone();
+    inject_with(
+        &d.config.read().unwrap(),
+        &own,
+        host,
+        plaintext,
+        effects,
+        headers,
+    )
+}
+
+/// `inject` with the config and the session's secrets given.
 pub(crate) fn inject_with(
     config: &zapper_policy::Config,
+    own: &BTreeMap<String, zapper_policy::Secret>,
     host: &str,
     plaintext: bool,
     effects: &NetEffects,
@@ -340,6 +370,7 @@ pub(crate) fn inject_with(
         let secret = config
             .secrets
             .get(name)
+            .or_else(|| own.get(name))
             .ok_or_else(|| format!("unknown secret {name}"))?;
         if !secret.allows_host(host) {
             return Err(format!("secret {name} may not be sent to {host}"));
@@ -529,7 +560,7 @@ where
     }
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, default_port);
-    let (used, values) = match inject(d, &host, plaintext, &v.effects, &mut parts.headers) {
+    let (used, values) = match inject_for(d, s, &host, plaintext, &v.effects, &mut parts.headers) {
         Ok(i) => (i.names, i.values),
         Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
     };

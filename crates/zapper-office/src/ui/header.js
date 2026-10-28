@@ -12,6 +12,15 @@ function buildHeader() {
     b.dataset.t = t;
     nav.append(b);
   }
+  syncTabs();
+}
+// The Git tab browses the firm's own repositories: none in the config, no tab.
+function tabShown(t) {
+  return !(t === 'git' && S.info && !S.info.local_git);
+}
+function syncTabs() {
+  for (const b of $('tabs').querySelectorAll('button')) b.classList.toggle('hidden', !tabShown(b.dataset.t));
+  if (!tabShown(S.tab)) showTab('overview');
 }
 // ───────────────────────── the scenario's next step ─────────────────────────
 //
@@ -236,6 +245,7 @@ function renderFooter() {
 // read once for a replay.
 async function footCommits() {
   const run = S.run;
+  if (!tabShown('git')) return;
   if (FOOT.busy || (FOOT.logRun === run && (S.mode === 'replay' || Date.now() - FOOT.logAt < 15000))) return;
   FOOT.busy = true; FOOT.logAt = Date.now();
   let log = [];

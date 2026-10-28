@@ -35,6 +35,10 @@ pub enum FirmCmd {
         /// worker reads.
         #[arg(long, value_name = "FILE")]
         articles: Option<std::path::PathBuf>,
+        /// A GitHub repository to work in, OWNER/NAME; repeat for more (a
+        /// firm with `git.github`), instead of all its App reaches.
+        #[arg(long = "repo", value_name = "OWNER/NAME")]
+        repo: Vec<String>,
         /// Security's share of every grant, from 0 to 1.
         #[arg(long)]
         security_share: Option<f64>,
@@ -697,6 +701,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             seed,
             ceo_prompt,
             articles,
+            repo,
             security_share,
             max_concurrent,
             daily_turns,
@@ -729,6 +734,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
                 "company": company, "ceo": ceo, "seed": seed, "ceo_prompt": read(&ceo_prompt)?, "articles": read(&articles)?,
                 "security_share": security_share, "max_concurrent": max_concurrent, "daily_turns": daily_turns,
                 "scenario": scenario, "task": read(&task)?, "attachments": attachments,
+                "repos": (!repo.is_empty()).then_some(repo),
             });
             let v = c
                 .json(

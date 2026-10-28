@@ -17,6 +17,7 @@ zapper-api = { path = "../zapper-api" }
 zapper-office = { path = "../zapper-office", optional = true }
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }
+zapper-github = { path = "../zapper-github" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

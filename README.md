@@ -46,7 +46,7 @@ On Linux with KVM, from a fresh clone (zapper uses `config/zapper.yaml` there):
 make deps                     # Firecracker and a guest kernel into ~/.local/share/zapper
 make install                  # zapper, zapper-agent and zapper-inspect into ~/.local/bin
 make image                    # the base Ubuntu image
-make image IMAGE=office       # Claude Code and pi (pinned), git, kubectl, podman, a headless browser
+make image IMAGE=office       # Claude Code and pi (pinned), git, gh, kubectl, podman, a headless browser
 claude setup-token            # anywhere with a browser; store the token: docs/configuration.md#model-credentials-claude-and-openrouter
 zapper check                  # each line "ok", or the command that fixes it
 zapper serve                  # the daemon; prints the UI URL

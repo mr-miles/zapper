@@ -46,6 +46,8 @@ pub struct Facilities {
     pub kubeconfig: Mutex<Option<String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
+    /// Per worker, the GitHub token's secret and rules in their session.
+    pub github: Mutex<HashMap<String, super::github::Applied>>,
     product: Mutex<Option<JoinHandle<()>>>,
     dashboard: Mutex<Option<JoinHandle<()>>>,
     /// The token the board signs in to the dashboard with.
@@ -127,7 +129,7 @@ pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
         &format!("firm {}", run.firm),
     )?;
     run.facility.services.lock().unwrap().push(id);
-    if run.config.git.is_some() {
+    if run.config.git_internal() {
         let handler = Arc::new(GitServer {
             run: Arc::downgrade(run),
         });
@@ -965,6 +967,12 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .iter()
             .map(|r| format!("https://git.{d}/{r}.git"))
             .collect(),
+        github: run
+            .config
+            .github_repos()
+            .iter()
+            .map(|r| format!("https://github.com/{r}.git"))
+            .collect(),
         kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
         product: cluster.then(|| format!("http://apps.{d}")),
     }
@@ -980,6 +988,24 @@ pub fn credentials_for(
     // The kubeconfig comes with a cluster grant (cluster_access); the git
     // password is the worker's identity, and their grant decides the rest.
     let mut files = Vec::new();
+    if run.config.git_github() {
+        // No credential here: the proxy sets the worker's own token on
+        // their requests to GitHub. `gh` won't run without one configured,
+        // so it is given a placeholder that is never sent.
+        let d = &run.domain;
+        files.push(GuestFile {
+            path: format!("{home}/.gitconfig"),
+            content: format!("[user]\n\tname = {worker}\n\temail = {worker}@{d}\n[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n"),
+            mode: 0o644,
+            user_owned: true,
+        });
+        files.push(GuestFile {
+            path: format!("{home}/.config/gh/hosts.yml"),
+            content: format!("github.com:\n    user: {worker}\n    oauth_token: replaced-by-the-proxy\n    git_protocol: https\n"),
+            mode: 0o600,
+            user_owned: true,
+        });
+    }
     if let Some(pw) = run.facility.git_passwords.lock().unwrap().get(worker) {
         let d = &run.domain;
         files.push(GuestFile {

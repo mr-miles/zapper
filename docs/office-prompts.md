@@ -54,6 +54,7 @@ hire: "You can hire, from your own budget: {{roles}}."}}
 
 {{services: one line per firm service, e.g.
 "Git: https://git.{{domain}}/product.git (with a grant: credentials_request(resource: git))"
+"GitHub repositories: https://github.com/{{owner}}/{{name}}.git, … (one at a time, with a grant: credentials_request(resource: git, repo: <owner>/<name>, level: <level>); the levels: {{each level and its permissions}}). Work reaches main only through a pull request, which the board merges; never push main or change .github/workflows (the office-git skill)"
 "Kubernetes: https://cluster.{{domain}}:6443, namespaces dev and prod (with a grant, kubectl is configured for you)"
 "The product: http://apps.{{domain}} (the cluster's ingress)"}}
 

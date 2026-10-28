@@ -70,6 +70,7 @@ secrets:
   ci:      { file: ~/.config/zapper/ci.token, hosts: [ci.internal.example], plaintext: true }
   s3:      { file: ~/.config/zapper/s3-session-key, mode: guest }
   tls_key: { file: ~/.config/zapper/client.key, mode: guest }
+  app:     { command: [zapper, mint, github-app, --app, acme.yaml, --repo, acme/api, --perm, contents=read], hosts: [api.github.com] }
 ```
 
 `mode` sets how the secret reaches the workload:
@@ -88,6 +89,8 @@ A `proxy` secret appears in the guest as `zapper-secret-<name>`. The proxy repla
 - the connection uses TLS, or the secret sets `plaintext: true`
 
 Values are read each time they're used, so a rotated file or variable takes effect without a restart.
+
+A `command` secret is minted by a command on the host, for tokens that expire, such as a GitHub App's. The command prints the value, or `{"value": ..., "expires_at": RFC 3339}`, and runs with `PATH`, `HOME`, `XDG_CONFIG_HOME` and `ZAPPER_*` only (`zapper` as the first word is this zapper). Its value is kept until it nears its expiry (or for `ttl_secs`, default 300, when it prints none), and minted again ahead of it in the background while the old one is still served; once expired, requests wait for one new mint and fail if it fails. `timeout_secs` bounds each run (default 30). The command's output never appears in an error. The office gives each worker of a firm on GitHub such a secret of their own session ([office: a firm on GitHub](office.md#a-firm-on-github)).
 
 ## Approvals
 

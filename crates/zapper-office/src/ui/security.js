@@ -167,6 +167,7 @@ function renderAccess(M) {
       miniAvatar(q.worker), el('b', {}, cap(q.worker)), el('span', {}, 'asks ' + q.level + ' on ' + q.resource), el('span', { class: 'muted small' }, q.id + ', ' + ago(q.ts)),
       pill('waiting', q.decider ? 'waiting for ' + cap(q.decider) + ' · you may decide it' : 'waiting for you'),
       can ? el('span', { class: 'bud-act' }, el('button', { class: 'btn ok small', type: 'button', onclick: decideCred(q, true) }, 'Grant'), el('button', { class: 'btn small', type: 'button', onclick: decideCred(q, false) }, 'Deny')) : ''),
+    q.detail ? el('div', { class: 'small', style: 'margin-top:4px' }, el('b', {}, 'Allows: '), q.detail) : '',
     el('div', { class: 'small', style: 'margin-top:4px' }, el('b', {}, 'Reason: '), q.reason));
   const cell = (w, r) => {
     const g = grantOf(M, w.name, r);

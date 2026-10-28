@@ -9,7 +9,7 @@
 | `make deps` | Download Firecracker, verifying its checksum, and the guest kernel into `~/.local/share/zapper` |
 | `make build` | Release build of the static musl `zapper-agent`, `zapper` and `zapper-inspect`, in `target/release` |
 | `make install` | Install the three into `~/.local/bin` (set `PREFIX` for another place) |
-| `make image [IMAGE=name]` | Build an image from a recipe in the Makefile: `office` (office workers: Claude Code and pi at pinned versions, git, kubectl, podman, a headless browser), `k3s` (a firm's cluster), and `ubuntu-26.04` (default; the base profiles) |
+| `make image [IMAGE=name]` | Build an image from a recipe in the Makefile: `office` (office workers: Claude Code and pi at pinned versions, git, gh, kubectl, podman, a headless browser), `k3s` (a firm's cluster), and `ubuntu-26.04` (default; the base profiles) |
 | `make kernel [KERNEL=k8s]` | Build a guest kernel from the Firecracker config plus `config/kernel/<name>.config`, in a container; `k8s` is the cluster's |
 | `make check` | `zapper check` |
 | `make test` | Unit tests |
@@ -40,15 +40,18 @@ Setting up and running the daemon:
 | `zapper init [example\|empty]` | Write a starter config to `--config` (outside a checkout, `~/.config/zapper/zapper.yaml`) if it doesn't exist yet. `example` (the default): the repository's full config, and the default skills of The Office's workers to `~/.config/zapper/skills` (those already there stay; a zapper built without the office writes none). `empty`: only the daemon defaults `serve` needs — no profiles, policy or skills |
 | `zapper check` | Report missing prerequisites, each with the command that fixes it (a missing or invalid config among them) |
 | `zapper serve` | Run the daemon; prints the UI URL. Requires a config file at `--config` (or the default path); if none exists it errors and points at `zapper init` |
+| `zapper github setup --org ORG\|--user LOGIN [--name NAME] [--with PERMS] [--public] [--port N] [--credentials FILE]` | Create a GitHub App for the account if it has none (through GitHub's manifest flow in your browser), and make sure it is installed there; writes its credentials to `~/.config/zapper/github-apps/<account>.yaml` (0600), never overwriting one. `--with` also gives it write on `checks`, `statuses`, `actions` or `workflows`; `--credentials` adopts an App made elsewhere. For a [firm on GitHub](office.md#a-firm-on-github) |
+| `zapper github status --org ORG\|--user LOGIN` | The account's App: its installation, permissions and the repositories it reaches |
+| `zapper mint github-app --app FILE --repo OWNER/NAME… --perm NAME=LEVEL…` | Print a token for those repositories with exactly those permissions, from the App in `FILE` (a name in `~/.config/zapper/github-apps`), as `{"value", "expires_at"}`: what a firm's `command` secrets run. Repeat `--repo` and `--perm`; every repository gets every permission |
 
 The office ([office](office.md)), as the board:
 
 | Command | Purpose |
 |---|---|
 | `zapper firm ls` | Firms and their runs' states |
-| `zapper firm credentials FIRM [grant WORKER RESOURCE LEVEL \| approve REQUEST \| deny REQUEST \| revoke WORKER RESOURCE] [--level L] [--expires 8h] [--note TEXT]` | Grants and credential requests; or the board grants, decides or revokes (resources: `git`, `cluster`, `drive:<space>`) |
+| `zapper firm credentials FIRM [grant WORKER RESOURCE LEVEL \| approve REQUEST \| deny REQUEST \| revoke WORKER RESOURCE] [--level L] [--expires 8h] [--note TEXT]` | Grants and credential requests; or the board grants, decides or revokes (resources: `git`, `git:OWNER/NAME` in a firm on GitHub at one of its levels, `cluster`, `drive:<space>`) |
 | `zapper firm contracts FIRM` | The run's contracts: hirer, contractor, state, offered, quoted and agreed budgets, how each ended |
-| `zapper firm up FIRM [--company NAME] [--ceo NAME] [--seed TOKENS] [--ceo-prompt FILE] [--articles FILE] [--security-share F] [--max-concurrent N] [--daily-turns N] [--scenario NAME] [--task FILE [--attach FILE]…]` / `zapper firm down FIRM` | Start a fresh run (facilities, then the CEO, idle; the CEO holds security until they hire an officer), with the board's parameters and charter terms for this run, optionally a [scenario](office.md#scenarios), and optionally the board's task (`--task`: its first line the subject, the rest the message; `--attach` adds files, up to 10 and 5 MiB together, put on the shared drive as the board's and attached to it), sent to the CEO as the first assignment once the run is up / stop it; the run stays on disk |
+| `zapper firm up FIRM [--company NAME] [--ceo NAME] [--seed TOKENS] [--ceo-prompt FILE] [--articles FILE] [--security-share F] [--max-concurrent N] [--daily-turns N] [--scenario NAME] [--repo OWNER/NAME…] [--task FILE [--attach FILE]…]` / `zapper firm down FIRM` | Start a fresh run (facilities, then the CEO, idle; in a firm on GitHub, the repositories its App reaches, or those `--repo` names; the CEO holds security until they hire an officer), with the board's parameters and charter terms for this run, optionally a [scenario](office.md#scenarios), and optionally the board's task (`--task`: its first line the subject, the rest the message; `--attach` adds files, up to 10 and 5 MiB together, put on the shared drive as the board's and attached to it), sent to the CEO as the first assignment once the run is up / stop it; the run stays on disk |
 | `zapper firm scenarios FIRM` | The firm's scenarios: hire slots with extra instructions, and the board's scripted actions |
 | `zapper firm pause FIRM` / `zapper firm resume FIRM` | Stop starting turns / start again |
 | `zapper firm status FIRM` | Workers' states, what they are doing, mail and desks, turns and tokens today |

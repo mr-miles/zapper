@@ -9,6 +9,7 @@ license.workspace = true
 zapper-core = { path = "../zapper-core" }
 zapper-runs = { path = "../zapper-runs" }
 zapper-policy = { path = "../zapper-policy" }
+zapper-github = { path = "../zapper-github" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

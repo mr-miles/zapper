@@ -348,6 +348,10 @@ pub struct Session {
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
     pub(crate) rules: Rules,
+    /// Secrets only this session's rules can use (a firm worker's GitHub
+    /// token). Not in the config, so `config save` never writes them and no
+    /// other session can name them. Not saved.
+    pub(crate) secrets: RwLock<BTreeMap<String, zapper_policy::Secret>>,
     /// The live VM, its control channel and lifecycle status while it runs.
     pub(crate) runtime: GuestRuntime,
     pub(crate) dir: SessionDir,
@@ -560,6 +564,71 @@ impl Session {
             Scope::Session(self.id.clone())
         ));
         Some(rule)
+    }
+
+    /// Registers a `proxy` secret for this session's rules alone: the value
+    /// stays on the host and goes only to the secret's `hosts`, in requests
+    /// a rule of this session lists it for. Replaces a session secret of the
+    /// same name. A name the config already has is refused, so a session can
+    /// never stand in for a global secret.
+    pub fn put_secret(&self, name: &str, secret: zapper_policy::Secret) -> Result<()> {
+        let valid = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !valid {
+            bail!("secret name {name:?}: lowercase letters, digits and dashes");
+        }
+        if secret.mode != zapper_policy::SecretMode::Proxy || secret.hosts.is_empty() {
+            bail!("a session secret is a proxy secret with hosts it may be sent to");
+        }
+        if let Some(d) = self.daemon.upgrade() {
+            if d.config.read().unwrap().secrets.contains_key(name) {
+                bail!("secret {name} is in the config; a session secret can't take its name");
+            }
+        }
+        let old = self
+            .secrets
+            .write()
+            .unwrap()
+            .insert(name.to_string(), secret.clone());
+        // A replaced command is not run again for its old value.
+        if let Some(spec) = old
+            .filter(|o| o.source != secret.source)
+            .and_then(|o| o.source.mint_spec())
+        {
+            zapper_policy::mint::forget(&spec);
+        }
+        self.config_event(format!("secret {name} set for session {}", self.id));
+        Ok(())
+    }
+
+    /// Removes a session secret, and what was minted for it.
+    pub fn remove_secret(&self, name: &str) -> bool {
+        let Some(old) = self.secrets.write().unwrap().remove(name) else {
+            return false;
+        };
+        if let Some(spec) = old.source.mint_spec() {
+            zapper_policy::mint::forget(&spec);
+        }
+        self.config_event(format!("secret {name} removed from session {}", self.id));
+        true
+    }
+
+    /// The source of a session secret: where its value comes from, not the
+    /// value.
+    pub fn secret_source(&self, name: &str) -> Option<zapper_policy::SecretSource> {
+        self.secrets
+            .read()
+            .unwrap()
+            .get(name)
+            .map(|s| s.source.clone())
+    }
+
+    /// The names of the session's own secrets (never their values).
+    pub fn secret_names(&self) -> Vec<String> {
+        self.secrets.read().unwrap().keys().cloned().collect()
     }
 
     fn config_event(&self, change: String) {

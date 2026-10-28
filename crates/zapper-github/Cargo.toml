@@ -1,0 +1,28 @@
+[package]
+name = "zapper-github"
+description = "GitHub App credentials, installation lookup and scoped installation tokens, for zapper's GitHub-backed repositories"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+base64 = "0.22"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["net", "time", "rt", "io-util", "sync", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+tokio = { version = "1", features = ["full"] }
