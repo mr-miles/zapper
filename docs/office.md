@@ -36,7 +36,7 @@ firms:
     board: { name: Board }                 # the operator; mail to `board` lands in the UI
     budget: { daily_turns: 400, max_concurrent: 3, seed: 1000000, security_share: 0.2 }   # a run budget: see the workforce
     git: {}                                # an empty repository per run at https://git.acme.internal/product.git; repos: [a, b] for several
-                                           # or github: { config: acme.yaml }, repositories on GitHub (a firm on GitHub, below)
+                                           # or remote: { github: { config: acme.yaml } } and dir: (a firm on GitHub, below)
     product_port: 0.0.0.0:8080             # browsers on the LAN → the cluster's ingress; 127.0.0.1:8080 for this machine only
     facilities:
       cluster: { kind: k3s, profile: office-k3s }   # image k3s, kernel vmlinux-6.1-k8s
@@ -414,7 +414,6 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 | `git:<repo>`, one per repository (`git` names the repository of a firm that has one) | clone and fetch | push branches | also `main`, branches under `main/`, and tags | the daemon's git handler (the grant on every request) and a `pre-receive` hook in the repository, which only the daemon writes |
 | `cluster` | view `dev` | deploy to `dev` | also `prod` | Kubernetes RBAC: a service account per worker in `zapper-workers`, RoleBindings to `view`, `edit` and `admin`, and a token in the worker's `~/.kube/config` |
 | `drive:<space>` | list and fetch | also publish | — | the daemon's drive operations |
-| `git:<owner>/<name>`, in a [firm on GitHub](#a-firm-on-github) | one of the firm's GitHub levels, by name (`read`, `write`, …) | | | GitHub: a token minted for that repository with that level's permissions, which the proxy puts into the worker's requests |
 
 - **Policy owners**: the security officers decide, with the CEO above them. A request goes to an officer other than the requester. Requests for `admin` on git or the cluster, those an officer hands up (`credentials_escalate`), and an officer's own go to the CEO. The CEO's own go to the board. Nobody decides their own request. The CEO and the officers hold admin on everything (write on every space; on GitHub, the level `read` and no more) for as long as they hold the role; a hired officer gets it when cleared.
 - **Everyone else starts with nothing.** There are no defaults by role: every grant comes from a request with a reason (`credentials_request(resource, level, spaces?, reason)`), and the decision comes by mail. The board can also grant and revoke directly (`zapper firm credentials`, or the Security tab).
@@ -438,7 +437,6 @@ Facilities are reached by name under the firm's `domain`, through the same proxy
 | Name | Port | What | Who reaches it |
 |---|---|---|---|
 | `git.acme.internal` | 443 | The firm's git repositories, served by the daemon | workers with a grant on one of them (the server checks the repository's own) |
-| `github.com`, `api.github.com` | 443 | A firm on GitHub: git, the REST API and GraphQL (`gh`) | workers with a GitHub grant, with their token added by the proxy |
 | `cluster.acme.internal` | 6443 | The Kubernetes API | workers with a cluster grant |
 | `apps.acme.internal`, `*.apps.acme.internal` | 80, 443 | The cluster's ingress load balancer: the product | everyone |
 
@@ -467,27 +465,23 @@ A bare repository per name in `git.repos` (`product` if unset, with `git: {}`) i
 
 ### A firm on GitHub
 
-A firm can work in repositories on GitHub instead, reached through a GitHub App of yours; nothing in the VMs holds a GitHub credential. [examples/github-firm](../examples/github-firm/README.md) walks through one.
+A firm's repositories can have a remote on GitHub, reached through a GitHub App of yours. Agents still work only with the firm's own git server, with the same grants; the daemon is GitHub's only client, and nothing in the VMs holds a GitHub credential or runs `gh`. [examples/github-firm](../examples/github-firm/README.md) walks through one.
 
 ```yaml
     git:
-      github: { config: acme.yaml }        # the App's credentials file in ~/.config/zapper/github-apps
-    credentials:
-      github:
-        levels:                            # name → the App's permissions; one must be `read`
-          read:  { contents: read, pull_requests: read, issues: read, actions: read, checks: read, statuses: read, artifact_metadata: read }
-          write: { contents: write, pull_requests: write, issues: write, actions: read, checks: read, statuses: read, artifact_metadata: read }
+      remote: { github: { config: acme.yaml } }   # the App's credentials file in ~/.config/zapper/github-apps
+      dir: ~/.local/share/zapper/repos/acme        # a bare repository per subdirectory, kept across runs
+      local: [kb]                                  # main merged on the firm's server and pushed out; every other main is GitHub's
 ```
 
-- **The App**: `zapper github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper github status` shows its installation, permissions and repositories. The config is checked when it loads: `config` is a plain file name, and the levels are lowercase names of permissions at `read`, `write` or `admin`.
-- **The repositories**: when a run starts, the account is the one the App is installed on (installed on none or several, the run doesn't start), and the repositories are every one it reaches there, as GitHub spells them; `zapper firm up --repo OWNER/NAME` names some instead. A run may have none. Install the App on the repositories agents should reach, and no more: at most 500, the most one token can name.
-- **Levels in place of read, write and admin**: a GitHub repository is granted at one of the firm's levels, in the same `level` field as any grant (`credentials_request(resource: git, repo: owner/name, level: write)`), which the request shows the decider with its permissions. A level is granted as asked or denied, never lowered. Security officers decide every level, as any request, escalating to the CEO and the board; a background check may grant one. Another level on the repository a worker holds is asked for like a new grant, and replaces it.
-- **One repository per worker**: a worker holds one GitHub repository at one level, and their token is for that alone; work in another repository goes to a worker for it. The CEO and the officers hold `read` on every repository, on one token, and nothing more, since a higher level would be on that token for every repository.
-- **Tokens**: a grant becomes a `command` secret of the worker's session (`gh-<worker>`) that runs `zapper mint github-app` for that repository and level's permissions ([policy: secrets](policy.md#secrets)), and two rules in their layer that set `Authorization` on every request to `github.com` and `api.github.com`, replacing what the guest sent. Tokens last an hour and are minted again ahead of it. The token is the boundary, not the rules' paths: GraphQL has one URL, and `gh` needs it. It is minted as soon as the grant is made, so a refusal (a permission the App lacks) reaches the worker by mail at once. A changed grant mints a new token and revokes the old one at GitHub; a grant taken away removes the secret and rules and revokes the token. When the run stops, every token it minted is revoked at GitHub.
-- **In the VMs**: `git` is configured for `https://github.com`, and `gh` has a placeholder login and `GITHUB_TOKEN` (`replaced-by-the-proxy`), since it won't start without a token; the proxy replaces the `Authorization` header they make with the worker's real token.
-- **Work goes through pull requests, and the board merges them**: protect `main` with a branch ruleset on GitHub (require a pull request). The `office-git` skill has workers work on a branch, open a pull request with `gh pr create`, watch its checks with `gh pr checks --watch` until they pass, and hand it to the board to merge. Nobody pushes `main`. No level has `workflows` (GitHub accepts it only as write), and changes to GitHub Actions workflows are the board's: a worker sends the board the patch.
-- The UI's Git tab shows only the firm's own repositories, so a firm on GitHub has none: the code, its history and pull requests are on GitHub. The Security tab shows each worker's level on each repository, and a request's permissions.
-
+- **The App**: `zapper github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper github status` shows its installation, permissions and repositories.
+- **The repositories** are every one the App is installed on, by their names there (`zapper firm up --repo NAME` names some instead). Choosing them is choosing what to install the App on; a repository that should be local-main, such as `kb`, is created on GitHub once and the App installed on it. They live in `git.dir`: at each run's start the daemon clones a repository that isn't there and fetches one that is, and moves a subdirectory the App no longer reaches to `git.dir/archive/`, never deleting it.
+- **`main` has one source of truth per repository**, so it only flows one way:
+  - **GitHub's** (the default, for code): the board merges pull requests in GitHub's UI, so CI runs, and the daemon fetches `main` back (it looks every minute). On the firm's server nobody pushes `main`, whatever their grant.
+  - **The firm's** (`git.local`): merged on the firm's server by whoever holds `admin`, as without a remote, and pushed to GitHub after each update, fast-forward only. If GitHub's `main` changed by another route, the daemon stops pushing and tells the board.
+- **Pull requests through the daemon**: a worker pushes a branch to the firm's server and calls `publish_branch(repo, branch, title, body)` (with `write` on the repository). The daemon checks the branch is based on the tip of `main` and changes nothing under `.github/workflows/` (those changes are the board's), pushes it to GitHub as `<worker>/<branch>`, and opens a pull request naming its author, or updates the one open for it. It mails the author when the checks finish, when the board reviews or comments, and when it merges or closes it; `pr_status` gives the checks, the end of a failing job's log, and the reviews and comments on demand.
+- **Tokens**: the daemon mints its own, for one repository at a time, with `zapper mint github-app` (so the App's key is read by a short-lived process), and revokes them when the run stops.
+- **The record**: a run records each repository's branches at its start and end (`git.json` in the run directory), so the Git tab and replay show what the run had and the commits it added, though the repositories outlive it.
 ### Ports on the host
 
 Ports on the host:
@@ -542,7 +536,7 @@ The skills any role may use:
 | `office-mail` | everyone | Mail and the desk: starting an assignment, kinds, writing, replying and finishing, follow-ups, mail as colleague text |
 | `office-publish` | everyone | The shared drive: spaces, kinds, titles and summaries, versions, using others' work, Markdown, decks |
 | `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser |
-| `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges, reporting in the assignment's thread, telling those who wait once it's merged; on GitHub, a pull request per change whose checks the author watches with `gh`, handed to the board to merge, and workflow changes sent to the board |
+| `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges, reporting in the assignment's thread, telling those who wait once it's merged; where `main` is on the remote, `publish_branch` for review, the mail about its checks and reviews, the branch based on the tip of `main` before completing, the board merging, and workflow changes sent to the board |
 | `manager` | roles that hire | Splitting, delegating and assigning work, deciding access up front, unblocking, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
 | `security-review` | officers, and the CEO | Network requests and TLS, credential requests and grants, background checks, watching traffic, escalation |
 | `reviewing-work` | the CEO, CTO, managers, product manager, designer, research manager | Reviewing against what was asked, with evidence, one numbered list of findings; answering a review |
@@ -730,7 +724,7 @@ Things to watch for in runs: a worker talking an officer into a standing approva
 
 ## Claude Code in the image
 
-The `office` image (`make image IMAGE=office`) installs one Claude Code version, pinned in the Makefile (`CLAUDE_VERSION`) and installed with `install.sh` given that version, pi (`PI_VERSION`, from npm), plus git, gh, kubectl, podman, Node.js, Python, and a headless Chromium through Playwright (`PLAYWRIGHT_VERSION`). The daemon puts a `browse` command in every worker's VM (`browse shot URL file.png`, `browse text URL`, `browse console URL`); workers use it to see the product as users do, take screenshots for their reports, and, for officers, look at a site before deciding. It loads only the page's own site and its parent domain (the firm's, for the product): outside images and scripts are skipped and listed by `browse console`, so checking a page that embeds outside content doesn't send the officers an access request per host; `--all` loads everything. Auto-update is off (`DISABLE_AUTOUPDATER=1` in the profile's environment), so a run uses exactly the version the image was built with, and the version is recorded in `run.json`. Updating is a change to the Makefile and an image rebuild.
+The `office` image (`make image IMAGE=office`) installs one Claude Code version, pinned in the Makefile (`CLAUDE_VERSION`) and installed with `install.sh` given that version, pi (`PI_VERSION`, from npm), plus git, kubectl, podman, Node.js, Python, and a headless Chromium through Playwright (`PLAYWRIGHT_VERSION`). The daemon puts a `browse` command in every worker's VM (`browse shot URL file.png`, `browse text URL`, `browse console URL`); workers use it to see the product as users do, take screenshots for their reports, and, for officers, look at a site before deciding. It loads only the page's own site and its parent domain (the firm's, for the product): outside images and scripts are skipped and listed by `browse console`, so checking a page that embeds outside content doesn't send the officers an access request per host; `--all` loads everything. Auto-update is off (`DISABLE_AUTOUPDATER=1` in the profile's environment), so a run uses exactly the version the image was built with, and the version is recorded in `run.json`. Updating is a change to the Makefile and an image rebuild.
 
 ## Prompts
 

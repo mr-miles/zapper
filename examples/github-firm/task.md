@@ -20,4 +20,4 @@ Done means all of these, checked by you, not taken on trust:
 - The tests exercise the spec: each acceptance criterion in SPEC.md has a test that checks it, the API's and the frontend's.
 - The code has been reviewed: no repetition, each part's job behind its own interface.
 
-Everything the team needs is mail, the GitHub repository and npm. Grant GitHub access to those who need it, at the least level that does the work.
+Everything the team needs is mail, the firm's git repository and npm. Grant git access to those who need it, at the least level that does the work.

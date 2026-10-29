@@ -30,7 +30,7 @@ zapper is the daemon and CLI the office runs on. Run it from the repository's ro
 
 ```
 make image                    # the base Ubuntu image
-make image IMAGE=office       # the workers: Claude Code and pi (pinned), git, gh, kubectl, podman, a headless browser
+make image IMAGE=office       # the workers: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
 make image IMAGE=k3s          # the firm's cluster
 make kernel KERNEL=k8s        # the cluster's kernel, built in a container
 ```

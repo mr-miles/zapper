@@ -1787,23 +1787,17 @@ mod tests {
         }
     }
 
-    /// `examples/github-firm`: the shopping list company on GitHub, with no
-    /// repository of its own and the levels read and write, neither of which
-    /// changes workflows.
+    /// `examples/github-firm`: the shopping list company with its
+    /// repositories on GitHub, behind the firm's own git server.
     #[cfg(feature = "office")]
     #[test]
     fn the_github_firm_example_loads() {
         let c = example("github-firm");
         let octo = &zapper_office::firm::all(&c)["octo"];
         assert_eq!(octo.workers.len(), 1);
-        assert!(octo.git_github() && !octo.git_internal());
-        let levels = &octo.credentials.github.levels;
-        assert_eq!(levels.keys().collect::<Vec<_>>(), ["read", "write"]);
-        assert!(levels
-            .values()
-            .all(|l| !l.permissions.contains_key("workflows")));
-        assert!(levels["read"].permissions.values().all(|v| v == "read"));
-        assert_eq!(levels["write"].permissions["contents"], "write");
+        assert!(octo.git_internal());
+        assert_eq!(octo.git_remote().unwrap().config, "acme.yaml");
+        assert!(octo.git.as_ref().unwrap().dir.is_some());
     }
 
     /// `examples/research-firm`: Ada alone, who may hire a research

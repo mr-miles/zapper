@@ -32,9 +32,10 @@ pub struct Firm {
     pub roles: BTreeMap<String, Role>,
     pub workers: Vec<Worker>,
     pub security: Security,
-    /// Git repositories per run: the firm's own, each empty at the start, at
-    /// `https://git.<domain>/<name>.git` (`{}` is one, `product`), or real
-    /// GitHub repositories reached with a GitHub App (`github: {}`).
+    /// The firm's git server, at `https://git.<domain>/<name>.git`: its own
+    /// repositories, each empty at the start of a run (`{}` is one,
+    /// `product`), or, with a `remote`, the repositories its GitHub App is
+    /// installed on, kept in `dir` across runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<GitService>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -547,36 +548,52 @@ impl Default for Digest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitService {
-    /// The repositories' names; `[product]` if unset. Access is granted per
-    /// repository (`git:<name>`).
+    /// The repositories' names, without a remote; `[product]` if unset.
+    /// Access is granted per repository (`git:<name>`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
-    /// Real GitHub repositories instead of the firm's own server. Not with
-    /// `repos`.
+    /// Where the daemon keeps the repositories in step: their remote. Only
+    /// the daemon talks to it; agents use the firm's server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub github: Option<GithubGit>,
-}
-
-/// A firm that works in the GitHub repositories of one account, through that
-/// account's GitHub App (`zapper github setup`). Its repositories are the ones
-/// the App reaches when a run starts.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct GithubGit {
-    /// The App's credentials file, a plain `NAME.yaml` in
-    /// `~/.config/zapper/github-apps`, as it is named there. An App belongs
-    /// to one account, which is where it is installed: the firm's
-    /// repositories are that account's.
-    pub config: String,
-    /// The account the App is installed on, as GitHub spells it; found when
-    /// a run starts. Not config.
+    pub remote: Option<GitRemote>,
+    /// With a remote: the folder that holds the repositories, a bare one per
+    /// subdirectory, kept across runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// With a remote: the repositories whose `main` is the firm's server's,
+    /// merged there and pushed out. Every other repository's `main` is the
+    /// remote's, merged there and fetched back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<String>,
+    /// The account the remote's App is installed on, as GitHub spells it;
+    /// found when a run starts. Not config.
     #[serde(skip)]
     pub owner: String,
-    /// The repositories, `owner/name`, listed from GitHub when the run
-    /// starts. Not config. Access is granted per repository
-    /// (`git:owner/name`).
+    /// The repositories the App is installed on, by name; found when a run
+    /// starts. Not config.
     #[serde(skip)]
-    pub repos: Vec<String>,
+    pub found: Vec<String>,
+}
+
+/// How the daemon reaches a firm's remote.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitRemote {
+    /// GitHub, through the account's App (`zapper github setup`).
+    pub github: Option<GithubRemote>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubRemote {
+    /// The App's credentials file, a plain `NAME.yaml` in
+    /// `~/.config/zapper/github-apps`. An App belongs to one account, which
+    /// is where it is installed: the firm's repositories are that account's.
+    pub config: String,
+    /// The command that mints the daemon's tokens, before `--app`, `--repo`
+    /// and `--perm` are added: `[zapper, mint, github-app]` if unset.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mint: Vec<String>,
 }
 
 /// The repository a firm with `git: {}` has.
@@ -621,72 +638,11 @@ pub struct Credentials {
     /// The shared drive's spaces: a flat list of names. Every artifact is
     /// published into one, and grants are per space.
     pub spaces: Vec<String>,
-    /// How GitHub repositories are granted (a firm with `git.github`).
-    #[serde(skip_serializing_if = "GithubCredentials::is_empty")]
-    pub github: GithubCredentials,
-}
-
-/// The level the policy owners hold on every GitHub repository of the firm.
-pub const OWNER_LEVEL: &str = "read";
-
-/// Access to a GitHub repository is a named level: a group of GitHub App
-/// permissions. A worker holds one repository at one level, and the token
-/// minted for them has exactly those permissions on that repository.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct GithubCredentials {
-    /// Level name to what it grants. There must be one named `read`: the
-    /// policy owners (the CEO and the officers) hold it on every repository
-    /// of the firm.
-    pub levels: BTreeMap<String, GithubLevel>,
-    /// The command that mints a token, before `--app`, `--repo` and `--perm`
-    /// are added: `[zapper, mint, github-app]` if unset.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mint: Vec<String>,
-}
-
-impl GithubCredentials {
-    fn is_empty(&self) -> bool {
-        *self == GithubCredentials::default()
-    }
-}
-
-/// A GitHub level: GitHub App permission names to `read`, `write` or
-/// `admin`, as the token request takes them (`contents`, `pull_requests`,
-/// `issues`, `workflows`, ...). `metadata: read` is always added.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct GithubLevel {
-    pub permissions: BTreeMap<String, String>,
-}
-
-impl GithubLevel {
-    /// How much it is, for ordering and routing: write if any permission is
-    /// write or admin, else read. Security officers decide every GitHub
-    /// level.
-    pub fn class(&self) -> crate::access::Level {
-        use crate::access::Level;
-        if self.permissions.values().any(|v| v != "read") {
-            Level::Write
-        } else {
-            Level::Read
-        }
-    }
-
-    /// `contents: write, issues: read`, for a person to read.
-    pub fn summary(&self) -> String {
-        self.permissions
-            .iter()
-            .map(|(k, v)| format!("{k}: {v}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 impl Default for Credentials {
     fn default() -> Self {
         Credentials {
-            github: GithubCredentials::default(),
             expiry: "24h".into(),
             spaces: [
                 "general",
@@ -749,41 +705,51 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 }
 
 impl Firm {
-    /// The repositories of the firm's own git server, in config order; none
-    /// without `git`, and none in a firm that works in GitHub.
+    /// The repositories of the firm's git server: with a remote, those its
+    /// App is installed on (found when a run starts); else the config's, in
+    /// order. None without `git`.
     pub fn git_repos(&self) -> Vec<String> {
         match &self.git {
             None => vec![],
-            Some(g) if g.github.is_some() => vec![],
+            Some(g) if g.remote.is_some() => g.found.clone(),
             Some(g) if g.repos.is_empty() => vec![DEFAULT_REPO.to_string()],
             Some(g) => g.repos.clone(),
         }
     }
 
-    /// Whether the firm runs its own git server.
+    /// Whether the firm has a git server.
     pub fn git_internal(&self) -> bool {
-        self.git.as_ref().is_some_and(|g| g.github.is_none())
+        self.git.is_some()
     }
 
-    /// The firm's GitHub repositories, `owner/name`.
-    pub fn github_repos(&self) -> Vec<String> {
+    /// The firm's remote, if its repositories have one.
+    pub fn git_remote(&self) -> Option<&GithubRemote> {
         self.git
             .as_ref()
-            .and_then(|g| g.github.as_ref())
-            .map(|g| g.repos.clone())
-            .unwrap_or_default()
+            .and_then(|g| g.remote.as_ref())
+            .and_then(|r| r.github.as_ref())
     }
 
-    /// Whether the firm works in GitHub repositories.
-    pub fn git_github(&self) -> bool {
-        self.git.as_ref().is_some_and(|g| g.github.is_some())
+    /// Whether a repository's `main` is the firm's server's (merged there and
+    /// pushed out) rather than the remote's. Without a remote, every `main`
+    /// is local.
+    pub fn main_is_local(&self, repo: &str) -> bool {
+        match &self.git {
+            Some(g) if g.remote.is_some() => g.local.iter().any(|l| l.eq_ignore_ascii_case(repo)),
+            _ => true,
+        }
     }
 
-    /// The resources of the firm's git, `git:<name>` or `git:<owner>/<name>`.
+    /// The remote's `owner/name` of a repository.
+    pub fn remote_repo(&self, repo: &str) -> Option<String> {
+        let g = self.git.as_ref().filter(|g| g.remote.is_some())?;
+        Some(format!("{}/{repo}", g.owner))
+    }
+
+    /// The resources of the firm's git, `git:<name>`.
     pub fn git_resources(&self) -> Vec<String> {
         self.git_repos()
             .into_iter()
-            .chain(self.github_repos())
             .map(|r| format!("git:{r}"))
             .collect()
     }
@@ -1054,44 +1020,37 @@ until someone funds them, every access request and background check goes to the 
                 err(format!("git.repos: {r:?} must be a unique name of lowercase letters, digits and dashes"));
             }
         }
-        match self
-            .git
-            .as_ref()
-            .and_then(|g| g.github.as_ref().map(|gh| (g, gh)))
-        {
-            Some((g, gh)) => {
-                if !g.repos.is_empty() {
-                    err("git: give repos (the firm's own server) or github, not both".into());
+        if let Some(g) = &self.git {
+            match (&g.remote, g.remote.as_ref().and_then(|r| r.github.as_ref())) {
+                (Some(_), None) => {
+                    err("git.remote: name the remote (github: { config: <account>.yaml })".into())
                 }
-                if let Err(e) = zapper_github::app_file(&gh.config) {
-                    err(format!("git.github.config: {e}"));
-                }
-                let creds = &self.credentials.github;
-                if creds.levels.is_empty() {
-                    err(
-                        "credentials.github.levels: a firm in GitHub needs at least one level"
-                            .into(),
-                    );
-                }
-                for (p, prof) in &creds.levels {
-                    if !valid_worker_name(p) {
-                        err(format!("credentials.github.levels: {p:?} must be lowercase letters, digits and dashes"));
+                (Some(_), Some(gh)) => {
+                    if !g.repos.is_empty() {
+                        err("git.repos: with a remote, the repositories are the ones its App is installed on".into());
                     }
-                    if let Err(e) = zapper_github::check_permissions(&prof.permissions) {
-                        err(format!("credentials.github.levels.{p}: {e}"));
+                    if let Err(e) = zapper_github::app_file(&gh.config) {
+                        err(format!("git.remote.github.config: {e}"));
+                    }
+                    if gh.mint.iter().any(|a| a.trim().is_empty()) {
+                        err("git.remote.github.mint: no empty words".into());
+                    }
+                    if g.dir.as_deref().is_none_or(|d| d.trim().is_empty()) {
+                        err("git.dir: a firm with a remote keeps its repositories in a folder; name it".into());
+                    }
+                    let mut seen = BTreeSet::new();
+                    for l in &g.local {
+                        if !crate::git::valid_repo_name(l) || !seen.insert(l.to_ascii_lowercase()) {
+                            err(format!("git.local: {l:?} must be a unique repository name"));
+                        }
                     }
                 }
-                if !creds.levels.is_empty() && !creds.levels.contains_key(OWNER_LEVEL) {
-                    err(format!("credentials.github.levels: define {OWNER_LEVEL:?}, the level the CEO and the officers hold on every repository"));
-                }
-                if creds.mint.iter().any(|a| a.trim().is_empty()) {
-                    err("credentials.github.mint: no empty words".into());
+                (None, _) => {
+                    if g.dir.is_some() || !g.local.is_empty() {
+                        err("git.dir and git.local are for a firm with git.remote".into());
+                    }
                 }
             }
-            None if self.credentials.github != GithubCredentials::default() => {
-                err("credentials.github is for a firm with git.github".into());
-            }
-            None => {}
         }
         if self.product_port.is_some() && self.facilities.is_empty() {
             err("product_port needs a cluster facility".into());
@@ -1258,86 +1217,65 @@ firms:
         assert!(firm(&format!("{BASE}    git: {{ repos: [Api] }}\n")).is_err());
     }
 
-    const GH: &str = "    git: { github: { config: acme.yaml } }
-    credentials:
-      github:
-        levels:
-          read: { actions: read, artifact_metadata: read, checks: read, contents: read, issues: read, pull_requests: read, statuses: read }
-          write: { contents: write, pull_requests: write, issues: write, actions: read, checks: read, statuses: read, artifact_metadata: read }
-";
+    const GH: &str = "    git: { remote: { github: { config: acme.yaml } }, dir: /srv/repos/acme, local: [kb] }\n";
 
     #[test]
-    fn a_firm_in_github() {
+    fn a_firm_with_a_remote() {
         let c = firm(&format!("{BASE}{GH}")).unwrap();
         let f = get(&c, "acme").unwrap();
-        assert!(f.git_github() && !f.git_internal());
-        assert!(f.git_repos().is_empty(), "no server of its own");
-        let gh = f.git.as_ref().unwrap().github.as_ref().unwrap();
-        assert_eq!(gh.config, "acme.yaml");
-        assert!(gh.owner.is_empty(), "found when a run starts");
+        assert!(f.git_internal(), "agents use the firm's own server");
+        assert_eq!(f.git_remote().unwrap().config, "acme.yaml");
         assert!(
-            f.github_repos().is_empty(),
-            "its repositories are listed from GitHub when a run starts"
+            f.git_repos().is_empty(),
+            "found from the App when a run starts"
         );
-        assert!(f.git_resources().is_empty());
-        let p = &f.credentials.github.levels;
-        assert_eq!(p["read"].class(), crate::access::Level::Read);
-        assert_eq!(p["write"].class(), crate::access::Level::Write);
-        assert_eq!(
-            p["read"].summary(),
-            "actions: read, artifact_metadata: read, checks: read, contents: read, issues: read, pull_requests: read, statuses: read"
-        );
-        // Repositories are not config.
-        let named = GH.replace(
-            "{ config: acme.yaml }",
-            "{ config: acme.yaml, repos: [Acme/api] }",
-        );
-        assert!(format!("{:#}", firm(&format!("{BASE}{named}")).unwrap_err()).contains("repos"));
+        assert!(f.main_is_local("kb") && f.main_is_local("KB"));
+        assert!(!f.main_is_local("api"), "every other main is the remote's");
+        let mut f = f.clone();
+        let g = f.git.as_mut().unwrap();
+        (g.owner, g.found) = ("Acme".into(), vec!["api".into(), "kb".into()]);
+        assert_eq!(f.git_repos(), ["api", "kb"]);
+        assert_eq!(f.remote_repo("api").as_deref(), Some("Acme/api"));
+        assert_eq!(f.git_resources(), ["git:api", "git:kb"]);
+        // Without a remote, every main is local, as today.
+        let plain = firm(&format!("{BASE}    git: {{}}\n")).unwrap();
+        assert!(get(&plain, "acme").unwrap().main_is_local("product"));
         // It round-trips.
         assert_eq!(firm(&c.to_yaml()).unwrap(), c);
     }
 
     #[test]
-    fn a_firm_in_github_is_checked() {
+    fn a_firm_with_a_remote_is_checked() {
         let bad = |from: &str, to: &str| {
             format!(
                 "{:#}",
                 firm(&format!("{BASE}{}", GH.replace(from, to))).unwrap_err()
             )
         };
-        // The config is a plain file name, as it is in the apps directory.
         for name in [
             "../acme.yaml",
             "a/acme.yaml",
             "acme",
             "acme.yml",
             ".yaml",
-            "\"\"",
             "ac me.yaml",
         ] {
-            let e = bad("config: acme.yaml", &format!("config: {name}"));
-            assert!(e.contains("git.github.config"), "{name}: {e}");
+            let e = bad("config: acme.yaml", &format!("config: '{name}'"));
+            assert!(e.contains("git.remote.github.config"), "{name}: {e}");
         }
-        assert!(bad("{ config: acme.yaml }", "{}").contains("git.github.config"));
-        assert!(bad("read: {", "look: {").contains("\"read\""));
-        assert!(bad("contents: read, issues", "contents: owner, issues").contains("bad permission"));
-        assert!(bad("write: {", "Write: {").contains("lowercase"));
-        // Both kinds of git, no levels, or levels without GitHub.
-        assert!(bad(
-            "{ github: { config: acme.yaml } }",
-            "{ repos: [x], github: { config: acme.yaml } }"
-        )
-        .contains("not both"));
-        let no_levels = "    git: { github: { config: acme.yaml } }\n";
         assert!(
-            format!("{:#}", firm(&format!("{BASE}{no_levels}")).unwrap_err())
-                .contains("at least one level")
+            bad("remote: { github: { config: acme.yaml } }", "remote: {}")
+                .contains("name the remote")
         );
-        let stray = GH.replace("git: { github: { config: acme.yaml } }", "git: {}");
-        assert!(
-            format!("{:#}", firm(&format!("{BASE}{stray}")).unwrap_err())
-                .contains("is for a firm with git.github")
+        assert!(bad(", dir: /srv/repos/acme", "").contains("git.dir"));
+        assert!(bad("local: [kb]", "local: [kb, KB]").contains("git.local"));
+        assert!(bad("local: [kb]", "local: ['.kb']").contains("git.local"));
+        assert!(bad("local: [kb]", "local: [kb], repos: [x]").contains("App is installed on"));
+        let e = format!(
+            "{:#}",
+            firm(&format!("{BASE}    git: {{ dir: /x, local: [kb] }}\n")).unwrap_err()
         );
+        assert!(e.contains("for a firm with git.remote"), "{e}");
     }
 
     #[test]

@@ -20,7 +20,7 @@ The image is sized at its content plus 25% plus 256 MiB, unless `--size` is give
 ## Usage
 
 ```
-make image IMAGE=office                        # office workers: Claude Code and pi (pinned), git, gh, kubectl, podman, Node.js, Python, headless Chromium
+make image IMAGE=office                        # office workers: Claude Code and pi (pinned), git, kubectl, podman, Node.js, Python, headless Chromium
 make image IMAGE=k3s                           # a firm's cluster: k3s (pinned) and its air-gap images
 make image                                     # ubuntu-26.04 with curl, git and CA certificates, for the base profiles
 zapper image build rust --from docker.io/library/rust:1-slim --run "apt-get update && apt-get install -y git"
