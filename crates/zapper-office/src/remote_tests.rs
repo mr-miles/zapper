@@ -253,8 +253,17 @@ async fn firm_with(t: &str, seeded: bool) -> (TestCore, Arc<FirmRun>, String, St
         std::fs::create_dir_all(&dir).unwrap();
         sh(&dir, &["init", "-q", "--bare", "-b", "main"]);
     }
+    let tc = crate::test_core(&config(t));
+    let run = test_run_remote(&tc.core, "acme", &[&code, &kb]).await;
+    (tc, run, code, kb)
+}
+
+/// The config of `firm(t)`'s firm.
+fn config(t: &str) -> String {
+    let w = world();
+    let kb = format!("kb-{t}");
     let dir = w.base.join("repos").join(t);
-    let yaml = format!(
+    format!(
         "
 profiles:
   w: {{ agent: {{ kind: claude-code }} }}
@@ -276,10 +285,7 @@ firms:
       local: [{kb}]
 ",
         dir.display()
-    );
-    let tc = crate::test_core(&yaml);
-    let run = test_run_remote(&tc.core, "acme", &[&code, &kb]).await;
-    (tc, run, code, kb)
+    )
 }
 
 /// What a worker's git does: clone from the firm's server (here, its
@@ -333,6 +339,15 @@ fn push_branch(
     Ok(sh(&work, &["rev-parse", "HEAD"]))
 }
 
+/// The run started, and its repositories brought in as their first use
+/// would.
+async fn ready(run: &Arc<FirmRun>) {
+    remote::prepare(run).await.unwrap();
+    for r in run.config.git_repos() {
+        remote::ensure(run, &r).await.unwrap();
+    }
+}
+
 fn rev(dir: &Path, r: &str) -> String {
     let out = Command::new("git")
         .arg("--git-dir")
@@ -364,36 +379,57 @@ async fn the_repositories_are_the_apps_kept_across_runs_and_unknown_ones_archive
     let g = run.config.git.as_ref().unwrap();
     assert_eq!(g.owner, "Acme");
     assert_eq!(run.config.git_repos(), [code.clone(), kb.clone()]);
+    // Starting clones nothing; a repository the App doesn't reach is moved
+    // aside, not deleted.
     remote::prepare(&run).await.unwrap();
-    for r in [&code, &kb] {
-        let local = dir.join(format!("{r}.git"));
-        assert_eq!(
-            rev(&local, "main"),
-            rev(&remote_dir(&w.base, r), "main"),
-            "{r} cloned"
-        );
-    }
-    // A repository the App doesn't reach is moved aside, not deleted.
+    assert!(
+        !dir.join(format!("{code}.git")).exists(),
+        "not cloned until used"
+    );
     assert!(!dir.join("gone.git").exists());
     assert!(dir.join("archive/gone.git").exists());
-    // The run's starting point is recorded, for replay.
+    // First used: cloned, once, however many ask at the same time.
+    let (a, b) = tokio::join!(remote::ensure(&run, &code), remote::ensure(&run, &code));
+    a.unwrap();
+    b.unwrap();
+    let local = dir.join(format!("{code}.git"));
+    assert_eq!(
+        rev(&local, "main"),
+        rev(&remote_dir(&w.base, &code), "main"),
+        "cloned"
+    );
+    let cloned = |run: &FirmRun| {
+        std::fs::read_to_string(run.dir.join("journal.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"cloned\""))
+            .count()
+    };
+    assert_eq!(cloned(&run), 1);
+    assert!(
+        !dir.join(format!("{kb}.git")).exists(),
+        "only what was used"
+    );
+    // Its starting point is recorded, for replay.
     let rec: Value =
         serde_json::from_slice(&std::fs::read(run.dir.join("git.json")).unwrap()).unwrap();
-    assert_eq!(
-        rec["repos"][&code]["start"]["main"],
-        rev(&dir.join(format!("{code}.git")), "main")
-    );
+    assert_eq!(rec["repos"][&code]["start"]["main"], rev(&local, "main"));
+    assert!(rec["repos"].get(&kb).is_none());
     // The next run fetches what is there instead of cloning again.
     let moved = commit_on_remote(&w.base, &code, "second.txt");
-    remote::prepare(&run).await.unwrap();
-    assert_eq!(rev(&dir.join(format!("{code}.git")), "main"), moved);
+    let again = crate::test_core(&config("prep"));
+    let next = test_run_remote(&again.core, "acme", &[&code, &kb]).await;
+    remote::prepare(&next).await.unwrap();
+    remote::ensure(&next, &code).await.unwrap();
+    assert_eq!(rev(&local, "main"), moved);
+    assert_eq!(cloned(&next), 0, "fetched, not cloned");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn main_comes_from_the_remote_and_nobody_pushes_it() {
     let w = world();
     let (_t, run, code, _kb) = firm("main").await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     // Not even admin pushes main of a repository whose main is the remote's.
     let e = push_branch(&run, &code, "main", "x.txt", "admin").unwrap_err();
     assert!(
@@ -417,7 +453,7 @@ async fn main_comes_from_the_remote_and_nobody_pushes_it() {
 async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
     let w = world();
     let (t, run, code, kb) = firm("pub").await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     let head = push_branch(&run, &code, "feature", "src.txt", "write").unwrap();
     // Publishing needs write.
     let e = remote::publish_branch(&run, "pat", &code, "feature", "Add src", "")
@@ -515,7 +551,7 @@ async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
 async fn the_author_hears_of_checks_reviews_and_the_merge() {
     let w = world();
     let (t, run, code, _kb) = firm("tell").await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     access::board_grant(
         &t.core,
         &run,
@@ -620,7 +656,7 @@ async fn the_author_hears_of_checks_reviews_and_the_merge() {
 async fn a_local_main_is_pushed_out_and_stops_when_the_remote_moved() {
     let w = world();
     let (_t, run, _code, kb) = firm("local").await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     // Write can't merge to the firm's main; admin can, and it goes out.
     assert!(push_branch(&run, &kb, "main", "page.md", "write")
         .unwrap_err()
@@ -650,7 +686,7 @@ async fn a_local_main_is_pushed_out_and_stops_when_the_remote_moved() {
 async fn a_run_keeps_what_it_had_and_its_tokens_are_revoked() {
     let w = world();
     let (t, run, code, _kb) = firm("end").await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     access::board_grant(
         &t.core,
         &run,
@@ -711,7 +747,7 @@ async fn a_run_keeps_what_it_had_and_its_tokens_are_revoked() {
 async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     let w = world();
     let (t, run, code, kb) = firm_with("kb", false).await;
-    remote::prepare(&run).await.unwrap();
+    ready(&run).await;
     crate::kb::seed(&run).await.unwrap();
     // The layout, committed on the firm's server and pushed out.
     let local = remote::root(&run.config, &run.dir).join(format!("{kb}.git"));
@@ -762,5 +798,86 @@ async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     assert!(
         p.contains(&format!("The main of {kb} is the firm's")),
         "{p}"
+    );
+}
+
+/// The git server's answer to `pat` asking for `path` with their password.
+async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
+    use base64::Engine as _;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::rt::TokioIo;
+    let (client, server) = tokio::io::duplex(1 << 16);
+    let r = run.clone();
+    tokio::spawn(async move {
+        let svc = hyper::service::service_fn(move |req| {
+            let r = r.clone();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    crate::facility::git_request(&r, "pat", req).await,
+                )
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server), svc)
+            .await;
+    });
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(client))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let auth = base64::engine::general_purpose::STANDARD.encode("pat:pw");
+    let req = hyper::Request::builder()
+        .uri(path)
+        .header("host", "git.acme")
+        .header(hyper::header::AUTHORIZATION, format!("Basic {auth}"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
+    let w = world();
+    let (t, run, code, _kb) = firm("touch").await;
+    remote::prepare(&run).await.unwrap();
+    run.facility
+        .git_passwords
+        .lock()
+        .unwrap()
+        .insert("pat".into(), "pw".into());
+    let local = remote::root(&run.config, &run.dir).join(format!("{code}.git"));
+    // Without a grant, nothing is cloned for them.
+    let (status, _) = git_request(
+        &run,
+        &format!("/{code}.git/info/refs?service=git-upload-pack"),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert!(!local.exists());
+    // With one, their first fetch brings it in, and is served.
+    access::board_grant(
+        &t.core,
+        &run,
+        "pat",
+        &format!("git:{code}"),
+        "read",
+        None,
+        "x",
+    )
+    .unwrap();
+    let (status, body) = git_request(
+        &run,
+        &format!("/{code}.git/info/refs?service=git-upload-pack"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("refs/heads/main"), "{body}");
+    assert_eq!(
+        rev(&local, "main"),
+        rev(&remote_dir(&w.base, &code), "main")
     );
 }

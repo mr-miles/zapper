@@ -275,7 +275,7 @@ pub(super) fn authorize(
     Ok(level)
 }
 
-async fn git_request(
+pub(crate) async fn git_request(
     run: &Arc<FirmRun>,
     member: &str,
     req: Request<hyper::body::Incoming>,
@@ -287,6 +287,16 @@ async fn git_request(
         Ok(level) => level,
         Err(refused) => return *refused,
     };
+    // A remote's repository is cloned, or fetched, when this run first uses
+    // it.
+    if let Some(repo) = repo_of(&path) {
+        if let Err(e) = super::remote::ensure(run, repo).await {
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("{repo} couldn't be brought from the firm's remote: {e:#}; try again shortly, and tell the board if it persists"),
+            );
+        }
+    }
     let method = req.method().to_string();
     let headers = req.headers().clone();
     let body = match http_body_util::Limited::new(req.into_body(), MAX_GIT_BODY)

@@ -2,7 +2,8 @@
 //! git server, and the daemon is the remote's only client.
 //!
 //! The repositories are the ones the firm's GitHub App is installed on, kept
-//! in `git.dir` across runs: cloned if absent, fetched otherwise. Each
+//! in `git.dir` across runs: each cloned (if absent) or fetched when a run
+//! first uses it. Each
 //! repository's `main` has one source of truth, so it only ever flows one
 //! way:
 //!
@@ -73,6 +74,8 @@ pub struct State {
     published: Mutex<BTreeMap<(String, String), Published>>,
     /// Local-main repositories whose remote `main` moved by another route.
     diverged: Mutex<BTreeSet<String>>,
+    /// The repositories this run has brought in step, each once.
+    touched: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<()>>>>,
 }
 
 /// The firm for a run that starts now: with a remote, the account its App is
@@ -276,58 +279,103 @@ done
 exit 0
 "#;
 
-/// Makes the firm's repositories ready for a run: each cloned into
-/// `git.dir` if it isn't there and fetched if it is, with the hook of its
-/// kind of `main`; any the App no longer reaches moved to `archive/`; and
-/// the run's starting point recorded.
+/// Readies the firm's repositories for a run without cloning any: the
+/// folder made, any repository the App no longer reaches moved to
+/// `archive/`. Each is brought in step when it is first used (`ensure`).
 pub async fn prepare(run: &Arc<FirmRun>) -> Result<()> {
     let root = root(&run.config, &run.dir);
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-    let names = run.config.git_repos();
-    archive_unknown(&root, &names, run)?;
-    for name in &names {
-        let dir = root.join(format!("{name}.git"));
-        let token = token(run, name).await?;
-        if dir.exists() {
-            if let Err(e) = fetch(run, name, &dir, &token).await {
-                // The copy here is still good to work on; the remote catches
-                // up when it can be reached.
-                run.journal.append(
-                    "git_remote",
-                    json!({ "repo": name, "event": "fetch failed", "error": format!("{e:#}") }),
-                );
-            }
-        } else {
-            let out = tokio::process::Command::new("git")
-                .args(["clone", "--bare", "--quiet"])
-                .arg(url(run, name)?)
-                .arg(&dir)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env("GIT_CONFIG_VALUE_0", zapper_github::git_auth_header(&token))
-                .output()
-                .await
-                .context("git clone (is git installed?)")?;
-            if !out.status.success() {
-                bail!(
-                    "cloning {name}: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-        }
-        git(&dir, &["config", "http.receivepack", "true"], None).await?;
-        let hook = if run.config.main_is_local(name) {
-            super::facility::PRE_RECEIVE
-        } else {
-            PRE_RECEIVE_REMOTE
-        };
-        std::fs::create_dir_all(dir.join("hooks"))?;
-        let path = dir.join("hooks").join("pre-receive");
-        std::fs::write(&path, hook)?;
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    archive_unknown(&root, &run.config.git_repos(), run)?;
+    Ok(())
+}
+
+/// A repository, ready for this run: cloned into `git.dir` if it isn't
+/// there, fetched if it is, with the hook of its kind of `main`, its
+/// starting point recorded, and, for the knowledge base, its layout. Done
+/// once per repository and run, when it is first used; callers of the same
+/// repository wait for the one doing it, and a failure is tried again on
+/// the next use.
+pub async fn ensure(run: &Arc<FirmRun>, name: &str) -> Result<()> {
+    if run.config.git_remote().is_none() {
+        return Ok(());
     }
-    record(run, "start").await;
+    let cell = run
+        .facility
+        .remote
+        .touched
+        .lock()
+        .unwrap()
+        .entry(name.to_string())
+        .or_default()
+        .clone();
+    cell.get_or_try_init(|| bring_in(run, name)).await?;
+    Ok(())
+}
+
+/// The repositories this run has used.
+fn touched(run: &FirmRun) -> Vec<String> {
+    let t = run.facility.remote.touched.lock().unwrap();
+    t.iter()
+        .filter(|(_, c)| c.initialized())
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+async fn bring_in(run: &Arc<FirmRun>, name: &str) -> Result<()> {
+    let root = root(&run.config, &run.dir);
+    std::fs::create_dir_all(&root)?;
+    let dir = root.join(format!("{name}.git"));
+    let token = token(run, name).await?;
+    if dir.exists() {
+        install_hook(run, name, &dir).await?;
+        if let Err(e) = fetch(run, name, &dir, &token).await {
+            // The copy here is still good to work on; the remote catches up
+            // when it can be reached.
+            run.journal.append(
+                "git_remote",
+                json!({ "repo": name, "event": "fetch failed", "error": format!("{e:#}") }),
+            );
+        }
+    } else {
+        let out = tokio::process::Command::new("git")
+            .args(["clone", "--bare", "--quiet"])
+            .arg(url(run, name)?)
+            .arg(&dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env("GIT_CONFIG_VALUE_0", zapper_github::git_auth_header(&token))
+            .output()
+            .await
+            .context("git clone (is git installed?)")?;
+        if !out.status.success() {
+            bail!(
+                "cloning {name} from the remote: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        install_hook(run, name, &dir).await?;
+        run.journal
+            .append("git_remote", json!({ "repo": name, "event": "cloned" }));
+    }
+    if run.config.knowledge_base().as_deref() == Some(name) {
+        super::kb::seed(run).await?;
+    }
+    record_repo(run, name, "start").await;
+    Ok(())
+}
+
+async fn install_hook(run: &FirmRun, name: &str, dir: &Path) -> Result<()> {
+    git(dir, &["config", "http.receivepack", "true"], None).await?;
+    let hook = if run.config.main_is_local(name) {
+        super::facility::PRE_RECEIVE
+    } else {
+        PRE_RECEIVE_REMOTE
+    };
+    std::fs::create_dir_all(dir.join("hooks"))?;
+    let path = dir.join("hooks").join("pre-receive");
+    std::fs::write(&path, hook)?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     Ok(())
 }
 
@@ -451,7 +499,7 @@ pub async fn push_main(run: &Arc<FirmRun>, name: &str) -> Result<()> {
 }
 
 /// After a push to the firm's server: a local-main repository's new `main`
-/// goes out.
+/// goes out. (A push means the repository was brought in first.)
 pub fn after_push(run: &Arc<FirmRun>, repo: &str) {
     if run.config.git_remote().is_none() || !run.config.main_is_local(repo) {
         return;
@@ -467,17 +515,24 @@ pub fn after_push(run: &Arc<FirmRun>, repo: &str) {
     });
 }
 
-/// Each repository's branches and their commits, at the run's start or end,
-/// in `git.json` in the run directory: what replay and the Git tab show of a
-/// run whose repositories outlive it.
-pub async fn record(run: &FirmRun, when: &str) {
+/// A repository's branches and their commits, when this run first used it
+/// or at its end, in `git.json` in the run directory: what replay and the
+/// Git tab show of a run whose repositories outlive it.
+async fn record_repo(run: &FirmRun, name: &str, when: &str) {
+    record(run, &[name.to_string()], when).await
+}
+
+async fn record(run: &FirmRun, names: &[String], when: &str) {
     let root = root(&run.config, &run.dir);
     let path = run.dir.join("git.json");
+    // One writer at a time: repositories are brought in concurrently.
+    static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = WRITING.lock().await;
     let mut v: Value = std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| json!({ "dir": root.display().to_string(), "repos": {} }));
-    for name in run.config.git_repos() {
+    for name in names {
         let refs = git(
             &root.join(format!("{name}.git")),
             &[
@@ -494,7 +549,7 @@ pub async fn record(run: &FirmRun, when: &str) {
             .filter_map(|l| l.split_once(' '))
             .map(|(r, c)| (r.to_string(), json!(c)))
             .collect();
-        v["repos"][&name][when] = Value::Object(refs);
+        v["repos"][name][when] = Value::Object(refs);
     }
     if let Ok(b) = serde_json::to_vec_pretty(&v) {
         let _ = std::fs::write(&path, b);
@@ -530,6 +585,7 @@ pub async fn publish_branch(
     if title.trim().is_empty() {
         bail!("give the pull request a title");
     }
+    ensure(run, &repo).await?;
     let dir = repo_path(run, &repo);
     let local = format!("refs/heads/{branch}");
     let head = rev(&dir, &local).await.ok_or_else(|| {
@@ -693,9 +749,9 @@ pub async fn watch(run: Arc<FirmRun>) {
     }
 }
 
-/// One look at the remote.
+/// One look at the remote, for the repositories this run has used.
 pub async fn poll(run: &Arc<FirmRun>) {
-    for name in run.config.git_repos() {
+    for name in touched(run) {
         if run.config.main_is_local(&name) {
             if let Err(e) = push_main(run, &name).await {
                 run.journal.append(
@@ -842,7 +898,7 @@ fn short(sha: &str) -> &str {
 /// time, the end is recorded, and every token the daemon minted is revoked.
 pub async fn finish(run: &Arc<FirmRun>) {
     if run.config.git_remote().is_some() {
-        for name in run.config.git_repos() {
+        for name in touched(run) {
             if run.config.main_is_local(&name) {
                 if let Err(e) = push_main(run, &name).await {
                     run.journal.append(
@@ -854,7 +910,7 @@ pub async fn finish(run: &Arc<FirmRun>) {
         }
     }
     if run.config.git_remote().is_some() {
-        record(run, "end").await;
+        record(run, &touched(run), "end").await;
     }
     let specs: Vec<(String, zapper_policy::mint::Spec)> =
         run.facility.remote.specs.lock().unwrap().drain().collect();

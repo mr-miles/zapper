@@ -65,7 +65,7 @@ zapper --config examples/github-firm/zapper.yaml check
    zapper firm up octo --task examples/github-firm/task.md
    ```
 
-   The run asks GitHub for the App's account and the repositories it is installed on (if it is installed on more than one account, it stops and says so), and clones them into `git.dir`, or fetches them if they are there from an earlier run. Ada's VM boots and the task arrives in her inbox.
+   The run asks GitHub for the App's account and the repositories it is installed on (if it is installed on more than one account, it stops and says so), and clones each into `git.dir` when someone first uses it in the run, or fetches it if it is there from an earlier run. Ada's VM boots and the task arrives in her inbox.
 
 3. Answer Ada, as the board, in the UI or the terminal:
 
