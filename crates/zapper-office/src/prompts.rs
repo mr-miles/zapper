@@ -58,10 +58,12 @@ fn expects_name(e: Expects) -> &'static str {
 
 /// Services a worker can reach, for its preamble.
 pub struct Services {
-    /// The firm's own repositories' URLs.
+    /// The firm's repositories' URLs, on its own server.
     pub git: Vec<String>,
-    /// Its GitHub repositories' URLs.
-    pub github: Vec<String>,
+    /// With a remote: the repositories whose `main` the board merges there,
+    /// and those whose `main` is the firm's.
+    pub remote_main: Vec<String>,
+    pub local_main: Vec<String>,
     pub kube: Option<String>,
     pub product: Option<String>,
 }
@@ -131,21 +133,6 @@ pub fn onboard(run: &super::FirmRun, worker: &str) {
             "git:<name> for each repository ({})",
             all.join(", ")
         )),
-    }
-    if !run.config.github_repos().is_empty() {
-        let levels: Vec<&str> = run
-            .config
-            .credentials
-            .github
-            .levels
-            .keys()
-            .map(String::as_str)
-            .collect();
-        resources.push(format!(
-            "git:<owner>/<name> for a GitHub repository ({}; one at a time, at one of the levels {})",
-            run.config.github_repos().join(", "),
-            levels.join(", ")
-        ));
     }
     if !run.config.facilities.is_empty() {
         resources.push("cluster (namespaces dev and prod)".to_string());
@@ -325,18 +312,21 @@ run's budget with budget_request, as the budget skill describes.\n",
             all.join(", ")
         )),
     }
-    if !services.github.is_empty() {
-        let levels: Vec<String> = config
-            .credentials
-            .github
-            .levels
-            .iter()
-            .map(|(n, l)| format!("{n} ({})", l.summary()))
-            .collect();
+    if !services.remote_main.is_empty() {
         lines.push(format!(
-            "GitHub repositories: {} (one at a time, with a grant: credentials_request(resource: git, repo: <owner>/<name>, level: <level>); the levels: {}). Work reaches main only through a pull request, which the board merges; never push main or change .github/workflows (the office-git skill)",
-            services.github.join(", "),
-            levels.join("; ")
+            "The main of {} is merged by the board, on the firm's remote: push your branch to the firm's server and send it for review with publish_branch; you get mail about its checks, reviews and merge. Nobody pushes main, and nobody changes .github/workflows (the office-git skill)",
+            services.remote_main.join(", ")
+        ));
+    }
+    if let Some(kb) = config.knowledge_base() {
+        lines.push(format!(
+            "The knowledge base: git:{kb}, what the firm knows, curated by the librarian. Read it (you are granted read when cleared): pull, start from index.md, search wiki/; contribute through a branch the librarian reviews (the knowledge-base skill)"
+        ));
+    }
+    if !services.local_main.is_empty() {
+        lines.push(format!(
+            "The main of {} is the firm's, merged on its server by whoever holds admin on it",
+            services.local_main.join(", ")
         ));
     }
     if let Some(k) = &services.kube {
@@ -672,7 +662,8 @@ mod tests {
         };
         let services = Services {
             git: vec![],
-            github: vec![],
+            remote_main: vec![],
+            local_main: vec![],
             kube: None,
             product: None,
         };
@@ -713,7 +704,8 @@ mod tests {
         };
         let services = Services {
             git: vec![],
-            github: vec![],
+            remote_main: vec![],
+            local_main: vec![],
             kube: None,
             product: None,
         };

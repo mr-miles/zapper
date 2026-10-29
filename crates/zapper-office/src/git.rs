@@ -10,9 +10,36 @@ use serde_json::{json, Value};
 /// Largest file or diff returned.
 const MAX_BYTES: usize = 1 << 20;
 
+/// What a run whose repositories outlive it (a remote's, in `git.dir`)
+/// recorded of them: where they are, and each one's branches at its start
+/// and, once it ended, at its end (`remote::record`).
+fn record(run_dir: &Path) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(run_dir.join("git.json")).ok()?).ok()
+}
+
+/// A recorded run's branches of a repository, `start` or `end`.
+pub fn recorded(run_dir: &Path, name: &str, when: &str) -> Option<serde_json::Map<String, Value>> {
+    record(run_dir)?["repos"][name][when].as_object().cloned()
+}
+
+/// What `r` meant in the run: once it ended, a branch is as it was then.
+fn as_of_run(run_dir: &Path, name: &str, r: &str) -> String {
+    recorded(run_dir, name, "end")
+        .and_then(|end| end.get(r).and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| r.to_string())
+}
+
 /// A run's repositories, as on disk (a past run's config may differ):
 /// `product` first, then by name.
 pub fn repos(run_dir: &Path) -> Vec<String> {
+    if let Some(rec) = record(run_dir) {
+        let mut v: Vec<String> = rec["repos"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        v.sort_by_key(|n| n.to_ascii_lowercase());
+        return v;
+    }
     let mut v: Vec<String> = std::fs::read_dir(run_dir.join("git"))
         .into_iter()
         .flatten()
@@ -24,10 +51,18 @@ pub fn repos(run_dir: &Path) -> Vec<String> {
                 .strip_suffix(".git")
                 .map(str::to_string)
         })
-        .filter(|n| zapper_policy::valid_worker_name(n))
+        .filter(|n| valid_repo_name(n))
         .collect();
     v.sort_by_key(|n| (n != crate::firm::DEFAULT_REPO, n.clone()));
     v
+}
+
+/// Where a run's repository is.
+pub fn repo_dir(run_dir: &Path, name: &str) -> std::path::PathBuf {
+    match record(run_dir).and_then(|r| r["dir"].as_str().map(std::path::PathBuf::from)) {
+        Some(root) => root.join(format!("{name}.git")),
+        None => run_dir.join("git").join(format!("{name}.git")),
+    }
 }
 
 /// A repository of the run: `name`, or its first.
@@ -41,7 +76,25 @@ fn repo(run_dir: &Path, name: Option<&str>) -> Result<std::path::PathBuf> {
             .cloned()
             .ok_or_else(|| anyhow!("this run has no git repository"))?,
     };
-    Ok(run_dir.join("git").join(format!("{name}.git")))
+    Ok(repo_dir(run_dir, &name))
+}
+
+/// The repository's name, as `repo` would pick it.
+fn repo_name(run_dir: &Path, name: Option<&str>) -> String {
+    name.map(str::to_string)
+        .or_else(|| repos(run_dir).into_iter().next())
+        .unwrap_or_default()
+}
+
+/// A repository's name, as the firm's server serves it and a remote may
+/// spell it: letters, digits, `-`, `_` and `.`, not starting with a dot or
+/// ending in `.git`.
+pub fn valid_repo_name(n: &str) -> bool {
+    (1..=100).contains(&n.len())
+        && !n.starts_with('.')
+        && !n.ends_with(".git")
+        && n.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// A branch name or a commit id, safe to pass to git.
@@ -97,7 +150,19 @@ async fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
 /// Branches, `main` first, with their last commit.
 pub async fn branches(run_dir: &Path, name: Option<&str>) -> Result<Value> {
     let r = repo(run_dir, name)?;
-    let out = git(&r, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%1f%(objectname)%1f%(authorname)%1f%(committerdate:unix)%1f%(subject)", "refs/heads/"]).await?;
+    // An ended run's branches are as they were when it ended.
+    let out = match recorded(run_dir, &repo_name(run_dir, name), "end") {
+        Some(end) => {
+            let mut out = Vec::new();
+            for (b, c) in end {
+                let Some(c) = c.as_str() else { continue };
+                let one = git(&r, &["show", "-s", "--format=%H%x1f%an%x1f%ct%x1f%s", c, "--"]).await?;
+                out.extend_from_slice(format!("{b}\x1f{}\n", String::from_utf8_lossy(&one).trim()).as_bytes());
+            }
+            out
+        }
+        None => git(&r, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)%1f%(objectname)%1f%(authorname)%1f%(committerdate:unix)%1f%(subject)", "refs/heads/"]).await?,
+    };
     let mut list: Vec<Value> = String::from_utf8_lossy(&out)
         .lines()
         .filter_map(|l| {
@@ -114,6 +179,7 @@ pub async fn branches(run_dir: &Path, name: Option<&str>) -> Result<Value> {
 pub async fn log(run_dir: &Path, name: Option<&str>, r: &str, limit: usize) -> Result<Value> {
     check_ref(r)?;
     let rp = repo(run_dir, name)?;
+    let r = &as_of_run(run_dir, &repo_name(run_dir, name), r);
     let n = format!("--max-count={}", limit.clamp(1, 1000));
     let out = git(
         &rp,
@@ -156,6 +222,7 @@ pub async fn tree(run_dir: &Path, name: Option<&str>, r: &str, path: &str) -> Re
     check_ref(r)?;
     check_path(path)?;
     let rp = repo(run_dir, name)?;
+    let r = &as_of_run(run_dir, &repo_name(run_dir, name), r);
     let spec = if path.is_empty() {
         r.to_string()
     } else {
@@ -189,6 +256,7 @@ pub async fn blob(run_dir: &Path, name: Option<&str>, r: &str, path: &str) -> Re
         bail!("give a file path");
     }
     let rp = repo(run_dir, name)?;
+    let r = &as_of_run(run_dir, &repo_name(run_dir, name), r);
     let spec = format!("{r}:{path}");
     let size: usize = String::from_utf8_lossy(&git(&rp, &["cat-file", "-s", &spec]).await?)
         .trim()

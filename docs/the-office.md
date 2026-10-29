@@ -56,7 +56,7 @@ On a Linux host with KVM, from a fresh clone (The Office uses `config/zapper.yam
 make deps                     # Firecracker and a guest kernel into ~/.local/share/zapper
 make install                  # zapper, zapper-agent and zapper-inspect into ~/.local/bin
 make image                    # base Ubuntu image
-make image IMAGE=office       # the workers' image: Claude Code and pi (pinned), git, gh, kubectl, podman, a headless browser
+make image IMAGE=office       # the workers' image: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
 make image IMAGE=k3s          # the firm's cluster
 make kernel KERNEL=k8s        # the cluster's kernel, built in a container
 claude setup-token            # anywhere with a browser; store the token as configuration.md#model-credentials-claude-and-openrouter says

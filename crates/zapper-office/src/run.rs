@@ -158,9 +158,9 @@ pub struct StartOptions {
     pub ceo_prompt: Option<String>,
     /// The board's own articles for the charter: every worker reads them.
     pub articles: Option<String>,
-    /// The GitHub repositories to work in, `owner/name`, instead of the
-    /// config's (a firm with `git.github`). Each is checked against the
-    /// owner's GitHub App when the run starts.
+    /// The repositories to work in, by name (or `owner/name`), instead of
+    /// every one the remote's App is installed on (a firm with `git.remote`).
+    /// Each is checked against the App when the run starts.
     pub repos: Option<Vec<String>>,
     /// The charter's terms, instead of the config's.
     pub security_share: Option<f64>,
@@ -379,19 +379,25 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
     }
     if let Some(repos) = o.repos.as_ref().filter(|r| !r.is_empty()) {
         // Repositories given outright are checked against the App when the
-        // run starts; without them it lists the account's from GitHub.
-        let Some(gh) = firm.git.as_mut().and_then(|g| g.github.as_mut()) else {
-            bail!("repos is for a firm whose git is in GitHub (git.github)");
+        // run starts; without them it lists the ones the App is installed on.
+        let Some(g) = firm.git.as_mut().filter(|g| g.remote.is_some()) else {
+            bail!("repos is for a firm whose repositories have a remote (git.remote)");
         };
         let mut named: Vec<String> = Vec::new();
         for r in repos {
             let r = r.trim();
-            zapper_github::split_repo(r)?;
-            if !named.iter().any(|n| n.eq_ignore_ascii_case(r)) {
+            let name = r.rsplit('/').next().unwrap_or(r);
+            if !super::git::valid_repo_name(name) || r.matches('/').count() > 1 {
+                bail!("{r:?} is not a repository name");
+            }
+            if !named
+                .iter()
+                .any(|n| n.rsplit('/').next().unwrap_or(n).eq_ignore_ascii_case(name))
+            {
                 named.push(r.to_string());
             }
         }
-        gh.repos = named;
+        g.found = named;
     }
     if let Some(share) = o.security_share {
         firm.budget.security_share = share;
@@ -554,6 +560,28 @@ pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmR
     let config = d.config();
     let firm = firm::get(&config, name).unwrap();
     let started = with_options(name, firm, &config, o).unwrap();
+    test_run_started(d, name, started)
+}
+
+/// A test run whose remote's repositories are found as a real run's are.
+#[cfg(test)]
+pub(crate) async fn test_run_remote(d: &Core, name: &str, repos: &[&str]) -> Arc<FirmRun> {
+    let config = d.config();
+    let firm = firm::get(&config, name).unwrap();
+    let o = StartOptions {
+        repos: Some(repos.iter().map(|r| r.to_string()).collect()),
+        ..Default::default()
+    };
+    let mut started = with_options(name, firm, &config, &o).unwrap();
+    started.firm = super::remote::with_repositories(started.firm)
+        .await
+        .unwrap();
+    test_run_started(d, name, started)
+}
+
+#[cfg(test)]
+fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
+    let config = d.config();
     let (run, _boots) = create_run(d, name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
     for w in run.rts() {
@@ -601,7 +629,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         scenario,
     } = with_options(name, firm, &config, opts)?;
     check_resources(d, &config, &firm)?;
-    let firm = super::github::with_repositories(firm).await?;
+    let firm = super::remote::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;
     }
@@ -850,9 +878,6 @@ pub(crate) fn agent_overlay(
     }
     // In a firm on GitHub, `gh` wants a token in the environment to start:
     // a placeholder, as the real one is added at the network.
-    if run.config.git_github() {
-        overlay["env"] = json!({ "GITHUB_TOKEN": super::github::PLACEHOLDER_TOKEN });
-    }
     overlay
 }
 
@@ -917,7 +942,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     for t in tasks {
         let _ = t.await;
     }
-    super::github::revoke_all(run).await;
+    super::remote::finish(run).await;
     facility::stop(d, run).await;
     security::unregister(d, run);
     ops::unregister(d, run);
@@ -1078,7 +1103,7 @@ mod tests {
         let yaml = |git: &str| {
             format!("profiles: {{ w: {{}} }}\nfirms:\n  acme:\n    roles: {{ ceo: {{ profile: w, agent: ceo }} }}\n    workers: [{{ name: barbara, role: ceo }}]\n{git}")
         };
-        let github = "    git: { github: { config: acme.yaml } }\n    credentials:\n      github:\n        levels: { read: { contents: read } }\n";
+        let remote = "    git: { remote: { github: { config: acme.yaml } }, dir: /tmp/repos }\n";
         let with = |y: String, repos: Option<Vec<&str>>| {
             let c = zapper_policy::Config::from_yaml(&y).unwrap();
             let firm = crate::firm::get(&c, "acme").unwrap();
@@ -1086,26 +1111,21 @@ mod tests {
                 repos: repos.map(|r| r.into_iter().map(String::from).collect()),
                 ..Default::default()
             };
-            super::with_options("acme", firm, &c, &o).map(|s| s.firm.github_repos())
+            super::with_options("acme", firm, &c, &o).map(|s| s.firm.git.unwrap().found)
         };
-        // Given, they are used as they are (once each); a run with none lists the
-        // owner's from GitHub when it starts, so none here is fine.
+        // Given, they are kept (once each) for the run to check against the
+        // App; a run with none takes every one the App is installed on.
         assert_eq!(
-            with(
-                yaml(github),
-                Some(vec![" acme/api ", "ACME/API", "Acme/web"])
-            )
-            .unwrap(),
-            ["acme/api", "Acme/web"]
+            with(yaml(remote), Some(vec![" api ", "API", "Acme/web"])).unwrap(),
+            ["api", "Acme/web"]
         );
-        assert!(with(yaml(github), None).unwrap().is_empty());
-        // Only OWNER/NAME (whose owner is checked against the App's account
-        // when the run starts).
-        assert!(with(yaml(github), Some(vec!["api"])).is_err());
-        // A firm with its own git server has none to name.
-        let e = with(yaml("    git: {}\n"), Some(vec!["acme/api"]))
+        assert!(with(yaml(remote), None).unwrap().is_empty());
+        assert!(with(yaml(remote), Some(vec!["a/b/c"])).is_err());
+        assert!(with(yaml(remote), Some(vec![".hidden"])).is_err());
+        // A firm without a remote has none to name.
+        let e = with(yaml("    git: {}\n"), Some(vec!["api"]))
             .unwrap_err()
             .to_string();
-        assert!(e.contains("git.github"), "{e}");
+        assert!(e.contains("git.remote"), "{e}");
     }
 }

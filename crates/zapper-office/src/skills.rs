@@ -33,6 +33,7 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "skills/office-publish/SKILL.md",
     "skills/office-resources/SKILL.md",
     "skills/office-git/SKILL.md",
+    "skills/knowledge-base/SKILL.md",
     "skills/manager/SKILL.md",
     "skills/security-review/SKILL.md",
     "skills/reviewing-work/SKILL.md",
@@ -63,6 +64,8 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "agents/process-improvement/AGENT.md",
     "agents/process-improvement/skills/retrospective/SKILL.md",
     "agents/security-officer/AGENT.md",
+    "agents/librarian/AGENT.md",
+    "agents/librarian/skills/curating/SKILL.md",
 ];
 
 /// A firm's `skills_dir` when it sets none, relative to the config file.
@@ -79,6 +82,9 @@ const MANAGER: &str = "manager";
 /// Every worker's, in a firm with a repository: branches, review, who
 /// merges to main.
 const GIT: &str = "office-git";
+/// Every worker's, in a firm with a knowledge base: reading it, and
+/// contributing to it through the librarian.
+const KNOWLEDGE_BASE: &str = "knowledge-base";
 
 /// Where a firm's skills are.
 pub fn dir(firm: &Firm) -> PathBuf {
@@ -170,7 +176,8 @@ pub fn agent(agents: &Path, name: &str) -> Result<Agent> {
 }
 
 /// The skills from the skills directory a role has whatever its brief
-/// says: everyone's, the git skill in a firm with a repository, the manager
+/// says: everyone's, the git skill in a firm with a repository (and the
+/// knowledge base's in a firm with one), the manager
 /// skill for roles that hire, and the security skill for officers and the
 /// CEO (who holds security until an officer is hired).
 pub(crate) fn automatic(firm: &Firm, role_name: &str, role: &Role) -> Vec<&'static str> {
@@ -179,8 +186,12 @@ pub(crate) fn automatic(firm: &Firm, role_name: &str, role: &Role) -> Vec<&'stat
         .and_then(|r| firm.worker(r))
         .map(|w| w.role.clone());
     let mut names = EVERYONE.to_vec();
-    if !firm.git_repos().is_empty() {
+    // With a remote, the repositories are found when a run starts.
+    if !firm.git_repos().is_empty() || firm.git_remote().is_some() {
         names.push(GIT);
+    }
+    if firm.knowledge_base().is_some() {
+        names.push(KNOWLEDGE_BASE);
     }
     if !role.hires.is_empty() {
         names.push(MANAGER);

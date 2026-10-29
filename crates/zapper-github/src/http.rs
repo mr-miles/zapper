@@ -18,6 +18,8 @@ const MAX_BODY: usize = 4 << 20;
 pub struct Response {
     pub status: u16,
     pub body: Bytes,
+    /// A redirect's target.
+    pub location: Option<String>,
 }
 
 /// One request; `bearer` is the JWT or token, `body` a JSON document.
@@ -81,6 +83,11 @@ where
     tokio::spawn(conn);
     let resp = sender.send_request(req).await?;
     let status = resp.status().as_u16();
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let mut body = resp.into_body();
     let mut buf = Vec::new();
     while let Some(frame) = body.frame().await {
@@ -94,6 +101,7 @@ where
     Ok(Response {
         status,
         body: buf.into(),
+        location,
     })
 }
 

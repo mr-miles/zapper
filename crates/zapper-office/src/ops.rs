@@ -836,7 +836,7 @@ static TOOLS: &[Tool] = &[
         name: "credentials_request",
         shown: |_| true,
         description: "Ask for access to one of the firm's resources, with a reason: a git repository (read: fetch; write: push branches; admin: also main and tags; each repository is its own grant), the cluster (read: view dev; write: deploy to dev; admin: also prod), or drive spaces (read: list and fetch; write: also publish). Ask for the least your work needs. The security officer decides (admin goes to the CEO); you get mail. Grants expire.",
-        props: || json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "description": "read, write or admin; for a GitHub repository, one of the firm's GitHub levels (see `credentials`)" }, "repo": s("For git: the repository's name, e.g. product, or owner/name for a GitHub repository (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
+        props: || json!({ "resource": { "type": "string", "enum": ["git", "cluster", "drive"] }, "level": { "type": "string", "enum": ["read", "write", "admin"] }, "repo": s("For git: the repository's name, e.g. product (needed when the firm has more than one)"), "spaces": { "type": "array", "items": { "type": "string" }, "description": "For drive: the spaces, e.g. [\"engineering\"]" }, "reason": s("What your work needs it for") }),
         required: &["resource", "level", "reason"],
         run: Run::Sync(|c| {
             let level = c.args.req("level")?;
@@ -858,6 +858,36 @@ static TOOLS: &[Tool] = &[
                 .map(|k| access::request(c.run, c.me, k, &level, &reason))
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!({ "requests": ids, "note": "the policy owner decides; you'll get mail" }))
+        }),
+    },
+    Tool {
+        name: "publish_branch",
+        shown: |_| true,
+        description: "Send a branch for review, in a repository whose main is merged by the board on the firm's remote: push the branch to the firm's git server first. It must be based on the tip of main and change nothing under .github/workflows (those are the board's). Opens a pull request, or updates the one open for the branch. You get mail when its checks finish, when it is reviewed or commented on, and when it is merged or closed. Needs write on the repository.",
+        props: || json!({ "repo": s("The repository, e.g. api"), "branch": s("Your branch, as pushed to the firm's server"), "title": s("The pull request's title: what it does"), "body": s("Markdown: what it does, why, and how to check it") }),
+        required: &["repo", "branch", "title"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let repo = c.args.req("repo")?;
+                let branch = c.args.req("branch")?;
+                let title = c.args.req("title")?;
+                let body = c.args.opt("body").unwrap_or_default();
+                super::remote::publish_branch(c.run, c.me, &repo, &branch, &title, &body).await
+            })
+        }),
+    },
+    Tool {
+        name: "pr_status",
+        shown: |_| true,
+        description: "A published branch's pull request now: its state, its checks (with the end of each failing job's log), and its reviews and comments.",
+        props: || json!({ "repo": s("The repository, e.g. api"), "branch": s("Your branch, as you published it") }),
+        required: &["repo", "branch"],
+        run: Run::Async(|c| {
+            Box::pin(async move {
+                let repo = c.args.req("repo")?;
+                let branch = c.args.req("branch")?;
+                super::remote::pr_status(c.run, c.me, &repo, &branch).await
+            })
         }),
     },
     Tool {

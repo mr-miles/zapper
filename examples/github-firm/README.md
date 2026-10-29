@@ -2,14 +2,14 @@
 
 # A firm on GitHub
 
-The [shopping list](../shopping-list/README.md) company, working in a repository of yours on GitHub instead of a repository of its own. **Ada**, the CEO, starts alone, hires a product manager to write a spec, then engineers to build a Node and React app from it. Everyone is Claude Code in a VM of their own, and nobody holds a GitHub credential: the host mints each worker a token from your GitHub App, for one repository at one level, and puts it into their requests to GitHub. All work goes through pull requests, whose checks the engineers watch with `gh`; you, the board, merge them.
+The [shopping list](../shopping-list/README.md) company, working in a repository of yours on GitHub. **Ada**, the CEO, starts with **Lin**, the librarian, hires a product manager to write a spec, then engineers to build a Node and React app from it. What the team learns goes into the firm's knowledge base, a markdown wiki in a second repository, `kb`, which Lin curates. Everyone is Claude Code in a VM of their own, working only with the firm's own git server: nobody in the VMs holds a GitHub credential. The daemon keeps that server in step with GitHub through your GitHub App, turns the branches the engineers publish into pull requests, and mails them their checks and reviews; you, the board, merge on GitHub.
 
-- [zapper.yaml](zapper.yaml): a complete config, with the firm `octo` and its two GitHub levels, `read` and `write`.
+- [zapper.yaml](zapper.yaml): a complete config, with the firm `octo`, whose repositories are on GitHub and kept in `~/.local/share/zapper/repos/octo`, and whose knowledge base `kb` has its `main` on the firm's server (`git.local`).
 - [task.md](task.md): the board's task for Ada. The first line is the subject.
 
 ## Before you start
 
-You need a zapper set up as in the [README](../../README.md): `make deps`, `make install`, and the Claude Code image, `make image IMAGE=office` (it has `gh`). You also need your Claude token in `~/.config/zapper/claude-token`; [config/zapper.yaml](../../config/zapper.yaml) says how.
+You need a zapper set up as in the [README](../../README.md): `make deps`, `make install`, and the Claude Code image, `make image IMAGE=office`. You also need your Claude token in `~/.config/zapper/claude-token`; [config/zapper.yaml](../../config/zapper.yaml) says how.
 
 Then, on GitHub, in an account of yours (an organisation, or your own login):
 
@@ -30,6 +30,7 @@ Then, on GitHub, in an account of yours (an organisation, or your own login):
    ```
 
 3. **`main` protected**: in the repository's settings, a branch ruleset on `main` that requires a pull request and blocks force pushes, so only a merged pull request changes it.
+4. **A repository for the knowledge base**, `kb`, left empty: the daemon gives it its layout (`AGENTS.md`, `index.md`, `log.md`, `raw/`, `wiki/`) when it is first used. Its `main` is merged on the firm's server by Lin and pushed out by the daemon, so protect it with a ruleset that lets only your App update `main` (add the App to the ruleset's bypass list); GitHub's copy is for you to read.
 
 Then the App, from the repository's root on the zapper host:
 
@@ -37,11 +38,11 @@ Then the App, from the repository's root on the zapper host:
 zapper github setup --org <account>        # or --user <your login>
 ```
 
-It opens GitHub to create the App (or finds the one there is) and to install it: install it on the `shopping-list` repository only, since the firm works in every repository the App reaches. It writes the App's credentials to `~/.config/zapper/github-apps/<account>.yaml`. Put that file's name in [zapper.yaml](zapper.yaml), in place of `acme.yaml`:
+It opens GitHub to create the App (or finds the one there is) and to install it: install it on the `shopping-list` and `kb` repositories only, since the firm's repositories are every one the App is installed on. It writes the App's credentials to `~/.config/zapper/github-apps/<account>.yaml`. Put that file's name in [zapper.yaml](zapper.yaml), in place of `acme.yaml`:
 
 ```yaml
     git:
-      github: { config: <account>.yaml }
+      remote: { github: { config: <account>.yaml } }
 ```
 
 Check it:
@@ -65,17 +66,18 @@ zapper --config examples/github-firm/zapper.yaml check
    zapper firm up octo --task examples/github-firm/task.md
    ```
 
-   The run asks GitHub for the App's account and the repositories it reaches; if it reaches none, or the App is installed on more than one account, it stops and says so. Ada's VM boots and the task arrives in her inbox.
+   The run asks GitHub for the App's account and the repositories it is installed on (if it is installed on more than one account, it stops and says so), and clones each into `git.dir` when someone first uses it in the run, or fetches it if it is there from an earlier run. Ada's VM boots and the task arrives in her inbox.
 
 3. Answer Ada, as the board, in the UI or the terminal:
 
    - **Her budget request**: `zapper firm budget octo approve b-1`, or the Kickoff tab.
    - **Background checks** of her hires, which come to you because she holds security: `zapper firm screen octo c-1 --approve --note "ok"`, or the Security tab.
-   - **GitHub access**: each hire asks for the repository at `write`; Ada decides those. She holds `read` on it herself from the start, and nothing more.
+   - **Git access**: each hire asks for `git:shopping-list` at `write`, to push branches to the firm's server and publish them; Ada decides those. Nobody pushes `main`: it comes from GitHub.
+   - **The knowledge base**: every hire reads `kb` from being cleared, and asks Ada for `write` to contribute. Lin asks for `admin` on `kb`, to merge; that goes to Ada as CEO. A contribution is a branch Lin reviews and merges.
 
-4. **Merge the pull requests**, on GitHub, when the author mails you that one is reviewed and its checks pass. A workflow change comes to you by mail as a patch: apply it yourself if you agree.
+4. **Merge the pull requests**, on GitHub, when the author mails you that one is reviewed and its checks pass. The daemon fetches `main` back and tells the author. A workflow change comes to you by mail as a patch, since a branch that changes `.github/workflows/` can't be published: apply it yourself if you agree.
 
-5. Watch them work: the Organization, Messages and Security tabs show the people, their mail and who holds which level; the pull requests are on GitHub. There is no Git tab, since the firm has no repository of its own. In the terminal, `zapper firm journal octo -f` shows everything, including each token's minting.
+5. Watch them work: the Organization, Messages and Security tabs show the people, their mail and their grants; the Git tab shows the firm's server's copy of the repositories and the commits of this run, the knowledge base's pages among them; the pull requests are on GitHub, and so is a copy of `kb`. In the terminal, `zapper firm journal octo -f` shows everything, including what the daemon fetched, pushed and published.
 
 ## Afterwards
 
@@ -83,4 +85,4 @@ zapper --config examples/github-firm/zapper.yaml check
 zapper firm down octo     # stop the run; its journal, transcripts and drive stay; the code is on GitHub
 ```
 
-A worker leaving, or losing their grant, has their token revoked at GitHub, and so does every token when the run stops. [docs/office.md](../../docs/office.md) has the rest: a firm on GitHub is under "Facilities".
+The repositories stay in `git.dir` for the next run, which fetches what changed on GitHub, and the knowledge base with them: the next company starts from what this one recorded; the daemon's tokens are revoked at GitHub when the run stops. [docs/office.md](../../docs/office.md) has the rest: a firm on GitHub is under "Facilities".

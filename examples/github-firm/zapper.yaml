@@ -1,9 +1,9 @@
 # A company that builds software on GitHub: Ada, the CEO, starts alone,
 # hires a product manager to write the specification of a shopping list app,
-# then engineers to build it in a repository of yours on GitHub. Their access
-# is a token the host mints from your GitHub App for one repository at one
-# level; nothing in the VMs holds it. All work goes through pull requests,
-# whose checks the engineers watch with gh, and you, the board, merge them.
+# then engineers to build it in a repository of yours on GitHub. They work
+# only with the firm's own git server; the daemon keeps it in step with
+# GitHub through your GitHub App, publishes their branches as pull requests,
+# and mails them their checks and reviews. You, the board, merge on GitHub.
 # See README.md beside this file.
 #
 # A complete config, to run instead of config/zapper.yaml:
@@ -57,10 +57,9 @@ profiles:
     policy:
       net:
         - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
-        # GitHub comes with a grant (credentials_request), which allows it
-        # in the worker's own layer with their token; never a network ask.
-        - { action: deny, host: github.com, comment: with a GitHub grant only }
-        - { action: deny, host: api.github.com, comment: with a GitHub grant only }
+        # The firm's repositories come with a grant (credentials_request),
+        # which allows them in the worker's own layer; never a network ask.
+        - { action: deny, host: git.octo.internal, comment: with a git grant only }
       defaults: { net: ask }
 
   # Engineers also install packages from npm.
@@ -80,38 +79,21 @@ firms:
     # A run budget, in tokens: hiring needs one. The seed is what Ada has to
     # scope the task; she asks the board for the rest.
     budget: { seed: 1000000, max_concurrent: 3 }
-    # The firm's code is on GitHub: `config` names the App's credentials
-    # file in ~/.config/zapper/github-apps, which `zapper github setup` wrote
-    # (named after the account: change acme.yaml to yours). When a run
-    # starts, the account is the one the App is installed on, and the
-    # repositories are those it reaches there.
+    # The firm's repositories are on GitHub: `remote.github.config` names the
+    # App's credentials file in ~/.config/zapper/github-apps, which
+    # `zapper github setup` wrote (named after the account: change acme.yaml
+    # to yours). The repositories are every one the App is installed on,
+    # kept in `dir` across runs. Their main is merged by you on GitHub,
+    # unless listed in `local` (merged on the firm's server, pushed out).
+    # `kb` is the firm's knowledge base: a markdown wiki its librarian
+    # curates and merges, so its main is the firm's.
     git:
-      github: { config: acme.yaml }
+      remote: { github: { config: acme.yaml } }
+      dir: ~/.local/share/zapper/repos/octo
+      local: [kb]
     credentials:
       # board: where the CEO publishes the board pack for the board.
       spaces: [general, product, engineering, board]
-      github:
-        # The levels a repository is granted at, each a set of the App's
-        # permissions. The CEO holds read on every repository; a worker
-        # holds one repository at one level. None has workflows: changes
-        # to GitHub Actions workflows are the board's.
-        levels:
-          read:
-            contents: read
-            pull_requests: read
-            issues: read
-            actions: read
-            checks: read
-            statuses: read
-            artifact_metadata: read
-          write:
-            contents: write
-            pull_requests: write
-            issues: write
-            actions: read
-            checks: read
-            statuses: read
-            artifact_metadata: read
     # Names for hires, in order, when the hirer doesn't pick one.
     names: [priya, sam, leo, mia]
     roles:
@@ -133,6 +115,14 @@ firms:
         title: Software Engineer
         model: claude-sonnet-5-5
         agent: software-engineer
-    # The founder; everyone else is hired during the run.
+      # Curates the knowledge base: reviews what others add, merges it, and
+      # keeps its index and log.
+      librarian:
+        profile: claude
+        title: Librarian
+        model: claude-sonnet-5-5
+        agent: librarian
+    # The founders; everyone else is hired during the run.
     workers:
       - { name: ada, role: ceo }
+      - { name: lin, role: librarian, reports_to: ada }

@@ -196,6 +196,17 @@ impl GitHub {
         serde_json::from_slice(&r.body).with_context(|| format!("{what}: decoding the response"))
     }
 
+    /// A call with an installation token.
+    pub(crate) async fn call_token(
+        &self,
+        method: Method,
+        path: &str,
+        token: &Token,
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        self.call(method, path, &token.value, body).await
+    }
+
     fn jwt(app: &App) -> Result<String> {
         app.jwt(time::OffsetDateTime::now_utc().unix_timestamp())
     }

@@ -1,6 +1,6 @@
 ---
 name: office-git
-description: "How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged; on GitHub, pull requests and their checks with gh. Use it whenever you push, open a pull request, ask for or give a review, or merge."
+description: "How work reaches main in the firm's git repositories: branches, review, who merges, and telling people when it's merged; where main is on the remote, publish_branch, its pull request and checks. Use it whenever you push, publish a branch, ask for or give a review, or merge."
 ---
 
 # Branches, review and main
@@ -36,21 +36,19 @@ Never push to someone else's branch unless they ask, never force-push a branch s
 3. Tell everyone who waits for it, in their threads: the author and the reviewer, and anyone whose work depends on it, with the merge commit. Nobody wakes for a push, only for mail.
 4. Delete merged branches when nobody needs them: `git push origin --delete <branch>`.
 
-# A firm on GitHub
+# A repository whose main is on the remote
 
-If your preamble's repositories are `https://github.com/<owner>/<name>.git`, the firm works on GitHub, and this section replaces the rest of this skill where they differ. Admin and the merging above are not used.
+Your preamble says which repositories' `main` is merged by the board on the firm's remote (GitHub). For those, this section replaces the merging above. You still work only with the firm's server, `https://git.<domain>/<name>.git`, with the same grants; you never talk to GitHub, and have no `gh`. The daemon keeps the firm's server in step with the remote.
 
-- **Your access is one repository at one level**: the firm's named levels, not read, write and admin; `credentials()` lists them and what each allows. Ask for the least that does the work: `credentials_request(resource: "git", repo: "<owner>/<name>", level: "<level>", reason)`.
-- `git` and `gh` are set up for you: never run `gh auth login`, set a token, or put credentials in a remote. A 401 or 403 from GitHub means your grant doesn't cover it (or has ended): check `credentials()`, then ask.
-- **Never push to `main`**, not even a one-line fix. All work reaches `main` through a pull request, and **the board merges it**. Nobody in the firm merges a pull request.
-- **Never change `.github/workflows/`.** Changes to GitHub Actions workflows are the board's. If your work needs one, keep it out of your branch and send it to the board: a `question` to `board` with the pull request, why the workflow must change, and the change itself as a patch (`git diff` of the workflow files, in the body or attached). Tell whoever gave you the work that it waits on the board.
+- **Nobody pushes `main`**, whatever their grant: the firm's server refuses it. All work reaches `main` through a pull request, and **the board merges it** on GitHub. Nobody in the firm merges.
+- **Never change `.github/workflows/`.** Changes to GitHub Actions workflows are the board's, and a branch that touches them can't be published. If your work needs one, keep it out of your branch and send it to the board: a `question` to `board` with the pull request, why the workflow must change, and the change as a patch (`git diff` of the workflow files, in the body or attached). Tell whoever gave you the work that it waits on the board.
 
-## Your work, on GitHub
+## Your work, with a remote
 
 1. Work on a branch, always: `git fetch && git checkout -b <your name>/<topic> origin/main`.
-2. Commit small, saying what and why, and push the branch to GitHub: `git push -u origin <branch>`.
-3. When the work is complete, open a pull request: `gh pr create --base main --head <branch> --title "<what>" --body "<what it does, why, how to check it>"`.
-4. Watch its checks until they finish: `gh pr checks <number> --watch`. If one fails, read why (`gh run view <run id> --log-failed`), fix it on the branch, push, and watch again. A pull request isn't done while a check is failing or still running.
-5. Ask a reviewer, as above, with the pull request's URL and its head commit; fix what they find, push, and watch the checks again.
-6. When it's approved and its checks pass, hand it to the board to merge: a `question` to `board`, subject "Merge <pull request URL>", with what it does, the approved commit, who approved it, and that its checks pass. Then finish your assignment in its thread (`mail_reply`, `kind: report`, `close: true`) with the same, saying it waits on the board's merge.
-7. If `main` moves first, or the board asks for changes, rebase or fix on the branch, push (`git push --force-with-lease` on your own branch only), watch the checks, and tell the reviewer and the board.
+2. Commit small, saying what and why, and push the branch to the firm's server: `git push -u origin <branch>`.
+3. When the work is complete, send it for review: `publish_branch(repo, branch, title, body)`, with what it does, why, and how to check it. The daemon pushes it to the remote and opens a pull request (or updates the one open for it).
+4. You get mail when its checks finish, when it is reviewed or commented on, and when the board merges or closes it; end your turn meanwhile. `pr_status(repo, branch)` has the details now: each check, the end of a failing job's log, every review and comment. If a check fails, fix it on the branch, push, and `publish_branch` again. A pull request isn't done while a check is failing or still running.
+5. Ask a reviewer, as above, with the pull request's URL and its head commit; fix what they find, push, and publish again.
+6. Before completing, check your branch is based on the tip of `main`: `git fetch && git merge-base --is-ancestor origin/main HEAD`. If not, rebase on it (`git rebase origin/main`), rerun the tests, push (`git push --force-with-lease` on your own branch only) and publish again; tell the reviewer if anything changed beyond the rebase. `publish_branch` refuses a branch that isn't.
+7. When it's approved and its checks pass, hand it to the board to merge: a `question` to `board`, subject "Merge <pull request URL>", with what it does, the approved commit, who approved it, and that its checks pass. Then finish your assignment in its thread (`mail_reply`, `kind: report`, `close: true`) with the same, saying it waits on the board's merge.

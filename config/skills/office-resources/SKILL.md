@@ -39,13 +39,13 @@ Traffic to sites outside the firm is checked by the security officers. Ask ahead
 
 ## git
 
-Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`, each empty at the start; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
+Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
 - `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
 - Ask for write, not admin. Branches, review and who merges to `main`: the office-git skill.
 - Code lives in git, never on the drive.
 
-If the repositories are `https://github.com/<owner>/<name>.git` instead, the firm works on GitHub: its levels are named by the firm (`credentials()` lists them and what each allows) in place of read, write and admin, you hold one repository at a time, and `git` and `gh` work without a login once you hold it. You never push `main` or change `.github/workflows/`: work goes through a pull request (the office-git skill).
+If your preamble says a repository's `main` is merged by the board on the firm's remote, you still clone and push only the firm's server, and nobody pushes `main`: send a branch for review with `publish_branch`, and never change `.github/workflows/` (the office-git skill). The repositories then aren't empty at the start: they are the remote's, kept across runs.
 
 ## The cluster
 

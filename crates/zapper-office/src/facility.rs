@@ -46,8 +46,8 @@ pub struct Facilities {
     pub kubeconfig: Mutex<Option<String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
-    /// Per worker, the GitHub token's secret and rules in their session.
-    pub github: Mutex<HashMap<String, super::github::Applied>>,
+    /// What the daemon knows of the firm's git remote.
+    pub remote: super::remote::State,
     product: Mutex<Option<JoinHandle<()>>>,
     dashboard: Mutex<Option<JoinHandle<()>>>,
     /// The token the board signs in to the dashboard with.
@@ -188,7 +188,7 @@ fn repo_of(path: &str) -> Option<&str> {
         .split('/')
         .next()?
         .strip_suffix(".git")
-        .filter(|n| zapper_policy::valid_worker_name(n))
+        .filter(|n| super::git::valid_repo_name(n))
 }
 
 fn basic_auth(h: &hyper::HeaderMap) -> Option<(String, String)> {
@@ -275,7 +275,7 @@ pub(super) fn authorize(
     Ok(level)
 }
 
-async fn git_request(
+pub(crate) async fn git_request(
     run: &Arc<FirmRun>,
     member: &str,
     req: Request<hyper::body::Incoming>,
@@ -287,6 +287,16 @@ async fn git_request(
         Ok(level) => level,
         Err(refused) => return *refused,
     };
+    // A remote's repository is cloned, or fetched, when this run first uses
+    // it.
+    if let Some(repo) = repo_of(&path) {
+        if let Err(e) = super::remote::ensure(run, repo).await {
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("{repo} couldn't be brought from the firm's remote: {e:#}; try again shortly, and tell the board if it persists"),
+            );
+        }
+    }
     let method = req.method().to_string();
     let headers = req.headers().clone();
     let body = match http_body_util::Limited::new(req.into_body(), MAX_GIT_BODY)
@@ -307,7 +317,10 @@ async fn git_request(
     cmd.arg("http-backend")
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("GIT_PROJECT_ROOT", run.dir.join("git"))
+        .env(
+            "GIT_PROJECT_ROOT",
+            super::remote::root(&run.config, &run.dir),
+        )
         .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("PATH_INFO", &path)
         .env("QUERY_STRING", &query)
@@ -378,6 +391,9 @@ async fn git_request(
     }
     if push && path.ends_with("/git-receive-pack") && out.status.success() {
         run.journal.append("git_push", json!({ "worker": member }));
+        if let Some(repo) = repo_of(&path) {
+            super::remote::after_push(run, repo);
+        }
     }
     resp.body(Full::new(Bytes::copy_from_slice(&out.stdout[at + sep..])))
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "bad CGI response"))
@@ -385,7 +401,7 @@ async fn git_request(
 
 /// The repository's `pre-receive` hook: below admin, no updates to `main`,
 /// branches under `main/`, or tags (the git handler sets `ZAPPER_GIT_LEVEL` from the pusher's grant).
-const PRE_RECEIVE: &str = r#"#!/bin/sh
+pub(super) const PRE_RECEIVE: &str = r#"#!/bin/sh
 # Installed by zapper: write may push branches; only admin updates main and tags
 # (and main/..., which would block main).
 [ "$ZAPPER_GIT_LEVEL" = admin ] && exit 0
@@ -549,8 +565,13 @@ pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
 
 pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let repos = run.config.git_repos();
+    if run.config.git_remote().is_some() {
+        // The repositories are the remote's, kept in git.dir across runs.
+        super::remote::prepare(run).await?;
+        tokio::spawn(super::remote::watch(run.clone()));
+    }
     if !repos.is_empty() {
-        for name in &repos {
+        for name in repos.iter().filter(|_| run.config.git_remote().is_none()) {
             let repo = run.dir.join("git").join(format!("{name}.git"));
             std::fs::create_dir_all(&repo)?;
             let ok = tokio::process::Command::new("git")
@@ -576,6 +597,8 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
             std::fs::write(&hook, PRE_RECEIVE)?;
             std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
         }
+        // An empty knowledge base gets its layout.
+        super::kb::seed(run).await?;
         // A password per worker is who they are, not what they may do: their
         // grant decides that.
         let mut pw = run.facility.git_passwords.lock().unwrap();
@@ -926,17 +949,38 @@ pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
 pub async fn git_log(run_dir: &Path) -> Value {
     let mut commits: Vec<Value> = Vec::new();
     for name in super::git::repos(run_dir) {
-        let repo = run_dir.join("git").join(format!("{name}.git"));
+        let repo = super::git::repo_dir(run_dir, &name);
+        // A run whose repositories outlive it shows what it added: from its
+        // branches at the end (or now) back to where they were at its start.
+        let shas = |when: &str| -> Vec<String> {
+            super::git::recorded(run_dir, &name, when)
+                .map(|m| {
+                    m.values()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut range: Vec<String> = match super::git::recorded(run_dir, &name, "end") {
+            Some(_) => shas("end"),
+            None => vec!["--branches".into()],
+        };
+        if super::git::recorded(run_dir, &name, "start").is_some() {
+            range.push("--not".into());
+            range.extend(shas("start"));
+        } else if range == ["--branches"] {
+            range = vec!["--all".into()];
+        }
         let out = tokio::process::Command::new("git")
             .arg("--git-dir")
             .arg(&repo)
             .args([
                 "log",
-                "--all",
                 "--date=unix",
                 "--max-count=500",
                 "--pretty=format:%H%x1f%an%x1f%ad%x1f%s%x1f%D",
             ])
+            .args(&range)
             .output()
             .await;
         let Ok(out) = out else { continue };
@@ -967,11 +1011,17 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .iter()
             .map(|r| format!("https://git.{d}/{r}.git"))
             .collect(),
-        github: run
+        remote_main: run
             .config
-            .github_repos()
-            .iter()
-            .map(|r| format!("https://github.com/{r}.git"))
+            .git_repos()
+            .into_iter()
+            .filter(|r| run.config.git_remote().is_some() && !run.config.main_is_local(r))
+            .collect(),
+        local_main: run
+            .config
+            .git_repos()
+            .into_iter()
+            .filter(|r| run.config.git_remote().is_some() && run.config.main_is_local(r))
             .collect(),
         kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
         product: cluster.then(|| format!("http://apps.{d}")),
@@ -988,27 +1038,6 @@ pub fn credentials_for(
     // The kubeconfig comes with a cluster grant (cluster_access); the git
     // password is the worker's identity, and their grant decides the rest.
     let mut files = Vec::new();
-    if run.config.git_github() {
-        // No credential here: the proxy sets the worker's own token on
-        // their requests to GitHub. `gh` won't run without one configured,
-        // so it is given a placeholder that is never sent.
-        let d = &run.domain;
-        files.push(GuestFile {
-            path: format!("{home}/.gitconfig"),
-            content: format!("[user]\n\tname = {worker}\n\temail = {worker}@{d}\n[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n"),
-            mode: 0o644,
-            user_owned: true,
-        });
-        files.push(GuestFile {
-            path: format!("{home}/.config/gh/hosts.yml"),
-            content: format!(
-                "github.com:\n    user: {worker}\n    oauth_token: {}\n    git_protocol: https\n",
-                super::github::PLACEHOLDER_TOKEN
-            ),
-            mode: 0o600,
-            user_owned: true,
-        });
-    }
     if let Some(pw) = run.facility.git_passwords.lock().unwrap().get(worker) {
         let d = &run.domain;
         files.push(GuestFile {
@@ -1083,8 +1112,11 @@ mod tests {
         assert_eq!(repo_of("/product.git/info/refs"), Some("product"));
         assert_eq!(repo_of("/product2.git/git-receive-pack"), Some("product2"));
         assert_eq!(repo_of("/product/info/refs"), None, "the .git suffix");
-        assert_eq!(repo_of("/Prod.git/info/refs"), None);
+        // As a remote may spell them; but no hidden or path-like names.
+        assert_eq!(repo_of("/My_Repo.v2.git/info/refs"), Some("My_Repo.v2"));
         assert_eq!(repo_of("/.git/info/refs"), None);
+        assert_eq!(repo_of("/.hidden.git/info/refs"), None);
+        assert_eq!(repo_of("/a b.git/info/refs"), None);
         assert_eq!(repo_of(""), None);
     }
 
