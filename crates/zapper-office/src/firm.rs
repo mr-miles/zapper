@@ -434,10 +434,6 @@ pub struct Role {
     /// Default title of workers of this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Host path of a script for the fake Claude, which plays it instead of
-    /// running Claude Code. For tests.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fake: Option<String>,
     /// Roles a worker of this role may hire, during a run with a budget.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hires: Vec<String>,

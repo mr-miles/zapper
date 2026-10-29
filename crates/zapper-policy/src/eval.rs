@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
+use zapper_proto::ExecRequest;
 
 use crate::{Action, ExecRule, NetRule, Policy, Scope};
 
@@ -16,16 +17,6 @@ pub struct NetRequest {
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ExecRequest {
-    /// Resolved executable path.
-    pub path: String,
-    #[serde(default)]
-    pub argv: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

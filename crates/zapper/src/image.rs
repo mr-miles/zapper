@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 
 use zapper_policy::parse_size;
@@ -73,11 +73,88 @@ fn run(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// An image's base, its steps, and the host files it takes with where each
+/// goes.
+pub type Recipe = (String, Vec<String>, Vec<(PathBuf, Vec<String>)>);
+
+/// What to build for `name`: its recipe in the config, with the files its
+/// arguments name (`--arg NAME=PATH`, else the arg's default); or, with
+/// `from`, the base and steps given on the command line, which take no
+/// arguments.
+pub fn recipe(
+    config: &zapper_policy::Config,
+    name: &str,
+    from: Option<String>,
+    run: Vec<String>,
+    args: &[String],
+) -> Result<Recipe> {
+    if let Some(from) = from {
+        if !args.is_empty() {
+            bail!("--arg is for an image's recipe; with --from there is none");
+        }
+        return Ok((from, run, vec![]));
+    }
+    if !run.is_empty() {
+        bail!("--run goes with --from; a recipe has its own steps");
+    }
+    let r = config.images.get(name).ok_or_else(|| {
+        let names: Vec<&str> = config.images.keys().map(String::as_str).collect();
+        anyhow!(
+            "no recipe for image {name:?} in the config (images: {}); or give --from and --run",
+            if names.is_empty() {
+                "none".into()
+            } else {
+                names.join(", ")
+            }
+        )
+    })?;
+    let mut given: std::collections::BTreeMap<&str, &str> = Default::default();
+    for a in args {
+        let (k, v) = a
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--arg {a:?}: NAME=PATH"))?;
+        if !r.args.contains_key(k) {
+            bail!(
+                "image {name} takes no argument {k:?} (it takes: {})",
+                if r.args.is_empty() {
+                    "none".to_string()
+                } else {
+                    r.args.keys().cloned().collect::<Vec<_>>().join(", ")
+                }
+            );
+        }
+        given.insert(k, v);
+    }
+    let mut files = Vec::new();
+    for (k, arg) in &r.args {
+        let path = match (given.get(k.as_str()), &arg.default) {
+            (Some(v), _) => PathBuf::from(v),
+            (None, Some(d)) => PathBuf::from(zapper_policy::expand_home(d)),
+            (None, None) => bail!("image {name} needs --arg {k}=PATH: {}", arg.description),
+        };
+        if !path.is_file() {
+            bail!(
+                "image {name}: {k} is {}, which isn't a file{}",
+                path.display(),
+                if arg.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", arg.description)
+                }
+            );
+        }
+        files.push((path, arg.install.clone()));
+    }
+    Ok((r.from.clone(), r.run.clone(), files))
+}
+
 pub struct Build<'a> {
     pub name: &'a str,
     pub from: &'a str,
     /// Shell commands run in the image at build time, as `RUN` steps.
     pub run: &'a [String],
+    /// Host files put in the image first, each at its paths, as `COPY` steps.
+    pub files: &'a [(PathBuf, Vec<String>)],
     pub size: Option<&'a str>,
     pub dir: &'a Path,
 }
@@ -96,12 +173,22 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
     std::fs::create_dir_all(b.dir)?;
     let oci = engine();
     let work = tempdir()?;
-    let reference = if b.run.is_empty() {
+    let reference = if b.run.is_empty() && b.files.is_empty() {
         eprintln!("pulling {}", b.from);
         run(Command::new(&oci).args(["pull", "-q", b.from]))?;
         b.from.to_string()
     } else {
         let mut file = format!("FROM {}\n", b.from);
+        for (i, (src, dests)) in b.files.iter().enumerate() {
+            // Into the build's context under a name of its own, then into
+            // the image at each of its paths, its mode kept.
+            let name = format!("file-{i}");
+            std::fs::copy(src, work.join(&name))
+                .with_context(|| format!("reading {}", src.display()))?;
+            for dest in dests {
+                file.push_str(&format!("COPY {name} {dest}\n"));
+            }
+        }
         for r in b.run {
             file.push_str(&format!("RUN {r}\n"));
         }

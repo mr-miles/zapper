@@ -74,7 +74,7 @@ firms:
 | `domain` | Names the firm's services; default `<firm>.internal` |
 | `budget` | `daily_turns`, `worker_daily_turns`, `daily_tokens` (0 is no limit), `max_concurrent`; days end at midnight UTC. `seed` (tokens, 0: none) gives the run a budget agreed with the board ([the workforce](#the-workforce-hiring-and-budgets)); `security_share` (0.2) is the officers' share of it (0 with officers leaves them unfunded, so their decisions go to the board until someone funds them: `zapper check` notes it, and the board is told when a run starts); `quote_fee` (30000) is what a contract offer gives the candidate for quoting; `turn_price` (10000) is what a turn costs in tokens on the firm's models until the CEO has measured their own, and prices the sizing in the CEO's `budget()` (set it for a firm on other models); `stall_after` (`10m`) is how long a worker may stay out of tokens with mail waiting before the CEO is reminded (the board is told at three times that); `turn_timeout` (`30m`) is how long one turn may run ([waking an idle worker](#waking-an-idle-worker)) |
 | `limits` | `thread_messages` (60), `mail_per_hour` (120), `fanout_per_hour` (10), `pair_per_10min` (30), `mail_per_run` (20000), `artifact_size` (50MiB), `drive_size` (2GiB) |
-| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first), `fake` (a fake Claude script, for tests) |
+| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first) |
 | `workers` | The founders, who boot with the firm: `name`, `role`, `reports_to`, `title`, and `profile` to run one on another profile than the role's (another agent or model) |
 | `names` | Optional: names for hires whose hirer doesn't pick one, in order; without it, a random free name from a built-in list |
 | `security` | `officers`, `digest_every: {minutes, requests}`, `answer_within`, `officer_first` (default true: a firm whose CEO can hire a security officer hires or contracts nobody else before one) |
@@ -743,7 +743,17 @@ The wake prompts, the follow-up and escalation texts, the officers' prompts, the
 
 ## Testing
 
-Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-agent fake-claude`, which speaks Claude Code's stream-json on stdin and stdout and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. A role uses it with `fake: <script path>`:
+Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`, from a mount:
+
+```yaml
+profiles:
+  fake-ceo:
+    engine: { image: office-fake }
+    agent: { kind: claude-code, env: { ZAPPER_FAKE_SCRIPT: /fake/ceo.yaml } }
+    mounts: [{ host: ./fake, guest: /fake, mode: ro }]
+```
+
+A script:
 
 ```yaml
 rules:                                        # the first rule that matches a wake runs

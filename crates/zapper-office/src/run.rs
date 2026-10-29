@@ -816,16 +816,6 @@ pub(crate) async fn boot_worker(
         mode: 0o755,
         user_owned: false,
     });
-    if let Some(script) = &role.fake {
-        let text = std::fs::read_to_string(zapper_policy::expand_home(script))
-            .with_context(|| format!("fake script {script}"))?;
-        files.push(GuestFile {
-            path: format!("{home}/.office/fake.yaml"),
-            content: text,
-            mode: 0o644,
-            user_owned: true,
-        });
-    }
     let overlay = agent_overlay(run, w, role, own.is_some(), preamble);
     let new = NewSession {
         profile: profile_name,

@@ -204,3 +204,61 @@ profiles:
   #       headers: { Authorization: "Bearer {{secret:github}}" }
   #     files:
   #       command: [npx, -y, "@modelcontextprotocol/server-filesystem", /srv/shared]
+
+# Image recipes: `zapper image build NAME` (or `make image IMAGE=NAME`)
+# builds one into daemon.images, from an OCI base and the steps here. A
+# recipe's `args` are files from the host (`--arg NAME=PATH`, else the
+# default), put at their `install` paths before the steps run. To update a
+# pinned version, change it here and rebuild the image.
+images:
+  ubuntu-26.04:
+    description: The base image, for the plain profiles
+    from: docker.io/library/ubuntu:26.04
+    run:
+      - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*"
+
+  # Office workers: Claude Code at a pinned version (auto-update is off in
+  # sessions), pi, a headless browser for checking what they build
+  # (Playwright and its Chromium; the `browse` command wraps it), and the
+  # tools engineers deploy with. Node.js LTS from nodejs.org, as Ubuntu's is
+  # too old for Playwright.
+  office:
+    description: Claude Code and pi (pinned), git, kubectl, podman, Node.js, Python, a headless browser
+    from: docker.io/library/ubuntu:26.04
+    run:
+      - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*"
+      - "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz && echo 'df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de  /tmp/node.tar.xz' | sha256sum -c && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE && rm /tmp/node.tar.xz && node --version"
+      - "curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/v1.36.5/bin/linux/amd64/kubectl && echo '33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e  /usr/local/bin/kubectl' | sha256sum -c && chmod 755 /usr/local/bin/kubectl"
+      - "curl -fsSL https://claude.ai/install.sh | bash -s 2.1.301 && cp -L /root/.local/bin/claude /usr/local/bin/claude && rm -rf /root/.local /root/.claude* && claude --version"
+      - "npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.3.0 && PI_OFFLINE=1 pi --version && rm -rf /root/.npm /root/.pi"
+      - "npm install -g --no-audit --no-fund playwright@1.64.1 && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright install --with-deps chromium && chmod -R a+rX /opt/ms-playwright && rm -rf /var/lib/apt/lists/* /root/.npm"
+
+  # The office's end-to-end tests: the office image's place, with a fake
+  # Claude Code and pi that play scripts (ZAPPER_FAKE_SCRIPT, set by the
+  # profile) instead of thinking, so firms' runs are the same every time and
+  # cost no tokens. A profile on this image drives them exactly as it would
+  # the real agents.
+  office-fake:
+    description: A fake Claude Code and pi, for the office's end-to-end tests
+    from: docker.io/library/ubuntu:26.04
+    args:
+      fake-source:
+        description: the fake agent, built by `make build` (cargo build --release -p zapper-fake --target x86_64-unknown-linux-musl)
+        default: ../target/x86_64-unknown-linux-musl/release/zapper-fake
+        install: [/usr/local/bin/claude, /usr/local/bin/pi]
+    run:
+      - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*"
+      - "claude --version && pi --version"
+
+  # The cluster facility: k3s at a pinned release, with its air-gap images so
+  # it starts without the internet, and the board's dashboard (Headlamp),
+  # whose image goes into the air-gap directory so k3s imports it at start.
+  # Needs the k8s kernel: make kernel KERNEL=k8s.
+  k3s:
+    description: A single-node k3s cluster (pinned), with its air-gap images and Headlamp
+    from: docker.io/library/ubuntu:26.04
+    run:
+      - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl iptables conntrack ipset zstd procps && rm -rf /var/lib/apt/lists/*"
+      - "curl -fsSL -o /usr/local/bin/k3s https://github.com/k3s-io/k3s/releases/download/v1.36.5%2Bk3s1/k3s && echo 'd73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313  /usr/local/bin/k3s' | sha256sum -c && chmod 755 /usr/local/bin/k3s && ln -sf k3s /usr/local/bin/kubectl"
+      - "mkdir -p /var/lib/rancher/k3s/agent/images && curl -fsSL -o /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst https://github.com/k3s-io/k3s/releases/download/v1.36.5%2Bk3s1/k3s-airgap-images-amd64.tar.zst && echo '7d939471907df2d4e537a9c308bf94173e453fff4a2e9e77e9ae92a64be3007f  /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst' | sha256sum -c"
+      - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends skopeo && skopeo copy --override-os linux --override-arch amd64 docker://ghcr.io/headlamp-k8s/headlamp@sha256:8a0ef97527544baa2b35825940ddf4db6e2d09c30cd5aa31fd269ff604cc8b75 docker-archive:/var/lib/rancher/k3s/agent/images/headlamp.tar:ghcr.io/headlamp-k8s/headlamp:v0.46.0 && apt-get purge -y skopeo && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*"

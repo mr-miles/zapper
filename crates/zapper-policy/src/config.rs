@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use zapper_proto::FsRule;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,42 @@ pub struct Config {
     /// change.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub firms: BTreeMap<String, serde_yaml::Value>,
+    /// Image recipes, by the image's name: what `zapper image build NAME`
+    /// builds. (`daemon.images` is where the built images go.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, ImageRecipe>,
+}
+
+/// How an image is built: an OCI base, the files it takes as named
+/// arguments, and the commands run in it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageRecipe {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The OCI image it starts from, e.g. `docker.io/library/ubuntu:26.04`.
+    pub from: String,
+    /// Files from the host it takes, by name: `--arg NAME=PATH` gives one,
+    /// else its `default`. Each goes to its `install` paths before `run`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<String, ImageArg>,
+    /// Shell commands run in the image at build time, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run: Vec<String>,
+}
+
+/// A file an image recipe takes from the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageArg {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The file used when no `--arg` gives one; relative to the config's
+    /// directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Where it goes in the image: absolute paths, its mode kept.
+    pub install: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -481,28 +518,6 @@ pub struct ExecRule {
     pub final_: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-}
-
-/// Filesystem rule, applied inside the sandbox when the session starts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsRule {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Guest path glob, e.g. `/work/**/.env`.
-    pub path: String,
-    pub access: FsAccess,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FsAccess {
-    /// Covered by an empty file or directory.
-    Hidden,
-    /// Remounted read-only.
-    Ro,
 }
 
 fn any() -> String {
@@ -1066,6 +1081,30 @@ impl Config {
                     errors.push(format!(
                         "secrets {other} and {name}: their fake AWS key ids collide; rename one"
                     ));
+                }
+            }
+        }
+        for (name, r) in &self.images {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            {
+                errors.push(format!(
+                    "images.{name}: an image's name is letters, digits, '-', '_' and '.'"
+                ));
+            }
+            if r.from.trim().is_empty() {
+                errors.push(format!("images.{name}: from: the OCI image it starts from"));
+            }
+            for (a, arg) in &r.args {
+                if !crate::valid_worker_name(a) {
+                    errors.push(format!(
+                        "images.{name}.args.{a}: lowercase letters, digits and dashes"
+                    ));
+                }
+                if arg.install.is_empty() || arg.install.iter().any(|p| !p.starts_with('/')) {
+                    errors.push(format!("images.{name}.args.{a}.install: where it goes in the image, absolute paths"));
                 }
             }
         }

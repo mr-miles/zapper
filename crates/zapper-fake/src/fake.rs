@@ -1,6 +1,6 @@
 //! A fake agent for tests: speaks the same stream-json on stdin and stdout
 //! as `claude -p --input-format stream-json --output-format stream-json`
-//! (`fake-claude`), or pi's `--mode rpc` (`fake-pi`), and plays a script
+//! (run as `claude`), or pi's `--mode rpc` (run as `pi`), and plays a script
 //! instead of thinking. Tools are called through the office MCP server
 //! named in `~/.claude.json` or `~/.pi/agent/mcp.json`, as the agent would.
 //!

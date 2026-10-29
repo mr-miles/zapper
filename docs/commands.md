@@ -9,13 +9,13 @@
 | `make deps` | Download Firecracker, verifying its checksum, and the guest kernel into `~/.local/share/zapper` |
 | `make build` | Release build of the static musl `zapper-agent`, `zapper` and `zapper-inspect`, in `target/release` |
 | `make install` | Install the three into `~/.local/bin` (set `PREFIX` for another place) |
-| `make image [IMAGE=name]` | Build an image from a recipe in the Makefile: `office` (office workers: Claude Code and pi at pinned versions, git, kubectl, podman, a headless browser), `k3s` (a firm's cluster), and `ubuntu-26.04` (default; the base profiles) |
+| `make image [IMAGE=name]` | Build an image from its recipe in the config (`images:`, as `zapper image build NAME`): `office` (office workers: Claude Code and pi at pinned versions, git, kubectl, podman, a headless browser), `k3s` (a firm's cluster), `office-fake` (a fake Claude Code and pi, for the office's e2e tests), and `ubuntu-26.04` (default; the base profiles) |
 | `make kernel [KERNEL=k8s]` | Build a guest kernel from the Firecracker config plus `config/kernel/<name>.config`, in a container; `k8s` is the cluster's |
 | `make check` | `zapper check` |
 | `make test` | Unit tests |
 | `make lint` / `make fmt` / `make hooks` | rustfmt and clippy with warnings as errors / format the code / use the repository's pre-commit hook, which runs `make lint` |
 | `make test-e2e` | End-to-end tests with real VMs ([testing](testing.md)): zapper's controls, then the office's |
-| `make test-e2e-office` | The office's end-to-end tests only: firms of real VMs with a fake Claude |
+| `make test-e2e-office` | The office's end-to-end tests only: firms of real VMs with a fake Claude (needs `make image IMAGE=office-fake`) |
 
 ## zapper-inspect
 
@@ -96,7 +96,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper eval [-s ID\|-p PROFILE] exec PATH [ARGV…]` | Dry run of an exec |
 | `zapper config show\|startup\|diff\|save\|reload\|edit\|apply FILE` | [Running and startup config](configuration.md#running-and-startup-config) |
 | `zapper profile ls\|show NAME\|set NAME FILE\|rm NAME` | Profiles in the running config |
-| `zapper image build NAME --from REF [--run CMD]… [--size S]` / `zapper image ls` | [Images](images.md) |
+| `zapper image build NAME [--arg ARG=PATH]… [--size S]`, or `zapper image build NAME --from REF [--run CMD]…` / `zapper image ls` | Build an image from its recipe in the config, or from a base and steps given here; [images](images.md) |
 
 Examples:
 

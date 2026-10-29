@@ -1,0 +1,10 @@
+[package]
+name = "zapper-proto"
+description = "The host↔guest protocol of zapper's microVMs, shared by the daemon and the guest agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

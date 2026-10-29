@@ -39,7 +39,7 @@ The office uses only these to set a worker up: the preamble as `instructions`, t
   - `Send(line)`: a reply the protocol expects, which the foreman writes back.
 - `steers()` and `steer(text)`: hand the agent a message while it works, where the harness supports that natively. Without it, the `turn_end` command hands mail over when the agent is about to stop (`foreman::stop_check`).
 
-The fake Claude (`zapper-agent fake-claude`) is the test double for office e2e tests. It speaks Claude Code's stream-json and runs the `turn_end` hook from the settings the way Claude Code does. A new harness either gets its own fake or is tested through the same events.
+The fake Claude (`zapper-fake`, installed as `claude` in the `office-fake` image) is the test double for office e2e tests. It speaks Claude Code's stream-json and runs the `turn_end` hook from the settings the way Claude Code does. A new harness either gets its own fake or is tested through the same events.
 
 ## Claude Code (`claude-code`)
 
@@ -77,7 +77,7 @@ pi is the coding agent in [earendil-works/pi](https://github.com/earendil-works/
 | Output | `tool_execution_start {toolName, args}` → activity. `message_end` of an assistant message: `usage {input, output, cacheRead, cacheWrite}`, `stopReason` (`stop`, `toolUse`, `error`, `aborted`), `errorMessage`; the turn's tokens are `input + output + cacheWrite` summed over its messages. `auto_retry_end` with `success: false` and `finalError`: pi's own retries gave up. `agent_settled` ends the turn (`agent_end` alone is not final). A last `stopReason: "error"` is `RateLimited` when its message names a rate limit or overload (429, 529), else `Failed` (a refused key: `401: …token validation failed`, at once) |
 | Mid-turn mail | `steers()`: the foreman sends `{"type": "follow_up", "message": …}` as mail arrives; pi delivers it when the agent would otherwise stop, before `agent_settled` |
 | Install | the `office` image: `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@$(PI_VERSION)` |
-| Tests | `harness::tests::pi_setup` and `pi_output` (events as pi printed them); `zapper-agent fake-pi` speaks the same RPC for office e2e (the `mixed` firm) |
+| Tests | `harness::tests::pi_setup` and `pi_output` (events as pi printed them); `zapper-fake`, installed as `pi` in the `office-fake` image, speaks the same RPC for office e2e (the `mixed` firm) |
 
 Notes from the first runs: a turn on a 27B model behind a busy endpoint takes one to two minutes (the first byte came after 60 s); `httpIdleTimeoutMs` (300 s) covers it. pi also has an `abort` command, which a turn timeout could use instead of hanging the process up.
 

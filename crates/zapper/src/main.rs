@@ -327,12 +327,16 @@ enum ProfileCmd {
 
 #[derive(Subcommand)]
 enum ImageCmd {
-    /// Build an image from an OCI image: `zapper image build ubuntu-26.04 --from docker.io/library/ubuntu:26.04`
+    /// Build an image by its recipe in the config (`images:`), e.g. `zapper image build office`; or, with `--from`, from an OCI image and `--run` steps given here.
     Build {
         name: String,
+        /// One of the recipe's files, `NAME=PATH` (repeatable), instead of its default.
+        #[arg(long = "arg", value_name = "NAME=PATH")]
+        args: Vec<String>,
+        /// Without a recipe: the OCI image to start from.
         #[arg(long)]
-        from: String,
-        /// Command run in the image at build time (repeatable).
+        from: Option<String>,
+        /// Without a recipe: a command run in the image at build time (repeatable).
         #[arg(long)]
         run: Vec<String>,
         /// Image size, e.g. `4GiB` (default: content plus headroom).
@@ -882,14 +886,17 @@ async fn run(cli: Cli) -> Result<i32> {
             match cmd {
                 ImageCmd::Build {
                     name,
+                    args,
                     from,
                     run,
                     size,
                 } => {
+                    let (from, run, files) = image::recipe(&config, &name, from, run, &args)?;
                     let out = image::build(image::Build {
                         name: &name,
                         from: &from,
                         run: &run,
+                        files: &files,
                         size: size.as_deref(),
                         dir: &dir,
                     })?;

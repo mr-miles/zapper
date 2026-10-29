@@ -1,11 +1,13 @@
 #!/bin/sh
 # End-to-end tests of the office: a small firm of real VMs whose workers run
-# the fake Claude (`zapper-agent fake-claude`), so runs are deterministic and
-# cost no tokens.
+# a fake Claude Code and pi (the office-fake image's `claude` and `pi`), which
+# play the script their profile names, so runs are deterministic and cost no
+# tokens.
 #
 #   tests/e2e-office.sh [path/to/zapper]
 #
-# Needs what tests/e2e.sh needs (KVM, the ubuntu-26.04 image, network). Runs
+# Needs what tests/e2e.sh needs (KVM, network) and the office-fake image
+# (make image IMAGE=office-fake). Runs
 # its own daemon under a temporary directory. ZAPPER_E2E_KEEP=1 keeps it.
 set -u
 
@@ -284,6 +286,17 @@ rules:
     do:
       - mail_reply: { message: $message, body: "Built.", kind: report, close: true }
 EOF
+# A profile per script: the fake plays the one ZAPPER_FAKE_SCRIPT names. On
+# pi too for the scripts a pi worker plays, and on the engineer profile.
+fake_profiles() {
+    for s in ceo eng sec corp-ceo corp-sec corp-dev scen-ceo scen-dev mixed-ceo solo-ceo solo-sec solo-dev first-ceo none; do
+        printf '  fake-%s:\n    extends: worker\n    agent: { env: { ZAPPER_FAKE_SCRIPT: /fake/%s.yaml } }\n' "$s" "$s"
+    done
+    for s in corp-dev scen-dev mixed-dev; do
+        printf '  fake-%s-pi:\n    extends: pi-worker\n    agent: { env: { ZAPPER_FAKE_SCRIPT: /fake/%s.yaml } }\n' "$s" "$s"
+    done
+    printf '  fake-none-engineer:\n    extends: engineer\n    agent: { env: { ZAPPER_FAKE_SCRIPT: /fake/none.yaml } }\n'
+}
 cat > "$T/zapper.yaml" <<EOF
 daemon:
   state: $T/state
@@ -294,20 +307,25 @@ daemon:
 policy:
   defaults: { net: deny, exec: allow }
 profiles:
+  # Workers run the fake Claude Code; each fake-* profile below names the
+  # script it plays, from the scripts mounted at /fake.
   worker:
-    engine: { image: ubuntu-26.04, vcpus: 1, memory_mib: 512, disk: 2GiB }
+    engine: { image: office-fake, vcpus: 1, memory_mib: 512, disk: 2GiB }
     agent: { kind: claude-code, command: [bash], user: agent, workdir: /work }
-    mounts: [{ host: "{workdir}", guest: /work, mode: rw, extra: 256MiB }]
+    mounts:
+      - { host: "{workdir}", guest: /work, mode: rw, extra: 256MiB }
+      - { host: $T/fake, guest: /fake, mode: ro }
     policy:
       net:
         - { action: ask, host: example.com, ports: [443] }
         - { action: allow, host: apps.lab.internal, ports: [80] }
   engineer:
     extends: worker
-  # The same worker on pi (the fake doesn't need pi in the image).
+  # The same worker on pi.
   pi-worker:
     extends: worker
     agent: { kind: pi }
+$(fake_profiles)
   k3s:
     engine: { image: k3s, kernel: vmlinux-6.1-k8s, vcpus: 4, memory_mib: 4096, disk: 12GiB }
     agent: { kind: generic, command: [bash], user: user, workdir: / }
@@ -318,9 +336,9 @@ firms:
   acme:
     budget: { max_concurrent: 2 }
     roles:
-      ceo: { profile: worker, agent: ceo, fake: $T/fake/ceo.yaml, avatar: { figure: ceo } }
-      engineer: { profile: worker, agent: software-engineer, fake: $T/fake/eng.yaml, avatar: { figure: engineer, color: "#6A9BCC" } }
-      security: { profile: worker, agent: security-officer, fake: $T/fake/sec.yaml, avatar: { figure: shield } }
+      ceo: { profile: fake-ceo, agent: ceo, avatar: { figure: ceo } }
+      engineer: { profile: fake-eng, agent: software-engineer, avatar: { figure: engineer, color: "#6A9BCC" } }
+      security: { profile: fake-sec, agent: security-officer, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: ceo }
       - { name: ada, role: engineer, reports_to: ceo }
@@ -329,9 +347,9 @@ firms:
   corp:
     budget: { max_concurrent: 2, seed: 1000, quote_fee: 500, stall_after: 5s }
     roles:
-      boss: { profile: worker, agent: ceo, fake: $T/fake/corp-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
-      dev: { profile: worker, contract_profile: pi-worker, title: Developer, agent: software-engineer, fake: $T/fake/corp-dev.yaml, avatar: { figure: engineer } }
-      sec: { profile: worker, agent: security-officer, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
+      boss: { profile: fake-corp-ceo, agent: ceo, hires: [dev], avatar: { figure: ceo } }
+      dev: { profile: fake-corp-dev, contract_profile: fake-corp-dev-pi, title: Developer, agent: software-engineer, avatar: { figure: engineer } }
+      sec: { profile: fake-corp-sec, agent: security-officer, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: boss }
       - { name: sec-1, role: sec, reports_to: ceo }
@@ -339,10 +357,10 @@ firms:
   scen:
     budget: { max_concurrent: 3, seed: 1000, quote_fee: 500 }
     roles:
-      boss: { profile: worker, agent: ceo, fake: $T/fake/scen-ceo.yaml, hires: [dev], avatar: { figure: ceo } }
-      dev: { profile: worker, title: Developer, agent: software-engineer, fake: $T/fake/scen-dev.yaml, avatar: { figure: engineer } }
-      intern: { profile: worker, agent: software-engineer, fake: $T/fake/none.yaml }
-      sec: { profile: worker, agent: security-officer, fake: $T/fake/corp-sec.yaml, avatar: { figure: shield } }
+      boss: { profile: fake-scen-ceo, agent: ceo, hires: [dev], avatar: { figure: ceo } }
+      dev: { profile: fake-scen-dev, title: Developer, agent: software-engineer, avatar: { figure: engineer } }
+      intern: { profile: fake-none, agent: software-engineer }
+      sec: { profile: fake-corp-sec, agent: security-officer, avatar: { figure: shield } }
     workers:
       - { name: ceo, role: boss }
       - { name: sec-1, role: sec, reports_to: ceo }
@@ -352,7 +370,7 @@ firms:
         description: Scripted hires and board actions
         articles: The drill's article.
         hires:
-          - { role: dev, count: 1, contract: true, board_line: true, prompt: "SCENARIO-RED instructions", profile: pi-worker }
+          - { role: dev, count: 1, contract: true, board_line: true, prompt: "SCENARIO-RED instructions", profile: fake-scen-dev-pi }
           - { role: dev, count: 1, prompt: "SCENARIO-CUSTOM instructions" }
         script:
           - { after: 5s, mail: { to: boss, kind: fyi, subject: "Pivot-X", body: "The requirements changed." } }
@@ -362,25 +380,25 @@ firms:
   solo:
     budget: { max_concurrent: 3, seed: 1000 }
     roles:
-      boss: { profile: worker, agent: ceo, fake: $T/fake/solo-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
-      dev: { profile: worker, agent: software-engineer, fake: $T/fake/solo-dev.yaml }
-      officer: { profile: worker, agent: security-officer, fake: $T/fake/solo-sec.yaml, officer: true }
+      boss: { profile: fake-solo-ceo, agent: ceo, hires: [dev, officer], avatar: { figure: ceo } }
+      dev: { profile: fake-solo-dev, agent: software-engineer }
+      officer: { profile: fake-solo-sec, agent: security-officer, officer: true }
     workers:
       - { name: ceo, role: boss }
     security: { officer_first: false, digest_every: { minutes: 60, requests: 0 } }
   first:
     budget: { max_concurrent: 1, seed: 1000, turn_timeout: 8s }
     roles:
-      boss: { profile: worker, agent: ceo, fake: $T/fake/first-ceo.yaml, hires: [dev, officer], avatar: { figure: ceo } }
-      dev: { profile: worker, agent: software-engineer, fake: $T/fake/none.yaml }
-      officer: { profile: worker, agent: security-officer, fake: $T/fake/none.yaml, officer: true }
+      boss: { profile: fake-first-ceo, agent: ceo, hires: [dev, officer], avatar: { figure: ceo } }
+      dev: { profile: fake-none, agent: software-engineer }
+      officer: { profile: fake-none, agent: security-officer, officer: true }
     workers:
       - { name: ceo, role: boss }
     security: { answer_within: 10s, digest_every: { minutes: 60, requests: 0 } }
   mixed:
     roles:
-      boss: { profile: worker, agent: ceo, fake: $T/fake/mixed-ceo.yaml }
-      dev: { profile: pi-worker, agent: software-engineer, fake: $T/fake/mixed-dev.yaml }
+      boss: { profile: fake-mixed-ceo, agent: ceo }
+      dev: { profile: fake-mixed-dev-pi, agent: software-engineer }
     workers:
       - { name: ceo, role: boss }
       - { name: pat, role: dev, reports_to: ceo }
@@ -391,8 +409,8 @@ firms:
     facilities: { cluster: { kind: k3s, profile: k3s } }
     landing: { name: "Lab <Inc.>", motto: "Building digital worlds!" }
     roles:
-      engineer: { profile: engineer, agent: software-engineer, fake: $T/fake/none.yaml }
-      analyst: { profile: worker, agent: analyst, fake: $T/fake/none.yaml }
+      engineer: { profile: fake-none-engineer, agent: software-engineer }
+      analyst: { profile: fake-none, agent: analyst }
     workers:
       - { name: ada, role: engineer }
       - { name: ken, role: analyst, reports_to: ada }
@@ -566,7 +584,7 @@ import sys, json
 for l in sys.stdin:
     e = json.loads(l)
     if e.get("type") == "hired" and e["worker"]["name"] in ("carl", "grace"):
-        print(e["worker"]["name"], e["worker"].get("agent"), e["worker"].get("profile"))')" "carl pi pi-worker"
+        print(e["worker"]["name"], e["worker"].get("agent"), e["worker"].get("profile"))')" "carl pi fake-scen-dev-pi"
 expect "staff of the role keep the role's" "$("$Z" --json firm journal corp | python3 -c '
 import sys, json
 for l in sys.stdin:

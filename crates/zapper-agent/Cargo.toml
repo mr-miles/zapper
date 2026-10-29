@@ -7,16 +7,13 @@ license.workspace = true
 
 [features]
 default = ["office"]
-# Firm workers' `office` command and MCP server, and the fake Claude and pi
-# the office's tests use.
+# Firm workers' `office` command and MCP server.
 office = []
 
 [dependencies]
-zapper-policy = { path = "../zapper-policy" }
+zapper-proto = { path = "../zapper-proto" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 globset.workspace = true
 libc = "0.2"
-ureq = { version = "2", default-features = false }
