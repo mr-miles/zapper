@@ -32,7 +32,7 @@ pub trait Handler: Send + Sync {
 #[derive(Clone)]
 pub enum Target {
     /// Served in the daemon. With `tls`, the daemon terminates TLS with the
-    /// session's CA for the name asked for.
+    /// session's CA for the name asked for, offering HTTP/1.1 only (ALPN).
     Handler {
         tls: bool,
         handler: Arc<dyn Handler>,
@@ -278,7 +278,13 @@ pub async fn connect(
         }
         Target::Handler { tls: true, handler } => {
             let (a, b) = tokio::io::duplex(256 * 1024);
-            let config = s.tls.server_config(host)?;
+            // A handler is given a byte stream, and speaks HTTP/1.1 on it if
+            // it speaks HTTP (the firm's git server does): offer only that,
+            // so a client that would rather have HTTP/2 (git's curl) doesn't
+            // pick a protocol nobody on this side speaks.
+            let mut config = (*s.tls.server_config(host)?).clone();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let config = Arc::new(config);
             let (s, handler) = (s.clone(), handler.clone());
             tokio::spawn(async move {
                 let Ok(Ok(tls)) = tokio::time::timeout(

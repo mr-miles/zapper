@@ -262,6 +262,45 @@ fn a_zone_is_a_domain() {
         .is_err());
 }
 
+/// A handler is handed a byte stream and speaks HTTP/1.1 on it (the firm's
+/// git server does): a client that would rather have HTTP/2, as git's curl
+/// does, is given HTTP/1.1, not a protocol nobody on the other side speaks.
+#[tokio::test]
+async fn a_handler_behind_tls_negotiates_http1() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let target = Target::Handler {
+        tls: true,
+        handler: Arc::new(Echo::default()),
+    };
+    let io = super::connect(t.core.daemon(), &s, "echo.internal", &target)
+        .await
+        .unwrap();
+    let pem: String = s
+        .tls
+        .pem()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, pem).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(der.into()).unwrap();
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let name = rustls::pki_types::ServerName::try_from("echo.internal").unwrap();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, io)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+}
+
 #[tokio::test]
 async fn a_handler_behind_tls_gets_the_plain_stream() {
     let t = TestCore::new(CONFIG);
