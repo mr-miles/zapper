@@ -237,10 +237,22 @@ fn commit_on_remote(base: &Path, name: &str, file: &str) -> String {
 /// A firm `acme` whose remote has repositories `code-<t>` and `kb-<t>` (its
 /// main the firm's), a CEO and an engineer `pat`.
 async fn firm(t: &str) -> (TestCore, Arc<FirmRun>, String, String) {
+    firm_with(t, true).await
+}
+
+/// `firm`, its knowledge base (`kb-<t>`) empty on the remote unless
+/// `seeded`.
+async fn firm_with(t: &str, seeded: bool) -> (TestCore, Arc<FirmRun>, String, String) {
     let w = world();
     let (code, kb) = (format!("code-{t}"), format!("kb-{t}"));
     remote_repo(&w.base, &code);
-    remote_repo(&w.base, &kb);
+    if seeded {
+        remote_repo(&w.base, &kb);
+    } else {
+        let dir = remote_dir(&w.base, &kb);
+        std::fs::create_dir_all(&dir).unwrap();
+        sh(&dir, &["init", "-q", "--bare", "-b", "main"]);
+    }
     let dir = w.base.join("repos").join(t);
     let yaml = format!(
         "
@@ -255,6 +267,7 @@ firms:
       - {{ name: ceo, role: ceo }}
       - {{ name: pat, role: eng, reports_to: ceo }}
     git:
+      knowledge_base: {kb}
       remote:
         github:
           config: acme.yaml
@@ -692,4 +705,62 @@ async fn a_run_keeps_what_it_had_and_its_tokens_are_revoked() {
         .map(|c| c["subject"].as_str().unwrap())
         .collect();
     assert_eq!(commits, ["add d.txt"], "{commits:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
+    let w = world();
+    let (t, run, code, kb) = firm_with("kb", false).await;
+    remote::prepare(&run).await.unwrap();
+    crate::kb::seed(&run).await.unwrap();
+    // The layout, committed on the firm's server and pushed out.
+    let local = remote::root(&run.config, &run.dir).join(format!("{kb}.git"));
+    let files = sh(&local, &["ls-tree", "-r", "--name-only", "main"]);
+    for f in [
+        "AGENTS.md",
+        "index.md",
+        "log.md",
+        "raw/README.md",
+        "wiki/README.md",
+    ] {
+        assert!(files.lines().any(|l| l == f), "{f}: {files}");
+    }
+    assert_eq!(rev(&remote_dir(&w.base, &kb), "main"), rev(&local, "main"));
+    // Seeding again leaves it alone.
+    let before = rev(&local, "main");
+    crate::kb::seed(&run).await.unwrap();
+    assert_eq!(rev(&local, "main"), before);
+    // A hire reads it from being cleared.
+    let r = format!("git:{kb}");
+    assert_eq!(access::level(&run, "pat", &r), access::Level::None);
+    access::grant_at_clearance(&t.core, &run, "ceo", "pat", "c-1", &[]);
+    assert_eq!(access::level(&run, "pat", &r), access::Level::Read);
+    assert_eq!(
+        access::level(&run, "pat", &format!("git:{code}")),
+        access::Level::None,
+        "only the knowledge base"
+    );
+    // Everyone has the skill, and the preamble says where it is.
+    let role = &run.config.roles["eng"];
+    let skills = crate::skills::automatic(&run.config, "eng", role);
+    assert!(
+        skills.contains(&"knowledge-base") && skills.contains(&"office-git"),
+        "{skills:?}"
+    );
+    let services = crate::facility::services_for(&run, "eng");
+    let p = crate::prompts::preamble(
+        "acme",
+        &run.config,
+        &run.config,
+        "pat",
+        &services,
+        "",
+        None,
+        "",
+    );
+    assert!(p.contains(&format!("The knowledge base: git:{kb}")), "{p}");
+    assert!(
+        p.contains(&format!("The main of {kb} is the firm's")),
+        "{p}"
+    );
 }

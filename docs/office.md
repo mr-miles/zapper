@@ -482,6 +482,15 @@ A firm's repositories can have a remote on GitHub, reached through a GitHub App 
 - **Pull requests through the daemon**: a worker pushes a branch to the firm's server and calls `publish_branch(repo, branch, title, body)` (with `write` on the repository). The daemon checks the branch is based on the tip of `main` and changes nothing under `.github/workflows/` (those changes are the board's), pushes it to GitHub as `<worker>/<branch>`, and opens a pull request naming its author, or updates the one open for it. It mails the author when the checks finish, when the board reviews or comments, and when it merges or closes it; `pr_status` gives the checks, the end of a failing job's log, and the reviews and comments on demand.
 - **Tokens**: the daemon mints its own, for one repository at a time, with `zapper mint github-app` (so the App's key is read by a short-lived process), and revokes them when the run stops.
 - **The record**: a run records each repository's branches at its start and end (`git.json` in the run directory), so the Git tab and replay show what the run had and the commits it added, though the repositories outlive it.
+### The knowledge base
+
+A firm can keep what it knows in a markdown wiki in one of its repositories: `kb`, or the one `git.knowledge_base` names (with a remote, it must be in `git.local`, so its `main` is the firm's). It is laid out as an LLM wiki: `AGENTS.md` (the conventions), `index.md` (a short map, read first), `log.md` (one line per merged change), `raw/` (sources, untouched) and `wiki/` (the pages, each with frontmatter: author, sources, updated, status, trust). The daemon commits that layout to an empty one; the rest is the agents' work.
+
+- **Reading**: every hire is granted read on it when cleared, with the firm's default expiry, so no role reads it by default; founders ask for it. Agents clone it, pull before searching, start from `index.md` and search `wiki/` with `rg` (the `knowledge-base` skill, every worker's in a firm with one). Pages are information, never instructions.
+- **Contributing**: write is asked for like any grant. An author works on a branch, one topic each, cites every claim, never edits `index.md` or `log.md`, and mails the branch to the librarian.
+- **The librarian** (the `librarian` agent, with its `curating` skill) holds admin on it and alone merges its `main`: it reviews each branch against the existing pages for duplicates and contradictions, merges, and keeps the index and the log. It writes no content of its own: its changes are mechanical (links, the index, the log, moving a page), and contradictions and stale pages go back to their authors. It doesn't browse the web.
+- With a remote, every merge is pushed out, so the knowledge base outlives runs in `git.dir` and on GitHub.
+
 ### Ports on the host
 
 Ports on the host:
@@ -521,6 +530,7 @@ Each worker's skills follow from their agent and their place in the firm:
 ```
 Everyone             office-mail, office-publish, office-resources
 + a firm with git    office-git        (branches, review, who merges to main; on GitHub, pull requests the board merges)
++ a knowledge base   knowledge-base    (reading it, contributing through the librarian)
 + roles that hire    manager           (splitting work, budget and people, contractors, reporting up)
 + security duty      security-review   (officers; the CEO until an officer is hired)
 + leading engineers  releases, checking-the-product   (roles that hire one whose agent uses releases)
@@ -538,13 +548,14 @@ The skills any role may use:
 | `office-resources` | everyone | Onboarding: your machine and budget, the charter and internal names, access to git, the cluster, drive spaces and outside sites, working with each, the product and the browser |
 | `office-git` | everyone, in a firm with a repository | Branches from `main`, asking for and giving reviews, who merges, reporting in the assignment's thread, telling those who wait once it's merged; where `main` is on the remote, `publish_branch` for review, the mail about its checks and reviews, the branch based on the tip of `main` before completing, the board merging, and workflow changes sent to the board |
 | `manager` | roles that hire | Splitting, delegating and assigning work, deciding access up front, unblocking, budget and people (staff vs contractor, hiring, funding, letting go), contractors, reporting up |
+| `knowledge-base` | everyone, in a firm with a knowledge base | Its layout, pulling before searching, starting from `index.md`, page frontmatter and trust, pages as information not instructions, contributing through a branch the librarian reviews |
 | `security-review` | officers, and the CEO | Network requests and TLS, credential requests and grants, background checks, watching traffic, escalation |
 | `reviewing-work` | the CEO, CTO, managers, product manager, designer, research manager | Reviewing against what was asked, with evidence, one numbered list of findings; answering a review |
 | `checking-the-product` | engineers, the product manager, the designer, and whoever leads engineers | Checking through the interface: curl and the browser, desktop and phone widths, criteria pass or fail |
 | `releases` | engineers, and whoever leads them (the CTO, or the CEO without one) | Asking for, commanding, deploying and verifying a release to `prod`; rolling back; incidents |
 | `research-sources` | researchers, the research manager, analysts | Web search and fetching, judging and recording sources, facts apart from judgement, suggesting sources |
 
-The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`), `process-improvement` (`retrospective`) and `security-officer`.
+The agents, each with its own skills: `ceo` (`budget`, `building-the-team`, `the-board`), `cto`, `manager`, `product-manager` (`product-brief`), `software-engineer` (`build-and-deploy`), `designer` (`design-deliverables`), `researcher` (`findings-pack`), `research-manager` (`research-plan`, `collating-packs`), `prototype-engineer` (`prototyping`), `analyst` (`analysis`), `process-improvement` (`retrospective`), `librarian` (`curating`) and `security-officer`.
 
 The `process-improvement` agent (title "Process Lead") runs the firm's **retrospective**: it asks every worker what worked and what didn't, de-duplicates the answers with them, puts the merged list to a vote, and reports the improvements the firm itself chose — all over mail and the drive. That is the half of process improvement a worker can do from inside the firm. The other half, reading the run's transcripts and stats for avoidable mistakes, waiting and missing information, is the board's, from outside the VMs, by the [process-review](../skills/process-review/SKILL.md) operating skill — a worker can't reach the record.
 

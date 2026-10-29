@@ -587,6 +587,8 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
             std::fs::write(&hook, PRE_RECEIVE)?;
             std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
         }
+        // An empty knowledge base gets its layout.
+        super::kb::seed(run).await?;
         // A password per worker is who they are, not what they may do: their
         // grant decides that.
         let mut pw = run.facility.git_passwords.lock().unwrap();

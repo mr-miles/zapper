@@ -318,6 +318,11 @@ run's budget with budget_request, as the budget skill describes.\n",
             services.remote_main.join(", ")
         ));
     }
+    if let Some(kb) = config.knowledge_base() {
+        lines.push(format!(
+            "The knowledge base: git:{kb}, what the firm knows, curated by the librarian. Read it (you are granted read when cleared): pull, start from index.md, search wiki/; contribute through a branch the librarian reviews (the knowledge-base skill)"
+        ));
+    }
     if !services.local_main.is_empty() {
         lines.push(format!(
             "The main of {} is the firm's, merged on its server by whoever holds admin on it",

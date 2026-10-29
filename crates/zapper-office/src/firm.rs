@@ -565,6 +565,11 @@ pub struct GitService {
     /// remote's, merged there and fetched back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub local: Vec<String>,
+    /// The repository that is the firm's central knowledge base, a markdown
+    /// wiki its librarian curates: `kb` if unset and the firm has one. With a
+    /// remote, its `main` must be local (in `local`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knowledge_base: Option<String>,
     /// The account the remote's App is installed on, as GitHub spells it;
     /// found when a run starts. Not config.
     #[serde(skip)]
@@ -598,6 +603,8 @@ pub struct GithubRemote {
 
 /// The repository a firm with `git: {}` has.
 pub const DEFAULT_REPO: &str = "product";
+/// The knowledge base's repository, unless `git.knowledge_base` names another.
+pub const KNOWLEDGE_BASE: &str = "kb";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -744,6 +751,17 @@ impl Firm {
     pub fn remote_repo(&self, repo: &str) -> Option<String> {
         let g = self.git.as_ref().filter(|g| g.remote.is_some())?;
         Some(format!("{}/{repo}", g.owner))
+    }
+
+    /// The firm's knowledge base, as its repository is named: the one
+    /// `git.knowledge_base` names (`kb` if unset), if the firm has it.
+    pub fn knowledge_base(&self) -> Option<String> {
+        let g = self.git.as_ref()?;
+        let name = g.knowledge_base.as_deref().unwrap_or(KNOWLEDGE_BASE);
+        self.git_repos()
+            .into_iter()
+            .chain(g.local.iter().cloned())
+            .find(|r| r.eq_ignore_ascii_case(name))
     }
 
     /// The resources of the firm's git, `git:<name>`.
@@ -1051,6 +1069,25 @@ until someone funds them, every access request and background check goes to the 
                     }
                 }
             }
+            // A knowledge base named outright must be one of the firm's, and
+            // with a remote its main is the firm's, so the librarian merges.
+            if let Some(kb) = &g.knowledge_base {
+                let known = if g.remote.is_some() {
+                    g.local.iter().any(|l| l.eq_ignore_ascii_case(kb))
+                } else {
+                    self.git_repos().iter().any(|r| r == kb)
+                };
+                if !known {
+                    err(format!(
+                        "git.knowledge_base: {kb:?} must be {}",
+                        if g.remote.is_some() {
+                            "in git.local (its main is the firm's, merged by the librarian)"
+                        } else {
+                            "one of git.repos"
+                        }
+                    ));
+                }
+            }
         }
         if self.product_port.is_some() && self.facilities.is_empty() {
             err("product_port needs a cluster facility".into());
@@ -1276,6 +1313,32 @@ firms:
             firm(&format!("{BASE}    git: {{ dir: /x, local: [kb] }}\n")).unwrap_err()
         );
         assert!(e.contains("for a firm with git.remote"), "{e}");
+        // A knowledge base named outright is one of the firm's local-main
+        // repositories (with a remote) or of its repositories (without).
+        assert!(
+            bad("local: [kb]", "local: [kb], knowledge_base: wiki").contains("git.knowledge_base")
+        );
+        assert!(firm(&format!(
+            "{BASE}{}",
+            GH.replace("local: [kb]", "local: [kb], knowledge_base: KB")
+        ))
+        .is_ok());
+        let e = format!(
+            "{:#}",
+            firm(&format!(
+                "{BASE}    git: {{ repos: [product], knowledge_base: kb }}\n"
+            ))
+            .unwrap_err()
+        );
+        assert!(e.contains("one of git.repos"), "{e}");
+        let c = firm(&format!("{BASE}    git: {{ repos: [product, kb] }}\n")).unwrap();
+        assert_eq!(
+            get(&c, "acme").unwrap().knowledge_base().as_deref(),
+            Some("kb"),
+            "kb by default"
+        );
+        let c = firm(&format!("{BASE}    git: {{ repos: [product] }}\n")).unwrap();
+        assert_eq!(get(&c, "acme").unwrap().knowledge_base(), None);
     }
 
     #[test]

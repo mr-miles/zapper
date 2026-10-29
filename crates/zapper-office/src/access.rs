@@ -812,11 +812,25 @@ pub fn grant_at_clearance(
     screening: &str,
     grants: &[Clearance],
 ) {
+    // Every hire reads the knowledge base, from being cleared (an officer
+    // holds admin on it, as on all git, once cleared).
+    let mut grants = grants.to_vec();
+    if let Some(kb) = run.config.knowledge_base() {
+        let r = format!("git:{kb}");
+        if !run.chart().is_officer(worker)
+            && !grants.iter().any(|(x, ..)| *x == r)
+            && level(run, worker, &r) == Level::None
+        {
+            if let Ok(ttl) = parse_duration(&run.config.credentials.expiry) {
+                grants.push((r, Want::of(Level::Read), now() + ttl.as_secs_f64()));
+            }
+        }
+    }
     if grants.is_empty() {
         return;
     }
     let note = format!("cleared with background check {screening}");
-    for (r, want, expires) in grants {
+    for (r, want, expires) in &grants {
         put(
             d,
             run,
