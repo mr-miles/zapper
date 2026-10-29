@@ -1794,10 +1794,15 @@ mod tests {
     fn the_github_firm_example_loads() {
         let c = example("github-firm");
         let octo = &zapper_office::firm::all(&c)["octo"];
-        assert_eq!(octo.workers.len(), 1);
+        let founders: Vec<&str> = octo.workers.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(founders, ["ada", "lin"]);
+        assert_eq!(octo.roles["librarian"].agent.as_deref(), Some("librarian"));
         assert!(octo.git_internal());
         assert_eq!(octo.git_remote().unwrap().config, "acme.yaml");
         assert!(octo.git.as_ref().unwrap().dir.is_some());
+        // Its knowledge base is kb, whose main is the firm's.
+        assert_eq!(octo.knowledge_base().as_deref(), Some("kb"));
+        assert!(octo.main_is_local("kb") && !octo.main_is_local("shopping-list"));
     }
 
     /// `examples/research-firm`: Ada alone, who may hire a research
