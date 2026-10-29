@@ -15,7 +15,8 @@ This revises [proposal 08](08-github-app-repositories.md). Its App, `zapper gith
 |---|---|
 | Where agents work | Only on the firm's git server, with per-repository grants as for the drive: a worker can hold several repositories at different levels. |
 | Who talks to the remote | Only the daemon, with a token it mints from the firm's App for the repository at hand. Agents hold no GitHub credential and run no `gh`. |
-| `main` | One source of truth per repository: `remote` (the default) or `local`. It flows in one direction only. |
+| Which repositories | Every repository the firm's App is installed on. They live in a folder the config names, cloned if absent and fetched otherwise, so they persist across runs. |
+| `main` | One source of truth per repository: the remote (the default) or the firm's server, for the repositories the config lists as `local`. It flows in one direction only. |
 | Who merges code | The board, in GitHub's UI, for a remote-main repository. No agent and no grant merges there. |
 | Publishing a branch | The `publish_branch` office tool: the daemon pushes the branch and opens its pull request, or updates it. |
 | What agents learn of a pull request | Mail from the daemon (checks finished, a review or comment, merged or closed), and `pr_status` for the details on demand. |
@@ -27,32 +28,34 @@ This revises [proposal 08](08-github-app-repositories.md). Its App, `zapper gith
 ```yaml
 git:
   remote: { github: { config: acme.yaml } }   # the firm's App; omitted: no remote, as today
-  repos:
-    api: {}                 # main on the remote (the default)
-    web: {}
-    kb: { main: local }     # main on the firm's server, pushed out
+  dir: ~/zapper/repos/acme                     # one bare repository per subdirectory, named as on the remote
+  local: [kb]                                  # main on the firm's server, pushed out; every other repository's main is the remote's
 ```
 
 - **`git.remote`** names how the daemon reaches the remote. GitHub, through the App's credentials file, is the only kind for now; the setting is named for what it is, so another host can sit behind it later.
-- **`git.repos`** lists the firm's repositories by name, each mapped to `OWNER/NAME` on the remote. The default is the same name under the App's account. A repository the App doesn't reach is an error when the run starts.
-- **`main: remote | local`**, per repository, with `remote` the default.
+- **The repositories are the App's installation**: every repository the App is installed on, under its account, is one of the firm's, by its name there. Choosing them is choosing what to install the App on, as in proposal 08. A repository that should be local-main, such as `kb`, is created on the remote once by the operator and the App installed on it.
+- **`git.dir`** is where they live: a bare repository per subdirectory. At a run's start the daemon clones a repository that isn't there and fetches one that is. A subdirectory whose repository the App no longer reaches is moved to `git.dir/archive/`, never deleted.
+- **`git.local`** lists the repositories whose `main` is the firm's server's; every other repository's `main` is the remote's. Naming a repository the App doesn't reach is an error when the run starts.
 - **Without `git.remote`**, the firm works as today: empty repositories per run, nothing pushed anywhere.
+- **`zapper git sync FIRM`** does the clone-or-fetch outside a run, to warm `git.dir` for large repositories ahead of time or from cron. Nothing depends on it.
 
 Grants stay as they are: `git:<name>` at `read`, `write` or `admin`. GitHub levels go.
+
+Repositories now persist across runs, where today each run has its own, empty at the start. So that replay still shows a run's history as it was, a run records each repository's `main` (and the branches pushed) when it starts and when it ends.
 
 ## 2. Keeping `main` in step
 
 ### `main: remote` (code)
 
-- **At the start of a run**, the daemon clones the remote into the run's repository, so agents start from the remote's `main` instead of from nothing.
+- **At the start of a run**, the daemon clones the repository into `git.dir` if it isn't there and fetches it otherwise, so agents start from the remote's `main`.
 - **Afterwards**, the daemon fetches the remote's `main` whenever it changes (a webhook if the daemon is reachable from GitHub, else polling, see [open questions](#open-questions)) and moves the local `main` to it. Locally, `main` is the daemon's alone: the `pre-receive` hook refuses every agent, whatever their grant.
-- **A rewritten `main`** (a force-push on the remote) is followed, since the remote is the source of truth. The daemon tells the authors whose published branches were based on the old history.
+- **A rewritten `main`** (a force-push on the remote) is followed, since the remote is the source of truth.
 
 ### `main: local` (the knowledge base)
 
 - **Merges** happen on the firm's server, by whoever holds `admin` on the repository, under the existing `pre-receive` hook.
 - **Out to the remote**: after each update to `main`, the daemon pushes it, fast-forward only. A ruleset on the remote lets only the firm's App update `main`; the remote is a read-only copy for people, and where the repository lives between runs.
-- **At the start of a run**, the daemon clones the remote, which holds the last `main` pushed.
+- **At the start of a run**, the copy in `git.dir` is the one agents use. The daemon fetches the remote only to check that its `main` hasn't moved.
 - **If the remote's `main` changed by another route**, the daemon stops pushing, never force-pushes over it, and tells the board.
 - **Branches** stay on the firm's server and are reviewed over mail. They are not published.
 
@@ -97,10 +100,10 @@ wiki/         the pages, each with frontmatter: author, sources, updated, status
   - reviews each branch against the existing pages, searching for the entities it mentions to catch duplicates and contradictions that merge cleanly as text;
   - checks the sources, and has claims that came from the web marked `trust: web`;
   - merges, then updates `index.md` and `log.md`;
-  - sweeps for broken links, orphan pages, contradictions and stale `updated` dates, and fixes them through branches of its own;
+  - sweeps for broken links, orphan pages, contradictions and stale `updated` dates: it fixes what is mechanical itself (links, the index, the log, moving or renaming a page), and mails contradictions and stale pages to the authors of the pages involved, or whoever owns that area, to resolve on a branch of their own;
   - doesn't browse the web, so the agent that holds `main` has seen no untrusted content.
-- **Who reviews the librarian**: its mechanical changes (the index, the log, link fixes) it merges itself; a change of content by the librarian goes to another reviewer or the board, as nobody approves their own work ([open questions](#open-questions)).
-- **Persistence**: the knowledge base outlives runs. Each run starts from the remote's copy, and every merge is pushed back.
+- **The librarian writes no content**: its own changes are mechanical only, and it merges them itself. Deciding what a page says is its authors' work.
+- **Persistence**: the knowledge base outlives runs, in `git.dir` and on the remote, where every merge is pushed.
 
 ## 5. What changes from proposal 08
 
@@ -109,10 +112,10 @@ wiki/         the pages, each with frontmatter: author, sources, updated, status
 | Per-worker tokens, their session secrets and the two proxy rules on `github.com` and `api.github.com` | The App, `zapper github setup` and `status`, and the credentials file |
 | GitHub levels (`credentials.github.levels`) and one repository per worker | `zapper mint github-app`, now run for the daemon's own requests |
 | `gh` in the office image, its placeholder login and `GITHUB_TOKEN` | Revoking tokens at a run's end |
-| The `gh` steps in the `office-git` skill | Listing the App's repositories (now checking `git.repos` against them) |
+| The `gh` steps in the `office-git` skill | Listing the App's repositories, now the firm's list of repositories |
 | `git.github` and the rule against local repositories with GitHub | The rule that workflow changes are the board's, now enforced |
 
-The skills change with it: `office-git` describes `publish_branch`, the mail that follows and `pr_status`; `office-resources` and `security-review` drop GitHub levels; a new `knowledge-base` skill covers reading and contributing, and the librarian's agent definition covers curation.
+The skills change with it: `office-git` describes `publish_branch`, the mail that follows and `pr_status`, and has an agent check, before completing work, that their branch is based on the tip of `main` (`git fetch` and rebase if not); `office-resources` and `security-review` drop GitHub levels; a new `knowledge-base` skill covers reading and contributing, and the librarian's agent definition covers curation.
 
 ## 6. Security
 
@@ -130,7 +133,5 @@ The skills change with it: `office-git` describes `publish_branch`, the mail tha
 ## Open questions
 
 - **Webhook or polling** for the remote's changes: a webhook needs the daemon reachable from GitHub, which a firm on a laptop isn't. Polling every minute or so costs API requests; the checks' completion is the event agents wait for most.
-- **Who reviews the librarian's own content changes**: another agent with `admin` on `kb`, or the board.
 - **One librarian or several**: one per area of the wiki once a single one is a bottleneck, with scopes that don't overlap.
-- **Large repositories**: cloning the remote at every run's start may be slow; the daemon could keep a cache between runs.
 - **Branches of a local-main repository**: never published, as above, or publishable for people to see.
