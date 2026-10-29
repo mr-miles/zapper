@@ -743,17 +743,16 @@ The wake prompts, the follow-up and escalation texts, the officers' prompts, the
 
 ## Testing
 
-Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`, from a mount:
+Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, with the e2e tests' scripts (`tests/fake`) at `/fake`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`. `make test-e2e-office` rebuilds the image first, so a run plays the checkout's fake and scripts.
 
 ```yaml
 profiles:
   fake-ceo:
     engine: { image: office-fake }
     agent: { kind: claude-code, env: { ZAPPER_FAKE_SCRIPT: /fake/ceo.yaml } }
-    mounts: [{ host: ./fake, guest: /fake, mode: ro }]
 ```
 
-A script:
+A script, a file in `tests/fake`:
 
 ```yaml
 rules:                                        # the first rule that matches a wake runs

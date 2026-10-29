@@ -73,9 +73,18 @@ fn run(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// An image's base, its steps, and the host files it takes with where each
-/// goes.
-pub type Recipe = (String, Vec<String>, Vec<(PathBuf, Vec<String>)>);
+/// What an image is built from: its base, its steps, the host files (or
+/// directories) its arguments name, where each is copied, and the steps run
+/// once they are in.
+pub struct Recipe {
+    pub from: String,
+    pub run: Vec<String>,
+    /// The arguments' files, each once.
+    pub inputs: Vec<PathBuf>,
+    /// In order: which input, and where in the image.
+    pub copies: Vec<(usize, String)>,
+    pub after: Vec<String>,
+}
 
 /// What to build for `name`: its recipe in the config, with the files its
 /// arguments name (`--arg NAME=PATH`, else the arg's default); or, with
@@ -92,7 +101,13 @@ pub fn recipe(
         if !args.is_empty() {
             bail!("--arg is for an image's recipe; with --from there is none");
         }
-        return Ok((from, run, vec![]));
+        return Ok(Recipe {
+            from,
+            run,
+            inputs: vec![],
+            copies: vec![],
+            after: vec![],
+        });
     }
     if !run.is_empty() {
         bail!("--run goes with --from; a recipe has its own steps");
@@ -125,16 +140,17 @@ pub fn recipe(
         }
         given.insert(k, v);
     }
-    let mut files = Vec::new();
+    let mut inputs: Vec<PathBuf> = Vec::new();
+    let mut index: std::collections::BTreeMap<&str, usize> = Default::default();
     for (k, arg) in &r.args {
         let path = match (given.get(k.as_str()), &arg.default) {
             (Some(v), _) => PathBuf::from(v),
             (None, Some(d)) => PathBuf::from(zapper_policy::expand_home(d)),
             (None, None) => bail!("image {name} needs --arg {k}=PATH: {}", arg.description),
         };
-        if !path.is_file() {
+        if !path.is_file() && !path.is_dir() {
             bail!(
-                "image {name}: {k} is {}, which isn't a file{}",
+                "image {name}: {k} is {}, which isn't a file or a directory{}",
                 path.display(),
                 if arg.description.is_empty() {
                     String::new()
@@ -143,9 +159,47 @@ pub fn recipe(
                 }
             );
         }
-        files.push((path, arg.install.clone()));
+        index.insert(k, inputs.len());
+        inputs.push(path);
     }
-    Ok((r.from.clone(), r.run.clone(), files))
+    let copies = r
+        .copy
+        .iter()
+        .map(|c| {
+            index
+                .get(c.from.as_str())
+                .map(|&i| (i, c.to.clone()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "image {name}: copy from {:?}, which isn't one of its args",
+                        c.from
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Recipe {
+        from: r.from.clone(),
+        run: r.run.clone(),
+        inputs,
+        copies,
+        after: r.after.clone(),
+    })
+}
+
+/// Copies a file, or a directory and all it holds, modes kept.
+fn copy_into(src: &Path, dest: &Path) -> Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            copy_into(&e.path(), &dest.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(src, dest)
+            .map(|_| ())
+            .with_context(|| format!("reading {}", src.display()))
+    }
 }
 
 pub struct Build<'a> {
@@ -153,8 +207,13 @@ pub struct Build<'a> {
     pub from: &'a str,
     /// Shell commands run in the image at build time, as `RUN` steps.
     pub run: &'a [String],
-    /// Host files put in the image first, each at its paths, as `COPY` steps.
-    pub files: &'a [(PathBuf, Vec<String>)],
+    /// Host files and directories the copies take from.
+    pub inputs: &'a [PathBuf],
+    /// After `run`, in order, as `COPY` steps (so a changed input rebuilds
+    /// only from there): which input, and where in the image.
+    pub copies: &'a [(usize, String)],
+    /// Shell commands run once the copies are in.
+    pub after: &'a [String],
     pub size: Option<&'a str>,
     pub dir: &'a Path,
 }
@@ -173,23 +232,25 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
     std::fs::create_dir_all(b.dir)?;
     let oci = engine();
     let work = tempdir()?;
-    let reference = if b.run.is_empty() && b.files.is_empty() {
+    let reference = if b.run.is_empty() && b.copies.is_empty() && b.after.is_empty() {
         eprintln!("pulling {}", b.from);
         run(Command::new(&oci).args(["pull", "-q", b.from]))?;
         b.from.to_string()
     } else {
         let mut file = format!("FROM {}\n", b.from);
-        for (i, (src, dests)) in b.files.iter().enumerate() {
-            // Into the build's context under a name of its own, then into
-            // the image at each of its paths, its mode kept.
-            let name = format!("file-{i}");
-            std::fs::copy(src, work.join(&name))
-                .with_context(|| format!("reading {}", src.display()))?;
-            for dest in dests {
-                file.push_str(&format!("COPY {name} {dest}\n"));
-            }
-        }
         for r in b.run {
+            file.push_str(&format!("RUN {r}\n"));
+        }
+        // Each input into the build's context under a name of its own, then
+        // into the image where the copies say, modes kept (a directory's
+        // contents go into the directory named).
+        for (i, src) in b.inputs.iter().enumerate() {
+            copy_into(src, &work.join(format!("input-{i}")))?;
+        }
+        for (i, to) in b.copies {
+            file.push_str(&format!("COPY input-{i} {to}\n"));
+        }
+        for r in b.after {
             file.push_str(&format!("RUN {r}\n"));
         }
         std::fs::write(work.join("Containerfile"), file)?;
@@ -251,7 +312,7 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
         run(&mut docker)?;
     }
     std::fs::rename(&tmp, &out)?;
-    let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "size": size, "built": crate::util::now() as u64 });
+    let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "copy": b.copies.iter().map(|(i, to)| json!({ "from": b.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": b.after, "size": size, "built": crate::util::now() as u64 });
     std::fs::write(
         b.dir.join(format!("{}.json", b.name)),
         serde_json::to_vec_pretty(&meta)?,

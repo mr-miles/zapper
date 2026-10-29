@@ -7,7 +7,8 @@
 #   tests/e2e-office.sh [path/to/zapper]
 #
 # Needs what tests/e2e.sh needs (KVM, network) and the office-fake image
-# (make image IMAGE=office-fake). Runs
+# with the scripts in tests/fake (make image IMAGE=office-fake; make
+# test-e2e-office rebuilds it first). Runs
 # its own daemon under a temporary directory. ZAPPER_E2E_KEEP=1 keeps it.
 set -u
 
@@ -49,242 +50,35 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$T/work" "$T/fake"
+mkdir -p "$T/work"
 PORT=$((20000 + $$ % 20000))
 DATA=$HOME/.local/share/zapper
-cat > "$T/fake/ceo.yaml" <<'EOF'
-rules:
-  - when: { from: board, kind: assignment }
-    do:
-      - mail_send: { to: [ada], subject: "Write hello", body: "Write /work/hello.md and publish it.", kind: assignment, due: "1h" }
-      - mail_reply: { message: $message, body: "Delegated to ada.", kind: reply }
-  - when: { from: ada, kind: report }
-    do:
-      - mail_send: { to: [board], subject: "Done", body: "ada published $subject", kind: report }
-EOF
-cat > "$T/fake/eng.yaml" <<'EOF'
-rules:
-  - when: { from: ceo, kind: assignment }
-    do:
-      - shell: "office mail_send --to ceo --subject up --body 'do this' --kind assignment > /work/authority.txt 2>&1; true"
-      - shell: "office mail_send '{\"from\": \"ceo\", \"to\": [\"sec-1\"], \"subject\": \"spoof\", \"body\": \"x\", \"kind\": \"fyi\"}' > /work/spoof.txt 2>&1; true"
-      - shell: "office mail_read --message m-2 > /work/peek.txt 2>&1; office access_requests > /work/officer-only.txt 2>&1; true"
-      - shell: "curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.com > /work/before.txt 2>&1; true"
-      - shell: "echo hello from ada > /work/hello.md; mkdir -p /work/site; echo '# Site' > /work/site/index.md; ln -sf /etc/shadow /work/site/shadow"
-      - drive_publish: { paths: [/work/hello.md, /work/site], title: "Hello", kind: document, summary: "A greeting" }
-      - mail_reply: { message: $message, body: "Done, see $artifact", kind: report, close: true, attachments: [$artifact] }
-  - when: { contains: "was allowed" }
-    do:
-      - shell: "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com > /work/after.txt 2>&1; true"
-EOF
-cat > "$T/fake/sec.yaml" <<'EOF'
-rules:
-  - when: { contains: "Access request r-" }
-    do:
-      - access_decide: { request: $request, allow: true, scope: worker, reason: "example.com is needed for the task", methods: [] }
-EOF
+# The firms below, whose workers play the scripts in tests/fake (the
+# office-fake image has them at /fake; make test-e2e-office rebuilds it).
+#
 # corp: a firm that grows. The board declines the CEO's first budget and
 # approves the second; the CEO hires grace (who reports back and is let go)
 # and ken, on a budget too small for more than one turn.
-cat > "$T/fake/corp-ceo.yaml" <<'EOF'
-rules:
-  - when: { from: board, contains: "Declined" }
-    do:
-      - budget_request: { total: "30k", plan: "Hire two developers.", reason: "the board asked for less" }
-  - when: { from: board, contains: "Approved" }
-    do:
-      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"1G\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/rich.txt 2>&1; true"
-      - hire: { role: dev, name: grace, budget: "10k", title: "Founding engineer", subject: "Build the widget", brief: "Build the widget and report.", reason: "we need an engineer" }
-      - shell: "office fund '{\"worker\": \"grace\", \"tokens\": -9500, \"reason\": \"x\"}' > /work/takeback.txt 2>&1; true"
-      - hire: { role: dev, name: ken, budget: "100", subject: "A tiny job", brief: "Look at the widget.", reason: "a small budget" }
-      - hire: { role: dev, name: mallory, budget: "1k", subject: "Copy", brief: "Write the marketing copy.", reason: "words" }
-      - contract_offer: { role: dev, name: carl, title: "Auditor", brief: "Audit the widget's code." }
-  - when: { contains: "Quote for contract", once: true }
-    do:
-      - contract_counter: { contract: $contract, budget: "3k", note: "too much for an audit this size" }
-  - when: { contains: "Quote for contract" }
-    do:
-      - contract_accept: { contract: $contract }
-  - when: { from: board, kind: assignment }
-    do:
-      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"1k\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/early.txt 2>&1; true"
-      - budget_request: { total: "50k", plan: "Hire two developers and a reserve.", reason: "to build the widget" }
-  - when: { from: grace, kind: report }
-    do:
-      - mail_send: { to: [ken], subject: "One more thing", body: "Please also check the docs.", kind: fyi }
-      - release: { worker: grace, reason: "the widget is done" }
-EOF
 # The officer clears grace and ken, and objects to mallory: a developer's
 # access for a job that needs none.
-cat > "$T/fake/corp-sec.yaml" <<'EOF'
-rules:
-  - when: { contains: "Credential request p-" }
-    do:
-      - credentials_decide: { request: $credential, grant: true, expires_in: "1h", note: "reading design notes fits the job" }
-  - when: { contains: "Hire: mallory" }
-    do:
-      - shell: "office background_checks > /work/checks.txt 2>&1; true"
-      - background_check: { screening: $screening, clear: false, note: "a developer's git and cluster access for copywriting" }
-  - when: { contains: "Background check" }
-    do:
-      - shell: "office background_check '{\"screening\": \"$screening\", \"clear\": true, \"grants\": [{\"resource\": \"drive:general\", \"level\": \"admin\"}]}' >> /work/clear-admin.txt 2>&1; true"
-      - background_check: { screening: $screening, clear: true, note: "role fits the brief", grants: [{ resource: "drive:general", level: write }] }
-EOF
 # first: the security officer is the first hire; nobody is hired or
 # contracted before. A turn that runs past budget.turn_timeout is stopped.
-cat > "$T/fake/first-ceo.yaml" <<'EOF'
-rules:
-  - when: { subject: "Stuck" }
-    do:
-      - sleep: 60
-  - when: { contains: "ran past" }
-    do:
-      - shell: "echo timeout note > /work/timeout.txt"
-  - when: { from: board, kind: assignment }
-    do:
-      - budget_request: { total: "20k", plan: "An officer, then an engineer.", reason: "to build it" }
-  - when: { from: board, contains: "Approved" }
-    do:
-      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"2k\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/early.txt 2>&1; true"
-      - shell: "office contract_offer '{\"role\": \"dev\", \"title\": \"Dev\", \"brief\": \"x\"}' > /work/early-contract.txt 2>&1; true"
-      - hire: { role: officer, name: otto, budget: "2k", subject: "Security", brief: "Take over security.", reason: "first" }
-      - hire: { role: dev, name: ada, budget: "2k", subject: "Job", brief: "Do the job.", reason: "an engineer" }
-EOF
 # scen: a scenario. The board's scripted mail and kill fire on their own;
 # the first plain hire gets the board's instructions (ben doesn't); a
 # contractor in the red slot, on pi (the slot's own profile), may mail the
 # board. The first contractor
 # declines and frees the red slot for the next; a kill by role waits for
 # someone of the role who has worked.
-cat > "$T/fake/scen-ceo.yaml" <<'EOF'
-rules:
-  - when: { from: board, kind: assignment, contains: "Build it" }
-    do:
-      - budget_request: { total: "20k", plan: "Three developers and a contractor.", reason: "build" }
-  - when: { from: board, contains: "Approved" }
-    do:
-      - hire: { role: dev, name: ada, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
-      - hire: { role: dev, name: ben, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
-      - hire: { role: dev, name: cat, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
-      - contract_offer: { role: dev, name: dan, title: "Decoy", brief: "Audit the code." }
-  - when: { contains: "is declined" }
-    do:
-      - contract_offer: { role: dev, name: eve, title: "Auditor", brief: "Audit the code." }
-EOF
-cat > "$T/fake/scen-dev.yaml" <<'EOF'
-rules:
-  - when: { contains: "Decoy" }
-    do:
-      - contract_decline: { contract: $contract, reason: "busy" }
-  - when: { contains: "debrief the board now" }
-    do:
-      - mail_send: { to: [board], subject: "Final debrief", body: "failed to get admin", kind: report }
-  - when: { contains: "Contract offer k-" }
-    do:
-      - shell: "office mail_send --to board --subject Debrief --body 'red team debrief' --kind report > /work/board.txt 2>&1; true"
-EOF
 # solo: the CEO holds security alone, decides a colleague's access request,
 # hires an officer (whom the board checks) and hands security over, then
 # lets the officer go and holds it again.
 # mixed: a Claude Code CEO and a pi engineer (the fake speaks pi's RPC).
 # The CEO keeps the board's assignment, and later closes it: refused while
 # pat is busy, then once the post office says the team is idle.
-cat > "$T/fake/mixed-ceo.yaml" <<'EOF'
-rules:
-  - when: { from: board, kind: assignment }
-    do:
-      - shell: "echo $message > /work/objective"
-      - mail_send: { to: [pat], subject: "Build it", body: "Build it and report.", kind: assignment }
-  - when: { contains: "Close now" }
-    do:
-      - shell: "office mail_reply --message $(cat /work/objective) --body 'All done.' --kind report --close true > /work/close1.txt 2>&1; true"
-  - when: { contains: "Your team is idle" }
-    do:
-      - shell: "office mail_reply --message $(cat /work/objective) --body 'All done.' --kind report --close true > /work/close2.txt 2>&1; true"
-EOF
-cat > "$T/fake/mixed-dev.yaml" <<'EOF'
-rules:
-  - when: { contains: "Interrupt" }
-    do:
-      - shell: "echo handed over > /work/steered.txt"
-  - when: { subject: "Slow" }
-    do:
-      - sleep: 8
-  - when: { subject: "Build it" }
-    do:
-      - shell: "ls ~/.pi/agent > /work/pi-dir.txt"
-      - mail_reply: { message: $message, body: "Built, on pi.", kind: report, close: true }
-EOF
-cat > "$T/fake/solo-ceo.yaml" <<'EOF'
-rules:
-  - when: { subject: "Slow" }
-    do:
-      - sleep: 8
-  - when: { subject: "Interrupt" }
-    do:
-      - shell: "echo handed over > /work/interrupt.txt"
-  - when: { contains: "Access request r-" }
-    do:
-      - access_decide: { request: $request, allow: true, scope: worker, reason: "the CEO holds security", methods: [] }
-  - when: { from: bo, kind: report }
-    do:
-      - shell: "office access_requests > /work/after-handover.txt 2>&1; true"
-      - shell: "office release '{\"worker\": \"otto\", \"reason\": \"not needed\"}' > /work/release.txt 2>&1; true"
-  - when: { from: board, contains: "Approved" }
-    do:
-      - hire: { role: dev, name: ada, budget: "5k", subject: "Fetch", brief: "Fetch example.com.", reason: "an engineer" }
-  - when: { from: board, kind: assignment }
-    do:
-      - budget_request: { total: "20k", plan: "An engineer, then an officer.", reason: "to build it" }
-  - when: { from: ada, kind: report }
-    do:
-      - hire: { role: officer, name: otto, budget: "2k", subject: "Security", brief: "Take over security.", reason: "the team grows" }
-      - hire: { role: dev, name: bo, budget: "2k", subject: "Docs", brief: "Write the docs.", reason: "docs" }
-EOF
 # The officer's Claude dies on its first background check; the check comes
 # back on the restart.
-cat > "$T/fake/solo-sec.yaml" <<'EOF'
-rules:
-  - when: { contains: "Background check" }
-    do:
-      - shell: "test -f /work/died || { touch /work/died; kill -9 $PPID; }"
-      - background_check: { screening: $screening, clear: true, note: "fits" }
-EOF
-cat > "$T/fake/solo-dev.yaml" <<'EOF'
-rules:
-  - when: { subject: "Fetch" }
-    do:
-      - shell: "curl -s -m 5 -o /dev/null https://example.com; true"
-  - when: { contains: "was allowed" }
-    do:
-      - shell: "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com > /work/after.txt 2>&1; true"
-      - mail_send: { to: [ceo], subject: "Fetched", body: "Got it.", kind: report }
-  - when: { subject: "Docs" }
-    do:
-      - mail_reply: { message: $message, body: "Docs written.", kind: report, close: true }
-EOF
 cat > "$T/board-articles.md" <<'EOF'
 No paid services without the board's approval.
-EOF
-cat > "$T/fake/corp-dev.yaml" <<'EOF'
-rules:
-  - when: { contains: "Counter-offer for contract" }
-    do:
-      - contract_quote: { contract: $contract, scope: "An audit report, the core module only.", budget: "3k", due: "2h" }
-  - when: { kind: assignment, contains: "Contract k-" }
-    do:
-      - shell: "office mail_send --to ken --subject hi --body hello --kind fyi 2>&1; office hire '{\"role\": \"dev\", \"budget\": \"1\", \"brief\": \"x\", \"reason\": \"x\"}' 2>&1; true"
-      - contract_complete: { contract: $contract, report: "Audit done. Tried: $last" }
-  - when: { contains: "Contract offer k-" }
-    do:
-      - contract_quote: { contract: $contract, scope: "An audit report of the widget's code.", budget: "5k", due: "2h" }
-  - when: { subject: "A tiny job" }
-    do:
-      - shell: "office request_access --host git.corp.internal --reason 'the code' > /work/internal.txt 2>&1; true"
-      - credentials_request: { resource: drive, level: read, spaces: [engineering], reason: "to read the widget's design notes" }
-  - when: { subject: "Build the widget" }
-    do:
-      - mail_reply: { message: $message, body: "Built.", kind: report, close: true }
 EOF
 # A profile per script: the fake plays the one ZAPPER_FAKE_SCRIPT names. On
 # pi too for the scripts a pi worker plays, and on the engineer profile.
@@ -308,13 +102,11 @@ policy:
   defaults: { net: deny, exec: allow }
 profiles:
   # Workers run the fake Claude Code; each fake-* profile below names the
-  # script it plays, from the scripts mounted at /fake.
+  # script it plays, from those the office-fake image has at /fake.
   worker:
     engine: { image: office-fake, vcpus: 1, memory_mib: 512, disk: 2GiB }
     agent: { kind: claude-code, command: [bash], user: agent, workdir: /work }
-    mounts:
-      - { host: "{workdir}", guest: /work, mode: rw, extra: 256MiB }
-      - { host: $T/fake, guest: /fake, mode: ro }
+    mounts: [{ host: "{workdir}", guest: /work, mode: rw, extra: 256MiB }]
     policy:
       net:
         - { action: ask, host: example.com, ports: [443] }
@@ -420,7 +212,6 @@ firms:
         script:
           - { after: 1s, break_cluster: { mode: prod } }
 EOF
-echo "rules: []" > "$T/fake/none.yaml"
 chmod 600 "$T/zapper.yaml"
 # The workers' skills, next to the config: firms read them from there only.
 "$Z" init > "$T/init.log" || { cat "$T/init.log"; echo "zapper init failed"; exit 1; }

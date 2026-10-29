@@ -1,0 +1,8 @@
+rules:
+  - when: { from: board, kind: assignment }
+    do:
+      - mail_send: { to: [ada], subject: "Write hello", body: "Write /work/hello.md and publish it.", kind: assignment, due: "1h" }
+      - mail_reply: { message: $message, body: "Delegated to ada.", kind: reply }
+  - when: { from: ada, kind: report }
+    do:
+      - mail_send: { to: [board], subject: "Done", body: "ada published $subject", kind: report }

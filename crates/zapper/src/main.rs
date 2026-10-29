@@ -891,12 +891,14 @@ async fn run(cli: Cli) -> Result<i32> {
                     run,
                     size,
                 } => {
-                    let (from, run, files) = image::recipe(&config, &name, from, run, &args)?;
+                    let r = image::recipe(&config, &name, from, run, &args)?;
                     let out = image::build(image::Build {
                         name: &name,
-                        from: &from,
-                        run: &run,
-                        files: &files,
+                        from: &r.from,
+                        run: &r.run,
+                        inputs: &r.inputs,
+                        copies: &r.copies,
+                        after: &r.after,
                         size: size.as_deref(),
                         dir: &dir,
                     })?;

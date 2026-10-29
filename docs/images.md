@@ -8,22 +8,29 @@ An image is an ext4 file built from a container image's filesystem. A profile se
 
 ## How it works
 
-`zapper image build NAME` builds the image from its recipe in the config, under `images:`: the OCI image it starts `from`, files from the host it takes as `args`, and the commands it `run`s. `make image IMAGE=NAME` runs it after `make build`. Without a recipe, `zapper image build NAME --from REF [--run CMD]…` gives the base and steps on the command line.
+`zapper image build NAME` builds the image from its recipe in the config, under `images:`: the OCI image it starts `from`, the commands it `run`s, the files or directories from the host it takes as `args` (each a name, a description and a default), where it `copy`s them, after those commands, and the commands to run once they are in (`after`). With the copies after `run`, changing an argument's file rebuilds only from the copy: the steps before it stay cached. `make image IMAGE=NAME` runs it after `make build`. Without a recipe, `zapper image build NAME --from REF [--run CMD]…` gives the base and steps on the command line.
 
 ```yaml
 images:
   office-fake:
     description: A fake Claude Code and pi, for the office's end-to-end tests
     from: docker.io/library/ubuntu:26.04
+    run:
+      - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*"
     args:
       fake-source:                       # --arg fake-source=PATH, else the default
         default: ../target/x86_64-unknown-linux-musl/release/zapper-fake   # relative to the config's directory
-        install: [/usr/local/bin/claude, /usr/local/bin/pi]
-    run:
-      - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*"
+      scripts:
+        default: ../tests/fake
+    copy:
+      - { from: fake-source, to: /usr/local/bin/claude }
+      - { from: fake-source, to: /usr/local/bin/pi }
+      - { from: scripts, to: /fake }     # a directory: its contents go into /fake
+    after:
+      - "claude --version && pi --version && ls /fake"
 ```
 
-1. Pulls `REF` with podman, or builds `FROM REF`: each argument's file copied to its `install` paths (its mode kept), then one `RUN` per step. `$ZAPPER_OCI` selects another engine.
+1. Pulls `REF` with podman, or builds `FROM REF`: one `RUN` per step, then one `COPY` per `copy` entry (modes kept; a directory's contents into the directory named), then one `RUN` per `after` step. `$ZAPPER_OCI` selects another engine.
 2. Exports the container's filesystem as a tar.
 3. Extracts the tar and runs `mkfs.ext4 -d` inside `podman unshare`, the engine's user namespace. This keeps the image's file ownership without needing root; outside it, every file would belong to the building user, and uid 1000 in the guest would own `/usr`.
 4. Writes `images/NAME.ext4`, and `images/NAME.json` with the source, steps, size and build time.
@@ -36,7 +43,7 @@ The image is sized at its content plus 25% plus 256 MiB, unless `--size` is give
 make image IMAGE=office                        # office workers: Claude Code and pi (pinned), git, kubectl, podman, Node.js, Python, headless Chromium
 make image IMAGE=k3s                           # a firm's cluster: k3s (pinned) and its air-gap images
 make image                                     # ubuntu-26.04 with curl, git and CA certificates, for the base profiles
-make image IMAGE=office-fake                   # the office's e2e tests: the fake Claude Code and pi (zapper-fake) as `claude` and `pi`
+make image IMAGE=office-fake                   # the office's e2e tests: the fake Claude Code and pi (zapper-fake) as `claude` and `pi`, and tests/fake at /fake
 zapper image build office-fake --arg fake-source=./my-fake   # a recipe's file from elsewhere
 zapper image build rust --from docker.io/library/rust:1-slim --run "apt-get update && apt-get install -y git"
 zapper image ls

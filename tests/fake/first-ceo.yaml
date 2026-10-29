@@ -1,0 +1,16 @@
+rules:
+  - when: { subject: "Stuck" }
+    do:
+      - sleep: 60
+  - when: { contains: "ran past" }
+    do:
+      - shell: "echo timeout note > /work/timeout.txt"
+  - when: { from: board, kind: assignment }
+    do:
+      - budget_request: { total: "20k", plan: "An officer, then an engineer.", reason: "to build it" }
+  - when: { from: board, contains: "Approved" }
+    do:
+      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"2k\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/early.txt 2>&1; true"
+      - shell: "office contract_offer '{\"role\": \"dev\", \"title\": \"Dev\", \"brief\": \"x\"}' > /work/early-contract.txt 2>&1; true"
+      - hire: { role: officer, name: otto, budget: "2k", subject: "Security", brief: "Take over security.", reason: "first" }
+      - hire: { role: dev, name: ada, budget: "2k", subject: "Job", brief: "Do the job.", reason: "an engineer" }

@@ -85,11 +85,15 @@ fmt:
 hooks:
 	git config core.hooksPath .githooks
 
+# The office's tests play the fake and scripts of this checkout: their image
+# is rebuilt first (quick when only they changed).
 test-e2e: build
 	tests/e2e.sh $(ZAPPER)
+	$(ZAPPER) image build office-fake
 	tests/e2e-office.sh $(ZAPPER)
 
 test-e2e-office: build
+	$(ZAPPER) image build office-fake
 	tests/e2e-office.sh $(ZAPPER)
 
 clean:

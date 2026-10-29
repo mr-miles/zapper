@@ -1,0 +1,11 @@
+rules:
+  - when: { from: board, kind: assignment }
+    do:
+      - shell: "echo $message > /work/objective"
+      - mail_send: { to: [pat], subject: "Build it", body: "Build it and report.", kind: assignment }
+  - when: { contains: "Close now" }
+    do:
+      - shell: "office mail_reply --message $(cat /work/objective) --body 'All done.' --kind report --close true > /work/close1.txt 2>&1; true"
+  - when: { contains: "Your team is idle" }
+    do:
+      - shell: "office mail_reply --message $(cat /work/objective) --body 'All done.' --kind report --close true > /work/close2.txt 2>&1; true"

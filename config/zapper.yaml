@@ -207,8 +207,8 @@ profiles:
 
 # Image recipes: `zapper image build NAME` (or `make image IMAGE=NAME`)
 # builds one into daemon.images, from an OCI base and the steps here. A
-# recipe's `args` are files from the host (`--arg NAME=PATH`, else the
-# default), put at their `install` paths before the steps run. To update a
+# recipe's `args` are files or directories from the host (`--arg NAME=PATH`,
+# else the default), which its `copy` puts in the image after `run`. To update a
 # pinned version, change it here and rebuild the image.
 images:
   ubuntu-26.04:
@@ -235,20 +235,28 @@ images:
 
   # The office's end-to-end tests: the office image's place, with a fake
   # Claude Code and pi that play scripts (ZAPPER_FAKE_SCRIPT, set by the
-  # profile) instead of thinking, so firms' runs are the same every time and
-  # cost no tokens. A profile on this image drives them exactly as it would
-  # the real agents.
+  # profile, names one of those under /fake) instead of thinking, so firms'
+  # runs are the same every time and cost no tokens. A profile on this image
+  # drives them exactly as it would the real agents. `make test-e2e-office`
+  # rebuilds it, so it has the fake and the scripts of the checkout.
   office-fake:
-    description: A fake Claude Code and pi, for the office's end-to-end tests
+    description: A fake Claude Code and pi, for the office's end-to-end tests, with their scripts
     from: docker.io/library/ubuntu:26.04
     args:
       fake-source:
         description: the fake agent, built by `make build` (cargo build --release -p zapper-fake --target x86_64-unknown-linux-musl)
         default: ../target/x86_64-unknown-linux-musl/release/zapper-fake
-        install: [/usr/local/bin/claude, /usr/local/bin/pi]
+      scripts:
+        description: the scripts the fake plays, by name (a profile's ZAPPER_FAKE_SCRIPT, e.g. /fake/ceo.yaml)
+        default: ../tests/fake
     run:
       - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git less procps iproute2 && rm -rf /var/lib/apt/lists/*"
-      - "claude --version && pi --version"
+    copy:
+      - { from: fake-source, to: /usr/local/bin/claude }
+      - { from: fake-source, to: /usr/local/bin/pi }
+      - { from: scripts, to: /fake }
+    after:
+      - "claude --version && pi --version && ls /fake"
 
   # The cluster facility: k3s at a pinned release, with its air-gap images so
   # it starts without the internet, and the board's dashboard (Headlamp),

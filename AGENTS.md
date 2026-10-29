@@ -118,7 +118,7 @@ config/                  zapper.yaml: the config, used when zapper runs in the c
 scripts/fetch-deps.sh    Firecracker and kernel download
 scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
 tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
-tests/e2e-office.sh      end-to-end tests of firms, on the office-fake image (make image IMAGE=office-fake)
+tests/e2e-office.sh      end-to-end tests of firms, on the office-fake image; the scripts its fake workers play are in tests/fake
 docs/                    one page per topic; index in docs/README.md
 examples/                configs to run as they are (mini-firm: the smallest company at work); each loads in a test
 skills/zapper/           operating skill, linked from .claude/skills/zapper

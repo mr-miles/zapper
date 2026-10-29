@@ -15,7 +15,7 @@
 | `make test` | Unit tests |
 | `make lint` / `make fmt` / `make hooks` | rustfmt and clippy with warnings as errors / format the code / use the repository's pre-commit hook, which runs `make lint` |
 | `make test-e2e` | End-to-end tests with real VMs ([testing](testing.md)): zapper's controls, then the office's |
-| `make test-e2e-office` | The office's end-to-end tests only: firms of real VMs with a fake Claude (needs `make image IMAGE=office-fake`) |
+| `make test-e2e-office` | The office's end-to-end tests only: firms of real VMs with a fake Claude; rebuilds the `office-fake` image first, from the checkout's fake and `tests/fake` scripts |
 
 ## zapper-inspect
 

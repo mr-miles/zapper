@@ -1,0 +1,5 @@
+rules:
+  - when: { contains: "Background check" }
+    do:
+      - shell: "test -f /work/died || { touch /work/died; kill -9 $PPID; }"
+      - background_check: { screening: $screening, clear: true, note: "fits" }

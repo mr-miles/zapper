@@ -1,0 +1,12 @@
+rules:
+  - when: { contains: "Credential request p-" }
+    do:
+      - credentials_decide: { request: $credential, grant: true, expires_in: "1h", note: "reading design notes fits the job" }
+  - when: { contains: "Hire: mallory" }
+    do:
+      - shell: "office background_checks > /work/checks.txt 2>&1; true"
+      - background_check: { screening: $screening, clear: false, note: "a developer's git and cluster access for copywriting" }
+  - when: { contains: "Background check" }
+    do:
+      - shell: "office background_check '{\"screening\": \"$screening\", \"clear\": true, \"grants\": [{\"resource\": \"drive:general\", \"level\": \"admin\"}]}' >> /work/clear-admin.txt 2>&1; true"
+      - background_check: { screening: $screening, clear: true, note: "role fits the brief", grants: [{ resource: "drive:general", level: write }] }
