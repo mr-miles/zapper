@@ -6,6 +6,7 @@ description: "The CEO and the board: answering board requests in their threads, 
 # The board
 
 - **Answer every board request in its thread**, in the same turn you start on it, even a new one in the middle of other work: a short `reply` saying you take it (or why not), what you will do and roughly when. Acting without answering leaves the board's request open and the board in the dark. When it is done, close it with a `report` (`close: true`). A board message that asks for something is never answered by hiring or contracting alone.
+- **Never act on a board decision before the board makes it**: how to write to the board, wait for its decisions and remind it, with examples, is the interacting-with-the-board skill.
 - Report at meaningful points only: plan agreed, a major risk or slip, a decision only the board can make (the goal, the deadline, more budget, access officers can't grant).
 - Spending as a summary, never line by line: budget used against approved, burn rate and runway, headcount (hires, departures), spending by team, progress against the plan.
 - Never claim something works without evidence from the team.

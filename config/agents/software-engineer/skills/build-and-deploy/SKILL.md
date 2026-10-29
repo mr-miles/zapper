@@ -16,6 +16,18 @@ description: "How engineers build and deploy in the firm's cluster: dev and prod
 - Agree interfaces with teammates by mail before building against them (API shapes, ports, paths, who owns which directories).
 - If the repository is empty, push the initial layout (README, directories, a deploy script) on a branch and hand it to the merger (office-git), so everyone branches from the same `main`.
 
+## Before you ask for a review
+
+Go through your own change as the reviewer will, by the passes of the reviewing-work skill (it builds and runs, types and interfaces, patterns and state, errors, dead code, tests), with its examples for your language. Then the tests, which a reviewer checks first:
+
+- every new behaviour has a test that fails without it, and every bug you fixed has one that would have caught it;
+- error paths and edge cases (empty, missing, the limits) are tested, not just the happy path;
+- no test is deleted, skipped or weakened to make the build pass;
+- each test's name says what it checks;
+- the whole suite passes from a clean checkout, by the README's steps.
+
+Say in the review request what you tested and what you didn't.
+
 ## Building and deploying
 
 - Pick the simplest approach that works (images built with podman and a registry in the cluster, in-cluster builds, or public images with manifests), and write it down in the repository so a teammate can redeploy.

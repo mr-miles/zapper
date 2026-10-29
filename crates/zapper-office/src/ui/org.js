@@ -329,7 +329,7 @@ function updateOverview() {
       n.fill.style.width = (frac * 100).toFixed(1) + '%';
       n.bar.classList.toggle('low', got > 0 && bal < got * 0.15);
       n.bar.classList.toggle('out', bal <= 0);
-      n.bar.title = 'budget: ' + fmtTok(bal) + ' left of ' + fmtTok(got) + ' given · ' + fmtTok(w.tokens) + ' spent';
+      n.bar.title = 'budget: ' + balanceText(bal, got) + ' · ' + fmtTok(w.tokens) + ' spent';
     }
     n.st.className = 'st' + (sl.bad ? ' bad' : '');
     n.rm.textContent = (STATE_ICON[w.state] || '') + ' ' + w.state;
@@ -467,7 +467,7 @@ function updatePanel() {
     pill(w.state === 'error' ? 'error' : w.state === 'working' || w.state === 'reviewing' ? 'accent' : '', w.state), el('span', {}, sl.text),
     sess ? el('span', { class: 'muted small', style: 'margin-left:auto' }, sessionsLink('Session'), ' ', el('span', { class: 'mono' }, sess)) : ''),
   el('div', { class: 'muted small', style: 'margin-top:4px' }, `${w.turns} turns · ${fmtNum(w.tokens)} tokens` + (w.rateLimited ? ` · ${w.rateLimited} rate-limited` : '')),
-  fundsOn(M) ? el('div', { class: 'small', style: 'margin-top:4px' }, 'Budget: ', el('b', {}, fmtTok(balanceOf(M, name))), ' left of ' + fmtTok(M.fundsIn.get(name) || 0) + ' given' + ((M.fundsOut.get(name) || 0) ? ', ' + fmtTok(M.fundsOut.get(name)) + ' passed on to their team' : '') + (w.exhausted && balanceOf(M, name) <= 0 ? ' · out of budget' : '')) : '',
+  fundsOn(M) ? el('div', { class: 'small', style: 'margin-top:4px' }, 'Budget: ', ...((p) => [el('b', {}, p[0]), p[1]])(balanceParts(balanceOf(M, name), M.fundsIn.get(name) || 0)), ((M.fundsOut.get(name) || 0) ? ', ' + fmtTok(M.fundsOut.get(name)) + ' passed on to their team' : '') + (w.exhausted && balanceOf(M, name) <= 0 ? ' · out of budget' : '')) : '',
   contractLine(M, w),
   grantsLine(M, w),
   w.hiredBy && !w.contract ? el('div', { class: 'small muted', style: 'margin-top:4px' }, 'Hired by ' + w.hiredBy + ', ' + fmtDate(w.hiredAt) + ', with ' + fmtTok(w.hireBudget) + ': ' + clip(w.hireReason, 200)) : '',

@@ -32,6 +32,7 @@ pub(crate) const DEFAULTS: &[(&str, &str)] = defaults![
     "skills/office-mail/SKILL.md",
     "skills/office-publish/SKILL.md",
     "skills/office-resources/SKILL.md",
+    "skills/interacting-with-the-board/SKILL.md",
     "skills/office-git/SKILL.md",
     "skills/knowledge-base/SKILL.md",
     "skills/manager/SKILL.md",
@@ -74,7 +75,12 @@ pub const DEFAULT_DIR: &str = "skills";
 pub const DEFAULT_AGENTS_DIR: &str = "agents";
 
 /// Every worker's: mail, the drive, the firm's resources.
-const EVERYONE: &[&str] = &["office-mail", "office-publish", "office-resources"];
+const EVERYONE: &[&str] = &[
+    "office-mail",
+    "office-publish",
+    "office-resources",
+    "interacting-with-the-board",
+];
 /// The skill officers work by.
 const SECURITY: &str = "security-review";
 /// The skill of every role that hires.
@@ -305,6 +311,37 @@ pub(crate) fn text(dir: &Path, name: &str) -> Result<String> {
     })
 }
 
+/// Copies the files of a skill's folder other than its `SKILL.md`, in their
+/// directories, within the limits; symbolic links aren't followed.
+fn copy_beside(from: &Path, to: &Path) -> Result<()> {
+    let (mut files, mut bytes) = (0usize, 0u64);
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(rel) = dirs.pop() {
+        for e in std::fs::read_dir(from.join(&rel))?.flatten() {
+            let kind = e.file_type()?;
+            let rel = rel.join(e.file_name());
+            if kind.is_dir() {
+                dirs.push(rel);
+            } else if kind.is_file() && rel != Path::new("SKILL.md") {
+                files += 1;
+                bytes += e.metadata()?.len();
+                if files > MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES {
+                    bail!(
+                        "{} holds more than {MAX_SKILL_FILES} files or {} KiB beside SKILL.md",
+                        from.display(),
+                        MAX_SKILL_BYTES >> 10
+                    );
+                }
+                let out = to.join(&rel);
+                std::fs::create_dir_all(out.parent().unwrap())?;
+                std::fs::copy(e.path(), &out)
+                    .with_context(|| format!("copying {}", e.path().display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Writes the default skills and agents under `base` (`skills/…`,
 /// `agents/…`), keeping any file already there. Returns the paths written.
 pub fn install(base: &Path) -> Result<Vec<&'static str>> {
@@ -322,8 +359,15 @@ pub fn install(base: &Path) -> Result<Vec<&'static str>> {
     Ok(written)
 }
 
-/// Writes `skills/<role>/<skill>/SKILL.md` and `agents/<role>/AGENT.md` in
-/// the run directory: what each role's workers have, as it was.
+/// The most a skill's folder may hold besides its `SKILL.md` (examples it
+/// points to, read when needed): files, and bytes in all.
+const MAX_SKILL_FILES: usize = 100;
+const MAX_SKILL_BYTES: u64 = 1 << 20;
+
+/// Writes `skills/<role>/<skill>/` and `agents/<role>/AGENT.md` in the run
+/// directory: what each role's workers have, as it was. A skill is its
+/// whole folder: `SKILL.md` and the files beside it (`examples/rust.md`),
+/// which it names and a worker reads when it needs them.
 pub(crate) fn prepare(run: &FirmRun, _config: &Config) -> Result<()> {
     for n in needed(&run.config)? {
         let out = run.dir.join("skills").join(&n.role).join(&n.skill);
@@ -332,6 +376,7 @@ pub(crate) fn prepare(run: &FirmRun, _config: &Config) -> Result<()> {
             out.join("SKILL.md"),
             text(&n.from, &n.skill).with_context(|| format!("role {}", n.role))?,
         )?;
+        copy_beside(&n.from.join(&n.skill), &out).with_context(|| format!("skill {}", n.skill))?;
     }
     let agents = agents_dir(&run.config);
     for (role_name, role) in &run.config.roles {
@@ -391,7 +436,12 @@ mod tests {
         let mut embedded: Vec<String> = DEFAULTS.iter().map(|(p, _)| p.to_string()).collect();
         embedded.sort();
         assert_eq!(embedded, on_disk);
-        for (path, text) in DEFAULTS {
+        // A skill's or an agent's file names it in front matter; the files
+        // beside a SKILL.md (its examples) are plain.
+        for (path, text) in DEFAULTS
+            .iter()
+            .filter(|(p, _)| p.ends_with("/SKILL.md") || p.ends_with("/AGENT.md"))
+        {
             let name = Path::new(path)
                 .parent()
                 .unwrap()
@@ -500,6 +550,7 @@ mod tests {
         assert_eq!(
             missing(&f),
             [
+                "interacting-with-the-board",
                 "office-mail",
                 "office-publish",
                 "office-resources",
@@ -534,6 +585,41 @@ mod tests {
             .filter(|x| x.role == "pm" && x.skill == "checking-the-product")
             .count();
         assert_eq!(count, 1, "once, though the PM's brief names it too");
+    }
+
+    /// A skill goes to the run as its whole folder: the examples beside its
+    /// SKILL.md too, but no links out of it, and not without bound.
+    #[test]
+    fn a_skill_takes_its_examples_along() {
+        let base = std::env::temp_dir().join(format!("zapper-skill-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let from = base.join("skills/reviewing-work");
+        std::fs::create_dir_all(from.join("examples")).unwrap();
+        std::fs::write(from.join("SKILL.md"), "---\nname: reviewing-work\n---\nx").unwrap();
+        std::fs::write(from.join("examples/rust.md"), "## An example\n").unwrap();
+        std::fs::write(base.join("secret.txt"), "not the skill's").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), from.join("examples/link.md")).unwrap();
+        let to = base.join("run/skills/eng/reviewing-work");
+        std::fs::create_dir_all(&to).unwrap();
+        super::copy_beside(&from, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("examples/rust.md")).unwrap(),
+            "## An example\n"
+        );
+        assert!(
+            !to.join("examples/link.md").exists(),
+            "links aren't followed"
+        );
+        assert!(!to.join("SKILL.md").exists(), "SKILL.md is written apart");
+        // Too much beside it is refused.
+        std::fs::write(
+            from.join("examples/big.md"),
+            vec![b'x'; (super::MAX_SKILL_BYTES + 1) as usize],
+        )
+        .unwrap();
+        let e = format!("{:#}", super::copy_beside(&from, &to).unwrap_err());
+        assert!(e.contains("beside SKILL.md"), "{e}");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

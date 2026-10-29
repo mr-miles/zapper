@@ -363,6 +363,19 @@ pub struct Budget {
     /// How long a worker may stay out of tokens with mail waiting before
     /// the CEO is reminded (`10m`); the board is told at three times that.
     pub stall_after: String,
+    /// Tokens the CEO keeps to ask the board for more: told when about
+    /// three turns are left above it, and at it they take one more turn,
+    /// for asking, then none until the board decides. 0: no reserve; unset:
+    /// 200k, or a fifth of the seed if that is less.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ceo_reserve: Option<u64>,
+}
+
+impl Budget {
+    /// The CEO's reserve, as set or by default.
+    pub fn reserve(&self) -> u64 {
+        self.ceo_reserve.unwrap_or((self.seed / 5).min(200_000))
+    }
 }
 
 impl Default for Budget {
@@ -378,6 +391,7 @@ impl Default for Budget {
             turn_price: 10_000,
             turn_timeout: "30m".into(),
             stall_after: "10m".into(),
+            ceo_reserve: None,
         }
     }
 }
@@ -911,6 +925,16 @@ until someone funds them, every access request and background check goes to the 
         }
         if self.budget.turn_price == 0 {
             err("budget.turn_price must be at least 1".into());
+        }
+        if let Some(r) = self
+            .budget
+            .ceo_reserve
+            .filter(|r| self.budget.seed > 0 && *r >= self.budget.seed)
+        {
+            err(format!(
+                "budget.ceo_reserve ({r}) must be below budget.seed ({}): the CEO keeps it to ask the board for more",
+                self.budget.seed
+            ));
         }
         for (field, v) in [
             ("artifact_size", &self.limits.artifact_size),
@@ -1526,6 +1550,13 @@ firms:
         let c = firm(&ok).unwrap();
         assert_eq!(get(&c, "acme").unwrap().roles["eng"].hires, vec!["eng"]);
         assert_eq!(get(&c, "acme").unwrap().budget.security_share, 0.2);
+        assert_eq!(get(&c, "acme").unwrap().budget.reserve(), 200_000);
+        // The CEO's reserve is kept from the seed, so it must be below it.
+        let e = firm(&ok.replace("seed: 2000000", "seed: 2000000, ceo_reserve: 2000000"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("budget.ceo_reserve"), "{e}");
+        assert!(firm(&ok.replace("seed: 2000000", "seed: 2000000, ceo_reserve: 0")).is_ok());
         let taken = ok.replace("names: [grace, ken]", "names: [grace, ada]");
         assert!(firm(&taken)
             .unwrap_err()

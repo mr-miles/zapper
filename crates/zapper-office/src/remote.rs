@@ -48,6 +48,35 @@ const PERMISSIONS: [&str; 5] = [
 /// The most of a failing job's log `pr_status` returns.
 const LOG_TAIL: usize = 4 << 10;
 
+/// Tells the board, once per repository and run, that `repo` has no `main`
+/// on the remote, which only it can make, and how.
+fn no_main(run: &FirmRun, repo: &str, worker: &str, branch: &str) {
+    if !run
+        .facility
+        .remote
+        .no_main
+        .lock()
+        .unwrap()
+        .insert(repo.to_string())
+    {
+        return;
+    }
+    let full = run
+        .config
+        .remote_repo(repo)
+        .unwrap_or_else(|| repo.to_string());
+    let url = url(run, repo).unwrap_or_default();
+    run.journal.append(
+        "git_remote",
+        json!({ "repo": repo, "event": "no main", "worker": worker, "branch": branch }),
+    );
+    run.notice(
+        super::BOARD,
+        &format!("{repo} has no main on the remote"),
+        &format!("[Automatic notice] {worker} wants to open a pull request for their branch {branch} of {full}, but the repository has no main there yet, so there is nothing to merge into. Only you can make it. An empty first commit is enough, from a fresh directory with your own credentials:\n\n    git init {repo} && cd {repo}\n    git commit --allow-empty -m \"Start the repository\"\n    git push {url} HEAD:refs/heads/main\n\nThen make main the default branch, and check its ruleset. The firm's server fetches it within a minute; tell {worker}, who moves the branch onto it and publishes it again.\n"),
+    );
+}
+
 /// A branch published for review.
 #[derive(Debug, Clone)]
 pub struct Published {
@@ -73,6 +102,9 @@ pub struct State {
     diverged: Mutex<BTreeSet<String>>,
     /// The repositories this run has brought in step, each once.
     touched: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<()>>>>,
+    /// Repositories with no `main` on the remote the board was told of, once
+    /// each.
+    no_main: Mutex<BTreeSet<String>>,
 }
 
 /// The firm for a run that starts now: with a remote, the account its App is
@@ -595,7 +627,7 @@ pub async fn publish_branch(
     let resource = super::access::resource(run, &format!("git:{repo}"))?;
     let repo = resource.trim_start_matches("git:").to_string();
     if run.config.main_is_local(&repo) {
-        bail!("{repo}'s main is the firm's: ask whoever holds admin on it to review and merge your branch");
+        bail!("{repo}'s main is the firm's: ask whoever holds merge (or admin) on it to review and merge your branch");
     }
     if !super::access::level(run, worker, &resource).covers(super::access::Level::Write) {
         bail!("publishing a branch of {repo} needs write on it (credentials_request git:{repo})");
@@ -613,7 +645,18 @@ pub async fn publish_branch(
     let head = rev(&dir, &local).await.ok_or_else(|| {
         anyhow!("{repo} has no branch {branch} on the firm's server: push it first")
     })?;
-    if let Some(main) = rev(&dir, "refs/heads/main").await {
+    let token = token(run, &repo).await?;
+    // A pull request needs a main to merge into: one made on the remote a
+    // moment ago is fetched now; with none there, nothing is pushed, and
+    // the board, who makes main, is told.
+    if rev(&dir, "refs/heads/main").await.is_none() {
+        let _ = fetch(run, &repo, &dir, &token).await;
+    }
+    let Some(main) = rev(&dir, "refs/heads/main").await else {
+        no_main(run, &repo, worker, branch);
+        bail!("{repo} has no main on the remote yet, so a pull request has nothing to merge into. The board makes main and has been told: end your turn and wait for it. Then `git fetch`, move your branch onto main (`git rebase --onto origin/main --root {branch}` when it has no history in common with it), push it, and publish again");
+    };
+    {
         if !is_ancestor(&dir, &main, &head).await {
             bail!("{branch} isn't based on the tip of main: `git fetch && git rebase origin/main`, push, then publish again");
         }
@@ -626,7 +669,6 @@ pub async fn publish_branch(
         }
     }
     let remote_branch = format!("{worker}/{branch}");
-    let token = token(run, &repo).await?;
     git(
         &dir,
         &[

@@ -321,6 +321,7 @@
   .feed .tx.err { border-left-color: var(--bad); color: var(--bad); }
   .feed .tx.res { color: var(--muted); font-size: 12px; }
   .feed .tx.turn { border-left-color: var(--ok); color: var(--muted); font-size: 12px; }
+  .feed .tx.warn { border-left-color: var(--warn); color: var(--warn); font-size: 12px; }
   .feed .tx .when { color: var(--muted); font-family: var(--mono); font-size: 11px; font-weight: normal; margin-right: 6px; }
   .feed .tx.text > .when { display: block; }
   .feed details > summary { cursor: pointer; color: var(--muted); }

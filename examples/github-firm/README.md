@@ -13,7 +13,7 @@ You need a zapper set up as in the [README](../../README.md): `make deps`, `make
 
 Then, on GitHub, in an account of yours (an organisation, or your own login):
 
-1. **A repository for the app**, say `shopping-list`, with a README so it has a `main`.
+1. **A repository for the app**, say `shopping-list`, with a README so it has a `main`: a pull request needs one to merge into. If you create one empty, the first worker to publish a branch is told to wait, and you get a notice with how to make `main` (an empty first commit is enough).
 2. **A workflow that tests pull requests**, committed by you, since workflows are the board's: `.github/workflows/test.yml`:
 
    ```yaml

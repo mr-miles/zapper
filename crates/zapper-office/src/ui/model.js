@@ -458,6 +458,12 @@ function chartWorkers() {
 const fundsOn = (M) => !!(M && M.budget && Number(M.budget.seed) > 0);
 const balanceOf = (M, n) => (M.fundsIn.get(n) || 0) - (M.fundsOut.get(n) || 0) - ((M.workers.get(n) || {}).tokens || 0);
 function fmtTok(n) { n = Number(n) || 0; const a = Math.abs(n); const s = a >= 1e6 ? (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M' : a >= 1e3 ? Math.round(a / 1e3) + 'k' : String(Math.round(a)); return (n < 0 ? '−' : '') + s; }
+// A balance against what was given: "141k left of 250k given", or past
+// zero (a turn is charged after it ends), "141k over 250k given".
+function balanceParts(bal, got) {
+  return bal < 0 ? [fmtTok(-bal), ' over ' + fmtTok(got) + ' given'] : [fmtTok(bal), ' left of ' + fmtTok(got) + ' given'];
+}
+function balanceText(bal, got) { return balanceParts(bal, got).join(''); }
 const pendingBudget = (M) => (M ? [...M.budgetReqs.values()].find((r) => r.state === 'pending') : null);
 function rootWorker() { const ws = chartWorkers(); return (ws.find((w) => !w.reports_to) || ws[0] || {}).name || null; }
 function workerUnread(name) {
