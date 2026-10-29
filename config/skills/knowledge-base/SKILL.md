@@ -5,13 +5,12 @@ description: "The firm's central knowledge base: a markdown wiki in git, curated
 
 # The knowledge base
 
-The firm keeps what it knows in a markdown wiki in one of its git repositories; your preamble names it (`<kb>` below). It outlives runs. The librarian curates it: only they merge to its `main`.
+The firm keeps what it knows in a markdown wiki in one of its git repositories; your preamble names it (`<kb>` below). It outlives runs. The librarian curates it: only they merge to its `main`, and they write nothing in it themselves.
 
 ```
 AGENTS.md     the conventions: where pages go, how to cite, when to split a page
 index.md      a short map of the wiki: read it first
 log.md        one line per merged change, newest last
-raw/          sources, untouched, each with where it came from
 wiki/         the pages
 ```
 
@@ -33,14 +32,14 @@ Write access is asked for like any grant: `credentials_request(resource: git, re
    ```
    ---
    author: <your name>
-   sources: [raw/2026-10-29-pricing-page.md, wiki/competitors.md]
+   sources: [git:product/SPEC.md@3f2a9c1, drive:a-17@v2, wiki/competitors.md]
    updated: 2026-10-29
    status: current
    trust: internal        # web, if any claim came from outside the firm
    ---
    ```
 
-3. Cite every new claim: a source you saved, untouched, in `raw/` (with where it came from at its top), or a page already merged. Say plainly what is your judgement rather than a source's.
-4. Never edit `index.md` or `log.md`: they are the librarian's, and everyone editing them would conflict.
+3. Cite every new claim, in the frontmatter's `sources` and next to the claim: a file of one of the firm's repositories at a commit (`git:<repo>/<path>@<sha>`), a shared drive artifact at a version (`drive:<artifact>@<version>`, e.g. `drive:a-17@v2`), or another page of this wiki (a relative link). A source from outside the firm (a web page, a vendor's document) is published to the shared drive first (`drive_publish`, the office-publish skill), with where it came from, and cited as that artifact; mark the page `trust: web`. Say plainly what is your judgement rather than a source's.
+4. In the same branch, add your page to `index.md` where a reader would look for it (a line, not a copy of the page), and a line at the end of `log.md`: `YYYY-MM-DD — <your name>: <what you added or changed> (<branch>)`. The librarian checks both. If `main` moves and your branch no longer merges cleanly (another branch's `log.md` line, say), rebase it on `main`, keep both lines, and push again.
 5. Push the branch and mail the librarian a `question`: the branch, its head commit, what it adds and why. They review it against the existing pages, and may send it back.
 6. Never put secrets, credentials or anyone's personal details in it.

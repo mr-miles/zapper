@@ -22,7 +22,7 @@ If you have reports and the work fits their roles, delegate: one assignment per 
 
 Every access request costs the asker a turn and you a decision, and a wrong one (too much, or a space nobody needs) costs another round. Work out the access before you hire or assign, not as it's asked for.
 
-- Before you send a brief, list the grants the work needs, at the least level: which repository at `write` (admin only for whoever merges to `main`, and never where `main` is merged by the board on the remote), `cluster` at `write` for `dev`, and drive spaces only if they will publish or read there. No drive access when the deliverable is in git, and no admin to push their own work.
+- Before you send a brief, list the grants the work needs, at the least level: which repository at `write` (merge, not admin, for whoever merges to `main`, and neither where `main` is merged by the board on the remote), `cluster` at `write` for `dev`, and drive spaces only if they will publish or read there. No drive access when the deliverable is in git, and no merge or admin to push their own work: a merger can't merge their own.
 - Put the list in the brief as "Ask for these first, in one go:", with the exact resource and level, and anything they should not ask for ("no drive access: report by mail"). A security officer clearing the hire can grant them with the check; otherwise they ask at once, and whoever decides access decides them together.
 - Name the sites the work needs beyond what their machine allows, so they ask once, early.
 - If you decide access (you hold security), grant what the brief named as asked. A request it didn't name is a question about the work: answer it, or redirect them.

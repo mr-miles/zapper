@@ -129,6 +129,14 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), push).await;
     assert!(allowed(&r), "{r:?}");
+    // Merge pushes too: the repository's hook says where (into main only).
+    access::board_grant(&t.core, &run, "pat", "git:api", "merge", None, "test").unwrap();
+    let r = git(&run, "pat", Some("pat:pw"), push).await;
+    assert!(allowed(&r), "{r:?}");
+    // Merge is git's: not a level of the cluster or a drive space.
+    assert!(
+        access::board_grant(&t.core, &run, "pat", "drive:general", "merge", None, "test").is_err()
+    );
 
     // Other repositories: their own grant; unknown ones aren't there.
     assert_eq!(
@@ -149,4 +157,174 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
             .0,
         400
     );
+}
+
+/// The `pre-receive` hook as git runs it: a bare repository with it
+/// installed, pushed to from a clone as `who` at a level, the way the git
+/// handler sets them.
+struct Hooked {
+    dir: std::path::PathBuf,
+}
+
+impl Hooked {
+    fn new(name: &str) -> Hooked {
+        let dir = std::env::temp_dir().join(format!("zapper-hook-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = Hooked { dir };
+        h.git(&["init", "-q", "--bare", "-b", "main", "repo.git"], ".");
+        let hook = h.dir.join("repo.git/hooks/pre-receive");
+        std::fs::write(&hook, super::PRE_RECEIVE).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        h.git(&["clone", "-q", "repo.git", "work"], ".");
+        h.commit("ceo", "README.md", "hello\n");
+        assert!(h.push("ceo", "admin", "main").0, "admin starts main");
+        h
+    }
+
+    fn git(&self, args: &[&str], at: &str) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(self.dir.join(at))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A commit in the clone by `author`, on whatever is checked out.
+    fn commit(&self, author: &str, file: &str, text: &str) {
+        std::fs::write(self.dir.join("work").join(file), text).unwrap();
+        self.git(&["add", file], "work");
+        let who = format!("user.name={author}");
+        let mail = format!("user.email={author}@acme.internal");
+        self.git(
+            &["-c", &who, "-c", &mail, "commit", "-q", "-m", file],
+            "work",
+        );
+    }
+
+    fn branch(&self, name: &str, from: &str) {
+        self.git(&["checkout", "-q", "-B", name, from], "work");
+    }
+
+    /// Pushes `refspec` as `who` at `level`: whether it was taken, and what
+    /// the hook said.
+    fn push(&self, who: &str, level: &str, refspec: &str) -> (bool, String) {
+        let out = std::process::Command::new("git")
+            .current_dir(self.dir.join("work"))
+            .args(["push", "-q", "origin", refspec])
+            .env("REMOTE_USER", who)
+            .env("ZAPPER_GIT_LEVEL", level)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// Merges `branch` into the clone's main as git does, by `who`.
+    fn merge(&self, who: &str, branch: &str) {
+        self.git(&["checkout", "-q", "main"], "work");
+        self.git(&["reset", "-q", "--hard", "origin/main"], "work");
+        let name = format!("user.name={who}");
+        let mail = format!("user.email={who}@acme.internal");
+        self.git(
+            &[
+                "-c",
+                &name,
+                "-c",
+                &mail,
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge",
+                &format!("origin/{branch}"),
+            ],
+            "work",
+        );
+    }
+}
+
+#[test]
+fn merge_merges_someone_elses_branch_into_main_and_nothing_else() {
+    let h = Hooked::new("merge");
+    // Write pushes branches, not main.
+    h.branch("pat/a", "main");
+    h.commit("pat", "a.md", "a\n");
+    assert!(h.push("pat", "write", "pat/a").0);
+    let (ok, why) = h.push("pat", "write", "pat/a:main");
+    assert!(!ok && why.contains("needs merge"), "{why}");
+    // Merge pushes no branches of its own.
+    h.branch("lin/x", "main");
+    h.commit("lin", "x.md", "x\n");
+    let (ok, why) = h.push("lin", "merge", "lin/x");
+    assert!(!ok && why.contains("push nothing else"), "{why}");
+    // It merges pat's branch, as git makes the merge.
+    h.merge("lin", "pat/a");
+    let (ok, why) = h.push("lin", "merge", "main");
+    assert!(ok, "{why}");
+
+    // A merge that adds something of its own is refused.
+    h.branch("pat/b", "origin/main");
+    h.commit("pat", "b.md", "b\n");
+    assert!(h.push("pat", "write", "pat/b").0);
+    h.merge("lin", "pat/b");
+    std::fs::write(h.dir.join("work/extra.md"), "smuggled\n").unwrap();
+    h.git(&["add", "extra.md"], "work");
+    h.git(
+        &[
+            "-c",
+            "user.name=lin",
+            "-c",
+            "user.email=lin@acme.internal",
+            "commit",
+            "-q",
+            "--amend",
+            "--no-edit",
+        ],
+        "work",
+    );
+    let (ok, why) = h.push("lin", "merge", "main");
+    assert!(!ok && why.contains("add nothing of its own"), "{why}");
+    // Nor can main move to a commit that is no branch's.
+    let (ok, why) = h.push("lin", "merge", "HEAD:main");
+    assert!(!ok, "{why}");
+
+    // A fast-forward to someone else's branch is a merge too.
+    h.branch("pat/ff", "origin/main");
+    h.commit("pat", "ff.md", "ff\n");
+    assert!(h.push("pat", "write", "pat/ff").0);
+    let (ok, why) = h.push("lin", "merge", "pat/ff:main");
+    assert!(ok, "{why}");
+}
+
+#[test]
+fn nobody_merges_their_own_work() {
+    let h = Hooked::new("own");
+    // What lin pushed, while she held write, she can't merge with merge.
+    h.branch("lin/c", "main");
+    h.commit("lin", "c.md", "c\n");
+    assert!(h.push("lin", "write", "lin/c").0);
+    h.merge("lin", "lin/c");
+    let (ok, why) = h.push("lin", "merge", "main");
+    assert!(!ok && why.contains("lin pushed"), "{why}");
+    // Nor what she wrote, though pat pushed it.
+    h.branch("pat/d", "origin/main");
+    h.commit("lin", "d.md", "d\n");
+    assert!(h.push("pat", "write", "pat/d").0);
+    h.merge("lin", "pat/d");
+    let (ok, why) = h.push("lin", "merge", "main");
+    assert!(!ok && why.contains("lin wrote"), "{why}");
+    // Someone else may merge it: the review the rule asks for.
+    h.merge("ken", "pat/d");
+    let (ok, why) = h.push("ken", "merge", "main");
+    assert!(ok, "{why}");
 }

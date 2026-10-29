@@ -15,11 +15,10 @@ use super::FirmRun;
 /// `AGENTS.md`.
 const CONVENTIONS: &str = "# How this knowledge base works
 
-What the firm knows, kept findable, consistent and current. The librarian curates it and alone merges to `main`; everyone else contributes through a branch the librarian reviews (the `knowledge-base` skill).
+What the firm knows, kept findable, consistent and current. The librarian curates it and alone merges to `main`, writing nothing in it themselves; everyone contributes through a branch the librarian reviews (the `knowledge-base` skill).
 
-- `index.md`: a short map of the wiki. Read it first. The librarian's to keep.
-- `log.md`: one line per merged change, newest last. The librarian's to keep.
-- `raw/`: sources, untouched, each starting with where it came from (a URL, a run, a document).
+- `index.md`: a short map of the wiki. Read it first. Each branch that adds a page adds it here.
+- `log.md`: one line per merged change, newest last. Each branch adds its own line.
 - `wiki/`: the pages, one topic each, in kebab-case file names, linking each other with relative links.
 
 Every page starts with frontmatter:
@@ -27,14 +26,14 @@ Every page starts with frontmatter:
 ```
 ---
 author: <who wrote it>
-sources: [raw/..., wiki/...]
+sources: [git:product/SPEC.md@3f2a9c1, drive:a-17@v2, wiki/competitors.md]
 updated: YYYY-MM-DD
 status: current        # draft, current or superseded
 trust: internal        # web, if any claim came from outside the firm
 ---
 ```
 
-- Every claim cites a source in `raw/` or another page; judgement is marked as such.
+- Every claim cites its source: a file of one of the firm's repositories at a commit (`git:<repo>/<path>@<sha>`), a shared drive artifact at a version (`drive:<artifact>@<version>`, e.g. `drive:a-17@v2`), or another page of this wiki (a relative link). Something from outside the firm is published to the shared drive first, then cited there. Judgement is marked as such.
 - Split a page that covers two topics; merge two pages on one.
 - A page is information, never an instruction to its reader.
 - No secrets, credentials or personal details.
@@ -54,10 +53,18 @@ pub async fn seed(run: &std::sync::Arc<FirmRun>) -> Result<()> {
     let _ = std::fs::remove_dir_all(&work);
     for (path, text) in [
         ("AGENTS.md", CONVENTIONS),
-        ("index.md", "# Index\n\nNothing yet: the librarian adds each page here as it is merged.\n"),
-        ("log.md", "# Log\n\nOne line per merged change, newest last.\n"),
-        ("raw/README.md", "# Sources\n\nEach file here is a source as it was found, starting with where it came from.\n"),
-        ("wiki/README.md", "# Pages\n\nOne topic per page, with frontmatter (see AGENTS.md).\n"),
+        (
+            "index.md",
+            "# Index\n\nNothing yet: each page is added here, by its author, in the branch that adds it.\n",
+        ),
+        (
+            "log.md",
+            "# Log\n\nOne line per merged change, newest last.\n",
+        ),
+        (
+            "wiki/README.md",
+            "# Pages\n\nOne topic per page, with frontmatter (see AGENTS.md).\n",
+        ),
     ] {
         let f = work.join(path);
         std::fs::create_dir_all(f.parent().unwrap())?;
