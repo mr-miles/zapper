@@ -14,9 +14,6 @@ use serde_json::{json, Value};
 use crate::app::{valid_login, App};
 use crate::http;
 
-/// Overrides the API base URL, for tests against a fake GitHub.
-pub const API_ENV: &str = "ZAPPER_GITHUB_API_URL";
-
 /// GitHub's permission levels, weakest first.
 const LEVELS: [&str; 3] = ["read", "write", "admin"];
 
@@ -150,20 +147,20 @@ pub struct GitHub {
     api: String,
 }
 
-impl Default for GitHub {
-    fn default() -> Self {
-        GitHub::new(std::env::var(API_ENV).ok().filter(|s| !s.is_empty()))
-    }
-}
-
 impl GitHub {
+    /// The API at `api`, else github.com's.
     pub fn new(api: Option<String>) -> GitHub {
         GitHub {
             api: api
-                .unwrap_or_else(|| "https://api.github.com".into())
+                .unwrap_or_else(|| crate::app::API_URL.into())
                 .trim_end_matches('/')
                 .into(),
         }
+    }
+
+    /// The API of the App's GitHub.
+    pub fn for_app(app: &App) -> GitHub {
+        GitHub::new(Some(app.api_url.clone()))
     }
 
     /// The API base URL.

@@ -574,6 +574,12 @@ pub struct GitService {
     /// starts. Not config.
     #[serde(skip)]
     pub found: Vec<String>,
+    /// The remote's API and site (its git), from its App's credentials
+    /// file; found when a run starts. Not config.
+    #[serde(skip)]
+    pub api_url: String,
+    #[serde(skip)]
+    pub web_url: String,
 }
 
 /// How the daemon reaches a firm's remote.

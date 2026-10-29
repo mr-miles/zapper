@@ -117,8 +117,17 @@ fn client_config() -> Arc<rustls::ClientConfig> {
     )
 }
 
-/// `(tls, host, port, path and query)`.
-fn split(url: &str) -> Result<(bool, String, u16, String)> {
+/// Whether `host` is this machine: `localhost`, or a loopback address.
+pub fn loopback(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `(tls, host, port, path and query)`. Plain `http` only to this machine:
+/// a JWT or a token never crosses a network unencrypted.
+pub fn split(url: &str) -> Result<(bool, String, u16, String)> {
     let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
     } else if let Some(r) = url.strip_prefix("http://") {
@@ -137,6 +146,9 @@ fn split(url: &str) -> Result<(bool, String, u16, String)> {
     if host.is_empty() {
         bail!("{url:?} has no host");
     }
+    if !tls && !loopback(host) {
+        bail!("{url:?}: plain http only to this machine (a loopback address); use https");
+    }
     Ok((tls, host.into(), port, path.into()))
 }
 
@@ -154,7 +166,21 @@ mod tests {
             split("http://127.0.0.1:8080").unwrap(),
             (false, "127.0.0.1".into(), 8080, "/".into())
         );
+        assert!(split("http://localhost/x").is_ok());
+        assert!(split("http://[::1]:8080/x").is_ok());
         assert!(split("ftp://x").is_err());
         assert!(split("https:///x").is_err());
+        // Plain http off this machine never: the JWT and tokens would be
+        // in the clear.
+        for off in [
+            "http://github.example",
+            "http://10.0.0.1:8080",
+            "http://127.0.0.1.example",
+        ] {
+            assert!(
+                format!("{:#}", split(off).unwrap_err()).contains("loopback"),
+                "{off}"
+            );
+        }
     }
 }
