@@ -61,7 +61,28 @@ pub struct Ledger {
     /// Workers whose manager was told they ran out, until they are funded:
     /// when, and how far it has gone up since (see `tick`).
     told: BTreeMap<String, (f64, u8)>,
+    /// How near the CEO is to her reserve, and what she was told of it.
+    reserve: Reserve,
 }
+
+/// The CEO and her reserve (`budget.ceo_reserve`), by what she has been
+/// told since her balance was last well above it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+enum Reserve {
+    #[default]
+    Clear,
+    /// Told about three turns are left before it.
+    Warned,
+    /// Told she reached it: one more turn, to ask the board.
+    Reached,
+    /// That turn taken: no more until the board decides.
+    Used,
+    /// And the board told.
+    Stopped,
+}
+
+/// How many turns above the reserve the CEO is warned at.
+const RESERVE_WARN_TURNS: u64 = 3;
 
 /// The run's ledger behind its lock. Other modules ask it; only this one
 /// changes it, so the rules on moving tokens live here.
@@ -150,6 +171,7 @@ impl Ledger {
             received: BTreeMap::new(),
             requests: Vec::new(),
             told: BTreeMap::new(),
+            reserve: Reserve::Clear,
         }
     }
 
@@ -452,9 +474,133 @@ pub fn summary(run: &FirmRun, w: &str) -> Value {
     json!({ "enabled": l.enabled, "you": mine, "team": team, "firm": firm })
 }
 
+/// Unspent budget below `w` (those they fund and may take it back from),
+/// the largest three, as `pat 500k, lee 120k`; empty if none.
+fn held_below(run: &FirmRun, l: &Ledger, w: &str) -> String {
+    let chart = run.chart();
+    let mut held: Vec<(i64, &str)> = chart
+        .workers
+        .iter()
+        .map(|x| x.name.as_str())
+        .filter(|x| *x != w && chart.is_above(w, x))
+        .map(|x| (l.balance(x), x))
+        .filter(|(b, _)| *b > 0)
+        .collect();
+    held.sort_by_key(|h| std::cmp::Reverse(h.0));
+    held.iter()
+        .take(3)
+        .map(|(b, x)| format!("{x} {}", fmt_tokens(*b)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// After a turn of the CEO's: how near their reserve (`budget.ceo_reserve`)
+/// their balance is, telling them once when about three turns are left
+/// above it, and once when they reach it.
+pub fn after_turn(run: &FirmRun, w: &str) {
+    let reserve = run.config.budget.reserve();
+    if reserve == 0 || run.chart().root() != Some(w) {
+        return;
+    }
+    let mut l = run.ledger.lock();
+    if !l.enabled {
+        return;
+    }
+    let bal = l.balance(w);
+    let price = l.turn_price(w, run.config.budget.turn_price);
+    let warn_at = reserve as i64 + (RESERVE_WARN_TURNS * price) as i64;
+    let held = held_below(run, &l, w);
+    let take_back = if held.is_empty() {
+        String::new()
+    } else {
+        format!(" Your team still holds {held}: take back what they won't need with fund(worker, tokens: -N, reason), which costs no budget request.")
+    };
+    let tell = if bal > warn_at {
+        l.reserve = Reserve::Clear;
+        None
+    } else if bal > reserve as i64 {
+        (l.reserve < Reserve::Warned).then(|| {
+            l.reserve = Reserve::Warned;
+            let turns = (bal - reserve as i64).max(0) as u64 / price.max(1);
+            ("warned", format!("Budget: about {turns} turns left"), format!("[Automatic notice] Your balance is {} tokens: about {turns} turns at your {} a turn before your reserve of {}. At the reserve you take one more turn, to ask the board, and then none until it decides. Ask the board for more now (budget_request, the budget skill), with what has been achieved, while you can still follow up.{take_back}\n", fmt_tokens(bal), fmt_tokens(price as i64), fmt_tokens(reserve as i64)))
+        })
+    } else {
+        (l.reserve < Reserve::Reached).then(|| {
+            l.reserve = Reserve::Reached;
+            ("reached", "Budget: your reserve".to_string(), format!("[Automatic notice] Your balance ({} tokens) has reached your reserve ({}). You take this one turn, to ask the board for more: budget_request, with what has been achieved and what the extra buys, or, if a request of yours is pending, one short reminder in its thread.{take_back} Then end your turn: you take no more until the board decides.\n", fmt_tokens(bal), fmt_tokens(reserve as i64)))
+        })
+    };
+    drop(l);
+    if let Some((event, subject, body)) = tell {
+        run.journal.append(
+            "funds",
+            json!({ "event": "reserve", "worker": w, "reserve": event, "balance": bal }),
+        );
+        run.notice(w, &subject, &body);
+    }
+}
+
+/// The CEO at their reserve: one turn, to ask the board, then none until it
+/// decides (the board told once). `None` when the reserve doesn't apply.
+fn reserve_allows(run: &FirmRun, w: &str) -> Option<bool> {
+    let reserve = run.config.budget.reserve();
+    if reserve == 0 || run.chart().root() != Some(w) {
+        return None;
+    }
+    let mut l = run.ledger.lock();
+    if !l.enabled {
+        return None;
+    }
+    let bal = l.balance(w);
+    if bal > reserve as i64 {
+        // Funded above it again: nearer than three turns maybe, but free.
+        if l.reserve > Reserve::Warned {
+            l.reserve = Reserve::Warned;
+        }
+        return None;
+    }
+    match l.reserve {
+        Reserve::Stopped => Some(false),
+        Reserve::Used => {
+            l.reserve = Reserve::Stopped;
+            let pending = l.pending().map(|r| (r.id.clone(), r.total));
+            let held = held_below(run, &l, w);
+            drop(l);
+            run.journal.append(
+                "funds",
+                json!({ "event": "reserve", "worker": w, "reserve": "stopped", "balance": bal }),
+            );
+            let ask = match pending {
+                Some((id, total)) => format!(" Their request {id}, for {} in all, is pending: `zapper firm budget {} approve {id}`, or decline it with a note, or in the Kickoff tab.", fmt_tokens(total as i64), run.firm),
+                None => " They have no request pending: their last turn may have gone to something else.".to_string(),
+            };
+            let ask = if held.is_empty() {
+                ask
+            } else {
+                format!("{ask} Their team still holds {held}, which {w} can take back once they have a turn.")
+            };
+            run.notice(
+                BOARD,
+                &format!("{w} is at their reserve"),
+                &format!("[Automatic notice] {w}, the CEO, has reached their reserve ({} of {} left) and takes no more turns until you decide: their last turn was for asking you for more.{ask} Or fund them: `zapper firm fund {} {w} TOKENS --reason …`.\n", fmt_tokens(bal), fmt_tokens(reserve as i64), run.firm),
+            );
+            Some(false)
+        }
+        // The one turn at the reserve, to ask, if there is anything left.
+        _ if bal > 0 => {
+            l.reserve = Reserve::Used;
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 /// Whether `w` has money for a turn. Tells their manager (the board, for
 /// the CEO and the founding officers) once when they run out.
 pub fn allows(run: &FirmRun, w: &str) -> bool {
+    if let Some(ok) = reserve_allows(run, w) {
+        return ok;
+    }
     let mut l = run.ledger.lock();
     if !l.enabled || l.balance(w) > 0 {
         return true;
@@ -1320,6 +1466,67 @@ pub fn let_go(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CEO is warned three turns above their reserve, takes one turn at
+    /// it to ask the board, then none until the board decides; the board is
+    /// told once, and both are shown the budget left with the team.
+    #[test]
+    fn the_ceo_keeps_a_reserve_to_ask_the_board() {
+        let t = crate::test_core(
+            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000000, ceo_reserve: 200000 }\n    roles: { boss: { profile: w, agent: ceo, hires: [eng] }, eng: { profile: w, agent: software-engineer } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: pat, role: eng, reports_to: ceo }\n",
+        );
+        let run = crate::run::test_run(&t.core, "acme");
+        let subjects = |who: &str| -> Vec<String> {
+            run.post
+                .with(|po| po.inbox(who, false, 50))
+                .iter()
+                .map(|m| m["subject"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+        let body = |who: &str, subject: &str| -> String {
+            let m = run
+                .post
+                .with(|po| po.inbox(who, false, 50))
+                .into_iter()
+                .find(|m| m["subject"].as_str().unwrap_or("").contains(subject))
+                .unwrap_or_else(|| panic!("no {subject:?} for {who}"));
+            run.post
+                .with(|po| po.body(&run.journal, m["id"].as_str().unwrap()))
+        };
+        fund(&run, "ceo", "pat", 500_000, "the build").unwrap();
+        // Well above: nothing said.
+        run.count_turn("ceo", 10_000);
+        assert!(!subjects("ceo").iter().any(|s| s.starts_with("Budget:")));
+        // Three turns above the reserve, at the CEO's own price: warned.
+        run.count_turn("ceo", 220_000);
+        assert!(
+            subjects("ceo").iter().any(|s| s.contains("turns left")),
+            "{:?}",
+            subjects("ceo")
+        );
+        assert!(body("ceo", "turns left").contains("pat 500k"));
+        assert!(allows(&run, "ceo"));
+        // At the reserve: told, and one turn, to ask.
+        run.count_turn("ceo", 80_000);
+        assert!(subjects("ceo").iter().any(|s| s == "Budget: your reserve"));
+        assert!(allows(&run, "ceo"), "the turn to ask");
+        assert!(!allows(&run, "ceo"), "then none");
+        assert!(!allows(&run, "ceo"));
+        let told: Vec<String> = subjects(BOARD)
+            .into_iter()
+            .filter(|s| s.contains("at their reserve"))
+            .collect();
+        assert_eq!(told.len(), 1, "the board is told once: {told:?}");
+        let b = body(BOARD, "at their reserve");
+        assert!(
+            b.contains("zapper firm fund acme ceo") && b.contains("pat 500k"),
+            "{b}"
+        );
+        // Funded above it again, the CEO works.
+        fund(&run, BOARD, "ceo", 300_000, "more").unwrap();
+        assert!(allows(&run, "ceo"));
+        assert!(allows(&run, "ceo"));
+    }
 
     #[test]
     fn ledger_moves_and_spends() {

@@ -1,6 +1,10 @@
 'use strict';
 // The office page: a worker's transcript, followed live or replayed.
 
+// A turn that writes this much to the cache is flagged: the cost of
+// caching the whole conversation again.
+const RECACHE_TOKENS = 20000;
+
 // ──────────────────────────── transcripts ────────────────────────────
 
 function closeTranscript() {
@@ -133,13 +137,18 @@ function feedEntries(e) {
       break;
     }
     case 'result': {
-      const u = e.usage || {};
-      const tok = (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0);
+      // What the budget is charged: input, output and cache writes (the
+      // harness's count); cache reads are shown, not charged.
+      const u = e.usage || {}, n = (k) => Number(u[k]) || 0;
+      const input = n('input_tokens'), output = n('output_tokens'), writes = n('cache_creation_input_tokens'), reads = n('cache_read_input_tokens');
+      const tok = input + output + writes;
       const bits = ['Turn finished'];
       if (e.num_turns) bits.push(e.num_turns + ' steps');
       if (tok) bits.push(fmtNum(tok) + ' tokens');
       if (e.duration_ms) bits.push(fmtDur(e.duration_ms / 1000));
-      out.push(el('div', { class: 'tx turn' + (e.is_error ? ' err' : '') }, bits.join(' · '), e.is_error && e.result ? el('pre', {}, clip(str(e.result), 4000)) : ''));
+      const split = 'charged: ' + fmtNum(input) + ' input, ' + fmtNum(output) + ' output, ' + fmtNum(writes) + ' cache writes; not charged: ' + fmtNum(reads) + ' cache reads';
+      out.push(el('div', { class: 'tx turn' + (e.is_error ? ' err' : ''), title: split }, bits.join(' · '), e.is_error && e.result ? el('pre', {}, clip(str(e.result), 4000)) : ''));
+      if (writes >= RECACHE_TOKENS) out.push(el('div', { class: 'tx warn' }, 'Re-cached ' + fmtTok(writes) + ' tokens of context, charged to the budget. Claude keeps a conversation cached for about five minutes unused; after a longer pause, a fresh session or a compaction, it is cached again.'));
       break;
     }
     // pi's events (agent.kind: pi).

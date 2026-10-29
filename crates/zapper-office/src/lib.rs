@@ -600,6 +600,7 @@ impl FirmRun {
 
     pub fn count_turn(&self, worker: &str, tokens: u64) {
         self.ledger.spend(worker, tokens);
+        workforce::after_turn(self, worker);
         let mut u = self.usage.lock().unwrap();
         let today = utc_day(now());
         if u.day != today {

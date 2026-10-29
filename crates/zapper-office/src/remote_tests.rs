@@ -883,3 +883,87 @@ async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
         rev(&remote_dir(&w.base, &code), "main")
     );
 }
+
+/// A repository whose remote has no main yet: publishing pushes nothing
+/// and tells the board once, which only it can make main; once it has, a
+/// branch from before is sent to be moved onto it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_main_on_the_remote_publishing_waits_for_the_board() {
+    let w = world();
+    // The code repository created empty on the remote.
+    let (code, kb) = ("code-nomain".to_string(), "kb-nomain".to_string());
+    let dir = remote_dir(&w.base, &code);
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(&dir, &["init", "-q", "--bare", "-b", "main"]);
+    remote_repo(&w.base, &kb);
+    let t = crate::test_core(&config("nomain"));
+    let run = test_run_remote(&t.core, "acme", &[&code, &kb]).await;
+    ready(&run).await;
+    access::board_grant(
+        &t.core,
+        &run,
+        "pat",
+        &format!("git:{code}"),
+        "write",
+        None,
+        "x",
+    )
+    .unwrap();
+    push_branch(&run, &code, "skeleton", "src.txt", "write").unwrap();
+
+    for _ in 0..2 {
+        let e = remote::publish_branch(&run, "pat", &code, "skeleton", "The skeleton", "")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no main on the remote") && e.contains("--root skeleton"),
+            "{e}"
+        );
+    }
+    let pushed = Command::new("git")
+        .arg("--git-dir")
+        .arg(&dir)
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/pat/skeleton"])
+        .status()
+        .unwrap();
+    assert!(!pushed.success(), "nothing is pushed to the remote");
+    let told: Vec<String> = subjects(&run, crate::BOARD)
+        .into_iter()
+        .filter(|s| s.contains("has no main on the remote"))
+        .collect();
+    assert_eq!(told.len(), 1, "the board is told once: {told:?}");
+    let m = inbox(&run, crate::BOARD)
+        .into_iter()
+        .find(|m| m["subject"].as_str().unwrap_or("").contains("has no main"))
+        .unwrap();
+    let body = run
+        .post
+        .with(|po| po.body(&run.journal, m["id"].as_str().unwrap()));
+    assert!(
+        body.contains("git commit --allow-empty") && body.contains("skeleton"),
+        "{body}"
+    );
+
+    // The board makes an empty main; the branch has no history in common
+    // with it, so it is sent to be moved onto it.
+    let seed = w.base.join("seed").join(&code);
+    std::fs::create_dir_all(&seed).unwrap();
+    sh(&seed, &["init", "-q", "-b", "main"]);
+    sh(
+        &seed,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Start the repository",
+        ],
+    );
+    sh(&seed, &["push", "-q", dir.to_str().unwrap(), "main"]);
+    let e = remote::publish_branch(&run, "pat", &code, "skeleton", "The skeleton", "")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("isn't based on the tip of main"), "{e}");
+}

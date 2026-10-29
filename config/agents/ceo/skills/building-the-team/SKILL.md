@@ -5,7 +5,7 @@ description: "The CEO's team and how the work runs: which roles a task needs (se
 
 # Building the team
 
-How to hire, contract, fund and let go is the manager skill; this is what the CEO decides.
+How to hire, contract, fund and let go is the manager skill; this is what the CEO decides. Hire for the plan only once the board has approved its budget (the budget skill, *Waiting for the board*); the seed is for scoping, not for starting the team.
 
 ## Which roles
 
