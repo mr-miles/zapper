@@ -74,7 +74,7 @@ firms:
 | `domain` | Names the firm's services; default `<firm>.internal` |
 | `budget` | `daily_turns`, `worker_daily_turns`, `daily_tokens` (0 is no limit), `max_concurrent`; days end at midnight UTC. `seed` (tokens, 0: none) gives the run a budget agreed with the board ([the workforce](#the-workforce-hiring-and-budgets)); `security_share` (0.2) is the officers' share of it (0 with officers leaves them unfunded, so their decisions go to the board until someone funds them: `zapper check` notes it, and the board is told when a run starts); `quote_fee` (30000) is what a contract offer gives the candidate for quoting; `turn_price` (10000) is what a turn costs in tokens on the firm's models until the CEO has measured their own, and prices the sizing in the CEO's `budget()` (set it for a firm on other models); `stall_after` (`10m`) is how long a worker may stay out of tokens with mail waiting before the CEO is reminded (the board is told at three times that); `turn_timeout` (`30m`) is how long one turn may run ([waking an idle worker](#waking-an-idle-worker)) |
 | `limits` | `thread_messages` (60), `mail_per_hour` (120), `fanout_per_hour` (10), `pair_per_10min` (30), `mail_per_run` (20000), `artifact_size` (50MiB), `drive_size` (2GiB) |
-| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first), `fake` (a fake Claude script, for tests) |
+| `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first) |
 | `workers` | The founders, who boot with the firm: `name`, `role`, `reports_to`, `title`, and `profile` to run one on another profile than the role's (another agent or model) |
 | `names` | Optional: names for hires whose hirer doesn't pick one, in order; without it, a random free name from a built-in list |
 | `security` | `officers`, `digest_every: {minutes, requests}`, `answer_within`, `officer_first` (default true: a firm whose CEO can hire a security officer hires or contracts nobody else before one) |
@@ -474,7 +474,7 @@ A firm's repositories can have a remote on GitHub, reached through a GitHub App 
       local: [kb]                                  # main merged on the firm's server and pushed out; every other main is GitHub's
 ```
 
-- **The App**: `zapper github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper github status` shows its installation, permissions and repositories.
+- **The App**: `zapper github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper github status` shows its installation, permissions and repositories. The file says where the App's GitHub is: `github.apiUrl` and `github.webUrl` (its API, and its site, for git), github.com's if unset, so an App on GitHub Enterprise Server sets `apiUrl: https://<host>/api/v3` and `webUrl: https://<host>`. Both are `https`; plain `http` is refused except to this machine (loopback), so a JWT or a token never crosses a network in the clear.
 - **The repositories** are every one the App is installed on, by their names there (`zapper firm up --repo NAME` names some instead). Choosing them is choosing what to install the App on; a repository that should be local-main, such as `kb`, is created on GitHub once and the App installed on it. They live in `git.dir`: a repository is cloned when a run first uses it (a worker's first fetch or push, or `publish_branch`), or fetched if it is there from an earlier run, so a run starts at once however many the App is installed on, and the first use of a large one waits for its clone. Concurrent first uses share one clone; one that fails is tried again on the next use, and the worker gets a 503 saying why. At a run's start the daemon moves a subdirectory the App no longer reaches to `git.dir/archive/`, never deleting it.
 - **`main` has one source of truth per repository**, so it only flows one way:
   - **GitHub's** (the default, for code): the board merges pull requests in GitHub's UI, so CI runs, and the daemon fetches `main` back (it looks every minute). On the firm's server nobody pushes `main`, whatever their grant.
@@ -743,7 +743,16 @@ The wake prompts, the follow-up and escalation texts, the officers' prompts, the
 
 ## Testing
 
-Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-agent fake-claude`, which speaks Claude Code's stream-json on stdin and stdout and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. A role uses it with `fake: <script path>`:
+Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, with the e2e tests' scripts (`tests/fake`) at `/fake`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`. `make test-e2e-office` rebuilds the image first, so a run plays the checkout's fake and scripts.
+
+```yaml
+profiles:
+  fake-ceo:
+    engine: { image: office-fake }
+    agent: { kind: claude-code, env: { ZAPPER_FAKE_SCRIPT: /fake/ceo.yaml } }
+```
+
+A script, a file in `tests/fake`:
 
 ```yaml
 rules:                                        # the first rule that matches a wake runs

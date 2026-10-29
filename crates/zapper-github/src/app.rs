@@ -66,7 +66,15 @@ struct Github {
     app_slug: String,
     private_key: String,
     private_key_path: String,
+    /// Where the App's GitHub is: its API and its site (git and links), for
+    /// GitHub Enterprise Server; github.com's if unset.
+    api_url: String,
+    web_url: String,
 }
+
+/// github.com's API and site: an App's unless its file names others.
+pub const API_URL: &str = "https://api.github.com";
+pub const WEB_URL: &str = "https://github.com";
 
 #[derive(Debug, Deserialize, Default)]
 struct File {
@@ -81,6 +89,10 @@ pub struct App {
     issuer: String,
     /// The App's URL name, if the file has it (for the install link).
     pub slug: Option<String>,
+    /// Its GitHub's API base, and its site's: `apiUrl` and `webUrl` in the
+    /// file, else github.com's.
+    pub api_url: String,
+    pub web_url: String,
     key: RsaKeyPair,
 }
 
@@ -132,9 +144,22 @@ impl App {
             }
         };
         let key = parse_key(&pem).with_context(|| format!("{}", path.display()))?;
+        // https, or plain http to this machine; the site may also be a
+        // local directory of repositories (`file://`), for its git.
+        let url = |key: &str, u: String, default: &str, file_ok: bool| -> Result<String> {
+            let u = if u.is_empty() { default.to_string() } else { u };
+            let u = u.trim_end_matches('/').to_string();
+            if !(file_ok && u.starts_with("file:///")) {
+                crate::http::split(&u)
+                    .with_context(|| format!("{}: github.{key}", path.display()))?;
+            }
+            Ok(u)
+        };
         Ok(App {
             issuer,
             slug: Some(g.app_slug).filter(|s| !s.is_empty()),
+            api_url: url("apiUrl", g.api_url, API_URL, false)?,
+            web_url: url("webUrl", g.web_url, WEB_URL, true)?,
             key,
         })
     }
@@ -144,6 +169,8 @@ impl App {
         Ok(App {
             issuer: issuer.into(),
             slug: slug.map(str::to_string),
+            api_url: API_URL.into(),
+            web_url: WEB_URL.into(),
             key: parse_key(pem)?,
         })
     }

@@ -1,0 +1,26 @@
+rules:
+  - when: { from: board, contains: "Declined" }
+    do:
+      - budget_request: { total: "30k", plan: "Hire two developers.", reason: "the board asked for less" }
+  - when: { from: board, contains: "Approved" }
+    do:
+      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"1G\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/rich.txt 2>&1; true"
+      - hire: { role: dev, name: grace, budget: "10k", title: "Founding engineer", subject: "Build the widget", brief: "Build the widget and report.", reason: "we need an engineer" }
+      - shell: "office fund '{\"worker\": \"grace\", \"tokens\": -9500, \"reason\": \"x\"}' > /work/takeback.txt 2>&1; true"
+      - hire: { role: dev, name: ken, budget: "100", subject: "A tiny job", brief: "Look at the widget.", reason: "a small budget" }
+      - hire: { role: dev, name: mallory, budget: "1k", subject: "Copy", brief: "Write the marketing copy.", reason: "words" }
+      - contract_offer: { role: dev, name: carl, title: "Auditor", brief: "Audit the widget's code." }
+  - when: { contains: "Quote for contract", once: true }
+    do:
+      - contract_counter: { contract: $contract, budget: "3k", note: "too much for an audit this size" }
+  - when: { contains: "Quote for contract" }
+    do:
+      - contract_accept: { contract: $contract }
+  - when: { from: board, kind: assignment }
+    do:
+      - shell: "office hire '{\"role\": \"dev\", \"budget\": \"1k\", \"subject\": \"x\", \"brief\": \"x\", \"reason\": \"x\"}' > /work/early.txt 2>&1; true"
+      - budget_request: { total: "50k", plan: "Hire two developers and a reserve.", reason: "to build the widget" }
+  - when: { from: grace, kind: report }
+    do:
+      - mail_send: { to: [ken], subject: "One more thing", body: "Please also check the docs.", kind: fyi }
+      - release: { worker: grace, reason: "the widget is done" }

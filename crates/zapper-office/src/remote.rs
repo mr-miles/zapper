@@ -34,9 +34,6 @@ use zapper_github::{GitHub, Token};
 use super::FirmRun;
 use crate::firm::Firm;
 
-/// The base of the remote's git URLs (`<base>/<owner>/<name>.git`); a test
-/// points it at a directory of bare repositories.
-pub const GIT_URL_ENV: &str = "ZAPPER_GITHUB_GIT_URL";
 /// How often the daemon looks at the remote.
 const POLL_SECS: u64 = 60;
 /// What the daemon's tokens may do: push branches and `main` (of a
@@ -91,7 +88,7 @@ pub async fn with_repositories(mut firm: Firm) -> Result<Firm> {
         .as_ref()
         .map(|g| g.found.clone())
         .unwrap_or_default();
-    let (owner, names) = resolve(&GitHub::default(), &file, &given).await?;
+    let (app, owner, names) = resolve(&file, &given).await?;
     let g = firm.git.as_mut().expect("a remote is under git");
     for l in &g.local {
         if !names.iter().any(|n| n.eq_ignore_ascii_case(l)) {
@@ -100,13 +97,19 @@ pub async fn with_repositories(mut firm: Firm) -> Result<Firm> {
     }
     g.owner = owner;
     g.found = names;
+    g.api_url = app.api_url;
+    g.web_url = app.web_url;
     Ok(firm)
 }
 
 /// The account the App in `file` is installed on and the names of its
 /// repositories there, sorted as GitHub spells them; or the `given` ones
-/// (`name` or `owner/name`), which must be among them.
-pub async fn resolve(gh: &GitHub, file: &Path, given: &[String]) -> Result<(String, Vec<String>)> {
+/// (`name` or `owner/name`), which must be among them. With the App, whose
+/// file says where its GitHub is.
+pub async fn resolve(
+    file: &Path,
+    given: &[String],
+) -> Result<(zapper_github::App, String, Vec<String>)> {
     if !file.exists() {
         bail!(
             "no GitHub App at {}; create it with `zapper github setup --org <account>` (or --user <login>)",
@@ -114,6 +117,7 @@ pub async fn resolve(gh: &GitHub, file: &Path, given: &[String]) -> Result<(Stri
         );
     }
     let app = zapper_github::App::load(file, &mut |w| tracing::warn!("{w}"))?;
+    let gh = GitHub::for_app(&app);
     let inst = gh.the_installation(&app).await?;
     let owner = inst.account.clone().unwrap_or_default();
     let mut names: Vec<String> = gh
@@ -129,7 +133,7 @@ pub async fn resolve(gh: &GitHub, file: &Path, given: &[String]) -> Result<(Stri
     names.sort_by_key(|n| n.to_ascii_lowercase());
     names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     if given.is_empty() {
-        return Ok((owner, names));
+        return Ok((app, owner, names));
     }
     let mut chosen: Vec<String> = Vec::new();
     for g in given {
@@ -148,7 +152,18 @@ pub async fn resolve(gh: &GitHub, file: &Path, given: &[String]) -> Result<(Stri
             chosen.push(found.clone());
         }
     }
-    Ok((owner, chosen))
+    Ok((app, owner, chosen))
+}
+
+/// The remote's API, as its App's file says.
+fn github(run: &FirmRun) -> GitHub {
+    GitHub::new(
+        run.config
+            .git
+            .as_ref()
+            .map(|g| g.api_url.clone())
+            .filter(|u| !u.is_empty()),
+    )
 }
 
 /// Where the firm's repositories are: `git.dir` with a remote, else the run's
@@ -174,10 +189,13 @@ fn url(run: &FirmRun, repo: &str) -> Result<String> {
         .config
         .remote_repo(repo)
         .ok_or_else(|| anyhow!("{repo} has no remote"))?;
-    let base = std::env::var(GIT_URL_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "https://github.com".into());
+    let base = run
+        .config
+        .git
+        .as_ref()
+        .map(|g| g.web_url.as_str())
+        .filter(|u| !u.is_empty())
+        .unwrap_or(zapper_github::WEB_URL);
     Ok(format!("{}/{full}.git", base.trim_end_matches('/')))
 }
 
@@ -618,7 +636,7 @@ pub async fn publish_branch(
     )
     .await
     .context("pushing the branch to the remote")?;
-    let gh = GitHub::default();
+    let gh = github(run);
     let full = run.config.remote_repo(&repo).unwrap_or_default();
     let pull = match gh.open_pull(&token, &full, &remote_branch).await? {
         Some(p) => p,
@@ -684,7 +702,7 @@ pub async fn pr_status(
         format!("{worker}/{branch}")
     };
     let token = token(run, &repo).await?;
-    let gh = GitHub::default();
+    let gh = github(run);
     let full = run
         .config
         .remote_repo(&repo)
@@ -799,7 +817,7 @@ pub async fn poll(run: &Arc<FirmRun>) {
 /// author.
 async fn follow(run: &Arc<FirmRun>, mut p: Published) -> Result<()> {
     let token = token(run, &p.repo).await?;
-    let gh = GitHub::default();
+    let gh = github(run);
     let full = run.config.remote_repo(&p.repo).unwrap_or_default();
     let key = (p.repo.clone(), format!("{}/{}", p.worker, p.branch));
     let pull = gh.pull(&token, &full, p.number).await?;
@@ -914,6 +932,7 @@ pub async fn finish(run: &Arc<FirmRun>) {
     }
     let specs: Vec<(String, zapper_policy::mint::Spec)> =
         run.facility.remote.specs.lock().unwrap().drain().collect();
+    let gh = &github(run);
     let revokes = specs.into_iter().filter_map(|(repo, spec)| {
         let value = mint::peek(&spec);
         mint::forget(&spec);
@@ -922,12 +941,9 @@ pub async fn finish(run: &Arc<FirmRun>) {
                 value,
                 expires_at: String::new(),
             };
-            let r = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                GitHub::default().revoke(&t),
-            )
-            .await
-            .unwrap_or_else(|_| Err(anyhow!("timed out")));
+            let r = tokio::time::timeout(std::time::Duration::from_secs(10), gh.revoke(&t))
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("timed out")));
             (repo, r)
         })
     });

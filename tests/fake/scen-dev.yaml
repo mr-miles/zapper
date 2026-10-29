@@ -1,0 +1,10 @@
+rules:
+  - when: { contains: "Decoy" }
+    do:
+      - contract_decline: { contract: $contract, reason: "busy" }
+  - when: { contains: "debrief the board now" }
+    do:
+      - mail_send: { to: [board], subject: "Final debrief", body: "failed to get admin", kind: report }
+  - when: { contains: "Contract offer k-" }
+    do:
+      - shell: "office mail_send --to board --subject Debrief --body 'red team debrief' --kind report > /work/board.txt 2>&1; true"

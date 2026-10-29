@@ -434,10 +434,6 @@ pub struct Role {
     /// Default title of workers of this role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Host path of a script for the fake Claude, which plays it instead of
-    /// running Claude Code. For tests.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fake: Option<String>,
     /// Roles a worker of this role may hire, during a run with a budget.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hires: Vec<String>,
@@ -578,6 +574,12 @@ pub struct GitService {
     /// starts. Not config.
     #[serde(skip)]
     pub found: Vec<String>,
+    /// The remote's API and site (its git), from its App's credentials
+    /// file; found when a run starts. Not config.
+    #[serde(skip)]
+    pub api_url: String,
+    #[serde(skip)]
+    pub web_url: String,
 }
 
 /// How the daemon reaches a firm's remote.

@@ -65,7 +65,12 @@ fn world() -> &'static World {
         let base = std::env::temp_dir().join(format!("zapper-remote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("remote/Acme")).unwrap();
-        // The App's credentials, where `git.remote.github.config` finds them.
+        let fake = Arc::new(Mutex::new(Fake::default()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The App's credentials, where `git.remote.github.config` finds them:
+        // its GitHub is the fake, and its git a directory of bare
+        // repositories.
         let apps = base.join("config/zapper/github-apps");
         std::fs::create_dir_all(&apps).unwrap();
         let key = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -74,21 +79,14 @@ fn world() -> &'static World {
         std::fs::write(
             &f,
             format!(
-                "github:\n  clientId: Iv23test\n  appSlug: acme-agents\n  privateKeyPath: {}\n",
-                key.display()
+                "github:\n  clientId: Iv23test\n  appSlug: acme-agents\n  privateKeyPath: {}\n  apiUrl: http://{addr}\n  webUrl: file://{}\n",
+                key.display(),
+                base.join("remote").display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         std::env::set_var("XDG_CONFIG_HOME", base.join("config"));
-        std::env::set_var(
-            remote::GIT_URL_ENV,
-            format!("file://{}", base.join("remote").display()),
-        );
-        let fake = Arc::new(Mutex::new(Fake::default()));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::env::set_var(zapper_github::API_ENV, format!("http://{addr}"));
         let (f, b) = (fake.clone(), base.clone());
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {

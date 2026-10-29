@@ -128,10 +128,11 @@ async fn status(owner: &str) -> Result<i32> {
             .map(|s| format!(" ({s})"))
             .unwrap_or_default()
     );
-    let gh = GitHub::default();
+    let gh = GitHub::for_app(&app);
     let Some(inst) = gh.installation_for_owner(&app, owner).await? else {
         println!(
-            "Not installed on {owner}. Install it: https://github.com/apps/{}/installations/new",
+            "Not installed on {owner}. Install it: {}/apps/{}/installations/new",
+            app.web_url,
             app.slug.as_deref().unwrap_or("<app>")
         );
         return Ok(1);
@@ -182,7 +183,7 @@ pub async fn mint(cmd: MintCmd) -> Result<i32> {
         );
     }
     let app = App::load(&file, &mut |w| eprintln!("{w}"))?;
-    let token = GitHub::default().mint(&app, &scope).await?;
+    let token = GitHub::for_app(&app).mint(&app, &scope).await?;
     // The token and nothing else on stdout; never on stderr.
     println!(
         "{}",

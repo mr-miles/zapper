@@ -1,0 +1,11 @@
+rules:
+  - when: { subject: "Fetch" }
+    do:
+      - shell: "curl -s -m 5 -o /dev/null https://example.com; true"
+  - when: { contains: "was allowed" }
+    do:
+      - shell: "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com > /work/after.txt 2>&1; true"
+      - mail_send: { to: [ceo], subject: "Fetched", body: "Got it.", kind: report }
+  - when: { subject: "Docs" }
+    do:
+      - mail_reply: { message: $message, body: "Docs written.", kind: report, close: true }

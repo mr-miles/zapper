@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread;
 
-use zapper_policy::proto::{HOST_CID, PROXY_PORT};
+use zapper_proto::proto::{HOST_CID, PROXY_PORT};
 
 use crate::sys;
 
@@ -27,12 +27,12 @@ pub fn start() -> io::Result<()> {
 
 /// Forwards host connections on vsock ports to local TCP ports, for a firm's
 /// facilities. Only the host (CID 2) may connect.
-pub fn inbound(forwards: &[zapper_policy::proto::Forward]) -> io::Result<()> {
+pub fn inbound(forwards: &[zapper_proto::proto::Forward]) -> io::Result<()> {
     for f in forwards {
         let listener = sys::VsockListener::bind(f.vsock_port)?;
         let tcp = f.tcp_port;
         let host = if f.nic {
-            zapper_policy::proto::GUEST_NIC_ADDR
+            zapper_proto::proto::GUEST_NIC_ADDR
         } else {
             "127.0.0.1"
         };

@@ -1,0 +1,13 @@
+rules:
+  - when: { from: ceo, kind: assignment }
+    do:
+      - shell: "office mail_send --to ceo --subject up --body 'do this' --kind assignment > /work/authority.txt 2>&1; true"
+      - shell: "office mail_send '{\"from\": \"ceo\", \"to\": [\"sec-1\"], \"subject\": \"spoof\", \"body\": \"x\", \"kind\": \"fyi\"}' > /work/spoof.txt 2>&1; true"
+      - shell: "office mail_read --message m-2 > /work/peek.txt 2>&1; office access_requests > /work/officer-only.txt 2>&1; true"
+      - shell: "curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.com > /work/before.txt 2>&1; true"
+      - shell: "echo hello from ada > /work/hello.md; mkdir -p /work/site; echo '# Site' > /work/site/index.md; ln -sf /etc/shadow /work/site/shadow"
+      - drive_publish: { paths: [/work/hello.md, /work/site], title: "Hello", kind: document, summary: "A greeting" }
+      - mail_reply: { message: $message, body: "Done, see $artifact", kind: report, close: true, attachments: [$artifact] }
+  - when: { contains: "was allowed" }
+    do:
+      - shell: "curl -s -m 10 -o /dev/null -w '%{http_code}' https://example.com > /work/after.txt 2>&1; true"

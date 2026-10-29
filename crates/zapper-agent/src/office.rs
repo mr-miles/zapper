@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use zapper_policy::proto::{HOST_CID, MAX_MCP_LINE, MCP_PORT};
+use zapper_proto::proto::{HOST_CID, MAX_MCP_LINE, MCP_PORT};
 
 use crate::sys;
 

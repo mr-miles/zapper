@@ -1,0 +1,24 @@
+rules:
+  - when: { subject: "Slow" }
+    do:
+      - sleep: 8
+  - when: { subject: "Interrupt" }
+    do:
+      - shell: "echo handed over > /work/interrupt.txt"
+  - when: { contains: "Access request r-" }
+    do:
+      - access_decide: { request: $request, allow: true, scope: worker, reason: "the CEO holds security", methods: [] }
+  - when: { from: bo, kind: report }
+    do:
+      - shell: "office access_requests > /work/after-handover.txt 2>&1; true"
+      - shell: "office release '{\"worker\": \"otto\", \"reason\": \"not needed\"}' > /work/release.txt 2>&1; true"
+  - when: { from: board, contains: "Approved" }
+    do:
+      - hire: { role: dev, name: ada, budget: "5k", subject: "Fetch", brief: "Fetch example.com.", reason: "an engineer" }
+  - when: { from: board, kind: assignment }
+    do:
+      - budget_request: { total: "20k", plan: "An engineer, then an officer.", reason: "to build it" }
+  - when: { from: ada, kind: report }
+    do:
+      - hire: { role: officer, name: otto, budget: "2k", subject: "Security", brief: "Take over security.", reason: "the team grows" }
+      - hire: { role: dev, name: bo, budget: "2k", subject: "Docs", brief: "Write the docs.", reason: "docs" }

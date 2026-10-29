@@ -1,0 +1,11 @@
+rules:
+  - when: { contains: "Interrupt" }
+    do:
+      - shell: "echo handed over > /work/steered.txt"
+  - when: { subject: "Slow" }
+    do:
+      - sleep: 8
+  - when: { subject: "Build it" }
+    do:
+      - shell: "ls ~/.pi/agent > /work/pi-dir.txt"
+      - mail_reply: { message: $message, body: "Built, on pi.", kind: report, close: true }

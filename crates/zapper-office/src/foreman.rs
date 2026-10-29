@@ -68,26 +68,10 @@ async fn start(
     resume: Option<&str>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
-    let home = format!("/home/{}", s.resolved.agent.user);
     let conv = driver_of(s)?.conversation(resume);
-    // The fake Claude plays a test script instead (it speaks Claude Code's
-    // stream-json).
-    let argv = match &run.config.roles[&w.role].fake {
-        Some(_) => vec![
-            super::ops::AGENT_PATH.into(),
-            if s.resolved.agent.kind == "pi" {
-                "fake-pi"
-            } else {
-                "fake-claude"
-            }
-            .into(),
-            format!("{home}/.office/fake.yaml"),
-        ],
-        None => conv.argv(),
-    };
     let req = ShellRequest {
         id: 0,
-        argv,
+        argv: conv.argv(),
         tty: None,
         env: Default::default(),
         system: false,

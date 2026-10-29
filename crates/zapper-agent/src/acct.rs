@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 
-use zapper_policy::proto::GuestEvent;
+use zapper_proto::proto::GuestEvent;
 
 use crate::control::Control;
 use crate::sys;

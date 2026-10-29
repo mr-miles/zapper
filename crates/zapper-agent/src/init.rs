@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use globset::GlobBuilder;
-use zapper_policy::proto::{GuestEvent, GuestMsg, GuestSpec};
-use zapper_policy::FsAccess;
+use zapper_proto::proto::{GuestEvent, GuestMsg, GuestSpec};
+use zapper_proto::FsAccess;
 
 use crate::control::Control;
 use crate::{acct, forward, shell, sys, usage};

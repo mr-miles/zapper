@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use zapper_policy::proto::{
+use zapper_proto::proto::{
     Frame, GuestEvent, GuestSpec, ShellRequest, HOST_CID, MAX_FRAME, MAX_LINE, SHELL_PORT,
 };
-use zapper_policy::ExecRequest;
+use zapper_proto::ExecRequest;
 
 use crate::control::Control;
 use crate::init::{wait_child, UID};

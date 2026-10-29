@@ -62,7 +62,7 @@ pub struct Options {
     pub credentials: Option<PathBuf>,
     /// The credentials file to write; default: the owner's.
     pub file: Option<PathBuf>,
-    /// API base, for tests.
+    /// The API of the GitHub to create the App on; github.com's if unset.
     pub api: Option<String>,
     /// Opens a URL in a browser; `None` tries `xdg-open`/`open`.
     pub open: Option<OpenUrl>,

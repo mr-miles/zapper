@@ -85,7 +85,8 @@ If zapper runs on a machine other than the user's, the UI (`daemon.ui`, `127.0.0
 Architecture: [docs/architecture.md](docs/architecture.md). Network: [docs/network.md](docs/network.md). Security model and the controls that must hold: [docs/security.md](docs/security.md).
 
 ```
-crates/zapper-policy/    config model, layered rule evaluation, host↔guest protocol (no I/O)
+crates/zapper-proto/     the host↔guest protocol, and the exec requests and filesystem rules it carries: all the guest agent shares with the host
+crates/zapper-policy/    config model (image recipes among it), layered rule evaluation (no I/O)
 crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gateway, approvals, the driver, the record; its interface `Core`, the only way in for the crates below
   src/interface.rs         `Core`: sessions, config, rules, approvals and deciders, services, MCP servers, events, what clients register
   src/vmm.rs               `zapper __vmm`: runs Firecracker confined in its own namespaces and root
@@ -108,15 +109,16 @@ crates/zapper/           the CLI and `serve`: starts the core, the office (featu
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
 crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
-crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI) and the fake Claude and pi
-config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it);
+crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
+crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests
+config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
   agents/                  office roles' agent definitions: each AGENT.md, the brief in the role's preamble, and the role's own skills/
   skills/                  office skills any role may use; both built in (`zapper init` writes them), read live by firms through `agents_dir` and `skills_dir`
   kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
 scripts/fetch-deps.sh    Firecracker and kernel download
 scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
 tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
-tests/e2e-office.sh      end-to-end tests of firms, with the fake Claude
+tests/e2e-office.sh      end-to-end tests of firms, on the office-fake image; the scripts its fake workers play are in tests/fake
 docs/                    one page per topic; index in docs/README.md
 examples/                configs to run as they are (mini-firm: the smallest company at work); each loads in a test
 skills/zapper/           operating skill, linked from .claude/skills/zapper

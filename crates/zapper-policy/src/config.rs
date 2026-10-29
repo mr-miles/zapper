@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use zapper_proto::FsRule;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,59 @@ pub struct Config {
     /// change.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub firms: BTreeMap<String, serde_yaml::Value>,
+    /// Image recipes, by the image's name: what `zapper image build NAME`
+    /// builds. (`daemon.images` is where the built images go.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, ImageRecipe>,
+}
+
+/// How an image is built: an OCI base, the files it takes as named
+/// arguments, the commands run in it, and where its arguments are copied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageRecipe {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The OCI image it starts from, e.g. `docker.io/library/ubuntu:26.04`.
+    pub from: String,
+    /// Files or directories from the host it takes, by name: `--arg
+    /// NAME=PATH` gives one, else its `default`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<String, ImageArg>,
+    /// Shell commands run in the image at build time, in order, before the
+    /// arguments are copied in (so changing one doesn't run these again).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run: Vec<String>,
+    /// Arguments copied into the image, in order, after `run`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<ImageCopy>,
+    /// Shell commands run once the arguments are copied in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+}
+
+/// One argument copied into the image.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageCopy {
+    /// The argument's name.
+    pub from: String,
+    /// Where it goes: an absolute path, its mode kept; a directory's
+    /// contents go into the directory named.
+    pub to: String,
+}
+
+/// A file (or a directory, with all it holds) an image recipe takes from
+/// the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageArg {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The file or directory used when no `--arg` gives one; relative to
+    /// the config's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -481,28 +535,6 @@ pub struct ExecRule {
     pub final_: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-}
-
-/// Filesystem rule, applied inside the sandbox when the session starts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsRule {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Guest path glob, e.g. `/work/**/.env`.
-    pub path: String,
-    pub access: FsAccess,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FsAccess {
-    /// Covered by an empty file or directory.
-    Hidden,
-    /// Remounted read-only.
-    Ro,
 }
 
 fn any() -> String {
@@ -1069,6 +1101,40 @@ impl Config {
                 }
             }
         }
+        for (name, r) in &self.images {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            {
+                errors.push(format!(
+                    "images.{name}: an image's name is letters, digits, '-', '_' and '.'"
+                ));
+            }
+            if r.from.trim().is_empty() {
+                errors.push(format!("images.{name}: from: the OCI image it starts from"));
+            }
+            for a in r.args.keys() {
+                if !crate::valid_worker_name(a) {
+                    errors.push(format!(
+                        "images.{name}.args.{a}: lowercase letters, digits and dashes"
+                    ));
+                }
+            }
+            for (i, c) in r.copy.iter().enumerate() {
+                if !r.args.contains_key(&c.from) {
+                    errors.push(format!(
+                        "images.{name}.copy[{i}]: from: {:?} isn't one of its args",
+                        c.from
+                    ));
+                }
+                if !c.to.starts_with('/') {
+                    errors.push(format!(
+                        "images.{name}.copy[{i}]: to: where it goes in the image, an absolute path"
+                    ));
+                }
+            }
+        }
         for name in self.profiles.keys() {
             if let Err(e) = self.resolve(name) {
                 errors.push(format!("profile {name}: {e:#}"));
@@ -1187,6 +1253,29 @@ pub fn merge(base: &mut Value, over: &Value) {
 
 #[cfg(test)]
 mod tests {
+    /// A recipe's copies take from its own args, to absolute paths.
+    #[test]
+    fn image_recipes_are_checked() {
+        let check = |copy: &str| {
+            super::Config::from_yaml(&format!(
+                "images:\n  x:\n    from: docker.io/library/ubuntu:26.04\n    args: {{ tool: {{ default: ./tool }} }}\n    copy: [{copy}]\n"
+            ))
+            .map(|c| c.images["x"].copy.len())
+            .map_err(|e| format!("{e:#}"))
+        };
+        assert_eq!(check("{ from: tool, to: /usr/local/bin/tool }"), Ok(1));
+        assert!(check("{ from: other, to: /x }")
+            .unwrap_err()
+            .contains("isn't one of its args"));
+        assert!(check("{ from: tool, to: bin/tool }")
+            .unwrap_err()
+            .contains("absolute path"));
+        assert!(
+            check("{ from: tool, to: /x, mode: 755 }").is_err(),
+            "unknown fields are refused"
+        );
+    }
+
     #[test]
     fn driven_agents_and_the_driver_switch() {
         use super::{Config, DaemonConfig};

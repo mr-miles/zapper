@@ -1,0 +1,13 @@
+rules:
+  - when: { from: board, kind: assignment, contains: "Build it" }
+    do:
+      - budget_request: { total: "20k", plan: "Three developers and a contractor.", reason: "build" }
+  - when: { from: board, contains: "Approved" }
+    do:
+      - hire: { role: dev, name: ada, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
+      - hire: { role: dev, name: ben, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
+      - hire: { role: dev, name: cat, budget: "4k", subject: "Job", brief: "Do the job.", reason: "need" }
+      - contract_offer: { role: dev, name: dan, title: "Decoy", brief: "Audit the code." }
+  - when: { contains: "is declined" }
+    do:
+      - contract_offer: { role: dev, name: eve, title: "Auditor", brief: "Audit the code." }

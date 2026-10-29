@@ -530,7 +530,53 @@ fn credentials_files_are_read_and_checked() {
         ),
         0o600,
     );
-    assert!(load(&by_path).0.is_ok());
+    let app = load(&by_path).0.unwrap();
+    assert_eq!(
+        (app.api_url.as_str(), app.web_url.as_str()),
+        ("https://api.github.com", "https://github.com"),
+        "github.com's unless the file says otherwise"
+    );
+
+    // Where the App's GitHub is: an Enterprise Server's URLs, or a local
+    // fake's; plain http only to this machine.
+    let at = |name: &str, urls: &str| {
+        write(
+            name,
+            format!(
+                "github:\n  appId: \"9\"\n  privateKeyPath: {}\n{urls}",
+                fixture("test-key-pkcs8.pem").display()
+            ),
+            0o600,
+        )
+    };
+    let ghes = load(&at(
+        "ghes.yaml",
+        "  apiUrl: https://git.acme.example/api/v3/\n  webUrl: https://git.acme.example\n",
+    ))
+    .0
+    .unwrap();
+    assert_eq!(ghes.api_url, "https://git.acme.example/api/v3");
+    assert_eq!(ghes.web_url, "https://git.acme.example");
+    assert!(load(&at(
+        "local.yaml",
+        "  apiUrl: http://127.0.0.1:8080\n  webUrl: file:///srv/git\n"
+    ))
+    .0
+    .is_ok());
+    for (name, urls) in [
+        (
+            "plain-api.yaml",
+            "  apiUrl: http://git.acme.example/api/v3\n",
+        ),
+        ("plain-web.yaml", "  webUrl: http://git.acme.example\n"),
+        ("file-api.yaml", "  apiUrl: file:///srv/api\n"),
+    ] {
+        let e = format!("{:#}", load(&at(name, urls)).0.unwrap_err());
+        assert!(
+            e.contains("github.apiUrl") || e.contains("github.webUrl"),
+            "{name}: {e}"
+        );
+    }
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
