@@ -78,7 +78,8 @@ secrets:
 | Mode | The guest sees | Use for |
 |---|---|---|
 | `proxy` (default) | a placeholder | bearer tokens and API keys, which travel in headers |
-| `guest` | the value | credentials the client holds itself: S3 signing keys, client certificates and keys, kubeconfigs (as workers with a cluster grant get for the firm's cluster) |
+| `guest` | the value | credentials the client holds itself: client certificates and keys, kubeconfigs (as workers with a cluster grant get for the firm's cluster) |
+| `aws` | a fake access key id | AWS keys: the proxy signs the guest's requests with them ([AWS](#aws)) |
 
 Profiles refer to secrets as `{{secret:<name>}}` in `agent.env` or `agent.files`. The workload can read and use a `guest` secret once it's delivered, so issue those scoped and short-lived.
 
@@ -90,7 +91,36 @@ A `proxy` secret appears in the guest as `zapper-secret-<name>`. The proxy repla
 
 Values are read each time they're used, so a rotated file or variable takes effect without a restart.
 
-A `command` secret is minted by a command on the host, for tokens that expire, such as a GitHub App's. The command prints the value, or `{"value": ..., "expires_at": RFC 3339}`, and runs with `PATH`, `HOME`, `XDG_CONFIG_HOME` and `ZAPPER_*` only (`zapper` as the first word is this zapper). Its value is kept until it nears its expiry (or for `ttl_secs`, default 300, when it prints none), and minted again ahead of it in the background while the old one is still served; once expired, requests wait for one new mint and fail if it fails. `timeout_secs` bounds each run (default 30). The command's output never appears in an error. The office gives each worker of a firm on GitHub such a secret of their own session ([office: a firm on GitHub](office.md#a-firm-on-github)).
+A `command` secret is minted by a command on the host, for tokens that expire, such as a GitHub App's. The command prints the value, or `{"value": ..., "expires_at": RFC 3339}`, and runs with `PATH`, `HOME`, `XDG_CONFIG_HOME` and `ZAPPER_*` only (`zapper` as the first word is this zapper). Its value is kept until it nears its expiry (or for `ttl_secs`, default 300, when it prints none), and minted again ahead of it in the background while the old one is still served; once expired, requests wait for one new mint and fail if it fails. However many requests wait, the command runs once, and a failure is the answer to all of them, and to new requests for the next 5 seconds. Waiting holds no thread of the daemon's. `timeout_secs` bounds each run (default 30). A `guest` command secret is minted once, when the session boots. The command's output never appears in an error. The office gives each worker of a firm on GitHub such a secret of their own session ([office: a firm on GitHub](office.md#a-firm-on-github)).
+
+### AWS
+
+AWS requests are signed over their headers and body (Signature Version 4), so the key can't travel in a header for the proxy to add. An `aws` secret keeps the keys on the host instead: the guest holds a fake key and signs with it, and the proxy signs each allowed request again with the real one.
+
+```
+secrets:
+  aws:
+    command: [aws, configure, export-credentials, --profile, dev, --format, process]
+    mode: aws
+    hosts: ["s3.*.amazonaws.com", "*.s3.*.amazonaws.com"]
+profiles:
+  dev:
+    agent:
+      env:
+        AWS_ACCESS_KEY_ID: "{{secret:aws}}"
+        AWS_SECRET_ACCESS_KEY: "{{secret:aws}}"
+        AWS_REGION: eu-west-2
+    policy:
+      net:
+        - { action: allow, host: "*.s3.eu-west-2.amazonaws.com", ports: [443], methods: [GET, PUT], secrets: [aws] }
+```
+
+- **The value** is AWS's credential_process JSON, `{"AccessKeyId", "SecretAccessKey", "SessionToken"?, "Expiration"?}`, from any source: a file, an inline value, or a command such as `aws configure export-credentials` or one that assumes a role. Temporary keys from a command are minted again before their `Expiration`.
+- **In the guest**, `{{secret:aws}}` is a fake access key id, `ZAPPER` and fourteen characters made from the secret's name; it serves as the secret key too. The guest's SDK signs as it always does. Nothing in the guest is a usable key.
+- **The proxy signs again** an inspected request whose signature names that fake key (in its `Authorization` header, or a presigned URL's `X-Amz-Credential`), when a rule allowing the request lists the secret, the host matches the secret's `hosts`, and the connection uses TLS (or the secret sets `plaintext: true`). It keeps the region, service and signed headers the guest chose, dates the request by its own clock, adds the session token when the keys are temporary, and signs with the real keys. A request signed with the fake key that no such rule lists is refused with `403`; one signed with keys of the guest's own is forwarded as it is.
+- **The body**: its hash is the one the guest sent in `x-amz-content-sha256`, or `UNSIGNED-PAYLOAD`. Without one (AWS's JSON and query APIs), the body is read and hashed, up to 32 MiB. An S3 upload in signed chunks (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, with or without a signed trailer) has each chunk's signature redone as it streams, so large uploads aren't held in memory. SigV4a (ECDSA) payloads are refused.
+- **Responses** have the secret key and session token masked, like any injected value.
+- **Hosts**: patterns are globs in which `*` spans dots. `s3.*.amazonaws.com` and `*.s3.*.amazonaws.com` are S3 alone (path-style and virtual-hosted); `s3*.amazonaws.com` would also take in `s3tables`, `s3-control` and `s3express-control`, separate services. `*.amazonaws.com` is the whole account, and never matches a look-alike such as `amazonaws.com.evil.test`.
 
 ## Approvals
 

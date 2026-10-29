@@ -331,12 +331,14 @@ pub(super) fn inject(
         plaintext,
         effects,
         headers,
+        &HashMap::new(),
     )
 }
 
 /// `inject` for a session's request: the config's secrets, then the
-/// session's own.
-pub(super) fn inject_for(
+/// session's own. Command secrets it will use are minted first, without
+/// holding a thread while they are.
+pub(super) async fn inject_for(
     d: &Daemon,
     s: &Session,
     host: &str,
@@ -345,6 +347,26 @@ pub(super) fn inject_for(
     headers: &mut hyper::HeaderMap,
 ) -> Result<Injected, String> {
     let own = s.secrets.read().unwrap().clone();
+    let to_mint: Vec<(String, zapper_policy::mint::Spec)> = {
+        let config = d.config.read().unwrap();
+        used(effects, headers)
+            .into_iter()
+            .filter_map(|name| {
+                let secret = config.secrets.get(&name).or_else(|| own.get(&name))?;
+                let sendable = secret.allows_host(host) && (!plaintext || secret.plaintext);
+                let aws = secret.mode == zapper_policy::SecretMode::Aws;
+                let spec = secret.source.mint_spec().filter(|_| sendable && !aws)?;
+                Some((name, spec))
+            })
+            .collect()
+    };
+    let mut minted = HashMap::new();
+    for (name, spec) in to_mint {
+        let v = crate::mint::resolve(&spec)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        minted.insert(name, v);
+    }
     inject_with(
         &d.config.read().unwrap(),
         &own,
@@ -352,10 +374,34 @@ pub(super) fn inject_for(
         plaintext,
         effects,
         headers,
+        &minted,
     )
 }
 
-/// `inject` with the config and the session's secrets given.
+/// The secrets a request would use: those of the rule's whose placeholder
+/// it carries, and those its headers are set from.
+fn used(effects: &NetEffects, headers: &hyper::HeaderMap) -> Vec<String> {
+    let mut names: Vec<String> = effects
+        .secrets
+        .iter()
+        .filter(|name| {
+            let ph = placeholder(name);
+            headers
+                .values()
+                .any(|v| v.to_str().is_ok_and(|s| s.contains(&ph)))
+        })
+        .cloned()
+        .collect();
+    for (_, template) in &effects.set_headers {
+        names.extend(zapper_policy::secret_refs(template));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// `inject` with the config and the session's secrets given, and the values
+/// of the command secrets already minted (by name).
 pub(crate) fn inject_with(
     config: &zapper_policy::Config,
     own: &BTreeMap<String, zapper_policy::Secret>,
@@ -363,6 +409,7 @@ pub(crate) fn inject_with(
     plaintext: bool,
     effects: &NetEffects,
     headers: &mut hyper::HeaderMap,
+    minted: &HashMap<String, Result<String, String>>,
 ) -> Result<Injected, String> {
     let mut used = Vec::new();
     let mut values = Vec::new();
@@ -378,12 +425,26 @@ pub(crate) fn inject_with(
         if plaintext && !secret.plaintext {
             return Err(format!("secret {name} may not be sent over plain HTTP (set plaintext: true on it to allow)"));
         }
-        secret
-            .source
-            .resolve()
-            .map_err(|e| format!("secret {name}: {e:#}"))
+        match secret.source.mint_spec() {
+            Some(_) => match minted.get(name) {
+                Some(v) => v
+                    .clone()
+                    .map_err(|e| format!("secret {name}: minting the secret: {e}")),
+                None => Err(format!("secret {name}: not minted")),
+            },
+            None => secret
+                .source
+                .resolve()
+                .map_err(|e| format!("secret {name}: {e:#}")),
+        }
     };
     for name in &effects.secrets {
+        // An `aws` secret signs the request (`aws::resign`); its value never
+        // goes into a header.
+        let aws = config.secrets.get(name).or_else(|| own.get(name));
+        if aws.is_some_and(|s| s.mode == zapper_policy::SecretMode::Aws) {
+            continue;
+        }
         let ph = placeholder(name);
         let present = headers
             .values()
@@ -560,10 +621,11 @@ where
     }
     let (mut parts, body) = req.into_parts();
     clean_headers(&mut parts.headers, &host, port, default_port);
-    let (used, values) = match inject_for(d, s, &host, plaintext, &v.effects, &mut parts.headers) {
-        Ok(i) => (i.names, i.values),
-        Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
-    };
+    let (mut used, mut values) =
+        match inject_for(d, s, &host, plaintext, &v.effects, &mut parts.headers).await {
+            Ok(i) => (i.names, i.values),
+            Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, vec![], e),
+        };
     // A response carrying a secret's value back must be readable to be
     // masked: ask for it uncompressed.
     if !values.is_empty() {
@@ -572,8 +634,29 @@ where
             HeaderValue::from_static("identity"),
         );
     }
-    let body = httplog::Tee::wrap(
+    // Signed with an `aws` secret's fake key: signed again with the real one.
+    let (body, path) = match super::aws::resign(
+        d,
+        s,
+        &host,
+        plaintext,
+        &v.effects.secrets,
+        &mut parts,
         body.boxed(),
+        &path,
+    )
+    .await
+    {
+        Ok(super::aws::Outcome::Resigned(r)) => {
+            used.push(r.secret);
+            values.extend(r.mask);
+            (r.body, r.path)
+        }
+        Ok(super::aws::Outcome::Unsigned(body)) => (body, path),
+        Err(e) => return fail(d, s, &rec, &net, &v, StatusCode::FORBIDDEN, used, e),
+    };
+    let body = httplog::Tee::wrap(
+        body,
         rec.clone(),
         s.requests.clone(),
         httplog::Side::Request,

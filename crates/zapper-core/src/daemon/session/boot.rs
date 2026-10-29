@@ -69,10 +69,20 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         });
         tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
     }
+    // Guest command secrets are minted once, for the VM to hold.
+    let to_mint = spec::guest_mints(&daemon.config.read().unwrap(), &session.resolved);
+    let mut minted = std::collections::HashMap::new();
+    for (name, m) in to_mint {
+        let v = crate::mint::resolve(&m)
+            .await
+            .with_context(|| format!("secret {name}: minting the secret"))?;
+        minted.insert(name, v);
+    }
     let spec = {
         let c = daemon.config.read().unwrap();
         spec::build(
             &c,
+            &minted,
             &session.resolved,
             &session.id,
             session.tls.pem(),

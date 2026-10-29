@@ -1001,7 +1001,10 @@ pub fn credentials_for(
         });
         files.push(GuestFile {
             path: format!("{home}/.config/gh/hosts.yml"),
-            content: format!("github.com:\n    user: {worker}\n    oauth_token: replaced-by-the-proxy\n    git_protocol: https\n"),
+            content: format!(
+                "github.com:\n    user: {worker}\n    oauth_token: {}\n    git_protocol: https\n",
+                super::github::PLACEHOLDER_TOKEN
+            ),
             mode: 0o600,
             user_owned: true,
         });

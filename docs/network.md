@@ -86,6 +86,8 @@ Before an inspected request is decided:
 - **Its path is put in the form the upstream acts on**: percent-encoded unreserved characters (letters, digits, `-._~`) are decoded, other escapes are written in capitals, and `.` and `..` segments are resolved. Rules match that path, and it is the path forwarded, so a `deny` on `/admin/*` also stops `/x/../admin/users` and `/%61dmin/users`. A path whose meaning depends on how the upstream decodes it is refused with `400`: a dot segment behind an encoded slash or backslash (`..%2f`), a backslash, a control character, an encoded NUL or a bad escape. An encoded slash elsewhere stays as sent (`group%2Frepo` is one segment). The query is not changed.
 - **A method override is refused with `403`**: an `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` or `X-Goog-HTTP-Method-Override` header, or a `_method`, `_HttpMethod` or `$httpmethod` query parameter, that names another method than the request's own. Some upstreams run the named method, so a `GET`-only rule would otherwise let a `DELETE` through. Naming the request's own method passes.
 
+An AWS request the guest signed with an `aws` secret's fake key is signed again with the real keys after it is allowed ([policy: AWS](policy.md#aws)).
+
 A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched.
 
 ### vsock mode

@@ -798,22 +798,7 @@ pub(crate) async fn boot_worker(
             user_owned: true,
         });
     }
-    // The worker's setup in the harness's neutral terms: the preamble as
-    // its instructions, the role's skills, the office's tools, and mail that
-    // arrives while the agent works handed over before it ends the turn
-    // (foreman::stop_check). The harness puts each where it reads it.
-    let skills_dir = run.dir.join("skills").join(&w.role);
-    let mut overlay = json!({
-        "instructions": preamble,
-        "skills": skills_dir.to_string_lossy(),
-        "mcp_servers": { "office": { "command": ops::AGENT_PATH, "args": ["office", "mcp"] } },
-        "turn_end": format!("{} office stop-hook", ops::AGENT_PATH),
-    });
-    // The role's model, unless the worker runs on a profile of their own,
-    // which brings its model.
-    if let (Some(m), None) = (&role.model, &own) {
-        overlay["model"] = json!(m);
-    }
+    let overlay = agent_overlay(run, w, role, own.is_some(), preamble);
     let new = NewSession {
         profile: profile_name,
         workdir: run.dir.join("empty"),
@@ -838,6 +823,37 @@ pub(crate) async fn boot_worker(
     // Grants made before the VM was up: its network rules and kubeconfig.
     access::reapply(d, run, &w.name);
     Ok(())
+}
+
+/// The worker's setup in the harness's neutral terms: the preamble as its
+/// instructions, the role's skills, the office's tools, and mail that
+/// arrives while the agent works handed over before it ends the turn
+/// (foreman::stop_check). The harness puts each where it reads it.
+pub(crate) fn agent_overlay(
+    run: &FirmRun,
+    w: &WorkerRt,
+    role: &crate::firm::Role,
+    own_profile: bool,
+    preamble: String,
+) -> Value {
+    let skills_dir = run.dir.join("skills").join(&w.role);
+    let mut overlay = json!({
+        "instructions": preamble,
+        "skills": skills_dir.to_string_lossy(),
+        "mcp_servers": { "office": { "command": ops::AGENT_PATH, "args": ["office", "mcp"] } },
+        "turn_end": format!("{} office stop-hook", ops::AGENT_PATH),
+    });
+    // The role's model, unless the worker runs on a profile of their own,
+    // which brings its model.
+    if let (Some(m), false) = (&role.model, own_profile) {
+        overlay["model"] = json!(m);
+    }
+    // In a firm on GitHub, `gh` wants a token in the environment to start:
+    // a placeholder, as the real one is added at the network.
+    if run.config.git_github() {
+        overlay["env"] = json!({ "GITHUB_TOKEN": super::github::PLACEHOLDER_TOKEN });
+    }
+    overlay
 }
 
 /// How the office drives a profile's agent: its harness's driver.

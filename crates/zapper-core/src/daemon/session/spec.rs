@@ -3,7 +3,7 @@
 //! `proxy` secrets appear here only as placeholders; `guest` secrets as their
 //! values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, Context, Result};
 use zapper_policy::proto::{GuestDisk, GuestFile, GuestSpec};
@@ -15,14 +15,29 @@ const CA_PATH: &str = "/usr/local/share/ca-certificates/zapper.crt";
 const PROXY: &str = "http://127.0.0.1:3128";
 
 /// Renders `{{secret:NAME}}`: placeholders for proxy secrets, values for
-/// guest secrets.
-fn render_secrets(config: &Config, template: &str) -> Result<String> {
+/// guest secrets (a command one's from `minted`).
+fn render_secrets(
+    config: &Config,
+    minted: &HashMap<String, String>,
+    template: &str,
+) -> Result<String> {
     let mut err = None;
     let out = render(template, |name| match config.secrets.get(name) {
-        Some(s) if s.mode == SecretMode::Guest => s.source.resolve().unwrap_or_else(|e| {
-            err.get_or_insert(e.context(format!("secret {name}")));
-            String::new()
-        }),
+        Some(s) if s.mode == SecretMode::Guest => {
+            let value = match s.source.mint_spec() {
+                Some(_) => minted
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("not minted")),
+                None => s.source.resolve(),
+            };
+            value.unwrap_or_else(|e| {
+                err.get_or_insert(e.context(format!("secret {name}")));
+                String::new()
+            })
+        }
+        // The fake key the guest's SDK signs with; the proxy signs again.
+        Some(s) if s.mode == SecretMode::Aws => zapper_policy::aws_key_id(name),
         Some(_) => placeholder(name),
         None => {
             err.get_or_insert(anyhow!("unknown secret {name}"));
@@ -35,8 +50,38 @@ fn render_secrets(config: &Config, template: &str) -> Result<String> {
     }
 }
 
+/// The guest command secrets a profile's env and files name: what boot
+/// mints before it builds the spec.
+pub fn guest_mints(
+    config: &Config,
+    profile: &ResolvedProfile,
+) -> Vec<(String, zapper_policy::mint::Spec)> {
+    let agent = &profile.agent;
+    let mut names: Vec<String> = agent
+        .env
+        .values()
+        .chain(agent.files.values())
+        .chain(agent.config_files.values())
+        .flat_map(|t| secret_refs(t))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|n| {
+            let s = config
+                .secrets
+                .get(&n)
+                .filter(|s| s.mode == SecretMode::Guest)?;
+            Some((n, s.source.mint_spec()?))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     config: &Config,
+    minted: &HashMap<String, String>,
     profile: &ResolvedProfile,
     session: &str,
     ca_pem: &str,
@@ -68,7 +113,7 @@ pub fn build(
     for (k, v) in &agent.env {
         env.insert(
             k.clone(),
-            render_secrets(config, v).with_context(|| format!("agent.env.{k}"))?,
+            render_secrets(config, minted, v).with_context(|| format!("agent.env.{k}"))?,
         );
     }
     let harness = crate::daemon::harness::get(&agent.kind)
@@ -97,8 +142,8 @@ pub fn build(
                 .is_some_and(|s| s.mode == SecretMode::Guest)
         });
         let mode = if holds_secret { 0o600 } else { 0o644 };
-        let content =
-            render_secrets(config, content).with_context(|| format!("agent.files.{path}"))?;
+        let content = render_secrets(config, minted, content)
+            .with_context(|| format!("agent.files.{path}"))?;
         files.push(GuestFile {
             path,
             content,
@@ -139,10 +184,40 @@ mod tests {
     use serde_json::Value;
 
     #[test]
+    fn an_aws_secret_is_its_fake_key_in_the_env() {
+        let config = Config::from_yaml("secrets:\n  aws: { value: '{}', mode: aws, hosts: [h] }\nprofiles:\n  c:\n    agent: { kind: claude-code, env: { AWS_ACCESS_KEY_ID: '{{secret:aws}}', AWS_SECRET_ACCESS_KEY: '{{secret:aws}}' } }\n").unwrap();
+        let profile = config.resolve("c").unwrap();
+        let spec = build(
+            &config,
+            &HashMap::new(),
+            &profile,
+            "s",
+            "",
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let id = zapper_policy::aws_key_id("aws");
+        assert_eq!(spec.env["AWS_ACCESS_KEY_ID"], id);
+        assert_eq!(spec.env["AWS_SECRET_ACCESS_KEY"], id);
+    }
+
+    #[test]
     fn permission_mode_goes_to_managed_settings() {
         let config = Config::from_yaml("profiles:\n  c:\n    agent: { kind: claude-code, permission_mode: bypassPermissions, model: m }\n").unwrap();
         let profile = config.resolve("c").unwrap();
-        let spec = build(&config, &profile, "s", "", vec![], vec![], vec![]).unwrap();
+        let spec = build(
+            &config,
+            &HashMap::new(),
+            &profile,
+            "s",
+            "",
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
         let file = |p: &str| {
             spec.files
                 .iter()
@@ -178,7 +253,17 @@ mod tests {
         .unwrap();
         let spec = |p: &str| {
             let profile = config.resolve(p).unwrap();
-            build(&config, &profile, "s", "", vec![], vec![], vec![]).unwrap()
+            build(
+                &config,
+                &HashMap::new(),
+                &profile,
+                "s",
+                "",
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap()
         };
         let uses = spec("uses");
         assert_eq!(uses.env["G"], "guest-value-1");

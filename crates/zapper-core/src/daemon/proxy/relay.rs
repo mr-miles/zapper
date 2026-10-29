@@ -60,15 +60,16 @@ struct Relayed {
 
 /// Resolves the one `dbauth` secret a database rule names (the config validates
 /// there is exactly one with a user).
-fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
-    let c = d.config.read().unwrap();
-    let sec = name
-        .and_then(|n| c.secrets.get(n))
-        .ok_or("database rule has no dbauth secret")?;
+async fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
+    let sec = {
+        let c = d.config.read().unwrap();
+        name.and_then(|n| c.secrets.get(n))
+            .cloned()
+            .ok_or("database rule has no dbauth secret")?
+    };
     let user = sec.user.clone().ok_or("dbauth secret has no user")?;
-    let password = sec
-        .source
-        .resolve()
+    let password = crate::mint::secret_value(&sec.source)
+        .await
         .map_err(|e| format!("resolving dbauth secret: {e:#}"))?;
     Ok(DbCred {
         user,
@@ -136,7 +137,7 @@ pub(super) async fn relay_database<S>(
         );
     };
     let name = v.effects.secrets.first().cloned();
-    let cred = match db_cred(d, name.as_deref()) {
+    let cred = match db_cred(d, name.as_deref()).await {
         Ok(c) => c,
         Err(e) => return fail(500, e),
     };
