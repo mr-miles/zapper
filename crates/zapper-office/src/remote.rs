@@ -287,6 +287,10 @@ async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
 /// `main`, `main/*` or tags; the daemon moves `main` from the remote.
 const PRE_RECEIVE_REMOTE: &str = r#"#!/bin/sh
 # Installed by zapper: main comes from the remote, where the board merges.
+if [ "$ZAPPER_GIT_LEVEL" = merge ]; then
+    echo "zapper: main of this repository is merged on the remote, by the board; merge pushes nothing here" >&2
+    exit 1
+fi
 while read old new ref; do
     case "$ref" in
         refs/heads/main|refs/heads/main/*|refs/tags/*)
@@ -593,7 +597,7 @@ pub async fn publish_branch(
     if run.config.main_is_local(&repo) {
         bail!("{repo}'s main is the firm's: ask whoever holds admin on it to review and merge your branch");
     }
-    if super::access::level(run, worker, &resource) < super::access::Level::Write {
+    if !super::access::level(run, worker, &resource).covers(super::access::Level::Write) {
         bail!("publishing a branch of {repo} needs write on it (credentials_request git:{repo})");
     }
     crate::git::check_ref(branch)?;

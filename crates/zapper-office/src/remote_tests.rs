@@ -658,7 +658,7 @@ async fn a_local_main_is_pushed_out_and_stops_when_the_remote_moved() {
     // Write can't merge to the firm's main; admin can, and it goes out.
     assert!(push_branch(&run, &kb, "main", "page.md", "write")
         .unwrap_err()
-        .contains("needs admin"));
+        .contains("needs merge (into main) or admin"));
     let merged = push_branch(&run, &kb, "main", "page.md", "admin").unwrap();
     remote::push_main(&run, &kb).await.unwrap();
     assert_eq!(rev(&remote_dir(&w.base, &kb), "main"), merged);
@@ -750,15 +750,19 @@ async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     // The layout, committed on the firm's server and pushed out.
     let local = remote::root(&run.config, &run.dir).join(format!("{kb}.git"));
     let files = sh(&local, &["ls-tree", "-r", "--name-only", "main"]);
-    for f in [
-        "AGENTS.md",
-        "index.md",
-        "log.md",
-        "raw/README.md",
-        "wiki/README.md",
-    ] {
+    for f in ["AGENTS.md", "index.md", "log.md", "wiki/README.md"] {
         assert!(files.lines().any(|l| l == f), "{f}: {files}");
     }
+    assert!(
+        !files.contains("raw/"),
+        "sources are references, not copies: {files}"
+    );
+    let conventions = sh(&local, &["show", "main:AGENTS.md"]);
+    assert!(
+        conventions.contains("git:<repo>/<path>@<sha>")
+            && conventions.contains("drive:<artifact>@<version>"),
+        "{conventions}"
+    );
     assert_eq!(rev(&remote_dir(&w.base, &kb), "main"), rev(&local, "main"));
     // Seeding again leaves it alone.
     let before = rev(&local, "main");

@@ -19,15 +19,22 @@ use super::{now, FirmRun};
 use zapper_core::Core;
 
 /// How far a grant reaches. For git: read is fetch, write is push to
-/// branches, admin is also `main` and tags. For the cluster: read and write
-/// are the `dev` namespace, admin is also `prod`. For a drive space: read
-/// is list and fetch, write is also publish.
+/// branches, merge is read and merging someone else's branch into `main`
+/// (no branches of its own), admin is everything, `main` and tags too. For
+/// the cluster: read and write are the `dev` namespace, admin is also
+/// `prod`. For a drive space: read is list and fetch, write is also
+/// publish.
+///
+/// Levels aren't a line: merge and write each do what the other can't.
+/// What one allows that another does is [`Level::covers`]; the order is for
+/// listing only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     None,
     Read,
     Write,
+    Merge,
     Admin,
 }
 
@@ -37,8 +44,9 @@ impl Level {
             "none" => Ok(Level::None),
             "read" => Ok(Level::Read),
             "write" => Ok(Level::Write),
+            "merge" => Ok(Level::Merge),
             "admin" => Ok(Level::Admin),
-            other => bail!("level {other:?}: none, read, write or admin"),
+            other => bail!("level {other:?}: none, read, write, merge or admin"),
         }
     }
 
@@ -47,8 +55,32 @@ impl Level {
             Level::None => "none",
             Level::Read => "read",
             Level::Write => "write",
+            Level::Merge => "merge",
             Level::Admin => "admin",
         }
+    }
+
+    /// Whether holding `self` allows all `other` does: admin covers
+    /// everything, write and merge each cover read (and themselves), and
+    /// nothing covers more than itself otherwise.
+    pub fn covers(self, other: Level) -> bool {
+        match (self, other) {
+            (_, Level::None) => true,
+            (Level::Admin, _) => true,
+            (Level::Write | Level::Merge, Level::Read) => true,
+            (a, b) => a == b,
+        }
+    }
+
+    /// Whether it may push at all: to branches (write), into `main` (merge),
+    /// or anywhere (admin); the repository's hook says where.
+    pub fn may_push(self) -> bool {
+        matches!(self, Level::Write | Level::Merge | Level::Admin)
+    }
+
+    /// Whether it reaches `main` (or `prod`): the CEO's to give.
+    pub fn is_main(self) -> bool {
+        matches!(self, Level::Merge | Level::Admin)
     }
 }
 
@@ -117,14 +149,19 @@ impl Want {
     }
 }
 
-/// What is meant by `s` on a (canonical) resource: read, write or admin.
+/// What is meant by `s` on a (canonical) resource: read, write or admin;
+/// merge too on a git repository.
 pub fn want(_run: &FirmRun, resource: &str, s: &str) -> Result<Want> {
     let s = s.trim();
     let level = Level::parse(s)?;
-    if level == Level::None || level > max_level(resource) {
+    let git = resource.starts_with("git:");
+    if level == Level::None || !max_level(resource).covers(level) || (level == Level::Merge && !git)
+    {
         bail!(
             "{resource} levels: read, write{}",
-            if max_level(resource) == Level::Admin {
+            if git {
+                ", merge, admin"
+            } else if max_level(resource) == Level::Admin {
                 ", admin"
             } else {
                 ""
@@ -239,11 +276,11 @@ pub fn level(run: &FirmRun, worker: &str, resource: &str) -> Level {
 
 /// Whether a worker may read a drive space (the board reads everything).
 pub fn can_read_space(run: &FirmRun, who: &str, space: &str) -> bool {
-    who == BOARD || level(run, who, &format!("drive:{space}")) >= Level::Read
+    who == BOARD || level(run, who, &format!("drive:{space}")).covers(Level::Read)
 }
 
 pub fn can_write_space(run: &FirmRun, who: &str, space: &str) -> bool {
-    who == BOARD || level(run, who, &format!("drive:{space}")) >= Level::Write
+    who == BOARD || level(run, who, &format!("drive:{space}")).covers(Level::Write)
 }
 
 fn every_resource(run: &FirmRun) -> Vec<String> {
@@ -430,13 +467,13 @@ pub fn revoke_all(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str, reason: 
 }
 
 /// Who decides a request first: a security officer other than the
-/// requester; the CEO for admin on git or the cluster, or when no officer
-/// can; the board for the CEO's own.
+/// requester; the CEO for merge or admin on git, admin on the cluster, or
+/// when no officer can; the board for the CEO's own.
 fn first_decider(run: &FirmRun, worker: &str, resource: &str, level: Level) -> Option<String> {
     let chart = run.chart();
     let ceo = chart.root().map(str::to_string);
     let to_ceo = || ceo.clone().filter(|c| c != worker);
-    if level == Level::Admin && !resource.starts_with("drive:") {
+    if level.is_main() && !resource.starts_with("drive:") {
         return to_ceo();
     }
     chart
@@ -516,7 +553,7 @@ pub fn request(
     }
     // The same again: a renewal, once the grant is about to expire.
     let held = self::level(run, worker, &resource);
-    let repeat = held >= level;
+    let repeat = held != Level::None && held.covers(level);
     let renews = if repeat {
         let g = run
             .access
@@ -644,7 +681,7 @@ pub fn decide(
         Some(l) => Want::of(Level::parse(l)?),
         None => Want::of(q.class),
     };
-    if grant && (want.class == Level::None || want.class > q.class) {
+    if grant && (want.class == Level::None || !q.class.covers(want.class)) {
         bail!("grant at most what was asked ({})", q.level);
     }
     let expires = match expires_in {
@@ -783,12 +820,12 @@ pub fn check_clearance(
     for g in list {
         let r = resource(run, g["resource"].as_str().unwrap_or(""))?;
         let want = want(run, &r, g["level"].as_str().unwrap_or(""))?;
-        if want.class == Level::Admin
+        if want.class.is_main()
             && !r.starts_with("drive:")
             && by != BOARD
             && ceo.as_deref() != Some(by)
         {
-            bail!("admin on {r} is the CEO's to grant: leave it out, the hire asks for it with credentials_request");
+            bail!("{} on {r} is the CEO's to grant: leave it out, the hire asks for it with credentials_request", want.class.name());
         }
         let ttl = g["expires_in"]
             .as_str()
@@ -1040,10 +1077,16 @@ mod tests {
     use super::Level;
 
     #[test]
-    fn levels_order() {
+    fn levels_cover_what_they_allow() {
+        use Level::*;
+        // Write and merge each do what the other can't; admin does both.
         assert!(
-            Level::None < Level::Read && Level::Read < Level::Write && Level::Write < Level::Admin
+            Write.covers(Read) && Merge.covers(Read) && Admin.covers(Merge) && Admin.covers(Write)
         );
+        assert!(!Merge.covers(Write) && !Write.covers(Merge) && !Read.covers(Write));
+        assert!(Merge.may_push() && Write.may_push() && !Read.may_push());
+        assert!(Merge.is_main() && Admin.is_main() && !Write.is_main());
+        assert_eq!(Level::parse("merge").unwrap(), Merge);
         assert_eq!(Level::parse("write").unwrap(), Level::Write);
         assert!(Level::parse("root").is_err());
         assert_eq!(serde_json::to_value(Level::Admin).unwrap(), "admin");

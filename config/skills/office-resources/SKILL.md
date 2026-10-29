@@ -20,13 +20,13 @@ Every turn you take spends tokens from your own balance, shown at each wake (`bu
 
 ## Getting access
 
-You start with no access to the firm's resources. Access is a **grant** per resource, decided by the security officer (admin by the CEO) and enforced by the platform. Grants expire, and they end when you leave.
+You start with no access to the firm's resources. Access is a **grant** per resource, decided by the security officer (merge and admin by the CEO) and enforced by the platform. Grants expire, and they end when you leave.
 
-| Resource | read | write | admin |
-|---|---|---|---|
-| `git:<repo>` (each repository its own; `git` when there is one) | clone and fetch | push branches | also push `main` and tags |
-| `cluster` | view `dev` | deploy to `dev` | also `prod` |
-| `drive:<space>` | list and fetch | also publish | — |
+| Resource | read | write | merge | admin |
+|---|---|---|---|---|
+| `git:<repo>` (each repository its own; `git` when there is one) | clone and fetch | push branches | merge someone else's branch into `main`, and push nothing else | also push `main` and tags |
+| `cluster` | view `dev` | deploy to `dev` | — | also `prod` |
+| `drive:<space>` | list and fetch | also publish | — | — |
 
 - Ask as soon as your brief shows what you need: `credentials_request(resource, level, repo?, spaces?, reason)`, the least level that does the job, with a reason tied to the work ("deploy the search API to dev for t-12"). For git, name the repository when the firm has more than one; for the drive, name the spaces.
 - The decision comes by mail. A denial says why: ask for less, or ask your manager whether the work should go another way.
@@ -42,7 +42,7 @@ Traffic to sites outside the firm is checked by the security officers. Ask ahead
 Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
 - `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
-- Ask for write, not admin. Branches, review and who merges to `main`: the office-git skill.
+- Ask for write, not merge or admin. Branches, review and who merges to `main`: the office-git skill.
 - Code lives in git, never on the drive.
 
 If your preamble says a repository's `main` is merged by the board on the firm's remote, you still clone and push only the firm's server, and nobody pushes `main`: send a branch for review with `publish_branch`, and never change `.github/workflows/` (the office-git skill). The repositories then aren't empty at the start: they are the remote's, kept across runs.

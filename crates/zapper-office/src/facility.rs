@@ -266,7 +266,7 @@ pub(super) fn authorize(
             ),
         )));
     }
-    if push && level < super::access::Level::Write {
+    if push && !level.may_push() {
         return Err(Box::new(plain(
             StatusCode::FORBIDDEN,
             &format!("you can read {repo}, not push to it; ask for write with credentials_request (git:{repo})"),
@@ -399,17 +399,79 @@ pub(crate) async fn git_request(
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "bad CGI response"))
 }
 
-/// The repository's `pre-receive` hook: below admin, no updates to `main`,
-/// branches under `main/`, or tags (the git handler sets `ZAPPER_GIT_LEVEL` from the pusher's grant).
+/// The repository's `pre-receive` hook, by the pusher's grant
+/// (`ZAPPER_GIT_LEVEL`, set by the git handler, as `REMOTE_USER` is):
+///
+/// - write: branches, never `main`, branches under `main/`, or tags;
+/// - merge: `main` only, and only to merge a branch already on the server
+///   that someone else pushed and wrote: a fast-forward to its tip, or a
+///   merge commit of the old `main` and its tip whose tree is exactly the
+///   merge's (nothing added in the merge itself);
+/// - admin: anything.
+///
+/// It records who pushed each commit new to the repository
+/// (`zapper-pushed`), which the merge check reads.
 pub(super) const PRE_RECEIVE: &str = r#"#!/bin/sh
-# Installed by zapper: write may push branches; only admin updates main and tags
-# (and main/..., which would block main).
-[ "$ZAPPER_GIT_LEVEL" = admin ] && exit 0
+# Installed by zapper: write pushes branches, merge merges someone else's
+# branch into main, admin does anything.
+zero=0000000000000000000000000000000000000000
+pushed="$GIT_DIR/zapper-pushed"
+refuse() { echo "zapper: $*" >&2; exit 1; }
+
+# The branch other than main whose tip is $1, if there is one.
+branch_at() {
+    git for-each-ref --format='%(objectname) %(refname)' refs/heads/ |
+        awk -v sha="$1" '$1 == sha && $2 != "refs/heads/main" { print $2; exit }'
+}
+
+# Refuses a merge of old..tip with any commit the merger pushed or wrote.
+not_theirs() {
+    for c in $(git rev-list "$1..$2"); do
+        if [ -f "$pushed" ] && grep -q "^$c $REMOTE_USER\$" "$pushed"; then
+            refuse "$REMOTE_USER pushed $c: someone else merges your work (ask for a review)"
+        fi
+    done
+    if git log --format='%an%n%cn' "$1..$2" | grep -qx "$REMOTE_USER"; then
+        refuse "$REMOTE_USER wrote commits on this branch: someone else merges your work (ask for a review)"
+    fi
+}
+
+merge_into_main() {
+    old=$1 new=$2
+    [ "$old" != "$zero" ] || refuse "main doesn't exist yet: someone with admin starts it"
+    [ "$new" != "$zero" ] || refuse "main can't be deleted"
+    if [ -n "$(branch_at "$new")" ] && git merge-base --is-ancestor "$old" "$new"; then
+        not_theirs "$old" "$new"
+        return
+    fi
+    set -- $(git rev-list --parents -n 1 "$new")
+    [ $# -eq 3 ] || refuse "with merge, main moves only to a branch's tip or to a merge of a branch into it"
+    [ "$2" = "$old" ] || refuse "a merge's first parent must be main as it is ($old)"
+    tip=$3
+    [ -n "$(branch_at "$tip")" ] || refuse "merge a branch that is on the server ($tip isn't a branch's tip)"
+    merged=$(git merge-tree --write-tree "$old" "$tip" 2>/dev/null) ||
+        refuse "the branch doesn't merge cleanly into main (or git is older than 2.38): its author rebases it"
+    [ "$(echo "$merged" | head -n 1)" = "$(git rev-parse "$new^{tree}")" ] ||
+        refuse "a merge may add nothing of its own: push the merge exactly as git makes it"
+    not_theirs "$old" "$tip"
+}
+
 while read old new ref; do
-    case "$ref" in
-        refs/heads/main|refs/heads/main/*|refs/tags/*)
-            echo "zapper: $REMOTE_USER has write access: push a branch; $ref needs admin (ask with credentials_request)" >&2
-            exit 1 ;;
+    # Who pushed each commit new to the repository, for the merge check.
+    if [ "$new" != "$zero" ]; then
+        git rev-list "$new" --not --all | sed "s/\$/ $REMOTE_USER/" >> "$pushed"
+    fi
+    case "$ZAPPER_GIT_LEVEL" in
+        admin) ;;
+        merge)
+            [ "$ref" = refs/heads/main ] ||
+                refuse "$REMOTE_USER has merge: they merge into main, and push nothing else ($ref); someone with write pushes branches"
+            merge_into_main "$old" "$new" ;;
+        *)
+            case "$ref" in
+                refs/heads/main|refs/heads/main/*|refs/tags/*)
+                    refuse "$REMOTE_USER has write access: push a branch; $ref needs merge (into main) or admin (ask with credentials_request)" ;;
+            esac ;;
     esac
 done
 exit 0
@@ -474,7 +536,9 @@ pub async fn cluster_access(
     let sa = format!("w-{worker}");
     let bindings: Vec<(&str, &str)> = match level {
         Level::None => vec![],
-        Level::Read => vec![("dev", "view")],
+        // Merge is git's alone and never granted on the cluster: if it were,
+        // it would be no more than read.
+        Level::Read | Level::Merge => vec![("dev", "view")],
         Level::Write => vec![("dev", "edit")],
         Level::Admin => vec![("dev", "edit"), ("prod", "admin")],
     };

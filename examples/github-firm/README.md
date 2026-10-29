@@ -30,7 +30,7 @@ Then, on GitHub, in an account of yours (an organisation, or your own login):
    ```
 
 3. **`main` protected**: in the repository's settings, a branch ruleset on `main` that requires a pull request and blocks force pushes, so only a merged pull request changes it.
-4. **A repository for the knowledge base**, `kb`, left empty: the daemon gives it its layout (`AGENTS.md`, `index.md`, `log.md`, `raw/`, `wiki/`) when it is first used. Its `main` is merged on the firm's server by Lin and pushed out by the daemon, so protect it with a ruleset that lets only your App update `main` (add the App to the ruleset's bypass list); GitHub's copy is for you to read.
+4. **A repository for the knowledge base**, `kb`, left empty: the daemon gives it its layout (`AGENTS.md`, `index.md`, `log.md`, `wiki/`) when it is first used. Its `main` is merged on the firm's server by Lin and pushed out by the daemon, so protect it with a ruleset that lets only your App update `main` (add the App to the ruleset's bypass list); GitHub's copy is for you to read.
 
 Then the App, from the repository's root on the zapper host:
 
@@ -73,7 +73,7 @@ zapper --config examples/github-firm/zapper.yaml check
    - **Her budget request**: `zapper firm budget octo approve b-1`, or the Kickoff tab.
    - **Background checks** of her hires, which come to you because she holds security: `zapper firm screen octo c-1 --approve --note "ok"`, or the Security tab.
    - **Git access**: each hire asks for `git:shopping-list` at `write`, to push branches to the firm's server and publish them; Ada decides those. Nobody pushes `main`: it comes from GitHub.
-   - **The knowledge base**: every hire reads `kb` from being cleared, and asks Ada for `write` to contribute. Lin asks for `admin` on `kb`, to merge; that goes to Ada as CEO. A contribution is a branch Lin reviews and merges.
+   - **The knowledge base**: every hire reads `kb` from being cleared, and asks Ada for `write` to contribute. Lin asks for `merge` on `kb`, which lets her merge others' branches and nothing else; that goes to Ada as CEO. A contribution is a branch Lin reviews and merges; she writes nothing in it herself, so every page has a second pair of eyes.
 
 4. **Merge the pull requests**, on GitHub, when the author mails you that one is reviewed and its checks pass. The daemon fetches `main` back and tells the author. A workflow change comes to you by mail as a patch, since a branch that changes `.github/workflows/` can't be published: apply it yourself if you agree.
 
