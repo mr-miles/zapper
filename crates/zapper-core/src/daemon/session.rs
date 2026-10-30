@@ -187,6 +187,11 @@ impl SessionDir {
             .map(|m| m.blocks() * 512)
             .sum()
     }
+    /// A persistent session's resume token: what its agent sends to take
+    /// its control channel again (`GuestMsg::Resume`).
+    pub fn resume_token(&self) -> PathBuf {
+        self.root.join("resume.token")
+    }
     /// A persistent session as it was created ([`Saved`]), so a daemon that
     /// starts again lists it, stopped.
     pub fn saved(&self) -> PathBuf {
@@ -370,6 +375,11 @@ impl GuestRuntime {
     /// The next terminal id.
     pub fn next_shell(&self) -> u64 {
         self.next_shell.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// New terminals get numbers after `n`, one the guest already has.
+    pub fn shells_after(&self, n: u64) {
+        self.next_shell.fetch_max(n + 1, Ordering::Relaxed);
     }
 
     /// A permit for one concurrent exec decision, or `None` over the cap.

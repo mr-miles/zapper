@@ -142,7 +142,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - An inspected request is judged on the path and method the upstream will act on: the path decoded and with dot segments resolved, and forwarded so; a path upstreams may read differently, and an override naming another method, refused.
 - The proxy connects to the address it checked. Loopback, link-local and host addresses are unreachable, and private ranges need `daemon.private_networks`.
 - Passthrough connections are bound to the TLS server name; inspected ones present a per-session CA and override `Host`.
-- The host accepts only the first control connection; the agent accepts terminal connections only from CID 2.
+- The host accepts only the first control connection, and afterwards, for a persistent session, only one whose first line carries the session's resume token; the agent accepts terminal connections only from CID 2.
 - A persistent session boots only disks whose hashes match those recorded at its last stop, or whose change (or missing hashes) the operator accepted; both are recorded.
 - A socket service names a file in the daemon's `state/services/` directory, never a path; its program is told the caller in a line the daemon sends first, from the VM the connection came from, before any byte from the guest.
 - The seccomp filter kills foreign-arch and x32 syscalls, so exec checks cannot be bypassed through another syscall table.

@@ -142,6 +142,28 @@ pub(crate) async fn pump_shell<C>(
     );
 }
 
+impl Session {
+    /// The persistent terminals the guest says it keeps, when its control
+    /// channel comes back (a daemon that adopts the session knows none of
+    /// them): listed, detached, to attach to again, their recordings going
+    /// on in their files.
+    pub(crate) fn adopt_terminals(&self, ids: &[u64]) {
+        let mut terminals = self.terminals.lock().unwrap();
+        for &id in ids {
+            self.runtime.shells_after(id);
+            if terminals.contains_key(&id) {
+                continue;
+            }
+            let cast = Recorder::reopen(self.dir.root(), id);
+            let t = Terminal::new(id, vec![], (24, 80), true, cast);
+            // What it recorded before is in its file: the guest's replay
+            // starts later, or a gap is marked.
+            t.state.lock().unwrap().recorded = u64::MAX / 2;
+            terminals.insert(id, Arc::new(t));
+        }
+    }
+}
+
 /// What a watcher of a terminal receives.
 #[derive(Debug, Clone)]
 pub enum TermChunk {
@@ -302,6 +324,22 @@ impl Recorder {
         if let Some(f) = r.file.as_mut() {
             let _ = f.line(header.to_string().as_bytes());
         }
+        r
+    }
+
+    /// Goes on with terminal `id`'s recording, written by an earlier daemon:
+    /// its times start again from zero, after a marker.
+    fn reopen(dir: &Path, id: u64) -> Self {
+        let path = dir.join(format!("shell-{id}.cast"));
+        let mut r = if path.exists() {
+            Recorder {
+                file: record::Writer::open(&path).ok(),
+                start: Instant::now(),
+            }
+        } else {
+            Recorder::new(dir, id, None, &[])
+        };
+        r.write("m", b"recording goes on after a daemon restart");
         r
     }
 

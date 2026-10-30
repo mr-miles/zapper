@@ -33,7 +33,8 @@ Each office worker runs in a zapper session, and zapper assumes that whatever ru
 | Host directories are copied into per-session disks, so host files stay unchanged | Host | Yes |
 | Lifetime (`ttl_secs`), CPU, memory and disk size | Host, Firecracker | Yes |
 | Limits on input from the guest: line and frame sizes, connections per session, concurrent exec checks, pending approvals | Host | Yes |
-| The host accepts one control connection, which the agent makes before the workload starts, then removes the socket | Host | Yes |
+| The host accepts one control connection, which the agent makes before the workload starts, then removes the socket. For a persistent session, whose agent connects again when the connection is lost (the daemon restarted), the host takes a new one only if its first line carries the resume token `Init` gave the agent, then removes the socket again; any other is closed and recorded | Host | Yes |
+| While a persistent session's host is gone, the guest's exec checks wait, and are refused after 60 seconds | Guest agent | No |
 | Audit log, terminal recordings, console log (capped at 1 MiB) | Host | Yes |
 | With a keeper ([the record](#the-record)), the record can only be appended to by the daemon's user: firms' journals and transcripts, audit logs and terminal recordings belong to `zapper-keeper`, a separate user | `zapper-keeper`, OS users | Yes |
 | Each `execve` and `execveat` of the workload waits for the host's decision | Guest agent (seccomp user notification) | No |

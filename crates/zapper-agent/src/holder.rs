@@ -116,6 +116,11 @@ pub fn start(
     Ok(())
 }
 
+/// The persistent terminals open, for a host connecting again.
+pub fn ids() -> Vec<u64> {
+    holders().lock().unwrap().keys().copied().collect()
+}
+
 /// Hands `conn` to terminal `id`'s holder; it takes over from a connection
 /// attached already.
 pub fn attach(id: u64, conn: &File, size: Option<(u16, u16)>) -> Result<()> {

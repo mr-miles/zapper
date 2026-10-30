@@ -81,7 +81,7 @@ The guest and the daemon use vsock, a direct channel between a VM and its host. 
 | Terminal | the daemon, once per terminal | Your keystrokes in, the workload's output out |
 | Network | the guest, per connection | The guest's internet traffic ([network](network.md)) |
 
-The daemon accepts one control connection per session. After that the socket is removed, so a workload can't pretend to be the agent.
+The daemon accepts one control connection per session. After that the socket is removed, so a workload can't pretend to be the agent. A persistent session's agent is given a resume token in `Init`, kept in PID 1's memory: when its control connection is lost, it connects again and sends the token first (`resume`), with its persistent terminals, then asks again the exec checks that were waiting; the daemon takes that connection only, and removes the socket again. Meanwhile the guest's execs wait, refused after 60 seconds. A connection without the token is closed, and the agent, which never gives up, tries again every two seconds; the daemon checks a few at once, so one that sends nothing holds up no other, and records refusals at most every ten seconds, counted. `zapper stop` still stops the session: its VM is killed when no agent answers. A session that isn't persistent powers off when its control connection is lost.
 
 The CLI talks to the daemon over a unix socket that only your user can open. The web UI, for watching firms and sessions, the board's writes and answering approvals, uses `127.0.0.1:7878`. Both are described on the [API](api.md) page.
 

@@ -109,14 +109,32 @@ pub struct GuestFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMsg {
-    Init { spec: Box<GuestSpec> },
-    ExecReply { id: u64, allow: bool },
+    Init {
+        spec: Box<GuestSpec>,
+        /// For a persistent session: what the agent, when its control
+        /// connection is lost, sends back on a new one (`GuestMsg::Resume`),
+        /// to be taken for itself; kept in PID 1's memory only. Without it,
+        /// a lost connection powers the guest off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
+    },
+    ExecReply {
+        id: u64,
+        allow: bool,
+    },
     Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestMsg {
+    /// First on a control connection made again, after the first was lost
+    /// (the daemon restarted): the token from `Init`, and the persistent
+    /// terminals the guest keeps.
+    Resume {
+        token: String,
+        terminals: Vec<u64>,
+    },
     /// Setup finished; terminals can be opened.
     Ready,
     /// Setup failed; the session is unusable.

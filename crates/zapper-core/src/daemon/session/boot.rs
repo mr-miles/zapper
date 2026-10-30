@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use zapper_policy::proto::{
-    Forward, GuestDisk, GuestMsg, HostMsg, CONTROL_PORT, MCP_PORT, PROXY_PORT,
+    Forward, GuestDisk, GuestMsg, HostMsg, CONTROL_PORT, MAX_LINE, MCP_PORT, PROXY_PORT,
 };
 use zapper_policy::{evaluate_exec, Action, AnyRule, ExecRequest, ExecRule, Kind, MountMode};
 
@@ -236,13 +236,161 @@ async fn guest_control(
     // workload. Remove the socket so further guest connections are refused.
     drop(listener);
     let _ = std::fs::remove_file(&path);
+    // A persistent session's agent may connect again, with this, when the
+    // connection is lost (the daemon restarted): kept beside the session,
+    // for a daemon that adopts it.
+    let resume = if session.persistent {
+        let token = crate::daemon::random_id(32);
+        crate::util::write_private(&session.dir.resume_token(), token.as_bytes())?;
+        Some(token)
+    } else {
+        None
+    };
+    let init = HostMsg::Init {
+        spec: Box::new(spec),
+        resume,
+    };
+    serve_control(daemon, session, stream, Some(init)).await?;
+    if session.persistent {
+        resume_control(daemon, session).await?;
+    }
+    Ok(())
+}
 
+/// For a persistent session whose control connection was lost: its agent
+/// connects again, and the connection is taken for it only if its first
+/// line is `Resume` with the session's token (others, which could be the
+/// workload's, are closed); then the socket goes again, as after the first
+/// connection. Until the session stops.
+pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
+    let path = session.dir.vsock_port(CONTROL_PORT);
+    let mut status = session.runtime.status().subscribe();
+    loop {
+        if !matches!(*status.borrow(), Status::Starting | Status::Running) {
+            return Ok(());
+        }
+        let token = std::fs::read_to_string(session.dir.resume_token())
+            .context("the session's resume token")?;
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path)?;
+        // Each connection checked in a task of its own, a few at once: one
+        // that sends nothing (which the workload could open) holds up no
+        // other. The first with the token is taken.
+        let (found_tx, mut found_rx) = mpsc::channel::<(tokio::net::UnixStream, Vec<u64>)>(1);
+        let checking = Arc::new(tokio::sync::Semaphore::new(4));
+        let refused: Arc<std::sync::Mutex<(u64, String)>> = Default::default();
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        let (stream, terminals) = loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { continue };
+                    let Ok(permit) = checking.clone().try_acquire_owned() else {
+                        let mut r = refused.lock().unwrap();
+                        r.0 += 1;
+                        r.1 = "too many connections at once".into();
+                        continue;
+                    };
+                    let (tx, token, refused) = (found_tx.clone(), token.clone(), refused.clone());
+                    tokio::spawn(async move {
+                        match resumed(&mut stream, &token).await {
+                            Ok(terminals) => {
+                                let _ = tx.send((stream, terminals)).await;
+                            }
+                            Err(why) => {
+                                let mut r = refused.lock().unwrap();
+                                r.0 += 1;
+                                r.1 = why;
+                            }
+                        }
+                        drop(permit);
+                    });
+                }
+                Some(found) = found_rx.recv() => break found,
+                _ = status.changed() => return Ok(()),
+                // Refusals recorded at most every ten seconds, counted.
+                _ = tick.tick() => note_refused(daemon, session, &refused),
+            }
+        };
+        note_refused(daemon, session, &refused);
+        session.adopt_terminals(&terminals);
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        daemon.emit(
+            Some(session),
+            EventBody::Session {
+                state: "running".into(),
+                detail: Some("its agent connected again".into()),
+            },
+        );
+        serve_control(daemon, session, stream, None).await?;
+    }
+}
+
+/// Records the control connections refused since last time, if any: how
+/// many, and why the last was.
+fn note_refused(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    refused: &std::sync::Mutex<(u64, String)>,
+) {
+    let (n, why) = std::mem::take(&mut *refused.lock().unwrap());
+    if n == 0 {
+        return;
+    }
+    tracing::warn!(session = %session.id, "refused {n} control connections: {why}");
+    daemon.emit(
+        Some(session),
+        EventBody::Session {
+            state: "running".into(),
+            detail: Some(format!(
+                "refused {n} control connection{} (the last: {why})",
+                if n == 1 { "" } else { "s" }
+            )),
+        },
+    );
+}
+
+/// Reads a resumed connection's first line: `Resume` with `token`, and the
+/// persistent terminals the guest keeps.
+async fn resumed(stream: &mut tokio::net::UnixStream, token: &str) -> Result<Vec<u64>, String> {
+    // A byte at a time: the exec checks the agent asks again follow the line
+    // at once, and must stay in the stream for `serve_control`.
+    let line = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut line = Vec::new();
+        loop {
+            match stream.read_u8().await {
+                Ok(b'\n') => return Ok(line),
+                Ok(b) if line.len() < MAX_LINE => line.push(b),
+                Ok(_) => return Err("an oversized first line".to_string()),
+                Err(_) => return Err("closed before its first line".to_string()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "no first line in time".to_string())??;
+    match serde_json::from_slice::<GuestMsg>(&line) {
+        Ok(GuestMsg::Resume {
+            token: t,
+            terminals,
+        }) if t == token => Ok(terminals),
+        Ok(GuestMsg::Resume { .. }) => Err("a wrong resume token".into()),
+        _ => Err("its first line isn't a resumption".into()),
+    }
+}
+
+/// Serves a guest's control connection until it closes: its messages in, and
+/// the host's out (`first` before any).
+async fn serve_control(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    stream: tokio::net::UnixStream,
+    first: Option<HostMsg>,
+) -> Result<()> {
     let (r, mut w) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<HostMsg>(256);
-    tx.send(HostMsg::Init {
-        spec: Box::new(spec),
-    })
-    .await?;
+    if let Some(m) = first {
+        tx.send(m).await?;
+    }
     session.runtime.set_guest(tx.clone());
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -264,6 +412,8 @@ async fn guest_control(
             }
         };
         match msg {
+            // Only first, on a connection made again (`resume_control`).
+            GuestMsg::Resume { .. } => {}
             GuestMsg::Ready => {
                 session.runtime.status().send_replace(Status::Running);
             }
@@ -476,5 +626,101 @@ mod image_tests {
             "{}",
             image_event(&t, &s)
         );
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::daemon::session::NewSession;
+    use crate::testing::TestCore;
+    use tokio::io::AsyncBufReadExt;
+
+    async fn connect(path: &std::path::Path) -> tokio::net::UnixStream {
+        for _ in 0..100 {
+            if let Ok(s) = tokio::net::UnixStream::connect(path).await {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the control socket didn't come back");
+    }
+
+    /// A persistent session's control channel taken again: only with its
+    /// token; the exec check sent right after the resumption is answered,
+    /// so nothing after the first line is lost; the guest's persistent
+    /// terminals are listed.
+    #[tokio::test]
+    async fn the_control_channel_is_taken_again_only_with_the_token() {
+        let t = TestCore::new(
+            "profiles:\n  web: { policy: { exec: [{ action: allow, path: \"*\" }] } }\n",
+        );
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.persistent = true;
+        let s = t.core.test_session(new, true).unwrap();
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        crate::util::write_private(&s.dir.resume_token(), b"the-token").unwrap();
+        let (d, s2) = (t.core.daemon().clone(), s.clone());
+        let task = tokio::spawn(async move { resume_control(&d, &s2).await });
+        let path = s.dir.vsock_port(CONTROL_PORT);
+
+        // One that sends nothing, as the workload could: it holds nobody up.
+        let _silent = connect(&path).await;
+        let mut wrong = connect(&path).await;
+        wrong
+            .write_all(b"{\"type\":\"resume\",\"token\":\"guessed\",\"terminals\":[]}\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let _ = wrong.read_to_end(&mut buf).await;
+        assert!(buf.is_empty(), "closed, unanswered");
+
+        let mut agent = connect(&path).await;
+        agent
+            .write_all(
+                b"{\"type\":\"resume\",\"token\":\"the-token\",\"terminals\":[3]}\n\
+                  {\"type\":\"exec_check\",\"id\":7,\"pid\":10,\"uid\":1000,\"req\":{\"path\":\"/bin/true\"}}\n",
+            )
+            .await
+            .unwrap();
+        let mut reader = tokio::io::BufReader::new(agent);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            line.contains("\"exec_reply\"") && line.contains("\"id\":7"),
+            "{line}"
+        );
+        assert!(!path.exists(), "the socket goes again");
+        let refusals: Vec<String> = t
+            .core
+            .daemon()
+            .recent_events(Some(&s.id))
+            .into_iter()
+            .filter_map(|e| match e.body {
+                EventBody::Session {
+                    detail: Some(d), ..
+                } if d.starts_with("refused") => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refusals,
+            vec!["refused 1 control connection (the last: a wrong resume token)"]
+        );
+        assert!(s.terminals.lock().unwrap().contains_key(&3));
+        assert!(s.runtime.next_shell() > 3);
+
+        s.runtime
+            .status()
+            .send_replace(Status::Stopped("stopped".into()));
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
