@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use zapper_core::{
-    ApiError, Catchup, Core, Cursor, NewSession, Remember, RuleRemoval, ServiceSpec, ServiceTarget,
-    SessionInfo, TermChunk, TerminalInfo,
+    ApiError, BuildMessage, BuildRequest, Catchup, Core, Cursor, NewSession, Remember, RuleRemoval,
+    ServiceSpec, ServiceTarget, SessionInfo, TermChunk, TerminalInfo,
 };
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{
@@ -76,6 +76,8 @@ fn read_routes() -> Router<Core> {
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
         .route("/services", get(list_services))
+        .route("/images", get(list_images))
+        .route("/images/builds/{id}", get(follow_build))
 }
 
 /// What a client of the core (the office) adds to the API and the UI: its
@@ -110,6 +112,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
         .route("/evaluate", post(evaluate))
+        .route("/images/{name}/build", post(build_image))
         .route("/approvals/{id}", post(answer));
     Router::new().nest(
         "/v1",
@@ -817,6 +820,98 @@ async fn events(
                 .unwrap_or_default(),
         })
     });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn list_images(State(d): D) -> R<Json<Value>> {
+    Ok(Json(
+        json!({ "images": d.images()?, "builds": d.image_builds() }),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct NewBuild {
+    /// The recipe's files, by argument name, instead of their defaults.
+    args: BTreeMap<String, String>,
+    /// Without a recipe: the OCI image to start from, and the steps.
+    from: Option<String>,
+    run: Vec<String>,
+    size: Option<String>,
+}
+
+/// Starts building an image in the daemon, from the running config: `202`
+/// with the build's id, whose log `/images/builds/{id}` streams; `409`
+/// while another build runs.
+async fn build_image(
+    State(d): D,
+    Path(name): Path<String>,
+    body: String,
+) -> R<(StatusCode, Json<Value>)> {
+    let b: NewBuild = if body.trim().is_empty() {
+        NewBuild::default()
+    } else {
+        parse_body(&body)?
+    };
+    if let Some(running) = d.image_builds().into_iter().find(|b| b.outcome.is_none()) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "image {} is being built (build {}); one build runs at a time",
+                running.name, running.id
+            ),
+        ));
+    }
+    let req = BuildRequest {
+        args: b
+            .args
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect(),
+        from: b.from,
+        run: b.run,
+        size: b.size,
+    };
+    let build = d.build_image(&name, req)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": build.id, "name": build.name })),
+    ))
+}
+
+/// A build's log as server-sent events: `{"line"}` each, `{"dropped": n}`
+/// for lines no longer kept, and last `{"end": {"built": PATH}}` or
+/// `{"end": {"failed": WHY}}`, when the stream ends.
+async fn follow_build(
+    State(d): D,
+    Path(id): Path<u64>,
+) -> R<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let build = d
+        .image_build(id)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no build {id}")))?;
+    let f = build.follow();
+    let mut head = Vec::new();
+    if f.dropped > 0 {
+        head.push(json!({ "dropped": f.dropped }));
+    }
+    head.extend(f.kept.into_iter().map(|l| json!({ "line": l })));
+    let tail = match f.outcome {
+        Some(o) => stream::iter(vec![json!({ "end": o })]).boxed(),
+        None => stream::unfold(Some(f.live), |live| async move {
+            let mut live = live?;
+            use tokio::sync::broadcast::error::RecvError;
+            match live.recv().await {
+                Ok(BuildMessage::Line(l)) => Some((json!({ "line": l }), Some(live))),
+                Ok(BuildMessage::End(o)) => Some((json!({ "end": o }), None)),
+                Err(RecvError::Lagged(n)) => Some((json!({ "dropped": n }), Some(live))),
+                Err(RecvError::Closed) => None,
+            }
+        })
+        .boxed(),
+    };
+    let stream = stream::iter(head)
+        .chain(tail)
+        .map(|v| Ok(SseEvent::default().json_data(v).unwrap_or_default()));
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 

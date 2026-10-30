@@ -22,6 +22,7 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon};
 
+pub use crate::daemon::builds::{BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome};
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
@@ -589,6 +590,98 @@ impl EventApi for Core {
         history: bool,
     ) -> (Vec<Catchup>, Option<u64>) {
         self.d.events.catch_up(session, after, history)
+    }
+}
+
+/// What to build: by the image's recipe in the running config, with
+/// `args` (`NAME=PATH`) for its files; or, with `from`, from that OCI image
+/// and `run` steps. `size` overrides the content-based size.
+#[derive(Debug, Clone, Default)]
+pub struct BuildRequest {
+    pub args: Vec<String>,
+    pub from: Option<String>,
+    pub run: Vec<String>,
+    pub size: Option<String>,
+}
+
+/// Root filesystem images: listing them, and building them in the daemon.
+pub trait ImageApi {
+    /// The images in the images directory, as `zapper image ls` shows them.
+    fn images(&self) -> Result<Vec<Value>>;
+    /// Starts building `name`, one build at a time; its log is followed with
+    /// [`ImageBuild::follow`]. A recipe that doesn't resolve is refused here,
+    /// before anything runs.
+    fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>>;
+    fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>>;
+    /// The build running and the latest that ended.
+    fn image_builds(&self) -> Vec<BuildInfo>;
+}
+
+impl ImageApi for Core {
+    fn images(&self) -> Result<Vec<Value>> {
+        crate::images::list(&self.d.paths.images)
+    }
+
+    fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>> {
+        let recipe = {
+            let c = self.d.config.read().unwrap();
+            crate::images::recipe(&c, name, req.from, req.run, &req.args)?
+        };
+        let (dir, image, size) = (self.d.paths.images.clone(), name.to_string(), req.size);
+        let event = |b: &ImageBuild, state: &str, detail: Option<String>| EventBody::Image {
+            name: b.name.clone(),
+            build: b.id,
+            state: state.into(),
+            detail,
+        };
+        let (d, d2) = (self.d.clone(), self.d.clone());
+        let started = EventBody::Image {
+            name: name.to_string(),
+            build: 0,
+            state: "started".into(),
+            detail: None,
+        };
+        let build = self.d.builds.start(
+            name,
+            move |id, log| {
+                // On the build's thread, before its work: before its end.
+                let mut started = started;
+                if let EventBody::Image { build, .. } = &mut started {
+                    *build = id;
+                }
+                d2.emit(None, started);
+                crate::images::build(
+                    crate::images::Build {
+                        name: &image,
+                        from: &recipe.from,
+                        run: &recipe.run,
+                        inputs: &recipe.inputs,
+                        copies: &recipe.copies,
+                        after: &recipe.after,
+                        size: size.as_deref(),
+                        dir: &dir,
+                    },
+                    log,
+                )
+            },
+            move |b| {
+                let body = match b.info().outcome {
+                    Some(Outcome::Built(path)) => event(b, "built", Some(path)),
+                    Some(Outcome::Failed(e)) => event(b, "failed", Some(e)),
+                    None => return,
+                };
+                d.emit(None, body);
+            },
+        )?;
+        Ok(build)
+    }
+
+    fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>> {
+        self.d.builds.get(id)
+    }
+
+    fn image_builds(&self) -> Vec<BuildInfo> {
+        self.d.builds.list()
     }
 }
 

@@ -5,8 +5,7 @@
 mod client;
 mod github;
 use zapper_core::prelude::*;
-use zapper_core::util;
-mod image;
+use zapper_core::{images, util};
 mod office;
 mod term;
 
@@ -360,6 +359,10 @@ enum ImageCmd {
         /// Image size, e.g. `4GiB` (default: content plus headroom).
         #[arg(long)]
         size: Option<String>,
+        /// Build here, from the config file, even when the daemon runs; by
+        /// default the daemon builds from its running config when it is up.
+        #[arg(long)]
+        local: bool,
     },
     Ls,
 }
@@ -908,22 +911,33 @@ async fn run(cli: Cli) -> Result<i32> {
                     from,
                     run,
                     size,
+                    local,
                 } => {
-                    let r = image::recipe(&config, &name, from, run, &args)?;
-                    let out = image::build(image::Build {
-                        name: &name,
-                        from: &r.from,
-                        run: &r.run,
-                        inputs: &r.inputs,
-                        copies: &r.copies,
-                        after: &r.after,
-                        size: size.as_deref(),
-                        dir: &dir,
-                    })?;
+                    let daemon = !local
+                        && tokio::net::UnixStream::connect(client::socket_path())
+                            .await
+                            .is_ok();
+                    if daemon {
+                        return build_in_daemon(&c, &name, &args, from, run, size).await;
+                    }
+                    let r = images::recipe(&config, &name, from, run, &args)?;
+                    let out = images::build(
+                        images::Build {
+                            name: &name,
+                            from: &r.from,
+                            run: &r.run,
+                            inputs: &r.inputs,
+                            copies: &r.copies,
+                            after: &r.after,
+                            size: size.as_deref(),
+                            dir: &dir,
+                        },
+                        &|l| eprintln!("{l}"),
+                    )?;
                     println!("built {}", out.display());
                 }
                 ImageCmd::Ls => {
-                    let v = image::list(&dir)?;
+                    let v = images::list(&dir)?;
                     if cli.json {
                         print_json(&json!(v));
                     } else {
@@ -944,6 +958,73 @@ async fn run(cli: Cli) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// `zapper image build` through the daemon: it builds from its running
+/// config; its log is printed as it comes, and the exit code says how it
+/// ended.
+async fn build_in_daemon(
+    c: &Client,
+    name: &str,
+    args: &[String],
+    from: Option<String>,
+    run: Vec<String>,
+    size: Option<String>,
+) -> Result<i32> {
+    let mut named = serde_json::Map::new();
+    for a in args {
+        let (k, v) = a
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--arg {a:?}: NAME=PATH"))?;
+        // The daemon reads the files: give it absolute paths.
+        let path = std::path::absolute(v).unwrap_or_else(|_| PathBuf::from(v));
+        named.insert(k.into(), json!(path));
+    }
+    let body = json!({ "args": named, "from": from, "run": run, "size": size });
+    let started = c
+        .json(
+            Method::POST,
+            &format!("/v1/images/{name}/build"),
+            Some(body.to_string()),
+        )
+        .await?;
+    eprintln!(
+        "the daemon is building {name} (build {})",
+        s(&started["id"])
+    );
+    let mut body = c
+        .stream(&format!("/v1/images/builds/{}", s(&started["id"])))
+        .await?;
+    let mut buf = String::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.push_str(&String::from_utf8_lossy(data));
+        while let Some(i) = buf.find('\n') {
+            let line: String = buf.drain(..=i).collect();
+            let Some(v) = line
+                .trim()
+                .strip_prefix("data:")
+                .and_then(|j| serde_json::from_str::<Value>(j.trim()).ok())
+            else {
+                continue;
+            };
+            if let Some(l) = v["line"].as_str() {
+                eprintln!("{l}");
+            } else if let Some(n) = v["dropped"].as_u64() {
+                eprintln!("({n} lines not kept)");
+            } else if let Some(path) = v["end"]["built"].as_str() {
+                println!("built {path}");
+                return Ok(0);
+            } else if let Some(why) = v["end"]["failed"].as_str() {
+                eprintln!("zapper: building {name} failed: {why}");
+                return Ok(1);
+            }
+        }
+    }
+    bail!("the daemon's build log ended without saying how the build went")
 }
 
 async fn attach(c: &Client, id: &str, command: &[String], system: bool) -> Result<i32> {
@@ -1355,7 +1436,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             "sudo apt install iproute2 nftables, or use network: vsock",
         );
     }
-    let oci = image::engine();
+    let oci = images::engine();
     let oci_ok = std::process::Command::new(&oci)
         .arg("--version")
         .output()

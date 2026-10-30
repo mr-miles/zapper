@@ -8,6 +8,7 @@
 pub(crate) mod addr;
 pub(crate) mod api_error;
 pub(crate) mod approvals;
+pub(crate) mod builds;
 pub(crate) mod clients;
 pub(crate) mod dbwire;
 pub(crate) mod deciders;
@@ -70,6 +71,7 @@ pub struct Daemon {
     pub(crate) services: services::Services,
     pub(crate) deciders: deciders::Deciders,
     pub(crate) gateway: gateway::Gateway,
+    pub(crate) builds: builds::Builds,
 }
 
 /// Accepts connections on `listener` and serves each with `handle`, running at
@@ -192,6 +194,7 @@ impl Daemon {
             services: services::Services::default(),
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
+            builds: builds::Builds::default(),
         }))
     }
 

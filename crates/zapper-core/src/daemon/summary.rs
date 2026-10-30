@@ -168,6 +168,15 @@ impl EventBody {
                         .unwrap_or_default(),
                 )
             }
+            EventBody::Image {
+                name,
+                build,
+                state,
+                detail,
+            } => format!(
+                "{state} image {name} (build {build}){}",
+                opt(detail, |d| format!("  {d}"))
+            ),
             EventBody::Mcp {
                 server,
                 tool,

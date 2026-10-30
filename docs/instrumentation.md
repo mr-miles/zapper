@@ -22,6 +22,7 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
+| `image` | `name`, `build`, `state` (`started`, `built`, `failed`), `detail` (the image's file, or why it failed) | An image build the daemon runs ([images](images.md)) |
 | `mcp` | `server`, `tool`, `ok`, `ms`, `error` (the first 512 characters) | A tool called through the [MCP gateway](architecture.md), an office tool included; a call to a server the session hasn't is one too, refused. Names are kept to 128 characters; arguments and results aren't recorded |
 
 The live stream adds `summary`, the event as one line, and `verdict` (`allow`, `deny` or `ask`) when the event decided something; `zapper events` and the UI's events view show those, and the audit log keeps the fields alone.

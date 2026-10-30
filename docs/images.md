@@ -10,6 +10,8 @@ An image is an ext4 file built from a container image's filesystem. A profile se
 
 `zapper image build NAME` builds the image from its recipe in the config, under `images:`: the OCI image it starts `from`, the commands it `run`s, the files or directories from the host it takes as `args` (each a name, a description and a default), where it `copy`s them, after those commands, and the commands to run once they are in (`after`). With the copies after `run`, changing an argument's file rebuilds only from the copy: the steps before it stay cached. `make image IMAGE=NAME` runs it after `make build`. Without a recipe, `zapper image build NAME --from REF [--run CMD]…` gives the base and steps on the command line.
 
+When the daemon is running, `zapper image build` asks it to build (`POST /v1/images/NAME/build`), from its running config, and prints the build's log as it comes; it exits 0 if the image was built. The daemon runs one build at a time and keeps each build's log, its latest 5000 lines, for anyone who follows it later (`GET /v1/images/builds/ID`), such as a UI; each build is an `image` event when it starts and when it ends. Without a daemon, or with `--local`, the CLI builds itself, from the config file; `make image` always does (`--local`), so it builds from the checkout's config whatever daemon runs. Either way, the same code builds the image, and the files a recipe's `args` name are read by whichever builds.
+
 ```yaml
 images:
   office-fake:

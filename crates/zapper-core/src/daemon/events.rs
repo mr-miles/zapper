@@ -124,6 +124,15 @@ pub enum EventBody {
         event: String,
         detail: serde_json::Value,
     },
+    /// An image build through the API (`builds`): `started`, `built` or
+    /// `failed`.
+    Image {
+        name: String,
+        build: u64,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// A tool called through the MCP gateway (`gateway`).
     Mcp {
         server: String,

@@ -933,3 +933,33 @@ async fn events_resume_after_the_last_one_seen() {
     let bad = get(&app, "/v1/events?after=nonsense").await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
 }
+
+/// Images through the API: the list, a recipe that doesn't resolve refused
+/// before anything runs, and a build that isn't there.
+#[tokio::test]
+async fn images_are_listed_and_unknown_recipes_refused() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let list = get(&app, "/v1/images").await;
+    assert_eq!(
+        list.json(),
+        json!({ "images": [], "builds": [] }),
+        "{}",
+        list.body
+    );
+    let r = post(&app, "/v1/images/nonesuch/build", "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    assert!(r.body.contains("no recipe for image"), "{}", r.body);
+    let r = post(
+        &app,
+        "/v1/images/web/build",
+        r#"{"from": "x", "args": {"a": "/b"}}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.contains("with --from there is none"), "{}", r.body);
+    assert_eq!(
+        get(&app, "/v1/images/builds/7").await.status,
+        StatusCode::NOT_FOUND
+    );
+}

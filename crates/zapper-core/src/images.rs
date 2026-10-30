@@ -6,9 +6,14 @@
 //! (docker) have no such thing: a helper container with e2fsprogs extracts
 //! the filesystem as root and writes the ext4 file. The guest agent is not
 //! part of the image: it boots from an initramfs the daemon builds.
+//!
+//! A build reports what it does, the container engine's output among it, a
+//! line at a time to the log it is given: the terminal for the CLI, the
+//! build's record in the daemon (`daemon::builds`).
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
@@ -38,8 +43,11 @@ fn has_unshare(engine: &str) -> bool {
     Path::new(engine).file_name().is_some_and(|n| n == "podman")
 }
 
+/// Where a build's lines go.
+pub type Log<'a> = &'a dyn Fn(&str);
+
 /// A local image with tar and mkfs.ext4, built once.
-fn mkfs_image(oci: &str) -> Result<String> {
+fn mkfs_image(oci: &str, log: Log) -> Result<String> {
     let tag = "localhost/zapper-mkfs:1";
     if run(Command::new(oci).args(["image", "inspect", tag])).is_ok() {
         return Ok(tag.into());
@@ -49,17 +57,64 @@ fn mkfs_image(oci: &str) -> Result<String> {
         work.join("Containerfile"),
         "FROM docker.io/library/ubuntu:26.04\nRUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs tar && rm -rf /var/lib/apt/lists/*\n",
     )?;
-    eprintln!("building {tag}");
-    let status = Command::new(oci)
-        .args(["build", "-t", tag, "-f"])
-        .arg(work.join("Containerfile"))
-        .arg(&work)
-        .status()?;
+    log(&format!("building {tag}"));
+    let built = run_logged(
+        Command::new(oci)
+            .args(["build", "-t", tag, "-f"])
+            .arg(work.join("Containerfile"))
+            .arg(&work),
+        log,
+    );
     let _ = std::fs::remove_dir_all(&work);
-    if !status.success() {
-        bail!("{oci} build of {tag} failed");
-    }
+    built.with_context(|| format!("{oci} build of {tag}"))?;
     Ok(tag.into())
+}
+
+/// Runs `cmd`, each line of its output (stdout and stderr) to `log` as it
+/// comes; an error if it fails.
+fn run_logged(cmd: &mut Command, log: Log) -> Result<()> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {cmd:?}"))?;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|o| Box::new(o) as Box<dyn std::io::Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|e| Box::new(e) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|r| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(r).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    })
+    .collect();
+    drop(tx);
+    for line in rx {
+        log(&line);
+    }
+    for r in readers {
+        let _ = r.join();
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("{:?} failed ({status})", cmd.get_program());
+    }
+    Ok(())
 }
 
 fn run(cmd: &mut Command) -> Result<String> {
@@ -218,7 +273,7 @@ pub struct Build<'a> {
     pub dir: &'a Path,
 }
 
-pub fn build(b: Build<'_>) -> Result<PathBuf> {
+pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
     if !b
         .name
         .chars()
@@ -233,7 +288,7 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
     let oci = engine();
     let work = tempdir()?;
     let reference = if b.run.is_empty() && b.copies.is_empty() && b.after.is_empty() {
-        eprintln!("pulling {}", b.from);
+        log(&format!("pulling {}", b.from));
         run(Command::new(&oci).args(["pull", "-q", b.from]))?;
         b.from.to_string()
     } else {
@@ -255,15 +310,15 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
         }
         std::fs::write(work.join("Containerfile"), file)?;
         let tag = format!("localhost/zapper-image-{}", b.name);
-        eprintln!("building {tag} from {}", b.from);
-        let status = Command::new(&oci)
-            .args(["build", "-t", &tag, "-f"])
-            .arg(work.join("Containerfile"))
-            .arg(&work)
-            .status()?;
-        if !status.success() {
-            bail!("{oci} build failed");
-        }
+        log(&format!("building {tag} from {}", b.from));
+        run_logged(
+            Command::new(&oci)
+                .args(["build", "-t", &tag, "-f"])
+                .arg(work.join("Containerfile"))
+                .arg(&work),
+            log,
+        )
+        .with_context(|| format!("{oci} build"))?;
         tag
     };
     let cid = run(Command::new(&oci).args(["create", &reference, "/bin/true"]))?;
@@ -280,7 +335,7 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
     let out = b.dir.join(format!("{}.ext4", b.name));
     let tmp = b.dir.join(format!(".{}.ext4.tmp", b.name));
     let root = work.join("root");
-    eprintln!("writing {} ({} MiB)", out.display(), size >> 20);
+    log(&format!("writing {} ({} MiB)", out.display(), size >> 20));
     let kib = format!("{}k", size / 1024);
     if has_unshare(&oci) {
         let script = r#"set -e; mkdir "$1"; tar -C "$1" -xf "$2"; mkfs.ext4 -q -F -L zapper -d "$1" "$3" "$4"; rm -rf "$1""#;
@@ -294,7 +349,7 @@ pub fn build(b: Build<'_>) -> Result<PathBuf> {
         run(&mut unshare)?;
     } else {
         // As root in a container, which also owns the output until chown.
-        let helper = mkfs_image(&oci)?;
+        let helper = mkfs_image(&oci, log)?;
         let out_dir = std::fs::canonicalize(b.dir)?;
         let tmp_name = tmp.file_name().unwrap().to_string_lossy().into_owned();
         let script = r#"set -e; mkdir /r; tar -C /r -xpf /w/rootfs.tar; mkfs.ext4 -q -F -L zapper -d /r "/out/$1" "$2"; chown "$3" "/out/$1""#;

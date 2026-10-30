@@ -64,7 +64,7 @@ install: build
 	install -m 0755 $(addprefix $(TARGET)/,$(BINS)) $(PREFIX)/bin/
 
 image: build
-	$(ZAPPER) image build $(IMAGE)
+	$(ZAPPER) image build --local $(IMAGE)
 
 kernel:
 	scripts/build-kernel.sh $(KERNEL)
@@ -89,11 +89,11 @@ hooks:
 # is rebuilt first (quick when only they changed).
 test-e2e: build
 	tests/e2e.sh $(ZAPPER)
-	$(ZAPPER) image build office-fake
+	$(ZAPPER) image build --local office-fake
 	tests/e2e-office.sh $(ZAPPER)
 
 test-e2e-office: build
-	$(ZAPPER) image build office-fake
+	$(ZAPPER) image build --local office-fake
 	tests/e2e-office.sh $(ZAPPER)
 
 clean:

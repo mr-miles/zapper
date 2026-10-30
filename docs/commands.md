@@ -96,7 +96,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper eval [-s ID\|-p PROFILE] exec PATH [ARGV…]` | Dry run of an exec |
 | `zapper config show\|startup\|diff\|save\|reload\|edit\|apply FILE` | [Running and startup config](configuration.md#running-and-startup-config) |
 | `zapper profile ls\|show NAME\|set NAME FILE\|rm NAME` | Profiles in the running config |
-| `zapper image build NAME [--arg ARG=PATH]… [--size S]`, or `zapper image build NAME --from REF [--run CMD]…` / `zapper image ls` | Build an image from its recipe in the config, or from a base and steps given here; [images](images.md) |
+| `zapper image build NAME [--arg ARG=PATH]… [--size S] [--local]`, or `zapper image build NAME --from REF [--run CMD]…` / `zapper image ls` | Build an image from its recipe in the config, or from a base and steps given here: by the daemon, from its running config, when it is up (`--local`: here, from the config file); [images](images.md) |
 
 Examples:
 
