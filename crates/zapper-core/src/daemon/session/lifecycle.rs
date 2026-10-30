@@ -17,14 +17,7 @@ use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon, E
 /// Creates a session without booting it: its profile resolved, its
 /// directory and audit log, its rules; listed, as starting.
 pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Session>> {
-    let (mut resolved, max, overcommit) = {
-        let c = daemon.config.read().unwrap();
-        (
-            c.resolve(&new.profile)?,
-            c.daemon.max_sessions,
-            c.daemon.memory_overcommit,
-        )
-    };
+    let mut resolved = daemon.config.read().unwrap().resolve(&new.profile)?;
     if let Some(overlay) = &new.agent_overlay {
         let mut agent = serde_json::to_value(&resolved.agent)?;
         zapper_policy::merge(&mut agent, overlay);
@@ -41,22 +34,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         let extra = h.mounts(&resolved.agent, &home);
         resolved.mounts.extend(extra);
     }
-    let running = daemon.sessions.running();
-    if running >= max {
-        bail!("{running} sessions running; daemon.max_sessions is {max}");
-    }
-    let memory_warning = memory_admission(
-        &Memory {
-            given: daemon.sessions.memory_mib(),
-            want: resolved.engine.memory_mib as u64,
-            total: crate::util::host_memory_mib("MemTotal"),
-            available: crate::util::host_memory_mib("MemAvailable"),
-        },
-        overcommit,
-    )?;
-    if let Some(w) = &memory_warning {
-        tracing::warn!("profile {}: {w}", new.profile);
-    }
+    let memory_warning = admit(daemon, &new.profile, resolved.engine.memory_mib)?;
     let id = random_id(6);
     let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&id));
     std::fs::create_dir_all(dir.root())?;
@@ -101,6 +79,33 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         },
     );
     Ok(session)
+}
+
+/// Whether another VM may start, before it is listed as starting: within
+/// `daemon.max_sessions`, and the host's memory (see [`memory_admission`]).
+/// A warning, logged, when it may but the memory is short.
+fn admit(daemon: &Daemon, profile: &str, memory_mib: u32) -> Result<Option<String>> {
+    let (max, overcommit) = {
+        let c = daemon.config.read().unwrap();
+        (c.daemon.max_sessions, c.daemon.memory_overcommit)
+    };
+    let running = daemon.sessions.running();
+    if running >= max {
+        bail!("{running} sessions running; daemon.max_sessions is {max}");
+    }
+    let warning = memory_admission(
+        &Memory {
+            given: daemon.sessions.memory_mib(),
+            want: memory_mib as u64,
+            total: crate::util::host_memory_mib("MemTotal"),
+            available: crate::util::host_memory_mib("MemAvailable"),
+        },
+        overcommit,
+    )?;
+    if let Some(w) = &warning {
+        tracing::warn!("profile {profile}: {w}");
+    }
+    Ok(warning)
 }
 
 /// The host's memory against a new VM's, in MiB. `total` and `available`
@@ -474,11 +479,7 @@ pub(crate) async fn start(
     // before the disks are checked, so a second start sees it starting.
     let lifecycle = session.lifecycle.lock().await;
     let was = session.runtime.status().borrow().clone();
-    let max = daemon.config.read().unwrap().daemon.max_sessions;
-    let running = daemon.sessions.running();
-    if running >= max {
-        bail!("{running} sessions running; daemon.max_sessions is {max}");
-    }
+    let memory_warning = admit(daemon, &session.profile, session.resolved.engine.memory_mib)?;
     if !session.runtime.claim_start() {
         bail!("session {id} is already running");
     }
@@ -499,7 +500,10 @@ pub(crate) async fn start(
         Some(session),
         EventBody::Session {
             state: "starting".into(),
-            detail: Some("started again, from its kept disks".into()),
+            detail: Some(match &memory_warning {
+                Some(w) => format!("started again, from its kept disks; {w}"),
+                None => "started again, from its kept disks".into(),
+            }),
         },
     );
     if let Some(driver) = &session.driver {
@@ -779,6 +783,27 @@ mod tests {
         t.core.forget_session(&s.id).unwrap();
         assert!(!s.dir.vm().exists());
         assert!(s.dir.audit().exists(), "the record stays");
+    }
+
+    #[tokio::test]
+    async fn a_start_is_admitted_like_a_new_session() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        stop(t.core.daemon(), &s, "stopped").await;
+        if crate::util::host_memory_mib("MemTotal").is_none() {
+            return;
+        }
+        // No host has a millionth of the memory of a 2 GiB VM to give.
+        t.core
+            .daemon()
+            .config
+            .write()
+            .unwrap()
+            .daemon
+            .memory_overcommit = Some(1e-6);
+        let e = start(t.core.daemon(), &s, false).await.unwrap_err();
+        assert!(e.to_string().contains("memory_overcommit"), "{e}");
+        assert!(matches!(*s.runtime.status().borrow(), Status::Stopped(_)));
     }
 
     #[tokio::test]
