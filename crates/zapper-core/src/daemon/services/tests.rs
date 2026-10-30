@@ -67,6 +67,7 @@ fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
         Some(Route::Service(Target::Session { id, port })) => format!("{id}:{port}"),
         Some(Route::Service(Target::Addr(a))) => a.to_string(),
         Some(Route::Service(Target::Handler { .. })) => "handler".into(),
+        Some(Route::Service(Target::Socket { name, .. })) => format!("socket {name}"),
         Some(Route::Unserved) => "unserved".into(),
         None => "host".into(),
     }
@@ -220,7 +221,7 @@ async fn connecting_to_a_handler_hands_it_the_session() {
         tls: false,
         handler: echo.clone(),
     };
-    let mut io = super::connect(t.core.daemon(), &s, "echo.internal", &target)
+    let mut io = super::connect(t.core.daemon(), &s, "echo.internal", 1, &target)
         .await
         .unwrap();
     io.write_all(b"hello").await.unwrap();
@@ -238,14 +239,14 @@ async fn addresses_keep_to_the_address_policy_and_gone_sessions_say_so() {
     let t = TestCore::new(CONFIG);
     let s = session(&t, &[]);
     let local = Target::Addr("127.0.0.1:5432".parse().unwrap());
-    let e = super::connect(t.core.daemon(), &s, "db.internal", &local)
+    let e = super::connect(t.core.daemon(), &s, "db.internal", 1, &local)
         .await
         .err()
         .unwrap()
         .to_string();
     assert!(e.starts_with("127.0.0.1:5432"), "{e}");
     let gone = to_session("abcdef", 6443);
-    let e = super::connect(t.core.daemon(), &s, "cluster.internal", &gone)
+    let e = super::connect(t.core.daemon(), &s, "cluster.internal", 1, &gone)
         .await
         .err()
         .unwrap()
@@ -273,7 +274,7 @@ async fn a_handler_behind_tls_negotiates_http1() {
         tls: true,
         handler: Arc::new(Echo::default()),
     };
-    let io = super::connect(t.core.daemon(), &s, "echo.internal", &target)
+    let io = super::connect(t.core.daemon(), &s, "echo.internal", 1, &target)
         .await
         .unwrap();
     let pem: String = s
@@ -309,7 +310,7 @@ async fn a_handler_behind_tls_gets_the_plain_stream() {
         tls: true,
         handler: Arc::new(Echo::default()),
     };
-    let io = super::connect(t.core.daemon(), &s, "echo.internal", &target)
+    let io = super::connect(t.core.daemon(), &s, "echo.internal", 1, &target)
         .await
         .unwrap();
     let name = rustls::pki_types::ServerName::try_from("echo.internal").unwrap();
@@ -330,6 +331,7 @@ async fn a_sessions_port_is_reached_over_vsock() {
         t.core.daemon(),
         &s,
         "k3s.internal",
+        6443,
         &to_session(&cluster.id, 6443),
     )
     .await
@@ -447,5 +449,142 @@ async fn requests_to_a_service_are_inspected_over_http_not_tls() {
             "web.internal is a service; rules with methods, paths or secrets don't apply to it"
         ),
         "{reply}"
+    );
+}
+
+fn socket(name: &str, tls: bool) -> Target {
+    Target::Socket {
+        name: name.into(),
+        tls,
+    }
+}
+
+/// Listens on `name` in the daemon's sockets directory: for one connection,
+/// sends back the caller line it was given, then echoes.
+fn socket_server(t: &TestCore, name: &str) -> tokio::task::JoinHandle<super::Caller> {
+    let path = t
+        .core
+        .daemon()
+        .paths
+        .state
+        .join(super::SOCKETS_DIR)
+        .join(name);
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        let mut line = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+            .await
+            .unwrap();
+        let caller: super::Caller = serde_json::from_str(&line).unwrap();
+        // Read on through the buffer: the guest's bytes may have come in
+        // with the caller line.
+        let mut buf = [0u8; 64];
+        let n = reader.read(&mut buf).await.unwrap();
+        reader.get_mut().write_all(&buf[..n]).await.unwrap();
+        caller
+    })
+}
+
+#[test]
+fn socket_names_stay_in_the_sockets_directory() {
+    let t = TestCore::new(CONFIG);
+    for bad in [
+        "",
+        "../api.sock",
+        "a/b",
+        ".hidden",
+        "/run/docker.sock",
+        "x y",
+    ] {
+        let e = t
+            .core
+            .add_service(spec("s.internal", 1, &[], socket(bad, false)))
+            .unwrap_err();
+        assert!(format!("{e}").contains("not a socket name"), "{bad}: {e}");
+    }
+    let id = t
+        .core
+        .add_service(spec("s.internal", 1, &[], socket("drive.sock", true)))
+        .unwrap();
+    let info = t.core.services().into_iter().find(|i| i.id == id).unwrap();
+    assert_eq!(info.to, "socket drive.sock (TLS terminated)");
+}
+
+#[tokio::test]
+async fn a_socket_service_is_told_the_caller_before_the_guests_bytes() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[("team", "a")]);
+    let server = socket_server(&t, "echo.sock");
+    let mut io = super::connect(
+        t.core.daemon(),
+        &s,
+        "echo.internal",
+        7,
+        &socket("echo.sock", false),
+    )
+    .await
+    .unwrap();
+    // The guest's first line looks like a caller line: it is only data.
+    io.write_all(b"{\"session\":\"other\"}\n").await.unwrap();
+    let mut buf = [0u8; 20];
+    io.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"{\"session\":\"other\"}\n");
+    let caller = server.await.unwrap();
+    assert_eq!(
+        caller,
+        super::Caller {
+            session: s.id.clone(),
+            labels: labels(&[("team", "a")]),
+            name: "echo.internal".into(),
+            port: 7,
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_socket_service_behind_tls_gets_the_plain_stream() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let server = socket_server(&t, "web.sock");
+    let io = super::connect(
+        t.core.daemon(),
+        &s,
+        "web.internal",
+        443,
+        &socket("web.sock", true),
+    )
+    .await
+    .unwrap();
+    let name = rustls::pki_types::ServerName::try_from("web.internal").unwrap();
+    let mut tls = guest_tls(&s).connect(name, io).await.unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), None);
+    tls.write_all(b"hello").await.unwrap();
+    let mut buf = [0u8; 5];
+    tls.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"hello");
+    assert_eq!(server.await.unwrap().port, 443);
+}
+
+#[tokio::test]
+async fn a_socket_nobody_serves_says_so() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let e = match super::connect(
+        t.core.daemon(),
+        &s,
+        "gone.internal",
+        80,
+        &socket("gone.sock", false),
+    )
+    .await
+    {
+        Err(e) => format!("{e:#}"),
+        Ok(_) => panic!("connected to a socket nobody serves"),
+    };
+    assert!(
+        e.contains("connecting to socket gone.sock, which serves gone.internal"),
+        "{e}"
     );
 }

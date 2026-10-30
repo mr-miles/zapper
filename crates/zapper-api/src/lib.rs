@@ -793,8 +793,18 @@ async fn list_services(State(d): D) -> Json<Value> {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ServiceTo {
-    Addr { addr: std::net::SocketAddr },
-    Session { session: String, port: u32 },
+    Addr {
+        addr: std::net::SocketAddr,
+    },
+    Session {
+        session: String,
+        port: u32,
+    },
+    Socket {
+        socket: String,
+        #[serde(default)]
+        tls: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -807,8 +817,8 @@ struct NewService {
     to: ServiceTo,
 }
 
-/// The operator's services: to an address on the host's network, or a port
-/// of a session's VM.
+/// The operator's services: to an address on the host's network, a port of
+/// a session's VM, or a socket in the daemon's `state/services/` directory.
 async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
     let n: NewService = parse_body(&body)?;
     let target = match n.to {
@@ -817,6 +827,7 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
             d.session(&session)?;
             ServiceTarget::Session { id: session, port }
         }
+        ServiceTo::Socket { socket, tls } => ServiceTarget::Socket { name: socket, tls },
     };
     let id = d.add_service(ServiceSpec {
         name: n.name,

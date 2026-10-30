@@ -319,14 +319,14 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
 #[derive(Clone)]
 enum Target {
     Addr(SocketAddr),
-    Service(String, services::Target),
+    Service(String, u16, services::Target),
 }
 
 /// The target for `host:port`: a service by name, anything else resolved on
 /// the host and checked against the address policy.
 async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
     match d.services.route(s, host, port) {
-        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), t)),
+        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), port, t)),
         Some(services::Route::Unserved) => Err(format!("nothing serves {host}:{port}")),
         None => resolve(d, host, port).await.map(Target::Addr),
     }
@@ -339,7 +339,7 @@ async fn dial_target(
 ) -> std::io::Result<Box<dyn services::Io>> {
     match t {
         Target::Addr(a) => Ok(Box::new(dial(*a).await?)),
-        Target::Service(host, t) => services::connect(d, s, host, t)
+        Target::Service(host, port, t) => services::connect(d, s, host, *port, t)
             .await
             .map_err(|e| std::io::Error::other(format!("{e:#}"))),
     }

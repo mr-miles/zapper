@@ -210,28 +210,46 @@ enum Cmd {
 enum ServiceCmd {
     /// List services and zones.
     Ls,
-    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`
+    /// Add a service: a name and port sessions use, and where the daemon
+    /// connects them.
+    ///
+    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`.
+    /// Sessions still need a net rule for the name.
     Add {
         /// The name and port sessions use; `*.` in front for any name
         /// under it.
+        #[arg(value_name = "NAME:PORT")]
         name: String,
         /// An address on the host's network, `ip:port`.
         #[arg(
             long,
-            conflicts_with = "to_session",
-            required_unless_present = "to_session"
+            conflicts_with_all = ["to_session", "to_socket"],
+            required_unless_present_any = ["to_session", "to_socket"]
         )]
         to: Option<String>,
         /// A port of a session's VM, `ID:port`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "to_socket")]
         to_session: Option<String>,
+        /// A socket in the daemon's `state/services/` directory, by file
+        /// name, served by a program on the host; each connection starts
+        /// with a line naming the calling session.
+        #[arg(long)]
+        to_socket: Option<String>,
+        /// With `--to-socket`: the daemon terminates TLS with the session's
+        /// CA, and the socket gets the plain stream.
+        #[arg(long, requires = "to_socket")]
+        tls: bool,
         /// Only for sessions with this label, `key=value` (repeatable);
         /// every session without.
         #[arg(long = "for")]
         sessions: Vec<String>,
     },
-    /// Remove a service added with `add`.
-    Rm { id: u64 },
+    /// Remove a service added with `add`; a firm's services are the
+    /// office's.
+    Rm {
+        /// The service's id, from `zapper service ls`.
+        id: u64,
+    },
 }
 
 /// `key=value` pairs, as JSON.
@@ -982,19 +1000,22 @@ async fn service(c: &Client, cmd: ServiceCmd, json_out: bool) -> Result<()> {
             name,
             to,
             to_session,
+            to_socket,
+            tls,
             sessions,
         } => {
             let (name, port) = name
                 .rsplit_once(':')
                 .context("name:port, e.g. db.internal:5432")?;
             let port: u16 = port.parse().context("the port")?;
-            let to = match (to, to_session) {
-                (Some(addr), _) => json!({ "addr": addr }),
-                (None, Some(t)) => {
+            let to = match (to, to_session, to_socket) {
+                (Some(addr), _, _) => json!({ "addr": addr }),
+                (None, Some(t), _) => {
                     let (id, port) = t.rsplit_once(':').context("--to-session ID:port")?;
                     json!({ "session": id, "port": port.parse::<u32>().context("the port")? })
                 }
-                (None, None) => bail!("give --to or --to-session"),
+                (None, None, Some(name)) => json!({ "socket": name, "tls": tls }),
+                (None, None, None) => bail!("give --to, --to-session or --to-socket"),
             };
             let body = json!({ "name": name, "port": port, "sessions": label_pairs(&sessions)?, "to": to });
             let v = c

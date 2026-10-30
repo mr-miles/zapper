@@ -86,7 +86,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
 | `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)) |
 | `GET /v1/services` | ✓ | Services and zones: `id`, `kind` (`service` or `zone`), `name`, `port`, `sessions` (labels; every session when empty), `to`, `owner` ([network: services](network.md#services)) |
-| `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port}}` → the service with its `id` |
+| `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port} \| {socket: NAME, tls?}}` → the service with its `id`. `socket` is a file name in the daemon's `state/services/` directory ([network: socket services](network.md#socket-services)) |
 | `DELETE /v1/services/{id}` | | Remove a service added through the API; `409` for another owner's (a firm's) |
 | `GET /v1/approvals` | ✓ | Pending approvals with suggested rules |
 | `POST /v1/approvals/{id}` | ✓ | `{allow, remember?: session}`; through the UI, also needs `X-Zapper-UI: 1` and an `Origin` naming the UI |

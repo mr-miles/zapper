@@ -145,11 +145,13 @@ fn load_startup_config(path: &Path) -> Result<Config> {
 }
 
 /// Resolves and prepares the state directory: creates it (0700) with its
-/// `sessions` subdirectory, and clears the VMM directories a previous daemon
+/// `sessions` subdirectory and the `services` one for socket services'
+/// sockets, and clears the VMM directories a previous daemon
 /// left behind (audit logs and recordings stay).
 fn prepare_state_dir(state: &str) -> Result<PathBuf> {
     let state = PathBuf::from(expand_home(state));
     std::fs::create_dir_all(state.join("sessions"))?;
+    std::fs::create_dir_all(state.join(services::SOCKETS_DIR))?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
         let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());

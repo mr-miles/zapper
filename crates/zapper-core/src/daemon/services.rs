@@ -1,7 +1,8 @@
 //! Services: names sessions use that the daemon connects itself, never
 //! looked up on the host. A service maps a name and port to an in-process
-//! handler, an address on the host, or a port of another session's VM, for
-//! the sessions its label selector picks. A zone is a domain whose names
+//! handler, a unix socket a program on the host serves (told which session
+//! is calling), an address on the host, or a port of another session's VM,
+//! for the sessions its label selector picks. A zone is a domain whose names
 //! resolve only to services, for the sessions it is for: a name in it that
 //! nothing serves doesn't exist. Reaching a service still needs a net rule.
 
@@ -40,8 +41,48 @@ pub enum Target {
     /// An address on the host's network, still subject to the address
     /// policy.
     Addr(SocketAddr),
+    /// A unix socket in the daemon's `state/services/` directory, served by
+    /// a program on the host (a facility outside the daemon). Each connection
+    /// starts with one line from the daemon naming the caller ([`Caller`]),
+    /// then carries the guest's stream. With `tls`, the daemon terminates
+    /// TLS as for a handler, and the socket gets the plain stream.
+    Socket { name: String, tls: bool },
     /// A port of another session's VM, over vsock.
     Session { id: String, port: u32 },
+}
+
+/// The directory under `state` holding the sockets socket services name.
+pub const SOCKETS_DIR: &str = "services";
+
+/// The first line on a connection to a socket service: who is calling,
+/// from the VM the connection came from. The guest's own bytes follow it,
+/// so nothing the guest sends can pose as it.
+#[derive(Debug, Serialize, serde::Deserialize, PartialEq)]
+pub struct Caller {
+    pub session: String,
+    pub labels: BTreeMap<String, String>,
+    /// The name the guest asked for, and the port.
+    pub name: String,
+    pub port: u16,
+}
+
+/// `name` as a socket's file name in `state/services/`: letters, digits,
+/// `.`, `-` and `_`, not starting with `.`, so it can't name anything
+/// outside that directory.
+fn check_socket(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    if !ok {
+        bail!(
+            "{name:?} is not a socket name: a file name in the daemon's {SOCKETS_DIR}/ directory \
+             (letters, digits, '.', '-', '_'; at most 64)"
+        );
+    }
+    Ok(())
 }
 
 /// A service to register.
@@ -123,6 +164,8 @@ fn describe(t: &Target) -> String {
     match t {
         Target::Handler { tls: true, .. } => "in the daemon (TLS terminated)".into(),
         Target::Handler { tls: false, .. } => "in the daemon".into(),
+        Target::Socket { name, tls: true } => format!("socket {name} (TLS terminated)"),
+        Target::Socket { name, tls: false } => format!("socket {name}"),
         Target::Addr(a) => a.to_string(),
         Target::Session { id, port } => format!("session {id} port {port}"),
     }
@@ -140,6 +183,9 @@ impl Services {
         let name = check_name(&name)?;
         if port == 0 {
             bail!("a service needs a port");
+        }
+        if let Target::Socket { name, .. } = &target {
+            check_socket(name)?;
         }
         let item = Item::Service {
             name: name.clone(),
@@ -259,12 +305,14 @@ fn info(id: u64, e: &Entry<Item>) -> Info {
     }
 }
 
-/// Opens a connection from `s` to a service's target. `host` is the name it
-/// asked for, which a TLS-terminating handler presents a certificate for.
+/// Opens a connection from `s` to a service's target. `host` and `port` are
+/// what it asked for: a TLS-terminating target presents a certificate for
+/// `host`, and a socket service is told both.
 pub async fn connect(
     d: &super::Daemon,
     s: &Arc<Session>,
     host: &str,
+    port: u16,
     target: &Target,
 ) -> Result<Box<dyn Io>> {
     match target {
@@ -296,6 +344,46 @@ pub async fn connect(
                     return;
                 };
                 handler.serve(s, Box::new(tls));
+            });
+            Ok(Box::new(a))
+        }
+        Target::Socket { name, tls } => {
+            let path = d.paths.state.join(SOCKETS_DIR).join(name);
+            let mut sock = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::net::UnixStream::connect(&path),
+            )
+            .await
+            .map_err(|_| anyhow!("connecting to socket {name}: timed out"))?
+            .with_context(|| format!("connecting to socket {name}, which serves {host}"))?;
+            let caller = Caller {
+                session: s.id.clone(),
+                labels: s.labels.clone(),
+                name: host.to_string(),
+                port,
+            };
+            let mut line = serde_json::to_vec(&caller)?;
+            line.push(b'\n');
+            tokio::io::AsyncWriteExt::write_all(&mut sock, &line).await?;
+            if !tls {
+                return Ok(Box::new(sock));
+            }
+            let (a, b) = tokio::io::duplex(256 * 1024);
+            // As for a handler: HTTP/1.1 only, since the program behind the
+            // socket gets a byte stream and may speak only that.
+            let mut config = (*s.tls.server_config(host)?).clone();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let config = Arc::new(config);
+            tokio::spawn(async move {
+                let Ok(Ok(mut tls)) = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    tokio_rustls::TlsAcceptor::from(config).accept(b),
+                )
+                .await
+                else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut tls, &mut sock).await;
             });
             Ok(Box::new(a))
         }

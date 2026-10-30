@@ -89,7 +89,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper approve ID [--remember session]` / `zapper deny …` | Answer one, for this request or the rest of the session |
 | `zapper rules [--scope S]` | List rules of all layers, or of `global`, `profile:NAME` or `session:ID` |
 | `zapper service ls` | Services and zones, a firm's included ([network: services](network.md#services)) |
-| `zapper service add NAME:PORT (--to IP:PORT \| --to-session ID:PORT) [--for KEY=VALUE…]` | A name sessions use that the daemon connects: to an address, or a port of a session's VM; for sessions with those labels, else every session. They still need a net rule for it |
+| `zapper service add NAME:PORT (--to IP:PORT \| --to-session ID:PORT \| --to-socket NAME [--tls]) [--for KEY=VALUE…]` | A name sessions use that the daemon connects: to an address, a port of a session's VM, or a socket in `state/services/` that a program on the host serves, told which session calls ([network: socket services](network.md#socket-services)); for sessions with those labels, else every session. They still need a net rule for it |
 | `zapper service rm ID` | Remove a service added with `add` |
 | `zapper rule add SCOPE 'YAML' [--at N]` / `zapper rule rm ID` | Change rules in the running config |
 | `zapper eval [-s ID\|-p PROFILE] net HOST[:PORT] [METHOD PATH]` | Dry run of a connection or request |

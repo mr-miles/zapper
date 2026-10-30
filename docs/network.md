@@ -57,7 +57,21 @@ When the guest connects to one of these synthetic addresses, the daemon knows wh
 
 ### Services
 
-A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule; rules with methods, paths or secrets don't apply to a service, since its traffic isn't inspected. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), a [socket](#socket-services) a program on the host serves, an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule; rules with methods, paths or secrets don't apply to a service, since its traffic isn't inspected. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+
+#### Socket services
+
+A socket service is served by a program on the host outside the daemon, such as a facility of a layer built on zapper, on a unix socket in the daemon's `state/services/` directory. The service names the socket by its file name (letters, digits, `.`, `-`, `_`), never by a path, so it can't point a session at a socket elsewhere on the host, such as a container engine's. The daemon connects to the socket for each connection a session makes to the service. It first sends one line naming the caller, taken from the VM the connection came from, then relays the guest's stream:
+
+```
+{"session":"ab3cd4","labels":{"team":"a"},"name":"drive.internal","port":443}
+```
+
+The guest's bytes come only after that line, so nothing the guest sends can pose as it. With `--tls`, the daemon terminates TLS with the session's CA for the name asked for (offering HTTP/1.1), and the socket gets the plain stream, as an in-process handler does. A socket nobody listens on refuses the connection ("connecting to socket NAME, which serves HOST").
+
+```
+zapper service add drive.internal:443 --to-socket drive.sock --tls --for team=a
+```
 
 A zone is a domain whose names resolve only to services, for the sessions it is for: a name in it that nothing serves doesn't exist (`NXDOMAIN`), and nothing about it is looked up on the host. A firm's domain is one: the office registers the zone and its services (`git.`, `cluster.` and `apps.` under the domain) for the run's sessions ([office](office.md#names-and-who-reaches-what)).
 
