@@ -230,7 +230,7 @@ impl EventBus {
         match after {
             Some(c) if c.epoch == self.epoch => {
                 if let Some(oldest) = recent.front().map(|e| e.seq) {
-                    if oldest > c.seq + 1 {
+                    if oldest > c.seq.saturating_add(1) {
                         out.push(Catchup::Gap(format!(
                             "events {} to {} are no longer kept",
                             c.seq + 1,
@@ -263,23 +263,27 @@ impl EventBus {
     /// Stamp `body` with the next sequence number and the time, record it on
     /// its session, keep it in recent history, and broadcast it.
     pub(crate) fn emit(&self, session: Option<&Session>, body: EventBody) {
-        let event = Event {
-            seq: self.seq.fetch_add(1, Ordering::Relaxed),
-            ts: now(),
-            session: session.map(|s| s.id.clone()),
-            body,
-        };
-        if let Some(s) = session {
-            s.record(&event);
-        }
-        {
+        // Numbered, kept and sent under one lock, so history and the live
+        // stream are in `seq` order, which resuming relies on: a subscriber
+        // skips live events up to the last it was sent from history.
+        let event = {
             let mut recent = self.recent.lock().unwrap();
+            let event = Event {
+                seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                ts: now(),
+                session: session.map(|s| s.id.clone()),
+                body,
+            };
             if recent.len() >= RECENT_EVENTS {
                 recent.pop_front();
             }
             recent.push_back(event.clone());
+            let _ = self.tx.send(event.clone());
+            event
+        };
+        if let Some(s) = session {
+            s.record(&event);
         }
-        let _ = self.tx.send(event);
     }
 
     /// The events still in recent history: all of them, or one session's.
@@ -335,6 +339,52 @@ mod tests {
                 Catchup::Event(_) => None,
             })
             .collect()
+    }
+
+    /// Emitted from many threads at once, events are kept, and sent live,
+    /// in `seq` order, each once: what a resuming subscriber relies on.
+    #[test]
+    fn events_are_kept_and_sent_in_order() {
+        let bus = std::sync::Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let bus = bus.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        bus.emit(
+                            None,
+                            EventBody::Session {
+                                state: "x".into(),
+                                detail: None,
+                            },
+                        );
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let kept: Vec<u64> = bus.recent(None).iter().map(|e| e.seq).collect();
+        assert_eq!(kept, (1..=800).collect::<Vec<_>>());
+        let mut live = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            live.push(e.seq);
+        }
+        assert_eq!(live, kept);
+    }
+
+    /// A cursor at the end of `u64` is neither a panic nor a made-up gap.
+    #[test]
+    fn a_cursor_at_the_end_of_u64_is_harmless() {
+        let bus = bus_with(3);
+        let after = Cursor {
+            epoch: bus.epoch().into(),
+            seq: u64::MAX,
+        };
+        let (items, _) = bus.catch_up(None, Some(&after), false);
+        assert!(items.is_empty());
     }
 
     #[test]
