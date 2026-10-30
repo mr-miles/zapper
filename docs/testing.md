@@ -10,7 +10,7 @@
 | End to end | `make test-e2e` | KVM, network access, user namespaces, the `ubuntu-26.04` image, gcc | Below |
 | Office | `make test-e2e-office` (also run by `make test-e2e`) | The same; the `office-fake` image, which it rebuilds from the checkout's fake and `tests/fake` scripts; for the cluster checks, the `k3s` image and the `k8s` kernel | [Office: testing](office.md#testing) |
 
-`tests/e2e.sh` starts its own daemon with a temporary config, socket and state directory, separate from any running daemon. It removes the sessions it starts, and deletes its directory when all checks pass, or keeps it when `ZAPPER_E2E_KEEP=1` is set. It ends with `all e2e checks passed`, or with the number of failures and the path of the daemon log.
+`tests/e2e.sh` starts its own daemon with a temporary config, socket and state directory, separate from any running daemon. It removes the sessions it starts, and deletes its directory when all checks pass, or keeps it when `ZAPPER_E2E_KEEP=1` is set. It ends with `all e2e checks passed`, or with the number of failures and the path of the daemon log. The attacks from inside the guest need `tests/attack.c` built statically (a static libc: glibc-static, or musl-gcc); without one the run fails, as they are the only test of some invariants, unless `ZAPPER_E2E_SKIP_ATTACKS=1` is set, when it ends `all e2e checks passed (the attacks from inside the guest skipped)`.
 
 ## What the end-to-end tier checks
 

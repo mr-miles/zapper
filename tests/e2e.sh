@@ -31,7 +31,19 @@ trap cleanup EXIT
 mkdir -p "$T/work" "$T/attack"
 echo 'SECRET=hunter2' > "$T/work/.env"
 echo 'hello from host' > "$T/work/readme.txt"
-gcc -static -O1 -o "$T/attack/attack" "$HERE/attack.c" 2>/dev/null || echo "skip  attack probe (no static gcc)"
+# The attacks from inside the guest are the only test of some invariants (a
+# second control connection, terminals from another CID, the 32-bit and x32
+# syscall tables): without them the run doesn't pass, unless skipping them is
+# asked for, and then it says so at the end.
+skipped=""
+if ! gcc -static -O1 -o "$T/attack/attack" "$HERE/attack.c" 2>/dev/null; then
+    if [ -n "${ZAPPER_E2E_SKIP_ATTACKS:-}" ]; then
+        echo "skip  attack probe (no static gcc; ZAPPER_E2E_SKIP_ATTACKS is set)"
+        skipped=" (the attacks from inside the guest skipped)"
+    else
+        fail "attack probe built" "can't build tests/attack.c statically: install a static libc (glibc-static, or musl-gcc), or set ZAPPER_E2E_SKIP_ATTACKS=1 to skip the attacks"
+    fi
+fi
 cat > "$T/zapper.yaml" <<EOF
 daemon: { state: $T/state, ui: "127.0.0.1:0", ask_timeout_secs: 20 }
 secrets:
@@ -262,5 +274,5 @@ if [ -x "$T/attack/attack" ]; then
 fi
 
 echo
-if [ "$fails" -eq 0 ]; then echo "all e2e checks passed"; else echo "$fails e2e checks failed; daemon log: $T/daemon.log"; ZAPPER_E2E_KEEP=1; fi
+if [ "$fails" -eq 0 ]; then echo "all e2e checks passed$skipped"; else echo "$fails e2e checks failed; daemon log: $T/daemon.log"; ZAPPER_E2E_KEEP=1; fi
 [ "$fails" -eq 0 ]
