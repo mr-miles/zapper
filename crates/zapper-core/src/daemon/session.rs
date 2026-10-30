@@ -312,6 +312,12 @@ impl Rules {
         id
     }
 
+    /// The own layer as it was kept (a persistent session's, restored):
+    /// its rules with the ids they had, which clients remove them by.
+    pub fn restore(&self, policy: Policy) {
+        *self.own.write().unwrap() = policy;
+    }
+
     /// Removes a rule from the own layer, returning it if it was there.
     pub fn remove(&self, id: &str) -> Option<AnyRule> {
         self.own.write().unwrap().remove(id)

@@ -84,6 +84,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         new.persistent,
         new.accept_changed_image,
         Some(audit),
+        false,
     )?;
     if session.persistent {
         save(&session)?;
@@ -165,6 +166,7 @@ fn assemble(
     persistent: bool,
     accept_changed_image: bool,
     audit: Option<record::Writer>,
+    restored: bool,
 ) -> Result<Arc<Session>> {
     let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&saved.id));
     let ttl = saved.resolved.engine.ttl_secs;
@@ -205,8 +207,15 @@ fn assemble(
         extra_files: saved.files,
         forwards: saved.forwards,
     });
-    for rule in saved.rules.rules() {
-        session.add_rule(rule, None);
+    if restored {
+        // Kept with their ids, which clients revoke them by.
+        session.rules.restore(saved.rules);
+    } else {
+        // A new session's rules get ids of the session's own; saved once,
+        // by `register`, not per rule.
+        for rule in saved.rules.rules() {
+            session.rules.add(rule, None);
+        }
     }
     Ok(session)
 }
@@ -264,7 +273,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         let record =
             std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
         let was_running = disks::last_stop(&disks::events(&record)) == disks::LastStop::RanSince;
-        let session = match assemble(daemon, saved, vec![], true, false, None) {
+        let session = match assemble(daemon, saved, vec![], true, false, None, true) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("restoring session in {}: {e:#}", dir.root().display());
@@ -323,7 +332,7 @@ fn adopt(
     rt: &tokio::runtime::Handle,
 ) -> Result<()> {
     let audit = record::Writer::open(&dir.audit())?;
-    let session = assemble(daemon, saved, vec![], true, false, Some(audit))?;
+    let session = assemble(daemon, saved, vec![], true, false, Some(audit), true)?;
     if let Some(n) = vmm.subid {
         crate::subids::claim(&session.id, n);
     }
@@ -961,6 +970,33 @@ mod tests {
         assert!(other.try_wait().unwrap().is_none(), "still running");
         other.kill().unwrap();
         let _ = other.wait();
+    }
+
+    /// A persistent session's rules keep their ids over a restart: a
+    /// client's id (a grant), and the session's own, gaps and all, so a
+    /// rule is revoked by the id it was given.
+    #[tokio::test]
+    async fn rule_ids_are_kept_over_a_restart() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        let rule = |yaml: &str| serde_yaml::from_str(yaml).unwrap();
+        s.put_rule(rule(
+            "{ kind: net, id: grant-x, action: allow, host: a.example }",
+        ));
+        s.add_rule(rule("{ kind: net, action: allow, host: b.example }"), None);
+        s.add_rule(rule("{ kind: net, action: allow, host: c.example }"), None);
+        s.remove_rule("s-net-1").unwrap();
+        stop(t.core.daemon(), &s, "stopped").await;
+        let back = restart(&t, &s);
+        let mut ids: Vec<String> = back
+            .own_policy()
+            .rules()
+            .iter()
+            .filter_map(|r| r.id().map(str::to_string))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["grant-x", "s-net-2"]);
+        assert!(back.remove_rule("grant-x").is_some(), "revoked by its id");
     }
 
     #[test]
