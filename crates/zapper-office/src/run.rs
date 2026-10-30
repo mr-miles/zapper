@@ -101,17 +101,7 @@ pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<Stri
 
 /// Memory still available on the host, in MiB.
 pub(crate) fn mem_available_mib() -> Option<u64> {
-    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-    info.lines()
-        .find_map(|l| {
-            l.strip_prefix("MemAvailable:")?
-                .trim()
-                .strip_suffix("kB")?
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })
-        .map(|k| k / 1024)
+    zapper_core::util::host_memory_mib("MemAvailable")
 }
 
 /// Checks that the firm fits before booting anything.

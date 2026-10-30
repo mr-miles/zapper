@@ -84,17 +84,23 @@ impl SessionStore {
 
     /// How many sessions are starting or running, for the session limit.
     pub(crate) fn running(&self) -> usize {
-        self.0
-            .read()
-            .unwrap()
-            .values()
-            .filter(|s| {
-                matches!(
-                    *s.runtime.status().borrow(),
-                    Status::Starting | Status::Running
-                )
-            })
-            .count()
+        self.live().count()
+    }
+
+    /// The memory given to the VMs starting or running, in MiB.
+    pub(crate) fn memory_mib(&self) -> u64 {
+        self.live()
+            .map(|s| s.resolved.engine.memory_mib as u64)
+            .sum()
+    }
+
+    fn live(&self) -> impl Iterator<Item = Arc<Session>> {
+        self.all().into_iter().filter(|s| {
+            matches!(
+                *s.runtime.status().borrow(),
+                Status::Starting | Status::Running
+            )
+        })
     }
 
     /// Take a stopped session off the list; a starting or running one stays,

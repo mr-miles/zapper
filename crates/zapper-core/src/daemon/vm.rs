@@ -154,6 +154,10 @@ pub struct VmSpec<'a> {
     pub subids: bool,
 }
 
+/// The VMM's `oom_score_adj`, as written to `/proc/self/oom_score_adj`:
+/// well above the daemon's (0), so the kernel's OOM killer picks a VM first.
+const VMM_OOM_SCORE_ADJ: &[u8] = b"500";
+
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
 pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     let mut drives = vec![json!({
@@ -210,10 +214,25 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     // it would fail to start.
     let mut cmd = Command::new("/proc/self/exe");
     cmd.args(shim.to_args());
-    // The VMM dies with the daemon, even if the daemon crashes.
+    // The VMM dies with the daemon, even if the daemon crashes. When the
+    // host runs out of memory, the kernel kills a VM before the daemon, which
+    // would end every session: raising one's own score needs no privilege,
+    // and Firecracker inherits it.
     unsafe {
         cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd >= 0 {
+                libc::write(
+                    fd,
+                    VMM_OOM_SCORE_ADJ.as_ptr().cast(),
+                    VMM_OOM_SCORE_ADJ.len(),
+                );
+                libc::close(fd);
+            }
             Ok(())
         });
     }
