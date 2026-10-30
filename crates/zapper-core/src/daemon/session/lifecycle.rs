@@ -835,6 +835,26 @@ mod tests {
         assert!(e.to_string().contains("can't share policy layers"), "{e}");
     }
 
+    /// A process standing in for session `id`'s VMM (its command line
+    /// `__vmm` and the id), once it has exec'd: before, its command line is
+    /// still this test's.
+    fn stand_in(id: &str) -> std::process::Child {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30", "__vmm", id])
+            .spawn()
+            .unwrap();
+        let cmdline = format!("/proc/{}/cmdline", child.id());
+        for _ in 0..500 {
+            if std::fs::read(&cmdline).is_ok_and(|c| c.windows(5).any(|w| w == b"__vmm")) {
+                return child;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the stand-in didn't start");
+    }
+
     /// As a daemon that starts again: the session gone from memory, then
     /// what its directory holds read back.
     fn restart(t: &TestCore, s: &Session) -> Arc<Session> {
@@ -941,10 +961,7 @@ mod tests {
         std::fs::create_dir_all(s.dir.vm()).unwrap();
         std::fs::write(s.dir.root_disk(), b"root").unwrap();
         crate::util::write_private(&s.dir.resume_token(), b"tok").unwrap();
-        let mut vmm = std::process::Command::new("sh")
-            .args(["-c", "sleep 30", "__vmm", &s.id])
-            .spawn()
-            .unwrap();
+        let mut vmm = stand_in(&s.id);
         let record = crate::daemon::vm::Vmm::of(vmm.id(), None).unwrap();
         std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -1004,10 +1021,7 @@ mod tests {
         let _ = other.wait();
 
         // Its command line, on a pid that started at another time.
-        let mut look_alike = std::process::Command::new("sh")
-            .args(["-c", "sleep 30", "__vmm", &s.id])
-            .spawn()
-            .unwrap();
+        let mut look_alike = stand_in(&s.id);
         let mut record = crate::daemon::vm::Vmm::of(look_alike.id(), None).unwrap();
         record.start += 1;
         std::fs::write(back.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
@@ -1052,10 +1066,7 @@ mod tests {
         let t = TestCore::new(CONFIG);
         let s = persistent(&t);
         std::fs::create_dir_all(s.dir.vm()).unwrap();
-        let mut vmm = std::process::Command::new("sh")
-            .args(["-c", "sleep 30", "__vmm", &s.id])
-            .spawn()
-            .unwrap();
+        let mut vmm = stand_in(&s.id);
         let record = crate::daemon::vm::Vmm::of(vmm.id(), None).unwrap();
         std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
         std::fs::write(s.dir.saved(), b"{ torn").unwrap();
@@ -1102,10 +1113,7 @@ mod tests {
     #[test]
     fn a_vmm_is_known_by_its_command_line_and_start() {
         use crate::daemon::vm::Vmm;
-        let mut stand_in = std::process::Command::new("sh")
-            .args(["-c", "sleep 30", "__vmm", "abc234"])
-            .spawn()
-            .unwrap();
+        let mut stand_in = stand_in("abc234");
         let vmm = Vmm::of(stand_in.id(), None).unwrap();
         assert!(vmm.runs_for("abc234"));
         assert!(!vmm.runs_for("other1"), "another session's");
