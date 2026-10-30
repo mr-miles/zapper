@@ -208,6 +208,26 @@ pub fn mask_values(values: &[String]) -> Arc<Vec<Vec<u8>>> {
     Arc::new(v)
 }
 
+/// The response's content coding, when it has one other than `identity`
+/// and some of `values` would be masked in it: a body that can't be
+/// searched for them.
+pub fn unmaskable(headers: &HeaderMap, values: &[String]) -> Option<String> {
+    if !values.iter().any(|v| v.len() >= MASK_MIN) {
+        return None;
+    }
+    let enc = headers
+        .get_all(hyper::header::CONTENT_ENCODING)
+        .iter()
+        .map(|v| {
+            String::from_utf8_lossy(v.as_bytes())
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|e| !e.is_empty() && e != "identity")
+        .collect::<Vec<_>>();
+    (!enc.is_empty()).then(|| enc.join(", "))
+}
+
 /// Overwrites each occurrence of a value in `buf` with `*`, keeping its
 /// length.
 fn mask(buf: &mut [u8], values: &[Vec<u8>]) {

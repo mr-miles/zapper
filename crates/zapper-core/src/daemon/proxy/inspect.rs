@@ -197,6 +197,15 @@ fn responded(
     used: Vec<String>,
     values: Vec<String>,
 ) -> Response<Body> {
+    // Asked for uncompressed and sent compressed anyway: a value echoed back
+    // couldn't be found to mask, so the response isn't passed on.
+    if let Some(enc) = sanitize::unmaskable(resp.headers(), &values) {
+        let e = format!(
+            "the upstream sent a {enc}-encoded response to a request carrying a secret, \
+             which can't be checked for it"
+        );
+        return fail(d, s, rec, net, v, StatusCode::BAD_GATEWAY, used, e);
+    }
     log(
         d,
         s,

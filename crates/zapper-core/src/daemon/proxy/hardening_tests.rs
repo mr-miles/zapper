@@ -382,9 +382,16 @@ impl crate::ServiceHandler for HttpEcho {
                         .get("authorization")
                         .cloned()
                         .unwrap_or(hyper::header::HeaderValue::from_static(""));
+                    // An upstream that compresses whatever it was asked for.
+                    let encoding = if req.uri().path().starts_with("/gzip") {
+                        "gzip"
+                    } else {
+                        "identity"
+                    };
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .header("x-seen-authorization", auth)
+                            .header("content-encoding", encoding)
                             .body(http_body_util::Full::new(Bytes::from(body)))
                             .unwrap(),
                     )
@@ -538,6 +545,22 @@ async fn an_injected_secret_is_masked_in_the_response() {
     assert!(!seen.contains("the-secret-value-123"), "{seen}");
     // The upstream did get the value.
     assert_eq!(seen.len(), "Bearer the-secret-value-123".len());
+}
+
+/// A response that can't be masked (compressed, though the proxy asked for
+/// it uncompressed) doesn't reach the guest when a secret was added; it
+/// does when none was.
+#[tokio::test]
+async fn a_compressed_response_to_a_request_with_a_secret_is_refused() {
+    let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], secrets: [s] }\n");
+    let auth = format!("Bearer {}", zapper_policy::placeholder("s"));
+    let (status, _, body) = request(&t, &s, Method::GET, "/gzip", &[("authorization", auth)]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("the-secret-value-123"), "{body}");
+    assert!(body.contains("gzip-encoded"), "{body}");
+
+    let (status, _, _) = request(&t, &s, Method::GET, "/gzip", &[]).await;
+    assert_eq!(status, StatusCode::OK, "no secret added, nothing to mask");
 }
 
 /// A plain-HTTP echo at `api.example:80` and an `aws` secret, `aws`, whose
