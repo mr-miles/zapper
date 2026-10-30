@@ -187,6 +187,13 @@ This replaces proposal 11's new `drive` rule kind: the drive becomes an ordinary
 
 The SSH gateway's needs from the core: an upgrade to a raw byte stream for the gateway, and the forward to the guest's loopback (`LOCAL_FORWARD_PORT`) for VS Code. Shell and exec over SSH use `attach`.
 
+### 8. Clients outside the daemon: event resume and scoped tokens
+
+The workbench is a client of the API in another process, as [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) foresees for the office. Two things such a client needs that the API lacks:
+
+- **Event resume.** Events carry a `seq`, but `/v1/events` takes only `session` and `history`, and `seq` starts again at 1 when the daemon restarts (`daemon/events.rs`). Add an `epoch` (an ID for the daemon's run, in every event and in `/v1/status`) and `?after=EPOCH:SEQ` (or SSE's `Last-Event-ID`). A client that reconnects gets what it missed from recent history, or a `gap` event saying history no longer reaches back that far. A new epoch tells it the daemon restarted.
+- **Scoped tokens.** Today, whoever opens the socket can do everything. Add API tokens, each limited to sessions with given labels and to a set of routes (read, answer approvals, create sessions, change rules at those sessions' layer). The workbench uses the socket with full rights, as the operator; the office out of process, or an automation, gets a token for its own sessions only.
+
 ### Invariants
 
 Changed:
@@ -208,10 +215,20 @@ New:
 
 ### Steps
 
-1. **Persist, stop, start** (§1). Useful on its own.
-2. **Survive a restart** (§2), with persistent terminals (§3).
-3. **Socket services, path placeholders, image builds** (§4–6).
-4. **SSH pieces** from proposal 10 (§7).
+Ordered so that what also makes zapper with the office (`OFFICE=1`) better separated, clearer or better encapsulated comes first. Each step is useful without the workbench, and leaves `make test-e2e` and `make test-e2e-office` passing.
+
+| # | Step | What `OFFICE=1` gains | The workbench needs it for |
+|---|---|---|---|
+| 1 | **Socket services with the caller named** (§4) | The office's facilities, its git server and drive among them, can be served from outside the daemon, behind the same interface: the step [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) lists for a separate office process ("session identity on gateway calls the upstream can check") | Drive and git as facility processes |
+| 2 | **Inspected service traffic, `net` path rules with `{session}` and `{label:KEY}`** (§5) | Access to the firm's git and drive can be stated as policy, visible in `zapper rules` and `eval`, instead of grant checks only the office's code makes | The drive's access control |
+| 3 | **Event resume and scoped tokens** (§8) | The other two of firm separation's three additions for a separate office process; the office's UI and foreman stop losing events across a reconnect | A gateway that survives either side restarting |
+| 4 | **Image builds over the API** (§6) | The office's Kickoff can build a missing image instead of failing; the CLI and the UI share one route | The wizard and the repository |
+| 5 | **Persist, stop, start** (§1) | Facilities (a firm's cluster) and workers can be stopped and kept; the cluster's state survives a firm going down | Sandboxes the user comes back to |
+| 6 | **Terminals that outlive their connection** (§3) | `persist: true` for the foreman's driver terminals: a worker's agent survives a dropped host connection; terminal handling leaves PID 1 for holder processes | Reconnecting over SSH to the same terminal |
+| 7 | **Survive a restart of the daemon** (§2) | Workers' VMs and terminals outlive a daemon restart. The office still ends its run when the daemon stops ([firm separation: restarts](../firm-separation.md#restarts)); resuming a run is the office's own work, after this | Upgrading zapper without losing sandboxes |
+| 8 | **SSH pieces** from proposal 10 (§7) | — | The SSH connector |
+
+[Proxy separation](../proxy-separation.md)'s session process (guest input parsed outside the process that holds the secrets) is the other change that most improves `OFFICE=1`'s separation. It is its own track, and fits with step 7 as follows. That process parses guest input, so it must be restartable like the daemon, not the durable piece. The VMM supervisor holds the CA's key and hands it to both, and both are adopted after a restart. Its step 2 (the control channel and terminal frames move into it) comes after this proposal's step 6, so terminals are already held in the guest when their host side moves.
 
 ## Part 2: the workbench
 
@@ -329,11 +346,15 @@ Automation uses the same API with a token from `~/.config/zapper-workbench/token
 
 ### Phases
 
-1. **Core step 1** (persist, stop, start). The workbench skeleton: the gateway's session views and the wizard against existing profiles.
-2. **Secrets** facility, and **the repository**, without git served to guests.
-3. **Core steps 2 and 3**, the SSH gateway (proposal 10), and the **SSH connector**: the user works over SSH in sandboxes that survive daemon restarts.
-4. **Drive**, on socket services and path rules (core step 3), with SFTP through the connector.
-5. **Git served to guests**, for agents' proposed changes.
+The workbench starts on the API as it is, and takes each core step as it lands.
+
+1. **Skeleton and session views**, on today's API: the gateway, its token, the UI's session pages; the facility interface. With core step 3, events resume across reconnects.
+2. **Secrets** facility: needs nothing new from the core.
+3. **The repository**, applying commits to the running config; with core step 4, building images.
+4. **Wizard**, with core step 5: sandboxes created to be kept, stopped and started.
+5. **Drive**, on core steps 1–2.
+6. **SSH connector**, on core step 8 and proposal 10, with core steps 6–7 so the user's work survives dropped connections and daemon restarts.
+7. **Git served to guests**, on core steps 1–2, for agents' proposed changes.
 
 ## Open questions
 
