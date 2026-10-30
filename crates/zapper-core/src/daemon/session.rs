@@ -435,6 +435,9 @@ pub struct Session {
     pub persistent: bool,
     /// How many times it has booted: a run's timers end with it.
     pub(crate) boots: AtomicU64,
+    /// Held across a persistent session's save, from the snapshot of its
+    /// rules to the write, so an older snapshot can't be written last.
+    pub(crate) saving: Mutex<()>,
     /// Make a persistent session from its image even if the image changed
     /// since it was built (recorded); not kept.
     pub(crate) accept_changed_image: bool,

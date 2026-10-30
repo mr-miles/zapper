@@ -188,6 +188,7 @@ fn assemble(
         expires: Mutex::new((ttl > 0).then_some(now() + ttl as f64)),
         persistent,
         boots: AtomicU64::new(0),
+        saving: Mutex::new(()),
         accept_changed_image,
         workdir: saved.workdir,
         rules: Rules::new(shared_layers),
@@ -222,6 +223,7 @@ fn assemble(
 
 /// Writes a persistent session's `session.json`, its own rules as they are.
 pub(super) fn save(session: &Session) -> Result<()> {
+    let _one_at_a_time = session.saving.lock().unwrap();
     let saved = Saved {
         id: session.id.clone(),
         profile: session.profile.clone(),
@@ -247,11 +249,23 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
     };
     for entry in dirs.flatten() {
         let dir = SessionDir::new(entry.path());
-        let Some(saved) = std::fs::read(dir.saved())
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Saved>(&b).ok())
-        else {
-            continue;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let saved = match std::fs::read(dir.saved()) {
+            Err(_) => continue,
+            Ok(b) => match serde_json::from_slice::<Saved>(&b) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    // Not to be listed or adopted; a VM it left running
+                    // isn't left running unwatched.
+                    if let Some(vmm) = live_vmm(&dir, &id) {
+                        kill_vmm(vmm.pid, &id);
+                    }
+                    tracing::warn!(
+                        "session {id}: its session.json can't be read ({e}); not listed, its VM stopped if it ran"
+                    );
+                    continue;
+                }
+            },
         };
         // Its VMM, still running, which an earlier daemon left: adopted, with
         // a runtime to serve it in; else stopped, so a start can't boot its
@@ -997,6 +1011,59 @@ mod tests {
         ids.sort();
         assert_eq!(ids, ["grant-x", "s-net-2"]);
         assert!(back.remove_rule("grant-x").is_some(), "revoked by its id");
+    }
+
+    /// A session.json that can't be read: the session isn't listed, and a
+    /// VM it left running is stopped rather than left unwatched.
+    #[tokio::test]
+    async fn an_unreadable_session_stops_its_running_vm() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        let mut vmm = std::process::Command::new("sh")
+            .args(["-c", "sleep 30", "__vmm", &s.id])
+            .spawn()
+            .unwrap();
+        let record = crate::daemon::vm::Vmm {
+            pid: vmm.id(),
+            subid: None,
+        };
+        std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
+        std::fs::write(s.dir.saved(), b"{ torn").unwrap();
+        t.core.daemon().sessions.0.write().unwrap().remove(&s.id);
+        restore(t.core.daemon());
+        assert!(t.core.daemon().sessions.get(&s.id).is_none());
+        let status = vmm.wait().unwrap();
+        assert!(!status.success(), "stopped: {status}");
+    }
+
+    /// Saves at once from many threads leave a whole session.json, with
+    /// every rule.
+    #[tokio::test]
+    async fn saves_at_once_leave_a_whole_file() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    let rule =
+                        format!("{{ kind: net, id: r{i}, action: allow, host: h{i}.example }}");
+                    s.put_rule(serde_yaml::from_str(&rule).unwrap());
+                })
+            })
+            .collect();
+        for th in threads {
+            th.join().unwrap();
+        }
+        let saved: Saved = serde_json::from_slice(&std::fs::read(s.dir.saved()).unwrap()).unwrap();
+        assert_eq!(saved.rules.net.len(), 8);
+        let left: Vec<_> = std::fs::read_dir(s.dir.root())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(left.is_empty(), "no temporary files left");
     }
 
     #[test]
