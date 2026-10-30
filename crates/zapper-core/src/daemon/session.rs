@@ -260,13 +260,16 @@ impl SessionDir {
 /// profile's). The owner of the session's rules; `Session` wraps these with
 /// the identity and events they need.
 pub(crate) struct Rules {
+    /// The session's id, in the ids `add` mints.
+    session: String,
     own: RwLock<Policy>,
     shared: Vec<(Scope, Arc<RwLock<Policy>>)>,
 }
 
 impl Rules {
-    pub fn new(shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
+    pub fn new(session: &str, shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
         Self {
+            session: session.to_string(),
             own: RwLock::new(Policy::default()),
             shared,
         }
@@ -282,8 +285,9 @@ impl Rules {
         self.own.read().unwrap().rules()
     }
 
-    /// Adds a rule to the own layer under a fresh `s-<kind>-<n>` id, so
-    /// session rule ids never clash with config ones.
+    /// Adds a rule to the own layer under a fresh `s-<session>-<kind>-<n>`
+    /// id, so session rule ids clash neither with config ones nor with
+    /// another session's.
     pub fn add(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
         let mut policy = self.own.write().unwrap();
         let taken: Vec<String> = policy
@@ -293,7 +297,7 @@ impl Rules {
             .collect();
         let kind = rule.kind();
         let id = (1..)
-            .map(|n| format!("s-{kind}-{n}"))
+            .map(|n| format!("s-{}-{kind}-{n}", self.session))
             .find(|i| !taken.contains(i))
             .unwrap();
         rule.set_id(id);
@@ -1034,34 +1038,38 @@ mod tests {
 
     #[test]
     fn rules_mint_per_kind_ids_and_reuse_a_freed_one() {
-        let r = Rules::new(vec![]);
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-2"));
+        let r = Rules::new("sid", vec![]);
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-2"));
         // Each kind has its own sequence.
-        assert_eq!(r.add(exec_rule(), None).id(), Some("s-exec-1"));
+        assert_eq!(r.add(exec_rule(), None).id(), Some("s-sid-exec-1"));
         // The lowest free id is reused once one is removed.
-        assert!(r.remove("s-net-1").is_some());
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        assert!(r.remove("s-sid-net-1").is_some());
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
         // Removing it again finds nothing.
-        assert!(r.remove("s-net-1").is_some());
-        assert!(r.remove("s-net-1").is_none());
+        assert!(r.remove("s-sid-net-1").is_some());
+        assert!(r.remove("s-sid-net-1").is_none());
     }
 
     #[test]
     fn put_replaces_a_rule_by_id_and_puts_it_first() {
-        let r = Rules::new(vec![]);
-        r.add(net_rule(), None); // s-net-1
-        r.add(net_rule(), None); // s-net-2
+        let r = Rules::new("sid", vec![]);
+        r.add(net_rule(), None); // s-sid-net-1
+        r.add(net_rule(), None); // s-sid-net-2
         let replacement: AnyRule = AnyRule::Net(
             serde_json::from_value(
-                serde_json::json!({ "id": "s-net-1", "action": "deny", "host": "y.example" }),
+                serde_json::json!({ "id": "s-sid-net-1", "action": "deny", "host": "y.example" }),
             )
             .unwrap(),
         );
         r.put(replacement);
         let rules = r.list();
         assert_eq!(rules.len(), 2, "replaced, not added");
-        assert_eq!(rules[0].id(), Some("s-net-1"), "the replacement is first");
+        assert_eq!(
+            rules[0].id(),
+            Some("s-sid-net-1"),
+            "the replacement is first"
+        );
         assert!(
             matches!(&rules[0], AnyRule::Net(n) if n.action == zapper_policy::Action::Deny),
             "it is the new rule"
@@ -1077,7 +1085,7 @@ mod tests {
         let resolved = c1.resolve("web").unwrap();
         // A running config that no longer has `web`.
         let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
-        let layers = Rules::new(vec![]).layers("sid", "web", &resolved, &c2);
+        let layers = Rules::new("sid", vec![]).layers("sid", "web", &resolved, &c2);
         let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
         assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
         assert_eq!(scopes.last(), Some(&Scope::Global));

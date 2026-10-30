@@ -436,18 +436,32 @@ impl RuleApi for Core {
                 return Ok(RuleRemoval::Revoked);
             }
         }
-        // `s-` ids are session-layer rules (`Rules::add` mints them);
-        // everything else lives in the config layers handled below.
+        // `s-` ids are session-layer rules (`Rules::add` mints them, with
+        // the session's id); everything else lives in the config layers
+        // handled below. An id several sessions hold (one a client put) is
+        // removed from none, rather than from whichever comes first.
         if id.starts_with("s-") {
-            for s in self.d.sessions.all() {
-                if let Some(r) = s.remove_rule(id) {
-                    return Ok(RuleRemoval::Removed(
+            let holders: Vec<Arc<Session>> = self
+                .d
+                .sessions
+                .all()
+                .into_iter()
+                .filter(|s| s.rules().iter().any(|r| r.id() == Some(id)))
+                .collect();
+            return match holders.as_slice() {
+                [] => Err(anyhow!("no rule {id}")),
+                [s] => {
+                    let r = s.remove_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;
+                    Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),
-                    ));
+                    ))
                 }
-            }
-            return Err(anyhow!("no rule {id}"));
+                many => {
+                    let ids: Vec<&str> = many.iter().map(|s| s.id.as_str()).collect();
+                    Err(anyhow!("rule {id} is in sessions {}", ids.join(", ")))
+                }
+            };
         }
         let (scope, rule) = self.d.change(&format!("rule {id} removed"), |c| {
             let scope = c.find_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;

@@ -185,6 +185,7 @@ fn assemble(
     } else {
         (tls::SessionTls::new(&saved.id)?, dns::SessionDns::new())
     };
+    let rules = Rules::new(&saved.id, shared_layers);
     let session = Arc::new(Session {
         tls,
         id: saved.id,
@@ -197,7 +198,7 @@ fn assemble(
         lifecycle: tokio::sync::Mutex::new(()),
         accept_changed_image,
         workdir: saved.workdir,
-        rules: Rules::new(shared_layers),
+        rules,
         secrets: Default::default(),
         runtime: GuestRuntime::new(),
         dir,
@@ -1022,7 +1023,7 @@ mod tests {
         ));
         s.add_rule(rule("{ kind: net, action: allow, host: b.example }"), None);
         s.add_rule(rule("{ kind: net, action: allow, host: c.example }"), None);
-        s.remove_rule("s-net-1").unwrap();
+        s.remove_rule(&format!("s-{}-net-1", s.id)).unwrap();
         stop(t.core.daemon(), &s, "stopped").await;
         let back = restart(&t, &s);
         let mut ids: Vec<String> = back
@@ -1032,7 +1033,7 @@ mod tests {
             .filter_map(|r| r.id().map(str::to_string))
             .collect();
         ids.sort();
-        assert_eq!(ids, ["grant-x", "s-net-2"]);
+        assert_eq!(ids, ["grant-x".to_string(), format!("s-{}-net-2", s.id)]);
         assert!(back.remove_rule("grant-x").is_some(), "revoked by its id");
     }
 

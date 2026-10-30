@@ -293,6 +293,36 @@ fn only_a_stopped_session_is_forgotten() {
 }
 
 #[test]
+fn removing_a_sessions_rule_leaves_another_sessions_alone() {
+    let t = TestCore::new(RULES);
+    let a = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let b = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let rule = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, action: allow, host: api.example.com }").unwrap()
+    };
+    let in_a = t.core.add_session_rule(&a, rule(), None);
+    let in_b = t.core.add_session_rule(&b, rule(), None);
+    assert_ne!(in_a.id(), in_b.id(), "each session's first rule");
+
+    match t.core.remove_rule(in_b.id().unwrap()).unwrap() {
+        RuleRemoval::Removed(scope, _) => assert_eq!(scope, Scope::Session(b.id.clone())),
+        RuleRemoval::Revoked => panic!("not a firm's"),
+    }
+    assert_eq!(a.rules().len(), 1, "A keeps its rule");
+    assert!(b.rules().is_empty());
+
+    // An id both hold (put by a client): removed from neither.
+    let shared = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, id: s-both, action: allow, host: x.example }").unwrap()
+    };
+    a.put_rule(shared());
+    b.put_rule(shared());
+    let e = t.core.remove_rule("s-both").err().unwrap().to_string();
+    assert!(e.contains(&a.id) && e.contains(&b.id), "{e}");
+    assert_eq!((a.rules().len(), b.rules().len()), (2, 1));
+}
+
+#[test]
 fn rules_added_to_a_session_are_its_own_and_an_event() {
     let t = TestCore::new(RULES);
     let s = t.core.test_session(new_session(&t, "web"), true).unwrap();

@@ -151,7 +151,7 @@ zapper eval -p office-engineer net git.acme.internal:443   # the decision, its r
 zapper eval -s tusn49 exec /usr/bin/perl perl -e 1
 ```
 
-A rule gets its id when it's added, such as `net-4`, or `s-net-1` for a session rule, and keeps it when saved.
+A rule gets its id when it's added, such as `net-4`, or `s-<session>-net-1` for a session rule (with its session's id, so no two sessions' rules share one), and keeps it when saved.
 
 ## Verification
 
