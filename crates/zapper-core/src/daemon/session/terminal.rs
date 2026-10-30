@@ -94,11 +94,25 @@ pub(crate) async fn pump_shell<C>(
         match &frame {
             Frame::Attached { from, .. } => {
                 at = *from;
-                let recorded = term.state.lock().unwrap().recorded;
-                if *from > recorded {
-                    let gap = format!("{} bytes no longer kept by the guest", from - recorded);
-                    cast.lock().unwrap().write("m", gap.as_bytes());
-                    term.state.lock().unwrap().recorded = *from;
+                let mut st = term.state.lock().unwrap();
+                let note = if std::mem::take(&mut st.adopted) {
+                    // Adopted: what came before this was recorded by an
+                    // earlier daemon, or not at all; record from here.
+                    st.recorded = *from;
+                    Some(
+                        "output before this was recorded by an earlier daemon, if at all"
+                            .to_string(),
+                    )
+                } else if *from > st.recorded {
+                    let gap = format!("{} bytes no longer kept by the guest", from - st.recorded);
+                    st.recorded = *from;
+                    Some(gap)
+                } else {
+                    None
+                };
+                drop(st);
+                if let Some(note) = note {
+                    cast.lock().unwrap().write("m", note.as_bytes());
                 }
             }
             Frame::Data(d) | Frame::Stderr(d) => {
@@ -156,9 +170,9 @@ impl Session {
             }
             let cast = Recorder::reopen(self.dir.root(), id);
             let t = Terminal::new(id, vec![], (24, 80), true, cast);
-            // What it recorded before is in its file: the guest's replay
-            // starts later, or a gap is marked.
-            t.state.lock().unwrap().recorded = u64::MAX / 2;
+            // Where its recording stopped is an earlier daemon's: it goes on
+            // from the first output the guest sends again.
+            t.state.lock().unwrap().adopted = true;
             terminals.insert(id, Arc::new(t));
         }
     }
@@ -194,6 +208,9 @@ struct TermState {
     open: bool,
     /// A client is attached (a persistent terminal can be open without).
     attached: bool,
+    /// Adopted from an earlier daemon: where its recording stopped isn't
+    /// known here, so it goes on from the next `Attached`.
+    adopted: bool,
     /// How much of the terminal's output is recorded.
     recorded: u64,
     history: VecDeque<TermChunk>,
@@ -221,6 +238,7 @@ impl Terminal {
             base: size,
             open: true,
             attached: false,
+            adopted: false,
             recorded: 0,
             history: Default::default(),
             bytes: 0,
@@ -450,5 +468,34 @@ mod persistent_tests {
         assert_eq!(out, "one two three four");
         assert_eq!(marks, vec!["16 bytes no longer kept by the guest"]);
         assert!(!term.info().open, "its program exited");
+    }
+
+    /// A persistent terminal adopted from an earlier daemon is recorded
+    /// again from the first output the guest sends, with a marker.
+    #[tokio::test]
+    async fn an_adopted_terminal_is_recorded_from_its_first_output() {
+        let t = TestCore::new("profiles:\n  web: {}\n");
+        let s = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        s.adopt_terminals(&[1]);
+        attachment(
+            &t,
+            &s,
+            &[
+                Frame::Attached { from: 100, to: 110 },
+                Frame::Data(b"kept".to_vec()),
+                Frame::Data(b" live".to_vec()),
+            ],
+        )
+        .await;
+        let (out, marks) = cast(&s);
+        assert_eq!(out, "kept live");
+        assert_eq!(marks.len(), 2, "{marks:?}");
+        assert!(marks[1].contains("earlier daemon"), "{marks:?}");
     }
 }
