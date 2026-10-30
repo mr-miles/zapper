@@ -107,6 +107,8 @@ The daemon scans `state/sessions/`:
 
 A terminal keeps running when its host connection closes, and the host can attach to it again: `GET /v1/sessions/{id}/attach?terminal=N`, `zapper attach ID --terminal N`.
 
+*As built (`65e03e1` on `feat/socket-services`):* persistence is opt-in per terminal (`--persist`, `persist=true`) and for terminals with a tty only; every other terminal keeps today's path in PID 1, `SIGHUP` included, so the office, the driver and `zapper exec` are unchanged. Non-tty persistence (the driver's, below) comes with step 7, which needs it. The attach response carries the terminal's number (`X-Zapper-Terminal`), and `zapper hangup ID N` ends one.
+
 - A daemon restart, or the user's SSH or VS Code connection dropping, then leaves Claude Code running, and the user reconnects to the same terminal.
 - A terminal ends when its command exits, or when the host closes it on purpose (`DELETE …/terminals/N`, `zapper attach --hangup`).
 - The recording continues in the same `shell-N.cast`, without gaps when the guest still holds the bytes, and with a marked gap when it doesn't.
