@@ -86,7 +86,9 @@ fn expand(pattern: &str, req: &NetRequest) -> Option<String> {
             continue;
         };
         for c in value.chars() {
-            if "*?[]{}\\,!".contains(c) {
+            // `!` is literal outside a class; inside one (`[!]`) it would
+            // start a negated class, so it is left as it is.
+            if "*?[]{}\\,".contains(c) {
                 out.push('[');
                 out.push(c);
                 out.push(']');
@@ -418,6 +420,28 @@ mod tests {
         assert!(!team.matches(&get("/teams/a/x", Some("s1"), &[("team", "*")])));
         assert!(team.matches(&get("/teams/*/x", Some("s1"), &[("team", "*")])));
         assert!(!team.matches(&get("/teams/a/x", Some("s1"), &[("team", "{a,b}")])));
+    }
+
+    /// Every character a glob gives meaning to, in a placeholder's value,
+    /// matches only itself: the rule still compiles, matches the value, and
+    /// matches nothing else.
+    #[test]
+    fn every_glob_character_in_a_value_is_literal() {
+        let team = rule_with_path("/t/{label:team}/**");
+        // (`?` and `#` can't be in a path: what follows them isn't matched.)
+        for v in [
+            "a!b", "a*b", "a[b", "a]b", "a\\b", "a,b", "a{b", "a}b", "[!x]", "!", "x-_.y",
+        ] {
+            let path = format!("/t/{v}/x");
+            assert!(
+                team.matches(&get(&path, Some("s1"), &[("team", v)])),
+                "{v:?} doesn't match itself"
+            );
+            assert!(
+                !team.matches(&get("/t/aXb/x", Some("s1"), &[("team", v)])),
+                "{v:?} matches another value"
+            );
+        }
     }
 
     #[test]
