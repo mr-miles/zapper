@@ -187,12 +187,12 @@ This replaces proposal 11's new `drive` rule kind: the drive becomes an ordinary
 
 The SSH gateway's needs from the core: an upgrade to a raw byte stream for the gateway, and the forward to the guest's loopback (`LOCAL_FORWARD_PORT`) for VS Code. Shell and exec over SSH use `attach`.
 
-### 8. Clients outside the daemon: event resume and scoped tokens
+### 8. Clients outside the daemon: event resume
 
-The workbench is a client of the API in another process, as [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) foresees for the office. Two things such a client needs that the API lacks:
+The workbench is a client of the API in another process, as [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) foresees for the office. Such a client needs what the API lacked:
 
 - **Event resume.** Events carry a `seq`, but `/v1/events` takes only `session` and `history`, and `seq` starts again at 1 when the daemon restarts (`daemon/events.rs`). Add an `epoch` (an ID for the daemon's run, in every event and in `/v1/status`) and `?after=EPOCH:SEQ` (or SSE's `Last-Event-ID`). A client that reconnects gets what it missed from recent history, or a `gap` event saying history no longer reaches back that far. A new epoch tells it the daemon restarted.
-- **Scoped tokens.** Today, whoever opens the socket can do everything. Add API tokens, each limited to sessions with given labels and to a set of routes (read, answer approvals, create sessions, change rules at those sessions' layer). The workbench uses the socket with full rights, as the operator; the office out of process, or an automation, gets a token for its own sessions only.
+- **Not scoped tokens in zapper.** Whoever opens zapper's socket can do everything, and stays able to: a token on that socket would limit only a client that chose to send one. Remote clients' security belongs to the process in front of zapper, the workbench's gateway ([trust](#processes)): it authenticates each client, holds what each may reach (sessions by label, and which routes), and calls zapper over its trusted socket for them. Tokens in zapper itself would be worth having only for a client that runs as another user and reaches zapper directly, through a second socket that requires one; nothing here does.
 
 ### Invariants
 
@@ -221,7 +221,7 @@ Ordered so that what also makes zapper with the office (`OFFICE=1`) better separ
 |---|---|---|---|
 | 1 | **Socket services with the caller named** (§4) | The office's facilities, its git server and drive among them, can be served from outside the daemon, behind the same interface: the step [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) lists for a separate office process ("session identity on gateway calls the upstream can check") | Drive and git as facility processes |
 | 2 | **Inspected service traffic, `net` path rules with `{session}` and `{label:KEY}`** (§5) | Access to the firm's git and drive can be stated as policy, visible in `zapper rules` and `eval`, instead of grant checks only the office's code makes | The drive's access control |
-| 3 | **Event resume and scoped tokens** (§8) | The other two of firm separation's three additions for a separate office process; the office's UI and foreman stop losing events across a reconnect | A gateway that survives either side restarting |
+| 3 | **Event resume** (§8) | Another of firm separation's additions for a separate office process; the UI stops re-reading history on a reconnect, and no client loses events between reading history and following the stream | A gateway that survives either side restarting |
 | 4 | **Image builds over the API** (§6) | The office's Kickoff can build a missing image instead of failing; the CLI and the UI share one route | The wizard and the repository |
 | 5 | **Persist, stop, start** (§1) | Facilities (a firm's cluster) and workers can be stopped and kept; the cluster's state survives a firm going down | Sandboxes the user comes back to |
 | 6 | **Terminals that outlive their connection** (§3) | `persist: true` for the foreman's driver terminals: a worker's agent survives a dropped host connection; terminal handling leaves PID 1 for holder processes | Reconnecting over SSH to the same terminal |
@@ -244,8 +244,9 @@ Two processes, not three. Facilities are modules behind one interface in the wor
 
 **Trust.**
 
-- The workbench holds zapper's API socket, so it is zapper's operator. It runs as the same user.
-- Its own API and UI listen on loopback by default, behind a token, with the same `Origin` and `X-Zapper-UI` checks as zapper's UI. Remote use goes through an SSH tunnel, as for zapper's UI.
+- The workbench holds zapper's API socket, so it is zapper's operator. It runs as the same user. Zapper's socket stays the trusted channel, with no tokens: the gateway is the one client with clients of its own.
+- **The gateway owns remote security.** It authenticates every client of the workbench's API and UI (tokens, and the UI's cookie with the same `Origin` and `X-Zapper-UI` checks as zapper's UI), and authorizes each request against what that client's token allows: which sessions (by label), and which routes (read, answer approvals, create sessions, change rules at those sessions' layer, each facility's routes). It then makes the calls to zapper and to the facilities itself, over their trusted sockets. It never passes a client's request through as it came: a session it creates gets the token's labels; a rule goes only to the session layer of a session the token reaches; approvals and events are filtered to those sessions.
+- Its API and UI listen on loopback by default. Remote use goes through an SSH tunnel, as for zapper's UI, or a TLS listener the gateway serves, behind the same authentication.
 - Guest input never reaches zapper's write routes through it. Requests from guests reach facilities only through socket services (Part 1 §4), already decided by zapper's policy.
 
 ### The facility interface
@@ -342,7 +343,7 @@ Under `/w/v1`:
 - `secrets`, `drive/{path}`, `repo` (the live commit, validation results, applying a commit), `ssh/keys`, `images` (proxied);
 - `events` (zapper's events, plus the facilities' own).
 
-Automation uses the same API with a token from `~/.config/zapper-workbench/token`. The UI is a client of it and nothing else.
+Automation uses the same API with a token. The first, with every right, is in `~/.config/zapper-workbench/token`; more, each limited to sessions with given labels and to a set of routes, are made with `zapper-workbench token add`. The UI is a client of it and nothing else. Events are resumed through zapper's cursors (§8), which the gateway passes on, so a restart of the gateway loses no client's place.
 
 ### Phases
 
