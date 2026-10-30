@@ -42,7 +42,7 @@ function newModel() {
     spans: [],
     // The run's money: moves between the board and workers, the CEO's
     // budget requests, what the board approved.
-    fundsIn: new Map(), fundsOut: new Map(), moves: [], budgetReqs: new Map(), approved: 0, hires: [],
+    fundsIn: new Map(), fundsOut: new Map(), debt: new Map(), moves: [], budgetReqs: new Map(), approved: 0, hires: [],
     // Background checks on new hires.
     screenings: new Map(), scenarioLog: [], scenario: null, closeWaiter: null,
     // Who held security when, and the board's own articles.
@@ -236,6 +236,11 @@ function apply(M, e) {
         M.fundsIn.set(str(e.to), (M.fundsIn.get(str(e.to)) || 0) + t);
         if (e.from !== BOARD) M.fundsOut.set(str(e.from), (M.fundsOut.get(str(e.from)) || 0) + t);
         M.moves.push({ from: str(e.from), to: str(e.to), tokens: t, reason: str(e.reason), ts });
+      } else if (ev === 'debt') {
+        // What a worker who left overspent, taken on by their manager.
+        const t = Number(e.tokens) || 0;
+        M.debt.set(str(e.to), (M.debt.get(str(e.to)) || 0) + t);
+        M.debt.set(str(e.from), (M.debt.get(str(e.from)) || 0) - t);
       } else if (ev === 'request' && typeof e.id === 'string') {
         M.budgetReqs.set(e.id, { id: e.id, by: str(e.by), total: Number(e.total) || 0, plan: str(e.plan), reason: str(e.reason), message: str(e.message), thread: str(e.thread), ts, state: 'pending', note: '', decided: null });
       } else if (ev === 'decided') {
@@ -456,7 +461,7 @@ function chartWorkers() {
 }
 // The run's budget, from the journal: on when the firm has a seed.
 const fundsOn = (M) => !!(M && M.budget && Number(M.budget.seed) > 0);
-const balanceOf = (M, n) => (M.fundsIn.get(n) || 0) - (M.fundsOut.get(n) || 0) - ((M.workers.get(n) || {}).tokens || 0);
+const balanceOf = (M, n) => (M.fundsIn.get(n) || 0) - (M.fundsOut.get(n) || 0) - (M.debt.get(n) || 0) - ((M.workers.get(n) || {}).tokens || 0);
 function fmtTok(n) { n = Number(n) || 0; const a = Math.abs(n); const s = a >= 1e6 ? (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M' : a >= 1e3 ? Math.round(a / 1e3) + 'k' : String(Math.round(a)); return (n < 0 ? '−' : '') + s; }
 // A balance against what was given: "141k left of 250k given", or past
 // zero (a turn is charged after it ends), "141k over 250k given".

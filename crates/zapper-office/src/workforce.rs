@@ -217,6 +217,14 @@ impl Ledger {
         }
     }
 
+    /// Moves what `from` overspent to `to`, who takes it on: `from`'s
+    /// balance comes back to zero and `to`'s goes down by as much. Not money
+    /// received, so `received` doesn't change.
+    fn take_on_debt(&mut self, from: &str, to: &str, debt: u64) {
+        *self.balance.entry(from.to_string()).or_default() += debt as i64;
+        *self.balance.entry(to.to_string()).or_default() -= debt as i64;
+    }
+
     pub fn spend(&mut self, w: &str, tokens: u64) {
         if !self.enabled {
             return;
@@ -494,6 +502,71 @@ fn held_below(run: &FirmRun, l: &Ledger, w: &str) -> String {
         .join(", ")
 }
 
+/// At the end of `w`'s turn: what they overspent goes up to their manager,
+/// and on up while that leaves the manager overspent too, so it never sits
+/// on someone who can't use it, and whoever funds them sees it at once.
+/// The board keeps no balance: what its own reports (the CEO, the founding
+/// officers) overspend stays with them. Each manager it reaches is told,
+/// once; returns who took some on.
+pub fn settle_overspend(run: &FirmRun, w: &str) -> Vec<String> {
+    let chart = run.chart();
+    let mut hops: Vec<(String, String, u64, i64)> = Vec::new();
+    {
+        let mut l = run.ledger.lock();
+        if !l.enabled {
+            return vec![];
+        }
+        let mut from = w.to_string();
+        loop {
+            let bal = l.balance(&from);
+            let founding_officer = chart.is_officer(&from)
+                && chart.root() != Some(from.as_str())
+                && run.config.worker(&from).is_some();
+            let to = match chart.manager_of(&from) {
+                Some(m) if bal < 0 && m != BOARD && !founding_officer => m.to_string(),
+                _ => break,
+            };
+            let debt = (-bal) as u64;
+            l.take_on_debt(&from, &to, debt);
+            // They are out of tokens now, and their manager is being told.
+            l.told.insert(from.clone(), (super::now(), 0));
+            hops.push((from.clone(), to.clone(), debt, l.balance(&to)));
+            from = to;
+        }
+    }
+    for (from, to, debt, left) in &hops {
+        run.journal.append(
+            "funds",
+            json!({ "event": "debt", "from": from, "to": to, "tokens": debt, "reason": format!("{from} overspent") }),
+        );
+        let after = if *left < 0 {
+            format!(
+                "your balance is overspent too ({} under), so it went on up to your manager",
+                fmt_tokens(-left)
+            )
+        } else {
+            format!("you have {} left", fmt_tokens(*left))
+        };
+        let whose = if from == w {
+            format!(
+                "{from}'s last turn cost {} more than they had",
+                fmt_tokens(*debt as i64)
+            )
+        } else {
+            format!(
+                "{from} took on {} of overspend from their team, more than they had",
+                fmt_tokens(*debt as i64)
+            )
+        };
+        run.notice(
+            to,
+            &format!("{from} overspent their budget"),
+            &format!("[Automatic notice] {whose}: it has come off your balance, and {after}. {from} takes no turns until you fund them (fund(worker: \"{from}\", tokens: …, reason: …)), or move their work. Whoever overspends next comes to you the same way.\n"),
+        );
+    }
+    hops.into_iter().map(|(_, to, ..)| to).collect()
+}
+
 /// After a turn of the CEO's: how near their reserve (`budget.ceo_reserve`)
 /// their balance is, telling them once when about three turns are left
 /// above it, and once when they reach it.
@@ -527,7 +600,7 @@ pub fn after_turn(run: &FirmRun, w: &str) {
     } else {
         (l.reserve < Reserve::Reached).then(|| {
             l.reserve = Reserve::Reached;
-            ("reached", "Budget: your reserve".to_string(), format!("[Automatic notice] Your balance ({} tokens) has reached your reserve ({}). You take this one turn, to ask the board for more: budget_request, with what has been achieved and what the extra buys, or, if a request of yours is pending, one short reminder in its thread.{take_back} Then end your turn: you take no more until the board decides.\n", fmt_tokens(bal), fmt_tokens(reserve as i64)))
+            ("reached", "Budget: your reserve".to_string(), format!("[Automatic notice] Your balance ({} tokens) has reached your reserve ({}), or gone below it with your team's overspend. You take this one turn, to ask the board for more: budget_request, with what has been achieved and what the extra buys, or, if a request of yours is pending, one short reminder in its thread.{take_back} Then end your turn: you take no more until the board decides.\n", fmt_tokens(bal), fmt_tokens(reserve as i64)))
         })
     };
     drop(l);
@@ -582,16 +655,17 @@ fn reserve_allows(run: &FirmRun, w: &str) -> Option<bool> {
             run.notice(
                 BOARD,
                 &format!("{w} is at their reserve"),
-                &format!("[Automatic notice] {w}, the CEO, has reached their reserve ({} of {} left) and takes no more turns until you decide: their last turn was for asking you for more.{ask} Or fund them: `zapper firm fund {} {w} TOKENS --reason …`.\n", fmt_tokens(bal), fmt_tokens(reserve as i64), run.firm),
+                &format!("[Automatic notice] {w}, the CEO, has reached their reserve ({}, of a reserve of {}) and takes no more turns until you decide: their last turn was for asking you for more.{ask} Or fund them: `zapper firm fund {} {w} TOKENS --reason …`.\n", if bal < 0 { format!("overdrawn by {}", fmt_tokens(-bal)) } else { format!("{} left", fmt_tokens(bal)) }, fmt_tokens(reserve as i64), run.firm),
             );
             Some(false)
         }
-        // The one turn at the reserve, to ask, if there is anything left.
-        _ if bal > 0 => {
+        // The one turn at the reserve, to ask: an emergency allowance, so
+        // it is there however far below the reserve the CEO is, overdrawn
+        // too (by their team's overspend, say).
+        _ => {
             l.reserve = Reserve::Used;
             Some(true)
         }
-        _ => None,
     }
 }
 
@@ -1377,7 +1451,9 @@ pub async fn release(
 
 /// A worker leaves the firm: out of the chart, their VM stopped; their
 /// reports, open work, mail and unspent budget go to their manager, who is
-/// told when someone else (`by`) made the call and `tell` is set.
+/// told when someone else (`by`) made the call and `tell` is set. So does
+/// what they overspent: letting someone go writes off nothing (the board
+/// alone, which keeps no balance, takes on its own reports' overspend).
 pub fn let_go(
     d: &Core,
     run: &Arc<FirmRun>,
@@ -1424,19 +1500,39 @@ pub fn let_go(
             objective_done: false,
         });
     }
-    let returned = {
+    let (returned, debt) = {
         let mut l = run.ledger.lock();
-        let left = l.balance(worker).max(0) as u64;
+        let bal = l.balance(worker);
+        let left = bal.max(0) as u64;
         if left > 0 {
             l.transfer(Some(worker), &manager, left);
         }
-        left
+        let debt = if bal < 0 && manager != BOARD {
+            (-bal) as u64
+        } else {
+            0
+        };
+        if debt > 0 {
+            l.take_on_debt(worker, &manager, debt);
+        }
+        (left, debt)
     };
     let rt = run.workers.write().unwrap().remove(worker);
     run.journal.append("left", json!({ "worker": worker, "by": by, "reason": reason.trim(), "to": manager, "returned": returned, "moved": moved.iter().map(|o| &o.message).collect::<Vec<_>>() }));
     if returned > 0 {
         run.journal.append("funds", json!({ "event": "move", "from": worker, "to": manager, "tokens": returned, "reason": format!("{worker} left") }));
     }
+    if debt > 0 {
+        run.journal.append("funds", json!({ "event": "debt", "from": worker, "to": manager, "tokens": debt, "reason": format!("{worker} left overspent") }));
+    }
+    let budget = if debt > 0 {
+        format!("and you took on what they overspent ({} tokens): letting someone go doesn't write it off", fmt_tokens(debt as i64))
+    } else {
+        format!(
+            "and you have their unspent budget ({} tokens)",
+            fmt_tokens(returned as i64)
+        )
+    };
     if let Some(rt) = rt {
         run.set_state(&rt, WorkerState::Off, None);
         rt.wake.notify_one();
@@ -1457,15 +1553,68 @@ pub fn let_go(
         run.notice(
             &manager,
             &format!("{worker} left; their work is yours"),
-            &format!("[Automatic notice] {by} let {worker} go: {}\nTheir reports now report to you, their mail comes to you (what they hadn't read, and the requests they hadn't answered, are in your inbox now), and you have their unspent budget ({} tokens).\n{}", reason.trim(), fmt_tokens(returned as i64), if list.is_empty() { String::new() } else { format!("What they owed is now yours:\n{list}") }),
+            &format!("[Automatic notice] {by} let {worker} go: {}\nTheir reports now report to you, their mail comes to you (what they hadn't read, and the requests they hadn't answered, are in your inbox now), {budget}.\n{}", reason.trim(), if list.is_empty() { String::new() } else { format!("What they owed is now yours:\n{list}") }),
         );
     }
-    json!({ "worker": worker, "returned": returned, "to": manager, "moved": moved.len() })
+    json!({ "worker": worker, "returned": returned, "debt": debt, "to": manager, "moved": moved.len() })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An overspend goes up at the end of the turn: the worker is left at
+    /// zero, unable to work until funded, and their manager takes it on and
+    /// is told; past a manager who can't cover it, on up to the CEO, whose
+    /// reserve still gives them a turn to ask the board, overdrawn or not.
+    #[test]
+    fn overspend_goes_up_at_the_end_of_the_turn() {
+        let t = crate::test_core(
+            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000000, ceo_reserve: 200000 }\n    roles: { boss: { profile: w, agent: ceo, hires: [eng] }, lead: { profile: w, agent: manager, hires: [eng] }, eng: { profile: w, agent: software-engineer } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: max, role: lead, reports_to: ceo }\n      - { name: pat, role: eng, reports_to: max }\n",
+        );
+        let run = crate::run::test_run(&t.core, "acme");
+        let subjects = |who: &str| -> Vec<String> {
+            run.post
+                .with(|po| po.inbox(who, false, 50))
+                .iter()
+                .map(|m| m["subject"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+        let bal = |w: &str| run.ledger.balance(w);
+        fund(&run, "ceo", "max", 300_000, "the team").unwrap();
+        fund(&run, "max", "pat", 200_000, "the build").unwrap();
+        // pat overspends by 50k: max covers it.
+        run.count_turn("pat", 250_000);
+        assert_eq!((bal("pat"), bal("max")), (0, 50_000));
+        assert!(!allows(&run, "pat"), "pat waits to be funded");
+        assert!(subjects("max")
+            .iter()
+            .any(|s| s == "pat overspent their budget"));
+        assert!(subjects("ceo")
+            .iter()
+            .all(|s| s != "pat overspent their budget"));
+        // Again by 80k: max can't cover 30k of it, which goes on to the CEO.
+        fund(&run, "max", "pat", 50_000, "finish it").unwrap();
+        run.count_turn("pat", 130_000);
+        assert_eq!(
+            (bal("pat"), bal("max"), bal("ceo")),
+            (0, 0, 700_000 - 80_000)
+        );
+        assert!(subjects("ceo")
+            .iter()
+            .any(|s| s == "max overspent their budget"));
+        // A huge overspend overdraws the CEO, who still gets a turn to ask.
+        fund(&run, "ceo", "max", 600_000, "x").unwrap();
+        fund(&run, "max", "pat", 600_000, "x").unwrap();
+        run.count_turn("pat", 700_000);
+        assert!(bal("ceo") < 0, "{}", bal("ceo"));
+        assert!(subjects("ceo").iter().any(|s| s == "Budget: your reserve"));
+        assert!(allows(&run, "ceo"), "the emergency turn, overdrawn");
+        assert!(!allows(&run, "ceo"));
+        assert!(subjects(BOARD)
+            .iter()
+            .any(|s| s.contains("at their reserve")));
+    }
 
     /// The CEO is warned three turns above their reserve, takes one turn at
     /// it to ask the board, then none until the board decides; the board is

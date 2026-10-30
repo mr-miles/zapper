@@ -600,7 +600,17 @@ impl FirmRun {
 
     pub fn count_turn(&self, worker: &str, tokens: u64) {
         self.ledger.spend(worker, tokens);
+        // Overspend goes up at once; the CEO, if it reached them, hears how
+        // near their reserve they are.
+        let took = workforce::settle_overspend(self, worker);
         workforce::after_turn(self, worker);
+        if let Some(ceo) = self
+            .chart()
+            .root()
+            .filter(|c| *c != worker && took.iter().any(|t| t == c))
+        {
+            workforce::after_turn(self, ceo);
+        }
         let mut u = self.usage.lock().unwrap();
         let today = utc_day(now());
         if u.day != today {

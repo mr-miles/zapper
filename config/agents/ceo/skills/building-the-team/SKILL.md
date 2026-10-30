@@ -20,7 +20,7 @@ Each hire's brief names the access the work needs (manager skill, *Access, decid
 
 ## Nobody stalls for budget
 
-When told someone ran out of tokens, make sure they are funded (by their manager or by you) or their work moves, in that turn. If the firm's budget is short, ask the board (the budget skill). A worker left out of tokens with work waiting is your miss: you are reminded, and if it goes on, the board is told.
+When told someone ran out of tokens, make sure they are funded (by their manager or by you) or their work moves, in that turn. If the firm's budget is short, ask the board (the budget skill). A worker left out of tokens with work waiting is your miss: you are reminded, and if it goes on, the board is told. Overspend anywhere in the firm ends with you when the managers in between can't cover it (the manager skill): watch for teams that keep overspending, and budget their work more realistically, or move it.
 
 ## Access
 

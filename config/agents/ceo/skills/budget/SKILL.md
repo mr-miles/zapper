@@ -39,4 +39,4 @@ End your turn: the board's decision wakes you, in the request's thread. If it de
 
 Ask for more only with `budget_request`, never by mail, and only with what was achieved, what the extra buys, and why the first estimate fell short. Before you ask, take back what your team won't need (`fund` with a negative amount, the manager skill).
 
-You keep a reserve to ask with: you're told when about three turns are left above it, which is when to ask; at the reserve you get one more turn, for asking, and then none until the board decides.
+You keep a reserve to ask with: you're told when about three turns are left above it, which is when to ask; at the reserve you get one more turn, for asking, and then none until the board decides. Overspend from your team can take you below your reserve, even overdrawn: you still get that one turn, so ask then, after taking back what your team won't need.
