@@ -1,5 +1,7 @@
 # A drive in zapper's core: files shared with sessions under policy
 
+> **Revised by [proposal 12](12-single-user-layer.md).** The drive moves into a facility outside the daemon: guests reach it as a socket service, whose caller the daemon names, and its access is ordinary `net` rules with `methods` and `path`, which gain `{session}` and `{label:KEY}` placeholders. The `drive` rule kind and the in-daemon handler below are replaced. Paths, links, bounds and events stand as written.
+
 A directory on the host that the operator fills and empties with `scp`, `sftp` or `zapper drive`, and that sessions reach over HTTPS at `drive.zapper`, each path read or written only as the session's `drive` rules allow. Files move between the operator and the sessions without the operator ever copying into a VM, and without the host unpacking an archive a guest made. It is part of the core, so it works with `OFFICE=0`. [Proposal 10](10-ssh-gateway.md)'s SSH gateway serves it as `drive.zapper` for `scp` and `sftp`.
 
 ## Today
