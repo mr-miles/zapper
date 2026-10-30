@@ -37,6 +37,23 @@ A session gains a **stopped** state, which keeps its disks.
 
 This step alone gives sandboxes the user can stop and come back to. It doesn't yet survive a daemon restart: a restart stops every running sandbox, which can then be started again.
 
+#### Tamper evidence for disks
+
+The keeper keeps the record append-only ([security: the record](../security.md#the-record)), but a sandbox's disks are files the daemon's user can change, the operator included, and nothing records what they hold. A changed disk would leave a record that reads as an honest account of a sandbox whose state no longer matches it. Kept disks make this matter: a stopped sandbox's disks wait on the host for as long as it is stopped. So disks get **tamper evidence**: a change made outside a running sandbox shows in the record.
+
+| When | Evidence |
+|---|---|
+| An image is built | Its SHA-256 goes into `images/NAME.json` with the rest of its build (`zapper image ls` shows it), and into the build's `image` event |
+| A sandbox is created | The SHA-256 of the image file it copies is checked against `NAME.json` and recorded in its `session` event, which reaches the record through the keeper. A mismatch is recorded as `image NAME changed since it was built` and the sandbox isn't created, unless `--accept-changed-image` |
+| A sandbox stops | When the guest has powered off, each kept disk's SHA-256 (root and data disks) is recorded in a `disks` event |
+| A sandbox starts | Each disk is hashed again before Firecracker opens it, and compared with the last `disks` event. A mismatch is recorded (`root.ext4 changed while stopped`), and the start refused unless `zapper start --accept-changed-disks`, which records that too |
+
+- Hashing reads the whole file: a few seconds for a disk of several GiB, at create, stop and start, never while the sandbox runs. Sparse holes hash as zeros like the rest.
+- The hashes are in the record, so the keeper's chain and signed checkpoints cover them: a disk changed while stopped, and the record rewritten to match it, shows as a broken chain.
+- `zapper record verify` gains a check that every start's hashes matched the stop before it, or was accepted as changed.
+
+**What it doesn't cover: a running sandbox.** Firecracker writes its disks all the time, and a write by the operator to the same file looks no different: watching for changes (inotify) can't say who wrote, and telling writers apart (fanotify) needs root. Preventing such writes would mean disks owned by a user the operator can't become (subordinate uids don't do it: the daemon's user owns its range), so VMs run by a helper under a system user of its own, the way the keeper runs; root on the host passes even that. [security: limitations](../security.md#limitations) gains: "The operator can change a running sandbox's disk without a trace; disks changed while stopped, and images changed after their build, show in the record."
+
 ### 2. Sandboxes that survive a restart of the daemon
 
 The daemon can't be made small enough never to need restarting. It is where the code that most needs patching lives (the HTTP and TLS parsers, DNS, the database wire protocols), and upgrades, `daemon.keeper` changes and crashes all restart it. So instead of avoiding restarts, **make them harmless**: the one piece a running VM needs is the process that owns Firecracker, and that piece already exists and is small.
@@ -205,11 +222,13 @@ New:
 
 - A sandbox is adopted only through its own supervisor's socket, and its CA comes only from that supervisor.
 - A socket service's caller is named by the daemon, from the VM the connection came from, never by the guest.
+- A sandbox boots only disks whose hashes match the record (its image's at creation, its own last stop's at a start), or whose change the operator accepted, which is recorded.
 
 `tests/e2e.sh` gains:
 
 - restarting the daemon with a guest running, then checking that during the gap a connection and an exec are refused, and that after it the terminal, rules, DNS answers and TLS trust all hold;
 - a resumption with a wrong token refused;
+- a stopped sandbox's disk changed on the host, and its start refused and recorded; an image changed after its build, and creation refused;
 - stop, start and remove;
 - a socket service seeing the right caller, and a guest-sent header ignored.
 
