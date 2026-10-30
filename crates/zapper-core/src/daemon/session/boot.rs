@@ -309,21 +309,28 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
         // that sends nothing (which the workload could open) holds up no
         // other. The first with the token is taken.
         let (found_tx, mut found_rx) = mpsc::channel::<(tokio::net::UnixStream, Vec<u64>)>(1);
-        let checking = Arc::new(tokio::sync::Semaphore::new(4));
+        // Connections being checked, oldest first. Full, the oldest still
+        // silent makes room for the new one, which is never refused: the
+        // agent sends its line as it connects, so the workload would have
+        // to open dozens of connections between the two to push it out.
+        let mut checking: std::collections::VecDeque<tokio::task::AbortHandle> = Default::default();
         let refused: Arc<std::sync::Mutex<(u64, String)>> = Default::default();
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         let (stream, terminals) = loop {
             tokio::select! {
                 accepted = listener.accept() => {
                     let Ok((mut stream, _)) = accepted else { continue };
-                    let Ok(permit) = checking.clone().try_acquire_owned() else {
-                        let mut r = refused.lock().unwrap();
-                        r.0 += 1;
-                        r.1 = "too many connections at once".into();
-                        continue;
-                    };
+                    checking.retain(|h| !h.is_finished());
+                    if checking.len() >= RESUME_CHECKS {
+                        if let Some(oldest) = checking.pop_front() {
+                            oldest.abort();
+                            let mut r = refused.lock().unwrap();
+                            r.0 += 1;
+                            r.1 = "silent while newer connections came".into();
+                        }
+                    }
                     let (tx, token, refused) = (found_tx.clone(), token.clone(), refused.clone());
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         match resumed(&mut stream, &token).await {
                             Ok(terminals) => {
                                 let _ = tx.send((stream, terminals)).await;
@@ -334,8 +341,8 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
                                 r.1 = why;
                             }
                         }
-                        drop(permit);
                     });
+                    checking.push_back(task.abort_handle());
                 }
                 Some(found) = found_rx.recv() => break found,
                 _ = status.changed() => return Ok(()),
@@ -354,9 +361,13 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
                 detail: Some("its agent connected again".into()),
             },
         );
-        serve_control(daemon, session, stream, None).await?;
+        // Told it was taken: the agent asks again what was waiting.
+        serve_control(daemon, session, stream, Some(HostMsg::Resumed)).await?;
     }
 }
+
+/// Connections checked for a resumption at once.
+const RESUME_CHECKS: usize = 64;
 
 /// Records the control connections refused since last time, if any: how
 /// many, and why the last was.
@@ -387,7 +398,7 @@ fn note_refused(
 async fn resumed(stream: &mut tokio::net::UnixStream, token: &str) -> Result<Vec<u64>, String> {
     // A byte at a time: the exec checks the agent asks again follow the line
     // at once, and must stay in the stream for `serve_control`.
-    let line = tokio::time::timeout(Duration::from_secs(10), async {
+    let line = tokio::time::timeout(Duration::from_secs(2), async {
         let mut line = Vec::new();
         loop {
             match stream.read_u8().await {
@@ -696,8 +707,6 @@ mod resume_tests {
         let task = tokio::spawn(async move { resume_control(&d, &s2).await });
         let path = s.dir.vsock_port(CONTROL_PORT);
 
-        // One that sends nothing, as the workload could: it holds nobody up.
-        let _silent = connect(&path).await;
         let mut wrong = connect(&path).await;
         wrong
             .write_all(b"{\"type\":\"resume\",\"token\":\"guessed\",\"terminals\":[]}\n")
@@ -706,6 +715,25 @@ mod resume_tests {
         let mut buf = Vec::new();
         let _ = wrong.read_to_end(&mut buf).await;
         assert!(buf.is_empty(), "closed, unanswered");
+        // Before the agent: more connections that send nothing than are
+        // checked at once, held open, and more opened all the while, as the
+        // workload could. They hold the agent up none the less.
+        let mut silent = Vec::new();
+        for _ in 0..RESUME_CHECKS + 6 {
+            silent.push(connect(&path).await);
+        }
+        let flood = {
+            let path = path.clone();
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                loop {
+                    if let Ok(c) = tokio::net::UnixStream::connect(&path).await {
+                        held.push(c);
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+        };
 
         let mut agent = connect(&path).await;
         agent
@@ -717,14 +745,23 @@ mod resume_tests {
             .unwrap();
         let mut reader = tokio::io::BufReader::new(agent);
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap();
+        let mut next = async || {
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            line.clone()
+        };
+        let first = next().await;
+        assert!(first.contains("\"resumed\""), "told it was taken: {first}");
+        let reply = next().await;
         assert!(
-            line.contains("\"exec_reply\"") && line.contains("\"id\":7"),
-            "{line}"
+            reply.contains("\"exec_reply\"") && reply.contains("\"id\":7"),
+            "{reply}"
         );
+        flood.abort();
+        drop(silent);
         assert!(!path.exists(), "the socket goes again");
         let refusals: Vec<String> = t
             .core
@@ -738,10 +775,10 @@ mod resume_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            refusals,
-            vec!["refused 1 control connection (the last: a wrong resume token)"]
-        );
+        // Counted, not an event each: the wrong token, and the silent
+        // connections that made room.
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert!(refusals[0].starts_with("refused "), "{refusals:?}");
         assert!(s.terminals.lock().unwrap().contains_key(&3));
         assert!(s.runtime.next_shell() > 3);
 

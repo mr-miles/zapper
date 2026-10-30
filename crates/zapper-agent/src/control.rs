@@ -81,7 +81,7 @@ impl Control {
                     }
                 }
                 Ok(Some(HostMsg::Shutdown)) => sys::power_off(),
-                Ok(Some(HostMsg::Init { .. })) => {}
+                Ok(Some(HostMsg::Init { .. } | HostMsg::Resumed)) => {}
                 Ok(None) | Err(_) => match &self.resume {
                     Some(token) => reader = self.reconnect(token),
                     None => {
@@ -118,6 +118,16 @@ impl Control {
                 token: token.to_string(),
                 terminals: crate::holder::ids(),
             });
+            // Taken only when the host says so: one that closes it (a host
+            // not adopting the session yet, or one refusing it) isn't, and
+            // the host stays gone, its 60 seconds running on.
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
+            sys::set_recv_timeout(fd, 5);
+            let mut reader = BufReader::new(reader);
+            if !matches!(read_msg(&mut reader), Ok(Some(HostMsg::Resumed))) {
+                continue;
+            }
+            sys::set_recv_timeout(fd, 0);
             let waiting: Vec<GuestMsg> = self
                 .pending
                 .lock()
@@ -129,7 +139,7 @@ impl Control {
                 self.send(m);
             }
             *self.gone_since.lock().unwrap() = None;
-            return BufReader::new(reader);
+            return reader;
         }
     }
 

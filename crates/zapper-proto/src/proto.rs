@@ -123,6 +123,9 @@ pub enum HostMsg {
         allow: bool,
     },
     Shutdown,
+    /// First on a control connection taken again (`GuestMsg::Resume`): the
+    /// host has it, and the agent asks again what was waiting.
+    Resumed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

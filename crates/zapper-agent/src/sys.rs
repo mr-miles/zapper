@@ -312,6 +312,23 @@ pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Option<(Vec<u8>, Option<O
     }
 }
 
+/// Makes a read from socket `fd` give up after `secs` seconds (0: never).
+pub fn set_recv_timeout(fd: RawFd, secs: i64) {
+    let tv = libc::timeval {
+        tv_sec: secs,
+        tv_usec: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
 /// Makes a write to socket `fd` give up after `secs` seconds.
 pub fn set_send_timeout(fd: RawFd, secs: i64) {
     let tv = libc::timeval {
