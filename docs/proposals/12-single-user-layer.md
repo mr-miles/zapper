@@ -20,7 +20,7 @@ This proposal has two parts. [Part 1](#part-1-changes-to-zapper) is what zapper'
 
 ### 1. Sandboxes that persist: stop, start, remove
 
-A session gains a **stopped** state, which keeps its disks.
+A session created **persistent** (`persistent: true`, `zapper run --persistent`) keeps its disks in a **stopped** state. Persistence is opt-in: other sessions lose their disks when they stop, as before, so `zapper run` and a firm's workers (which share policy layers, and so can't be persistent) keep today's behaviour and disk use. *(Built: `fe8a1b6`, `43fbbab` on `feat/socket-services`.)*
 
 | Operation | What happens |
 |---|---|
@@ -44,7 +44,7 @@ The keeper keeps the record append-only ([security: the record](../security.md#t
 | When | Evidence |
 |---|---|
 | An image is built | Its SHA-256 goes into `images/NAME.json` with the rest of its build (`zapper image ls` shows it), and into the build's `image` event |
-| A sandbox is created | The SHA-256 of the image file it copies is checked against `NAME.json` and recorded in its `session` event, which reaches the record through the keeper. A mismatch is recorded as `image NAME changed since it was built` and the sandbox isn't created, unless `--accept-changed-image` |
+| A persistent sandbox is created | The SHA-256 of the image file it copies is checked against `NAME.json` and recorded in a `disks` event (`image`), which reaches the record through the keeper. A mismatch is recorded as `image NAME changed since it was built` and the sandbox isn't created, unless `--accept-changed-image`. Only persistent sandboxes are checked: hashing an image takes seconds, which every `zapper run` and firm worker would otherwise pay |
 | A sandbox stops | When the guest has powered off, each kept disk's SHA-256 (root and data disks) is recorded in a `disks` event |
 | A sandbox starts | Each disk is hashed again before Firecracker opens it, and compared with the last `disks` event. A mismatch is recorded (`root.ext4 changed while stopped`), and the start refused unless `zapper start --accept-changed-disks`, which records that too |
 
