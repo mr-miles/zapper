@@ -190,17 +190,23 @@ fn serve_guest(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
         let _ = std::fs::remove_file(&path);
         UnixListener::bind(&path)
     };
+    // A boot's listeners end with it (`GuestRuntime::clear_guest`); any
+    // left from before (an adoption after a failed start) go first.
+    let rt = &session.runtime;
+    rt.end_listeners();
     let proxy_listener = bind(dir.vsock_port(PROXY_PORT))?;
     // The MCP gateway, to the servers registered for the session.
     let mcp = bind(dir.vsock_port(MCP_PORT))?;
-    tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
+    let task = tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
+    rt.hold_listener(task.abort_handle());
     if session.resolved.engine.network == zapper_policy::NetworkMode::Nic {
         let listener = bind(dir.nic_socket())?;
-        tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
+        let task = tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
+        rt.hold_listener(task.abort_handle());
     }
     let (d, s) = (daemon.clone(), session.clone());
-    let limit = session.runtime.conns();
-    tokio::spawn(crate::daemon::accept_loop(
+    let limit = rt.conns();
+    let task = tokio::spawn(crate::daemon::accept_loop(
         proxy_listener,
         limit,
         move |stream| {
@@ -210,6 +216,7 @@ fn serve_guest(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
             }
         },
     ));
+    rt.hold_listener(task.abort_handle());
     Ok(())
 }
 
@@ -676,6 +683,41 @@ mod resume_tests {
     use crate::daemon::session::NewSession;
     use crate::testing::TestCore;
     use tokio::io::AsyncBufReadExt;
+
+    /// The tasks accepting on a guest's sockets end when it stops: none is
+    /// left holding the session, and its sockets accept nothing more.
+    #[tokio::test]
+    async fn a_stopped_sessions_listeners_end() {
+        let t = TestCore::new("profiles:\n  web: {}\n");
+        let s = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        let before = Arc::strong_count(&s);
+        serve_guest(t.core.daemon(), &s).unwrap();
+        assert!(Arc::strong_count(&s) > before, "the listeners hold it");
+        // Serving again (an adoption) ends the first boot's.
+        serve_guest(t.core.daemon(), &s).unwrap();
+        let held = Arc::strong_count(&s);
+
+        super::super::stop(t.core.daemon(), &s, "stopped").await;
+        for _ in 0..100 {
+            if Arc::strong_count(&s) <= before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            Arc::strong_count(&s) <= before,
+            "held by {} before, {held} serving, {} after",
+            before,
+            Arc::strong_count(&s)
+        );
+    }
 
     async fn connect(path: &std::path::Path) -> tokio::net::UnixStream {
         for _ in 0..100 {

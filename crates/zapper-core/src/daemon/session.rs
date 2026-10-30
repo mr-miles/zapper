@@ -364,6 +364,9 @@ pub(crate) struct GuestRuntime {
     exec_checks: Arc<Semaphore>,
     /// Bounds concurrent proxy connections from the guest.
     conns: Arc<Semaphore>,
+    /// The tasks accepting on the guest's sockets (`boot::serve_guest`),
+    /// ended with the VM: each holds the session.
+    listeners: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl GuestRuntime {
@@ -375,6 +378,7 @@ impl GuestRuntime {
             next_shell: AtomicU64::new(1),
             exec_checks: Arc::new(Semaphore::new(64)),
             conns: Arc::new(Semaphore::new(256)),
+            listeners: Mutex::new(Vec::new()),
         }
     }
 
@@ -460,9 +464,24 @@ impl GuestRuntime {
         *self.guest.lock().unwrap() = Some(tx);
     }
 
-    /// Drops the control channel (teardown).
+    /// Drops the control channel and ends the tasks accepting on the
+    /// guest's sockets (teardown).
     pub fn clear_guest(&self) {
         *self.guest.lock().unwrap() = None;
+        self.end_listeners();
+    }
+
+    /// Keeps a task accepting on one of the guest's sockets, to end with
+    /// the VM.
+    pub fn hold_listener(&self, task: tokio::task::AbortHandle) {
+        self.listeners.lock().unwrap().push(task);
+    }
+
+    /// Ends the tasks accepting on the guest's sockets.
+    pub fn end_listeners(&self) {
+        for task in self.listeners.lock().unwrap().drain(..) {
+            task.abort();
+        }
     }
 
     /// Sends a message to the guest agent, if the channel is up.
