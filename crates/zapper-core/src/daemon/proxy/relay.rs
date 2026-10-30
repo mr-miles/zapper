@@ -137,6 +137,26 @@ pub(super) async fn relay_database<S>(
         );
     };
     let name = v.effects.secrets.first().cloned();
+    // The credential goes only to its secret's hosts, as an injected one
+    // does: a rule wider than them doesn't widen where the secret goes.
+    if let Some(n) = &name {
+        let for_host = d
+            .config
+            .read()
+            .unwrap()
+            .secrets
+            .get(n)
+            .is_some_and(|sec| sec.allows_host(&endpoint.host));
+        if !for_host {
+            return fail(
+                403,
+                format!(
+                    "secret {n} isn't for {}: it isn't among the secret's hosts",
+                    endpoint.host
+                ),
+            );
+        }
+    }
     let cred = match db_cred(d, name.as_deref()).await {
         Ok(c) => c,
         Err(e) => return fail(500, e),

@@ -668,3 +668,28 @@ async fn the_fake_aws_key_signs_only_for_the_secrets_hosts() {
         "{ev}"
     );
 }
+
+/// A database rule wider than its `dbauth` secret's hosts doesn't widen where
+/// the credential goes: to a host the rule allows but the secret isn't for,
+/// it is refused before the secret is even read; to one of its hosts, it
+/// gets past that (and here fails only to connect).
+#[tokio::test]
+async fn a_dbauth_secret_goes_only_to_its_hosts() {
+    let t = TestCore::with_daemon(
+        "private_networks: [10.0.0.0/8]",
+        "secrets:\n  prod: { value: pw, mode: dbauth, hosts: [10.0.0.9], user: app }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: \"10.*\", ports: [6379], protocol: redis, secrets: [prod] }\n",
+    );
+    let s = session(&t);
+    let mut io = crate::testing::dial_addr(&t, &s, "10.1.2.3".parse().unwrap(), 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    let refused = net_event(&t, &s, 0).await["error"].to_string();
+    assert!(
+        refused.contains("secret prod isn't for 10.1.2.3"),
+        "{refused}"
+    );
+
+    let mut io = crate::testing::dial_addr(&t, &s, "10.0.0.9".parse().unwrap(), 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    let past = net_event(&t, &s, 1).await["error"].to_string();
+    assert!(!past.contains("isn't for"), "{past}");
+}
