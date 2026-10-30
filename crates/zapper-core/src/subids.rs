@@ -124,6 +124,12 @@ pub fn lease(ids: &SubIds, session: &str) -> Result<u32> {
     Ok(n)
 }
 
+/// Takes offset `n` for `session` again: a daemon that adopts a VMM an
+/// earlier one started with it.
+pub fn claim(session: &str, n: u32) {
+    LEASES.lock().unwrap().insert(session.to_string(), n);
+}
+
 pub fn release(session: &str) {
     LEASES.lock().unwrap().remove(session);
 }

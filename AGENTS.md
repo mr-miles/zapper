@@ -142,6 +142,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - An inspected request is judged on the path and method the upstream will act on: the path decoded and with dot segments resolved, and forwarded so; a path upstreams may read differently, and an override naming another method, refused.
 - The proxy connects to the address it checked. Loopback, link-local and host addresses are unreachable, and private ranges need `daemon.private_networks`.
 - Passthrough connections are bound to the TLS server name; inspected ones present a per-session CA and override `Host`.
+- A persistent session's VMM outlives the daemon; while no daemon runs, its guest reaches nothing and starts nothing new; a daemon adopts it only after checking that the pid recorded is that session's VMM, and its agent only by its resume token.
 - The host accepts only the first control connection, and afterwards, for a persistent session, only one whose first line carries the session's resume token; the agent accepts terminal connections only from CID 2.
 - A persistent session boots only disks whose hashes match those recorded at its last stop, or whose change (or missing hashes) the operator accepted; both are recorded.
 - A socket service names a file in the daemon's `state/services/` directory, never a path; its program is told the caller in a line the daemon sends first, from the VM the connection came from, before any byte from the guest.
@@ -153,7 +154,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - A config change is validated as a whole and applied atomically, or not at all.
 - With a keeper, the record is appended through it and nothing else: the keeper takes appends from the configured uid only, has no operation to read back, rewrite or remove, flushes each line before acknowledging, and the daemon takes no firm turns while the record can't be written.
 
-Applying changes: rebuild with `make build` and restart the daemon; sessions do not survive a restart (stop them first, see Rules), but persistent ones come back stopped, with their disks. Rule and profile changes need no restart: they apply to running sessions at once.
+Applying changes: rebuild with `make build` and restart the daemon; sessions do not survive a restart (stop them first, see Rules), but persistent ones keep running through it: the next daemon adopts them. Rule and profile changes need no restart: they apply to running sessions at once.
 
 Code style: rustfmt's defaults and a clean clippy. `make hooks` turns on the pre-commit hook in `.githooks/`, which runs both; keep `make lint` passing.
 

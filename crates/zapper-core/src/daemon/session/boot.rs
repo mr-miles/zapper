@@ -143,15 +143,8 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     // Guest-initiated vsock connections arrive on `<uds>_<port>`.
     let control_path = dir.vsock_port(CONTROL_PORT);
     let control = UnixListener::bind(&control_path)?;
-    let proxy_listener = UnixListener::bind(dir.vsock_port(PROXY_PORT))?;
-    // The MCP gateway, to the servers registered for the session.
-    let mcp = UnixListener::bind(dir.vsock_port(MCP_PORT))?;
-    tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
+    serve_guest(daemon, session)?;
     let nic_on = engine.network == zapper_policy::NetworkMode::Nic;
-    if nic_on {
-        let listener = UnixListener::bind(dir.nic_socket())?;
-        tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
-    }
 
     let subids = daemon.config.read().unwrap().daemon.vmm_subids;
     let child = vm::start(vm::VmSpec {
@@ -168,7 +161,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         durable: session.persistent,
     })
     .await?;
-    *session.runtime.vm().lock().await = Some(child);
+    *session.runtime.vm().lock().await = Some(vm::VmProc::Child(child));
 
     {
         let (d, s) = (daemon.clone(), session.clone());
@@ -183,43 +176,81 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
             }
         });
     }
-    {
-        let (d, s) = (daemon.clone(), session.clone());
-        let limit = session.runtime.conns();
-        tokio::spawn(crate::daemon::accept_loop(
-            proxy_listener,
-            limit,
-            move |stream| {
-                let (d, s) = (d.clone(), s.clone());
-                async move {
-                    proxy::serve(d, s, stream).await;
-                }
-            },
-        ));
+    watch_vm(daemon, session);
+    Ok(())
+}
+
+/// The guest's sockets besides the control channel: the egress proxy (vsock
+/// mode), the MCP gateway, and the NIC's capture. Bound afresh, an earlier
+/// daemon's left behind removed (Firecracker's own `v.sock` is never one).
+fn serve_guest(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
+    let dir = &session.dir;
+    let bind = |path: PathBuf| {
+        let _ = std::fs::remove_file(&path);
+        UnixListener::bind(&path)
+    };
+    let proxy_listener = bind(dir.vsock_port(PROXY_PORT))?;
+    // The MCP gateway, to the servers registered for the session.
+    let mcp = bind(dir.vsock_port(MCP_PORT))?;
+    tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
+    if session.resolved.engine.network == zapper_policy::NetworkMode::Nic {
+        let listener = bind(dir.nic_socket())?;
+        tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
     }
-    {
-        // VM exit watcher.
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let mut vm = s.runtime.vm().lock().await;
-                let Some(child) = vm.as_mut() else { return };
-                if let Ok(Some(status)) = child.try_wait() {
-                    *vm = None;
-                    drop(vm);
-                    let reason = format!("vm exited ({status})");
-                    if matches!(*s.runtime.status().borrow(), Status::Starting) {
-                        s.runtime
-                            .status()
-                            .send_replace(Status::Failed(reason.clone()));
-                    }
-                    super::stop(&d, &s, &reason).await;
-                    return;
-                }
+    let (d, s) = (daemon.clone(), session.clone());
+    let limit = session.runtime.conns();
+    tokio::spawn(crate::daemon::accept_loop(
+        proxy_listener,
+        limit,
+        move |stream| {
+            let (d, s) = (d.clone(), s.clone());
+            async move {
+                proxy::serve(d, s, stream).await;
             }
-        });
-    }
+        },
+    ));
+    Ok(())
+}
+
+/// Stops the session when its VM exits.
+fn watch_vm(daemon: &Arc<Daemon>, session: &Arc<Session>) {
+    let (d, s) = (daemon.clone(), session.clone());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut vm = s.runtime.vm().lock().await;
+            let Some(proc) = vm.as_mut() else { return };
+            if let Some(reason) = proc.exited() {
+                *vm = None;
+                drop(vm);
+                if matches!(*s.runtime.status().borrow(), Status::Starting) {
+                    s.runtime
+                        .status()
+                        .send_replace(Status::Failed(reason.clone()));
+                }
+                super::stop(&d, &s, &reason).await;
+                return;
+            }
+        }
+    });
+}
+
+/// Takes on a persistent session whose VM an earlier daemon left running:
+/// its guest's sockets bound again, its VMM watched by pid, and its agent's
+/// control channel taken again when it connects with its token.
+pub(super) async fn adopt(daemon: &Arc<Daemon>, session: &Arc<Session>, pid: u32) -> Result<()> {
+    serve_guest(daemon, session)?;
+    *session.runtime.vm().lock().await = Some(vm::VmProc::Adopted {
+        pid,
+        session: session.id.clone(),
+    });
+    watch_vm(daemon, session);
+    let (d, s) = (daemon.clone(), session.clone());
+    tokio::spawn(async move {
+        if let Err(e) = resume_control(&d, &s).await {
+            tracing::warn!(session = %s.id, "taking the control channel again: {e:#}");
+        }
+    });
     Ok(())
 }
 

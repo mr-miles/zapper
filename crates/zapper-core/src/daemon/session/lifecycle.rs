@@ -244,10 +244,23 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         else {
             continue;
         };
-        // Its VMM, still running, which an earlier daemon left: stopped, as
-        // this daemon doesn't adopt it, so a start can't boot its disks
-        // twice.
-        let left_running = stop_left_vmm(&dir, &saved.id);
+        // Its VMM, still running, which an earlier daemon left: adopted, with
+        // a runtime to serve it in; else stopped, so a start can't boot its
+        // disks twice.
+        let live = live_vmm(&dir, &saved.id);
+        if let (Some(vmm), Ok(rt)) = (&live, tokio::runtime::Handle::try_current()) {
+            if let Err(e) = adopt(daemon, saved.clone(), &dir, vmm, &rt) {
+                tracing::warn!("adopting the session in {}: {e:#}", dir.root().display());
+                kill_vmm(vmm.pid, &saved.id);
+            } else {
+                continue;
+            }
+        }
+        let left_running = match &live {
+            Some(vmm) => kill_vmm(vmm.pid, &saved.id),
+            None => false,
+        };
+        let _ = std::fs::remove_file(dir.vmm());
         let record =
             std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
         let was_running = disks::last_stop(&disks::events(&record)) == disks::LastStop::RanSince;
@@ -273,23 +286,23 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
     }
 }
 
-/// Stops the durable VMM of the session `id` in `dir` if it still runs, after
-/// checking the pid is that VMM's (not a pid reused since); whether one was.
-/// Its Firecracker dies with it.
-fn stop_left_vmm(dir: &SessionDir, id: &str) -> bool {
-    let Some(vmm) = std::fs::read(dir.vmm())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<crate::daemon::vm::Vmm>(&b).ok())
-    else {
-        return false;
-    };
-    let _ = std::fs::remove_file(dir.vmm());
-    if !is_vmm_of(vmm.pid, id) {
+/// The durable VMM of session `id` in `dir`, if it still runs (its pid that
+/// session's VMM, not one reused since).
+fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
+    let vmm: crate::daemon::vm::Vmm =
+        serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
+    crate::daemon::vm::is_vmm_of(vmm.pid, id).then_some(vmm)
+}
+
+/// Stops session `id`'s VMM at `pid` (its Firecracker dies with it); whether
+/// it was running.
+fn kill_vmm(pid: u32, id: &str) -> bool {
+    if !crate::daemon::vm::is_vmm_of(pid, id) {
         return false;
     }
-    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     for _ in 0..50 {
-        if !is_vmm_of(vmm.pid, id) {
+        if !crate::daemon::vm::is_vmm_of(pid, id) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -297,14 +310,58 @@ fn stop_left_vmm(dir: &SessionDir, id: &str) -> bool {
     true
 }
 
-/// Whether `pid` runs the VMM of session `id`: `zapper __vmm`, with the id
-/// among its arguments.
-pub(crate) fn is_vmm_of(pid: u32, id: &str) -> bool {
-    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-        return false;
-    };
-    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-    args.contains(&&b"__vmm"[..]) && args.contains(&id.as_bytes())
+/// Takes on a persistent session whose VMM an earlier daemon left running:
+/// listed as running, its record written to again, its subordinate id
+/// claimed again, its lifetime from when its VM started; then, in `rt`, its
+/// guest served again ([`super::boot::adopt`]), its driver started, and its
+/// lifetime watched.
+fn adopt(
+    daemon: &Arc<Daemon>,
+    saved: Saved,
+    dir: &SessionDir,
+    vmm: &crate::daemon::vm::Vmm,
+    rt: &tokio::runtime::Handle,
+) -> Result<()> {
+    let audit = record::Writer::open(&dir.audit())?;
+    let session = assemble(daemon, saved, vec![], true, false, Some(audit))?;
+    if let Some(n) = vmm.subid {
+        crate::subids::claim(&session.id, n);
+    }
+    let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
+    let ttl = session.resolved.engine.ttl_secs;
+    // `vmm.json` was written when the VM started.
+    let started = std::fs::metadata(dir.vmm())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_else(now);
+    let expires = (ttl > 0).then_some(started + ttl as f64);
+    *session.expires.lock().unwrap() = expires;
+    session.runtime.status().send_replace(Status::Running);
+    daemon.sessions.insert(session.clone());
+    daemon.emit(
+        Some(&session),
+        EventBody::Session {
+            state: "running".into(),
+            detail: Some("adopted: its VM ran on through a daemon restart".into()),
+        },
+    );
+    let (d, s, pid) = (daemon.clone(), session, vmm.pid);
+    rt.spawn(async move {
+        if let Err(e) = super::boot::adopt(&d, &s, pid).await {
+            stop(&d, &s, &format!("adopting it failed: {e:#}")).await;
+            return;
+        }
+        driver::drive(&d, &s);
+        if let Some(at) = expires {
+            tokio::time::sleep(Duration::from_secs_f64((at - now()).max(0.0))).await;
+            if s.boots.load(Ordering::Relaxed) == run {
+                stop(&d, &s, "ttl expired").await;
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Boots a registered (or stopped, persistent) session's VM and waits for its
@@ -540,13 +597,8 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     if let Some(driver) = &session.driver {
         driver.stop();
     }
-    if let Some(mut child) = session.runtime.vm().lock().await.take() {
-        if tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-        }
+    if let Some(mut vm) = session.runtime.vm().lock().await.take() {
+        vm.stop_within(Duration::from_secs(5)).await;
     }
     crate::subids::release(&session.id);
     session.runtime.clear_guest();
@@ -830,10 +882,91 @@ mod tests {
         );
     }
 
+    /// A persistent session's VMM, left running by an earlier daemon, is
+    /// adopted: listed as running, its guest's sockets bound again (the
+    /// control socket waiting for its agent's resumption), its VM watched
+    /// by pid, so its end stops the session. A process standing in for the
+    /// VMM: what the check looks at is its command line.
+    #[tokio::test]
+    async fn a_running_vm_left_by_an_earlier_daemon_is_adopted() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        std::fs::write(s.dir.root_disk(), b"root").unwrap();
+        crate::util::write_private(&s.dir.resume_token(), b"tok").unwrap();
+        let mut vmm = std::process::Command::new("sh")
+            .args(["-c", "sleep 30", "__vmm", &s.id])
+            .spawn()
+            .unwrap();
+        let record = crate::daemon::vm::Vmm {
+            pid: vmm.id(),
+            subid: None,
+        };
+        std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let back = restart(&t, &s);
+        assert_eq!(*back.runtime.status().borrow(), Status::Running);
+        let adopted = t
+            .core
+            .recent_events(Some(&back.id))
+            .into_iter()
+            .any(|e| matches!(e.body, EventBody::Session { detail: Some(ref d), .. } if d.starts_with("adopted")));
+        assert!(adopted);
+        // Its guest's sockets, bound again by the adopting daemon.
+        let control = back.dir.vsock_port(zapper_policy::proto::CONTROL_PORT);
+        let proxy = back.dir.vsock_port(zapper_policy::proto::PROXY_PORT);
+        for _ in 0..100 {
+            if control.exists() && proxy.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(control.exists() && proxy.exists());
+
+        // Its VM ends: the session stops, its disks kept and hashed.
+        vmm.kill().unwrap();
+        vmm.wait().unwrap();
+        for _ in 0..100 {
+            if !back.is_running() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(matches!(
+            *back.runtime.status().borrow(),
+            Status::Stopped(_)
+        ));
+        assert!(back.dir.root_disk().exists());
+    }
+
+    /// A pid in `vmm.json` that isn't that session's VMM (reused since) is
+    /// neither adopted nor killed.
+    #[tokio::test]
+    async fn a_reused_pid_is_left_alone() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        stop(t.core.daemon(), &s, "stopped").await;
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let record = crate::daemon::vm::Vmm {
+            pid: other.id(),
+            subid: None,
+        };
+        std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
+        let back = restart(&t, &s);
+        assert!(!back.is_running());
+        assert!(other.try_wait().unwrap().is_none(), "still running");
+        other.kill().unwrap();
+        let _ = other.wait();
+    }
+
     #[test]
     fn a_vmm_is_known_by_its_command_line() {
-        assert!(!is_vmm_of(std::process::id(), "abc234"));
-        assert!(!is_vmm_of(u32::MAX - 1, "abc234"));
+        assert!(!crate::daemon::vm::is_vmm_of(std::process::id(), "abc234"));
+        assert!(!crate::daemon::vm::is_vmm_of(u32::MAX - 1, "abc234"));
     }
 
     #[tokio::test]

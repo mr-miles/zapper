@@ -188,6 +188,60 @@ fn raise_oom_score() {
     }
 }
 
+/// A session's VM: the VMM this daemon started, or a persistent session's,
+/// started by an earlier daemon and adopted, known by its pid only.
+pub enum VmProc {
+    Child(Child),
+    Adopted { pid: u32, session: String },
+}
+
+impl VmProc {
+    /// How it ended, once it has.
+    pub fn exited(&mut self) -> Option<String> {
+        match self {
+            VmProc::Child(c) => c
+                .try_wait()
+                .ok()
+                .flatten()
+                .map(|s| format!("vm exited ({s})")),
+            VmProc::Adopted { pid, session } => {
+                (!is_vmm_of(*pid, session)).then(|| "vm exited".to_string())
+            }
+        }
+    }
+
+    /// Waits up to `grace` for it to end (its guest powering off), then
+    /// kills it.
+    pub async fn stop_within(&mut self, grace: std::time::Duration) {
+        match self {
+            VmProc::Child(c) => {
+                if tokio::time::timeout(grace, c.wait()).await.is_err() {
+                    let _ = c.kill().await;
+                }
+            }
+            VmProc::Adopted { pid, session } => {
+                let until = std::time::Instant::now() + grace;
+                while is_vmm_of(*pid, session) && std::time::Instant::now() < until {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                if is_vmm_of(*pid, session) {
+                    unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+}
+
+/// Whether `pid` runs the VMM of session `id`: `zapper __vmm`, with the id
+/// among its arguments (not a pid reused since).
+pub fn is_vmm_of(pid: u32, id: &str) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    args.contains(&&b"__vmm"[..]) && args.contains(&id.as_bytes())
+}
+
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
 pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     let mut drives = vec![json!({

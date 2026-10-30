@@ -11,7 +11,6 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Semaphore};
 use zapper_policy::proto::{
     Forward, Frame, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT,
@@ -347,7 +346,7 @@ impl Rules {
 /// and dropped when it stops; the owner of "the session while it runs".
 pub(crate) struct GuestRuntime {
     status: watch::Sender<Status>,
-    vm: tokio::sync::Mutex<Option<Child>>,
+    vm: tokio::sync::Mutex<Option<super::vm::VmProc>>,
     /// The control channel to the guest agent, once it connects.
     guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
     next_shell: AtomicU64,
@@ -376,7 +375,7 @@ impl GuestRuntime {
     }
 
     /// The Firecracker process handle: set at boot, taken at teardown.
-    pub fn vm(&self) -> &tokio::sync::Mutex<Option<Child>> {
+    pub fn vm(&self) -> &tokio::sync::Mutex<Option<super::vm::VmProc>> {
         &self.vm
     }
 
