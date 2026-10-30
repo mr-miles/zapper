@@ -35,7 +35,7 @@ images:
 1. Pulls `REF` with podman, or builds `FROM REF`: one `RUN` per step, then one `COPY` per `copy` entry (modes kept; a directory's contents into the directory named), then one `RUN` per `after` step. `$ZAPPER_OCI` selects another engine.
 2. Exports the container's filesystem as a tar.
 3. Extracts the tar and runs `mkfs.ext4 -d` inside `podman unshare`, the engine's user namespace. This keeps the image's file ownership without needing root; outside it, every file would belong to the building user, and uid 1000 in the guest would own `/usr`.
-4. Writes `images/NAME.ext4`, and `images/NAME.json` with the source, steps, size and build time.
+4. Writes `images/NAME.ext4`, and `images/NAME.json` with the source, steps, size, build time and the image's SHA-256, which `zapper image ls` shows and a persistent session's creation checks the image against ([security: persistent sessions](security.md#persistent-sessions)).
 
 The image is sized at its content plus 25% plus 256 MiB, unless `--size` is given. Each session's copy is grown to `engine.disk`.
 

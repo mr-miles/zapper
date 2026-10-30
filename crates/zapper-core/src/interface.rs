@@ -639,6 +639,7 @@ impl ImageApi for Core {
             crate::images::recipe(&c, name, req.from, req.run, &req.args)?
         };
         let (dir, image, size) = (self.d.paths.images.clone(), name.to_string(), req.size);
+        let images_dir = dir.clone();
         let event = |b: &ImageBuild, state: &str, detail: Option<String>| EventBody::Image {
             name: b.name.clone(),
             build: b.id,
@@ -677,7 +678,12 @@ impl ImageApi for Core {
             },
             move |b| {
                 let body = match b.info().outcome {
-                    Some(Outcome::Built(path)) => event(b, "built", Some(path)),
+                    Some(Outcome::Built(path)) => {
+                        let hash = crate::images::built_hash(&images_dir, &b.name)
+                            .map(|h| format!(" sha256 {h}"))
+                            .unwrap_or_default();
+                        event(b, "built", Some(format!("{path}{hash}")))
+                    }
                     Some(Outcome::Failed(e)) => event(b, "failed", Some(e)),
                     None => return,
                 };

@@ -699,6 +699,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         agent_overlay: Some(json!({ "env": { "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml" } })),
         forwards,
         persistent: false,
+        accept_changed_image: false,
     };
     let _ = config;
     let s = d.create_session(new).await.context("booting the cluster")?;

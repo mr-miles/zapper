@@ -367,7 +367,11 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
         run(&mut docker)?;
     }
     std::fs::rename(&tmp, &out)?;
-    let meta = json!({ "name": b.name, "from": b.from, "run": b.run, "copy": b.copies.iter().map(|(i, to)| json!({ "from": b.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": b.after, "size": size, "built": crate::util::now() as u64 });
+    // What the image is, as built: checked when a persistent session is
+    // made from it, so an image changed since shows.
+    let sha256 = crate::util::sha256_file(&out)?;
+    log(&format!("sha256 {sha256}"));
+    let meta = json!({ "name": b.name, "sha256": sha256, "from": b.from, "run": b.run, "copy": b.copies.iter().map(|(i, to)| json!({ "from": b.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": b.after, "size": size, "built": crate::util::now() as u64 });
     std::fs::write(
         b.dir.join(format!("{}.json", b.name)),
         serde_json::to_vec_pretty(&meta)?,
@@ -392,11 +396,19 @@ pub fn list(dir: &Path) -> Result<Vec<serde_json::Value>> {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or(json!({}));
-            out.push(json!({ "name": name, "from": meta["from"], "size": e.metadata()?.len(), "built": meta["built"] }));
+            out.push(json!({ "name": name, "from": meta["from"], "size": e.metadata()?.len(), "built": meta["built"], "sha256": meta["sha256"] }));
         }
     }
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(out)
+}
+
+/// The SHA-256 recorded when the image `name` in `dir` was built; `None`
+/// for one built before images were hashed.
+pub fn built_hash(dir: &Path, name: &str) -> Option<String> {
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.json"))).ok()?).ok()?;
+    meta["sha256"].as_str().map(str::to_string)
 }
 
 fn tempdir() -> Result<PathBuf> {

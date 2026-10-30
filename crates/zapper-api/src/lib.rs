@@ -617,6 +617,10 @@ struct CreateSession {
     /// Keep its disks when it stops, to start it again.
     #[serde(default)]
     persistent: bool,
+    /// For a persistent session: make it from its image even if the image
+    /// changed since it was built; recorded.
+    #[serde(default)]
+    accept_changed_image: bool,
 }
 
 /// Labels the operator may give a session: short words, and none of the
@@ -661,6 +665,7 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     let mut new = NewSession::plain(req.profile, req.workdir, policy);
     new.labels = req.labels;
     new.persistent = req.persistent;
+    new.accept_changed_image = req.accept_changed_image;
     let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }

@@ -72,7 +72,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/profiles` | ✓ | Summaries |
 | `GET\|PUT\|DELETE /v1/profiles/{name}` | | Profile and its resolved form / set / remove |
 | `GET /v1/sessions` | ✓ | Sessions, each with its `labels` (a firm's: `firm`, `run`, `member` and `office`, `worker` or `facility`) |
-| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?, persistent?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's. `persistent`: its disks stay when it stops, to start it again; its info then has `disk_bytes`, what they take on the host |
+| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?, persistent?, accept_changed_image?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's. `persistent`: its disks stay when it stops, to start it again; its info then has `disk_bytes`, what they take on the host; its image must be as it was built (its SHA-256), unless `accept_changed_image` |
 | `GET /v1/sessions/{id}` | ✓ | One session |
 | `POST /v1/sessions/{id}/stop` | | Stop, keep listed; a persistent session keeps its disks, their hashes recorded |
 | `POST /v1/sessions/{id}/start` | | `{accept_changed_disks?}`: start a stopped persistent session again; returns once the guest is ready. `409` if its disks changed while it was stopped, or weren't hashed when it stopped, unless accepted |

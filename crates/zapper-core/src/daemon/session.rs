@@ -401,6 +401,9 @@ pub struct Session {
     pub persistent: bool,
     /// How many times it has booted: a run's timers end with it.
     pub(crate) boots: AtomicU64,
+    /// Make a persistent session from its image even if the image changed
+    /// since it was built (recorded); not kept.
+    pub(crate) accept_changed_image: bool,
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
@@ -756,6 +759,9 @@ pub struct NewSession {
     /// Keep its disks when it stops, so it can be started again
     /// (`Session::persistent`).
     pub persistent: bool,
+    /// For a persistent session: make it from its image even if the image
+    /// changed since it was built, which is recorded.
+    pub accept_changed_image: bool,
 }
 
 impl NewSession {
@@ -771,6 +777,7 @@ impl NewSession {
             agent_overlay: None,
             forwards: vec![],
             persistent: false,
+            accept_changed_image: false,
         }
     }
 }

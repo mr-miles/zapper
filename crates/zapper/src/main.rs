@@ -79,6 +79,10 @@ enum Cmd {
         /// start` (implies --keep); `zapper rm` removes them.
         #[arg(long)]
         persistent: bool,
+        /// With --persistent: make it from its image even if the image
+        /// changed since it was built; recorded.
+        #[arg(long, requires = "persistent")]
+        accept_changed_image: bool,
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
@@ -524,6 +528,7 @@ async fn run(cli: Cli) -> Result<i32> {
             profile,
             keep,
             persistent,
+            accept_changed_image,
             workdir,
             labels,
             command,
@@ -535,7 +540,7 @@ async fn run(cli: Cli) -> Result<i32> {
             };
             eprintln!("zapper: starting a {profile} session…");
             let body = serde_json::to_string(
-                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent }),
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent, "accept_changed_image": accept_changed_image }),
             )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
@@ -990,10 +995,14 @@ async fn run(cli: Cli) -> Result<i32> {
                                     s(&i["name"]),
                                     format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
                                     s(&i["from"]),
+                                    i["sha256"]
+                                        .as_str()
+                                        .map(|h| h[..h.len().min(12)].to_string())
+                                        .unwrap_or_else(|| "-".into()),
                                 ]
                             })
                             .collect();
-                        table(&["name", "size", "from"], rows);
+                        table(&["name", "size", "from", "sha256"], rows);
                     }
                 }
             }

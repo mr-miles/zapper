@@ -7,7 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub use crate::daemon::redact;
 pub use crate::daemon::session::read_frame;
@@ -43,6 +43,27 @@ fn meminfo_mib(info: &str, field: &str) -> Option<u64> {
                 .ok()
         })
         .map(|k| k / 1024)
+}
+
+/// A file's SHA-256, in hex.
+pub fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("hashing {}", path.display()))?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(ctx
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Unix time in seconds.

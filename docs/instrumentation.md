@@ -22,7 +22,7 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
-| `disks` | `state` (`stopped`, `checked`, `changed`, `unverified`, `accepted`), `disks` (each disk's SHA-256, by file name), `detail` (what changed) | A persistent session's disks, hashed when it stops and checked when it starts ([security: persistent sessions](security.md#persistent-sessions)) |
+| `disks` | `state` (`image`, `stopped`, `checked`, `changed`, `unverified`, `accepted`), `disks` (each disk's SHA-256, by file name; for `image`, the image's), `detail` (what changed, or how the image compares with its build) | A persistent session's disks, hashed when it stops and checked when it starts ([security: persistent sessions](security.md#persistent-sessions)) |
 | `image` | `name`, `build`, `state` (`started`, `built`, `failed`), `detail` (the image's file, or why it failed) | An image build the daemon runs ([images](images.md)) |
 | `mcp` | `server`, `tool`, `ok`, `ms`, `error` (the first 512 characters) | A tool called through the [MCP gateway](architecture.md), an office tool included; a call to a server the session hasn't is one too, refused. Names are kept to 128 characters; arguments and results aren't recorded |
 

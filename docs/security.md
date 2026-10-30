@@ -131,6 +131,7 @@ make test-e2e      # ends with "all e2e checks passed"
 
 A persistent session (`zapper run --persistent`, `persistent: true`) keeps its disks when it stops, in its `vm/` directory, and can be started again (`zapper start`), also after the daemon restarts; `zapper rm` removes them. Its disks are files the daemon's user can change, so they get tamper evidence in the record:
 
+- **When it is made**, its image's SHA-256 is compared with the one recorded when the image was built (`images/NAME.json`), in a `disks` event (`image`): an image changed since is refused unless `--accept-changed-image` (`accept_changed_image`), recorded too; one built before images were hashed is recorded as unverified, and used.
 - **When it stops**, once its VM is off, each disk's SHA-256 is recorded in a `disks` event (`stopped`), and kept beside it in `disks.json`.
 - **When it starts**, each disk is hashed again before Firecracker opens it, and compared: `checked` if the same; `changed` if not, naming what differs, and the start is refused; `unverified` if there are no hashes to compare with (the daemon ended while it ran, without stopping it). `--accept-changed-disks` starts it anyway, recorded as `accepted`.
 

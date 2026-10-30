@@ -4,7 +4,6 @@
 //! running its guest control channel is `boot`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -83,6 +82,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         saved,
         new.shared_layers.clone(),
         new.persistent,
+        new.accept_changed_image,
         Some(audit),
     )?;
     if session.persistent {
@@ -163,6 +163,7 @@ fn assemble(
         Arc<std::sync::RwLock<zapper_policy::Policy>>,
     )>,
     persistent: bool,
+    accept_changed_image: bool,
     audit: Option<record::Writer>,
 ) -> Result<Arc<Session>> {
     let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&saved.id));
@@ -175,6 +176,7 @@ fn assemble(
         expires: Mutex::new((ttl > 0).then_some(now() + ttl as f64)),
         persistent,
         boots: AtomicU64::new(0),
+        accept_changed_image,
         workdir: saved.workdir,
         rules: Rules::new(shared_layers),
         secrets: Default::default(),
@@ -237,7 +239,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
             let _ = std::fs::remove_file(dir.disk_hashes());
             let _ = std::fs::remove_file(dir.running_marker());
         }
-        let session = match assemble(daemon, saved, vec![], true, None) {
+        let session = match assemble(daemon, saved, vec![], true, false, None) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("restoring session in {}: {e:#}", dir.root().display());
@@ -444,30 +446,9 @@ fn hash_disks(disks: &[std::path::PathBuf]) -> Result<BTreeMap<String, String>> 
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        out.insert(name, sha256_file(path)?);
+        out.insert(name, crate::util::sha256_file(path)?);
     }
     Ok(out)
-}
-
-/// A file's SHA-256, in hex.
-pub(crate) fn sha256_file(path: &Path) -> Result<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).with_context(|| format!("hashing {}", path.display()))?;
-    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        ctx.update(&buf[..n]);
-    }
-    Ok(ctx
-        .finish()
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
 }
 
 /// Stops a session's VM and removes its disks, or, for a persistent session,
