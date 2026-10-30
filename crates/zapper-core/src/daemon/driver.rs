@@ -145,6 +145,16 @@ impl Driver {
         self.state.lock().unwrap().status
     }
 
+    /// After `stop`, ready to be driven again (`drive`) when the session is
+    /// started again: its queue and its conversation stay, so the agent
+    /// resumes where it was.
+    pub fn revive(&self) {
+        let mut st = self.state.lock().unwrap();
+        if st.status == Status::Stopped {
+            st.status = Status::Idle;
+        }
+    }
+
     /// Ends the loop; the agent's process goes with it.
     pub fn stop(&self) {
         self.state.lock().unwrap().status = Status::Stopped;

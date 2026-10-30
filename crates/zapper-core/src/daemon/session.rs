@@ -25,7 +25,7 @@ mod terminal;
 
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use lifecycle::register;
-pub(crate) use lifecycle::{create, stop};
+pub(crate) use lifecycle::{create, restore, start, stop};
 pub(crate) use terminal::pump_shell;
 pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
@@ -105,6 +105,8 @@ impl SessionStore {
 
     /// Take a stopped session off the list; a starting or running one stays,
     /// as nothing would manage its VM.
+    /// Takes a stopped session off the list; a persistent one's disks go
+    /// with it.
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {
@@ -115,7 +117,12 @@ impl SessionStore {
                 bail!("session {id} is still running; stop it first");
             }
         }
-        sessions.remove(id);
+        if let Some(s) = sessions.remove(id) {
+            if s.persistent {
+                let _ = std::fs::remove_dir_all(s.dir.vm());
+                let _ = std::fs::remove_file(s.dir.disk_hashes());
+            }
+        }
         Ok(())
     }
 }
@@ -154,6 +161,43 @@ impl SessionDir {
     }
     pub fn root_disk(&self) -> PathBuf {
         self.vm().join("root.ext4")
+    }
+    /// The disks in the VMM's directory, by file name: kept while a
+    /// persistent session is stopped.
+    pub fn disks(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(self.vm())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "ext4"))
+            .collect();
+        v.sort();
+        v
+    }
+    /// What the disks take on the host: their allocated blocks, not their
+    /// sparse size.
+    pub fn disk_bytes(&self) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        self.disks()
+            .iter()
+            .filter_map(|p| p.metadata().ok())
+            .map(|m| m.blocks() * 512)
+            .sum()
+    }
+    /// The disks' hashes when the session last stopped, also in its record.
+    pub fn disk_hashes(&self) -> PathBuf {
+        self.root.join("disks.json")
+    }
+    /// A persistent session as it was created ([`Saved`]), so a daemon that
+    /// starts again lists it, stopped.
+    pub fn saved(&self) -> PathBuf {
+        self.root.join("session.json")
+    }
+    /// There while a persistent session's VM runs: a daemon that finds it
+    /// stopped without hashing its disks.
+    pub fn running_marker(&self) -> PathBuf {
+        self.root.join("running")
     }
     pub fn data_disk(&self, i: usize) -> PathBuf {
         self.vm().join(format!("disk{i}.ext4"))
@@ -349,7 +393,14 @@ pub struct Session {
     pub id: String,
     pub profile: String,
     pub created: f64,
-    pub expires: Option<f64>,
+    /// When its `ttl_secs` ends this run: from its start, as it may be
+    /// started again (`persistent`).
+    pub(crate) expires: Mutex<Option<f64>>,
+    /// Its disks stay when it stops, and it can be started again; they go
+    /// when it is forgotten (`zapper rm`).
+    pub persistent: bool,
+    /// How many times it has booted: a run's timers end with it.
+    pub(crate) boots: AtomicU64,
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
@@ -371,7 +422,7 @@ pub struct Session {
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
     pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    audit: Mutex<Option<super::record::Writer>>,
+    pub(crate) audit: Mutex<Option<super::record::Writer>>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
@@ -392,6 +443,10 @@ pub struct SessionInfo {
     pub status: Status,
     pub created: f64,
     pub expires: Option<f64>,
+    pub persistent: bool,
+    /// For a persistent session: what its disks take on the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     pub image: String,
     pub vcpus: u8,
     pub memory_mib: u32,
@@ -425,7 +480,9 @@ impl Session {
             profile: self.profile.clone(),
             status: self.runtime.status().borrow().clone(),
             created: self.created,
-            expires: self.expires,
+            expires: *self.expires.lock().unwrap(),
+            persistent: self.persistent,
+            disk_bytes: self.persistent.then(|| self.dir.disk_bytes()),
             image: self.resolved.engine.image.clone(),
             vcpus: self.resolved.engine.vcpus,
             memory_mib: self.resolved.engine.memory_mib,
@@ -696,6 +753,9 @@ pub struct NewSession {
     /// Merged over the profile's `agent`.
     pub agent_overlay: Option<serde_json::Value>,
     pub forwards: Vec<Forward>,
+    /// Keep its disks when it stops, so it can be started again
+    /// (`Session::persistent`).
+    pub persistent: bool,
 }
 
 impl NewSession {
@@ -710,8 +770,27 @@ impl NewSession {
             mounts: vec![],
             agent_overlay: None,
             forwards: vec![],
+            persistent: false,
         }
     }
+}
+
+/// What a persistent session is, kept in its `session.json`: enough to list
+/// it again after the daemon restarts and to start it from its disks. Its
+/// own secrets aren't kept (`Session::secrets`): put them again.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub(crate) struct Saved {
+    pub id: String,
+    pub profile: String,
+    pub created: f64,
+    pub workdir: PathBuf,
+    pub resolved: ResolvedProfile,
+    pub labels: BTreeMap<String, String>,
+    /// Its own layer's rules, as of its last stop.
+    pub rules: Policy,
+    pub files: Vec<GuestFile>,
+    pub forwards: Vec<Forward>,
+    pub driven: bool,
 }
 
 /// One line from the guest's control channel, at most `MAX_LINE` bytes:

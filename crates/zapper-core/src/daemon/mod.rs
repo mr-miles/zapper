@@ -148,15 +148,19 @@ fn load_startup_config(path: &Path) -> Result<Config> {
 
 /// Resolves and prepares the state directory: creates it (0700) with its
 /// `sessions` subdirectory and the `services` one for socket services'
-/// sockets, and clears the VMM directories a previous daemon
-/// left behind (audit logs and recordings stay).
+/// sockets, and clears the VMM directories a previous daemon left behind
+/// (audit logs and recordings stay), but for persistent sessions', whose
+/// disks are theirs until they are removed.
 fn prepare_state_dir(state: &str) -> Result<PathBuf> {
     let state = PathBuf::from(expand_home(state));
     std::fs::create_dir_all(state.join("sessions"))?;
     std::fs::create_dir_all(state.join(services::SOCKETS_DIR))?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-        let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
+        let sd = session::SessionDir::new(dir.path());
+        if !sd.saved().exists() {
+            let _ = std::fs::remove_dir_all(sd.vm());
+        }
     }
     Ok(state)
 }
@@ -181,7 +185,7 @@ impl Daemon {
             bail!("firecracker not found at {}", paths.firecracker.display());
         }
         let addrs = addr::AddressPolicy::new(&d.private_networks)?;
-        Ok(Arc::new(Daemon {
+        let daemon = Arc::new(Daemon {
             config: RwLock::new(config),
             startup_path,
             paths,
@@ -195,7 +199,9 @@ impl Daemon {
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
             builds: builds::Builds::default(),
-        }))
+        });
+        session::restore(&daemon);
+        Ok(daemon)
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {

@@ -1,13 +1,18 @@
 //! A session's life: resolving and registering it, then stopping and tearing
-//! it down. Booting its VM and running its guest control channel is `boot`.
+//! it down, and, for a persistent one, starting it again from its kept disks,
+//! checked against the hashes recorded when it stopped. Booting its VM and
+//! running its guest control channel is `boot`.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use zapper_policy::proto::HostMsg;
 
-use super::{Counters, GuestRuntime, NewSession, Rules, Session, SessionDir, Status};
+use super::{Counters, GuestRuntime, NewSession, Rules, Saved, Session, SessionDir, Status};
 use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon, EventBody};
 
 /// Creates a session without booting it: its profile resolved, its
@@ -25,6 +30,9 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         let mut agent = serde_json::to_value(&resolved.agent)?;
         zapper_policy::merge(&mut agent, overlay);
         resolved.agent = serde_json::from_value(agent).context("agent overlay")?;
+    }
+    if new.persistent && !new.shared_layers.is_empty() {
+        bail!("a persistent session can't share policy layers with other sessions");
     }
     resolved.mounts.extend(new.mounts.iter().cloned());
     // The agent's skills and configuration directories, where its harness
@@ -58,34 +66,27 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
     let driven = resolved.agent.driven
         && !new.labels.contains_key("firm")
         && daemon.config.read().unwrap().daemon.driver;
-    let created = now();
-    let ttl = resolved.engine.ttl_secs;
-    let session = Arc::new(Session {
-        id: id.clone(),
+    let saved = Saved {
+        id,
         profile: new.profile.clone(),
-        created,
-        expires: (ttl > 0).then_some(created + ttl as f64),
+        created: now(),
         workdir: new.workdir.clone(),
-        rules: Rules::new(new.shared_layers.clone()),
-        secrets: Default::default(),
-        runtime: GuestRuntime::new(),
-        tls: tls::SessionTls::new(&id)?,
-        dir: dir.clone(),
         resolved,
-        counters: Counters::default(),
-        usage: Mutex::new(None),
-        dns: dns::SessionDns::new(),
-        terminals: Mutex::new(Default::default()),
-        requests: Default::default(),
-        audit: Mutex::new(Some(audit)),
         labels: new.labels.clone(),
-        driver: driven.then(driver::Driver::new),
-        daemon: Arc::downgrade(daemon),
-        extra_files: new.files.clone(),
+        rules: new.policy.clone(),
+        files: new.files.clone(),
         forwards: new.forwards.clone(),
-    });
-    for rule in new.policy.rules() {
-        session.add_rule(rule, None);
+        driven,
+    };
+    let session = assemble(
+        daemon,
+        saved,
+        new.shared_layers.clone(),
+        new.persistent,
+        Some(audit),
+    )?;
+    if session.persistent {
+        save(&session)?;
     }
     daemon.sessions.insert(session.clone());
     daemon.emit(
@@ -148,8 +149,125 @@ fn memory_admission(m: &Memory, overcommit: Option<f64>) -> Result<Option<String
 
 pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<Session>> {
     let session = register(&daemon, &new)?;
+    boot(&daemon, &session).await?;
+    Ok(session)
+}
+
+/// The session `saved` describes, not yet listed: its rules, a CA of its
+/// own, the driver if it is driven, and its lifetime from now.
+fn assemble(
+    daemon: &Arc<Daemon>,
+    saved: Saved,
+    shared_layers: Vec<(
+        zapper_policy::Scope,
+        Arc<std::sync::RwLock<zapper_policy::Policy>>,
+    )>,
+    persistent: bool,
+    audit: Option<record::Writer>,
+) -> Result<Arc<Session>> {
+    let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&saved.id));
+    let ttl = saved.resolved.engine.ttl_secs;
+    let session = Arc::new(Session {
+        tls: tls::SessionTls::new(&saved.id)?,
+        id: saved.id,
+        profile: saved.profile,
+        created: saved.created,
+        expires: Mutex::new((ttl > 0).then_some(now() + ttl as f64)),
+        persistent,
+        boots: AtomicU64::new(0),
+        workdir: saved.workdir,
+        rules: Rules::new(shared_layers),
+        secrets: Default::default(),
+        runtime: GuestRuntime::new(),
+        dir,
+        resolved: saved.resolved,
+        counters: Counters::default(),
+        usage: Mutex::new(None),
+        dns: dns::SessionDns::new(),
+        terminals: Mutex::new(Default::default()),
+        requests: Default::default(),
+        audit: Mutex::new(audit),
+        labels: saved.labels,
+        driver: saved.driven.then(driver::Driver::new),
+        daemon: Arc::downgrade(daemon),
+        extra_files: saved.files,
+        forwards: saved.forwards,
+    });
+    for rule in saved.rules.rules() {
+        session.add_rule(rule, None);
+    }
+    Ok(session)
+}
+
+/// Writes a persistent session's `session.json`, its own rules as they are.
+fn save(session: &Session) -> Result<()> {
+    let saved = Saved {
+        id: session.id.clone(),
+        profile: session.profile.clone(),
+        created: session.created,
+        workdir: session.workdir.clone(),
+        resolved: session.resolved.clone(),
+        labels: session.labels.clone(),
+        rules: session.own_policy(),
+        files: session.extra_files.clone(),
+        forwards: session.forwards.clone(),
+        driven: session.driver.is_some(),
+    };
+    crate::util::write_private(&session.dir.saved(), &serde_json::to_vec_pretty(&saved)?)
+}
+
+/// At the daemon's start: lists the persistent sessions an earlier daemon
+/// left, stopped, to be started again. One whose VM was running when that
+/// daemon ended had its disks changed without their hashes recorded: its
+/// hashes go, so its start says its disks are unverified.
+pub(crate) fn restore(daemon: &Arc<Daemon>) {
+    let Ok(dirs) = std::fs::read_dir(daemon.paths.state.join("sessions")) else {
+        return;
+    };
+    for entry in dirs.flatten() {
+        let dir = SessionDir::new(entry.path());
+        let Some(saved) = std::fs::read(dir.saved())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Saved>(&b).ok())
+        else {
+            continue;
+        };
+        let was_running = dir.running_marker().exists();
+        if was_running {
+            let _ = std::fs::remove_file(dir.disk_hashes());
+            let _ = std::fs::remove_file(dir.running_marker());
+        }
+        let session = match assemble(daemon, saved, vec![], true, None) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("restoring session in {}: {e:#}", dir.root().display());
+                continue;
+            }
+        };
+        let why = if was_running {
+            "the daemon ended while it ran; its disks weren't hashed"
+        } else {
+            "kept while the daemon restarted"
+        };
+        session
+            .runtime
+            .status()
+            .send_replace(Status::Stopped(why.into()));
+        daemon.sessions.insert(session);
+    }
+}
+
+/// Boots a registered (or stopped, persistent) session's VM and waits for its
+/// guest: running, with its driver and its `ttl_secs` for this run.
+async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
+    let daemon = daemon.clone();
+    let session = session.clone();
     let id = session.id.clone();
     let ttl = session.resolved.engine.ttl_secs;
+    let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
+    if session.persistent {
+        std::fs::write(session.dir.running_marker(), b"")?;
+    }
 
     let started = Instant::now();
     if let Err(e) = super::boot::launch(&daemon, &session).await {
@@ -204,13 +322,156 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
         let (d, s) = (daemon.clone(), session.clone());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(ttl)).await;
-            stop(&d, &s, "ttl expired").await;
+            // Only this run's: a session stopped and started again since
+            // has a lifetime of its own.
+            if s.boots.load(Ordering::Relaxed) == run {
+                stop(&d, &s, "ttl expired").await;
+            }
         });
     }
-    Ok(session)
+    Ok(())
 }
 
-/// Stops a session's VM and removes its disks; the audit log, console log and
+/// Starts a stopped persistent session again: its kept disks, checked against
+/// the hashes recorded when it stopped, boot afresh. A disk that changed
+/// while it was stopped is recorded, and the start refused unless
+/// `accept_changed`, which is recorded too.
+pub(crate) async fn start(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    accept_changed: bool,
+) -> Result<()> {
+    let id = &session.id;
+    if !session.persistent {
+        bail!("session {id} isn't persistent: its disks went when it stopped");
+    }
+    if matches!(
+        *session.runtime.status().borrow(),
+        Status::Starting | Status::Running
+    ) {
+        bail!("session {id} is already running");
+    }
+    let max = daemon.config.read().unwrap().daemon.max_sessions;
+    let running = daemon.sessions.running();
+    if running >= max {
+        bail!("{running} sessions running; daemon.max_sessions is {max}");
+    }
+    *session.audit.lock().unwrap() = Some(record::Writer::open(&session.dir.audit())?);
+    if let Err(e) = check_disks(daemon, session, accept_changed).await {
+        *session.audit.lock().unwrap() = None;
+        return Err(e);
+    }
+    let ttl = session.resolved.engine.ttl_secs;
+    *session.expires.lock().unwrap() = (ttl > 0).then(|| now() + ttl as f64);
+    session.runtime.status().send_replace(Status::Starting);
+    daemon.emit(
+        Some(session),
+        EventBody::Session {
+            state: "starting".into(),
+            detail: Some("started again, from its kept disks".into()),
+        },
+    );
+    if let Some(driver) = &session.driver {
+        driver.revive();
+    }
+    boot(daemon, session).await
+}
+
+/// Hashes a stopped session's disks and compares them with those recorded
+/// when it stopped; records what it found (`disks` event).
+async fn check_disks(daemon: &Arc<Daemon>, session: &Arc<Session>, accept: bool) -> Result<()> {
+    let dir = session.dir.clone();
+    let now = tokio::task::spawn_blocking(move || hash_disks(&dir.disks())).await??;
+    let recorded: Option<BTreeMap<String, String>> = std::fs::read(session.dir.disk_hashes())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let (state, detail) = match &recorded {
+        Some(before) if *before == now => ("checked", None),
+        Some(before) => ("changed", Some(changes(before, &now))),
+        None => (
+            "unverified",
+            Some("no hashes from its last stop to compare with".to_string()),
+        ),
+    };
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: state.into(),
+            disks: now.clone(),
+            detail: detail.clone(),
+        },
+    );
+    if let Some(detail) = detail {
+        if !accept {
+            bail!(
+                "session {}: {detail}; start it with --accept-changed-disks to boot its disks as they are",
+                session.id
+            );
+        }
+        daemon.emit(
+            Some(session),
+            EventBody::Disks {
+                state: "accepted".into(),
+                disks: now,
+                detail: Some(format!("started as they are: {detail}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// What differs between two sets of disk hashes, in words.
+fn changes(before: &BTreeMap<String, String>, now: &BTreeMap<String, String>) -> String {
+    let mut v = Vec::new();
+    for (name, hash) in before {
+        match now.get(name) {
+            Some(h) if h == hash => {}
+            Some(_) => v.push(format!("{name} changed while stopped")),
+            None => v.push(format!("{name} is gone")),
+        }
+    }
+    for name in now.keys().filter(|n| !before.contains_key(*n)) {
+        v.push(format!("{name} is new"));
+    }
+    v.join("; ")
+}
+
+/// Each disk's SHA-256, by file name.
+fn hash_disks(disks: &[std::path::PathBuf]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for path in disks {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.insert(name, sha256_file(path)?);
+    }
+    Ok(out)
+}
+
+/// A file's SHA-256, in hex.
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("hashing {}", path.display()))?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(ctx
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Stops a session's VM and removes its disks, or, for a persistent session,
+/// keeps them and records their hashes; the audit log, console log and
 /// recordings stay.
 ///
 /// Status invariant: `Failed` is terminal and never overwritten with
@@ -233,6 +494,53 @@ pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &
     }
     session.send(HostMsg::Shutdown);
     teardown(daemon, session, Some(reason)).await;
+}
+
+/// A persistent session's VM is off: its disks stay, the rest of the VMM's
+/// directory (sockets) goes, and the disks' hashes are recorded, to be
+/// checked when it starts again.
+async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
+    let sd = &session.dir;
+    for e in std::fs::read_dir(sd.vm()).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "ext4") {
+            continue;
+        }
+        let _ = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+    }
+    if let Err(e) = save(session) {
+        tracing::warn!(session = %session.id, "saving the session: {e:#}");
+    }
+    let disks = sd.disks();
+    let hashed = tokio::task::spawn_blocking(move || hash_disks(&disks)).await;
+    let (disks, detail) = match hashed {
+        Ok(Ok(h)) => {
+            let written = serde_json::to_vec_pretty(&h)
+                .map_err(anyhow::Error::from)
+                .and_then(|b| crate::util::write_private(&sd.disk_hashes(), &b));
+            let detail = written.err().map(|e| format!("keeping the hashes: {e:#}"));
+            (h, detail)
+        }
+        Ok(Err(e)) => (BTreeMap::new(), Some(format!("hashing: {e:#}"))),
+        Err(e) => (BTreeMap::new(), Some(format!("hashing: {e}"))),
+    };
+    let hashed = detail.is_none();
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: "stopped".into(),
+            disks,
+            detail,
+        },
+    );
+    // Hashed and recorded: the next start can check them.
+    if hashed {
+        let _ = std::fs::remove_file(sd.running_marker());
+    }
 }
 
 async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&str>) {
@@ -263,13 +571,21 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     let sd = &session.dir;
     let _ = std::fs::rename(sd.vm_config(), sd.root().join("vm.json"));
     let _ = std::fs::rename(sd.metrics(), sd.root().join("metrics.json"));
-    let _ = std::fs::remove_dir_all(sd.vm());
+    if session.persistent {
+        keep_disks(daemon, session).await;
+    } else {
+        let _ = std::fs::remove_dir_all(sd.vm());
+    }
     *session.audit.lock().unwrap() = None;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{memory_admission, Memory};
+    use super::*;
+    use crate::prelude::*;
+    use crate::testing::TestCore;
+
+    const CONFIG: &str = "profiles:\n  web: {}\n";
 
     fn host(given: u64, want: u64) -> Memory {
         Memory {
@@ -318,5 +634,187 @@ mod tests {
             ..host(1 << 30, 4096)
         };
         assert_eq!(memory_admission(&m, Some(1.0)).unwrap(), None);
+    }
+
+    fn persistent(t: &TestCore) -> Arc<Session> {
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.persistent = true;
+        t.core.test_session(new, true).unwrap()
+    }
+
+    /// The `disks` events of `s`, oldest first: each `(state, disks, detail)`.
+    fn disk_events(t: &TestCore, s: &Session) -> Vec<(String, serde_json::Value, String)> {
+        t.core
+            .recent_events(Some(&s.id))
+            .into_iter()
+            .filter_map(|e| match e.body {
+                EventBody::Disks {
+                    state,
+                    disks,
+                    detail,
+                } => Some((state, serde_json::json!(disks), detail.unwrap_or_default())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_persistent_sessions_disks_stay_and_are_checked_at_its_start() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        std::fs::write(s.dir.root_disk(), b"root").unwrap();
+        std::fs::write(s.dir.data_disk(0), b"work").unwrap();
+        std::fs::write(s.dir.vm().join("v.sock_1000"), b"").unwrap();
+
+        stop(t.core.daemon(), &s, "stopped by operator").await;
+        // The disks stay, the sockets go, and the hashes are recorded.
+        assert_eq!(s.dir.disks().len(), 2);
+        assert!(!s.dir.vm().join("v.sock_1000").exists());
+        let events = disk_events(&t, &s);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, "stopped");
+        assert_eq!(
+            events[0].1["root.ext4"],
+            "4813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2"
+        );
+
+        // Changed on the host while stopped: recorded, and refused.
+        std::fs::write(s.dir.root_disk(), b"tampered").unwrap();
+        let e = start(t.core.daemon(), &s, false).await.unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("root.ext4 changed while stopped"), "{e}");
+        assert!(e.contains("--accept-changed-disks"), "{e}");
+        let events = disk_events(&t, &s);
+        assert_eq!(events.last().unwrap().0, "changed", "{events:?}");
+        assert!(matches!(*s.runtime.status().borrow(), Status::Stopped(_)));
+
+        // Accepted: recorded too, then it boots, which, without a VM here,
+        // fails past the check and stops it again, its disks hashed again.
+        let _ = start(t.core.daemon(), &s, true).await;
+        let states: Vec<String> = disk_events(&t, &s).into_iter().map(|e| e.0).collect();
+        assert_eq!(
+            states,
+            ["stopped", "changed", "changed", "accepted", "stopped"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_disks_pass_and_forgetting_removes_them() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        std::fs::write(s.dir.root_disk(), b"root").unwrap();
+        stop(t.core.daemon(), &s, "stopped").await;
+        // Without a VM here, the boot fails past the check, and stops it.
+        let _ = start(t.core.daemon(), &s, false).await;
+        let states: Vec<String> = disk_events(&t, &s).into_iter().map(|e| e.0).collect();
+        assert_eq!(states, ["stopped", "checked", "stopped"]);
+        t.core.forget_session(&s.id).unwrap();
+        assert!(!s.dir.vm().exists());
+        assert!(!s.dir.disk_hashes().exists());
+        assert!(s.dir.audit().exists(), "the record stays");
+    }
+
+    #[tokio::test]
+    async fn only_a_persistent_session_starts_again() {
+        let t = TestCore::new(CONFIG);
+        let plain = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        stop(t.core.daemon(), &plain, "stopped").await;
+        let e = start(t.core.daemon(), &plain, false).await.unwrap_err();
+        assert!(e.to_string().contains("isn't persistent"), "{e}");
+
+        let running = persistent(&t);
+        let e = start(t.core.daemon(), &running, false).await.unwrap_err();
+        assert!(e.to_string().contains("already running"), "{e}");
+
+        let mut shared = NewSession::plain("web".into(), t.workdir(), Default::default());
+        shared.persistent = true;
+        shared.shared_layers = vec![(
+            zapper_policy::Scope::Role("acme/eng".into()),
+            Default::default(),
+        )];
+        let e = t.core.test_session(shared, true).err().unwrap();
+        assert!(e.to_string().contains("can't share policy layers"), "{e}");
+    }
+
+    /// As a daemon that starts again: the session gone from memory, then
+    /// what its directory holds read back.
+    fn restart(t: &TestCore, s: &Session) -> Arc<Session> {
+        t.core.daemon().sessions.0.write().unwrap().remove(&s.id);
+        restore(t.core.daemon());
+        t.core.daemon().sessions.get(&s.id).expect("restored")
+    }
+
+    #[tokio::test]
+    async fn a_persistent_session_is_listed_again_after_a_restart() {
+        let t = TestCore::new(CONFIG);
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.persistent = true;
+        new.labels = [("project".to_string(), "x".to_string())].into();
+        new.policy.insert(
+            serde_yaml::from_str("{ kind: net, action: allow, host: example.com }").unwrap(),
+            None,
+        );
+        let s = t.core.test_session(new, true).unwrap();
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        std::fs::write(s.dir.root_disk(), b"root").unwrap();
+        stop(t.core.daemon(), &s, "stopped").await;
+
+        let back = restart(&t, &s);
+        assert!(back.persistent);
+        assert_eq!(back.labels["project"], "x");
+        assert_eq!(back.own_policy().net.len(), 1, "its own rules");
+        assert_eq!(
+            *back.runtime.status().borrow(),
+            Status::Stopped("kept while the daemon restarted".into())
+        );
+        assert!(back.dir.root_disk().exists(), "its disks");
+        // Its disks are checked as before the restart.
+        let _ = start(t.core.daemon(), &back, false).await;
+        let states: Vec<String> = disk_events(&t, &back).into_iter().map(|e| e.0).collect();
+        assert!(states.contains(&"checked".to_string()), "{states:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_running_when_the_daemon_ended_is_unverified() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        std::fs::create_dir_all(s.dir.vm()).unwrap();
+        std::fs::write(s.dir.root_disk(), b"root").unwrap();
+        stop(t.core.daemon(), &s, "stopped").await;
+        // It ran again, and the daemon ended without stopping it.
+        std::fs::write(s.dir.running_marker(), b"").unwrap();
+        std::fs::write(s.dir.root_disk(), b"written while it ran").unwrap();
+
+        let back = restart(&t, &s);
+        assert!(!back.dir.running_marker().exists());
+        let e = start(t.core.daemon(), &back, false).await.unwrap_err();
+        assert!(
+            format!("{e:#}").contains("no hashes from its last stop"),
+            "{e:#}"
+        );
+    }
+
+    #[test]
+    fn changes_are_named() {
+        let m = |p: &[(&str, &str)]| -> BTreeMap<String, String> {
+            p.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            changes(
+                &m(&[("root.ext4", "a"), ("disk0.ext4", "b")]),
+                &m(&[("root.ext4", "x"), ("disk1.ext4", "c")])
+            ),
+            "disk0.ext4 is gone; root.ext4 changed while stopped; disk1.ext4 is new"
+        );
     }
 }

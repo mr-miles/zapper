@@ -75,6 +75,10 @@ enum Cmd {
         /// Keep the session after the command exits.
         #[arg(long)]
         keep: bool,
+        /// Keep its disks when it stops, to start it again with `zapper
+        /// start` (implies --keep); `zapper rm` removes them.
+        #[arg(long)]
+        persistent: bool,
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
@@ -106,8 +110,18 @@ enum Cmd {
     Cp { from: String, to: PathBuf },
     /// List sessions.
     Ps,
-    /// Stop a session; it stays listed with its audit log.
+    /// Stop a session; it stays listed with its audit log (and a persistent
+    /// one with its disks).
     Stop { id: String },
+    /// Start a stopped persistent session again, from its kept disks, once
+    /// they're checked against the hashes recorded when it stopped.
+    Start {
+        id: String,
+        /// Boot its disks even if they changed while it was stopped; the
+        /// change and this are recorded.
+        #[arg(long)]
+        accept_changed_disks: bool,
+    },
     /// Give a driven session's agent a task (`agent.driven`); it waits for
     /// the agent's next turn. Follow it with `zapper events --session ID`.
     Tell {
@@ -509,23 +523,27 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::Run {
             profile,
             keep,
+            persistent,
             workdir,
             labels,
             command,
         } => {
+            let keep = keep || persistent;
             let workdir = match workdir {
                 Some(w) => std::fs::canonicalize(w)?,
                 None => std::env::current_dir()?,
             };
             eprintln!("zapper: starting a {profile} session…");
             let body = serde_json::to_string(
-                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)? }),
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent }),
             )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
             eprintln!("zapper: session {id} is ready");
             let code = attach(&c, &id, &command, false).await;
-            if keep {
+            if persistent {
+                eprintln!("zapper: session {id} kept with its disks; `zapper attach {id}`, `zapper stop {id}`, `zapper start {id}`, `zapper rm {id}`");
+            } else if keep {
                 eprintln!("zapper: session {id} kept; `zapper attach {id}`, `zapper rm {id}`");
             } else {
                 c.json(Method::DELETE, &format!("/v1/sessions/{id}"), None)
@@ -602,6 +620,10 @@ async fn run(cli: Cli) -> Result<i32> {
                             s(&x["profile"]),
                             s(&x["state"]),
                             s(&x["image"]),
+                            x["disk_bytes"]
+                                .as_u64()
+                                .map(|b| format!("{} MiB", b >> 20))
+                                .unwrap_or_default(),
                             format!("{}/{}", k["net_allowed"], k["net_denied"]),
                             format!("{}/{}", k["exec_allowed"], k["exec_denied"]),
                             s(&x["detail"]),
@@ -614,6 +636,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         "profile",
                         "state",
                         "image",
+                        "kept disks",
                         "net ok/no",
                         "exec ok/no",
                         "detail",
@@ -626,6 +649,25 @@ async fn run(cli: Cli) -> Result<i32> {
             &c.json(Method::POST, &format!("/v1/sessions/{id}/stop"), None)
                 .await?,
         ),
+        Cmd::Start {
+            id,
+            accept_changed_disks,
+        } => {
+            eprintln!("zapper: checking {id}'s disks and starting it…");
+            let body = json!({ "accept_changed_disks": accept_changed_disks }).to_string();
+            let v = c
+                .json(
+                    Method::POST,
+                    &format!("/v1/sessions/{id}/start"),
+                    Some(body),
+                )
+                .await?;
+            if cli.json {
+                print_json(&v);
+            } else {
+                eprintln!("zapper: session {id} is ready; `zapper attach {id}`");
+            }
+        }
         Cmd::Tell { id, text } => {
             let body = json!({ "text": text.join(" ") }).to_string();
             let v = c

@@ -109,6 +109,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
+        .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
         .route("/evaluate", post(evaluate))
@@ -613,6 +614,9 @@ struct CreateSession {
     /// Labels for the session, which service selectors pick.
     #[serde(default)]
     labels: BTreeMap<String, String>,
+    /// Keep its disks when it stops, to start it again.
+    #[serde(default)]
+    persistent: bool,
 }
 
 /// Labels the operator may give a session: short words, and none of the
@@ -656,6 +660,7 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     }
     let mut new = NewSession::plain(req.profile, req.workdir, policy);
     new.labels = req.labels;
+    new.persistent = req.persistent;
     let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }
@@ -663,6 +668,36 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
 async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo>> {
     let s = d.session(&id)?;
     d.stop_session(&s, "stopped by operator").await;
+    Ok(Json(d.session_info(&s)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct StartSession {
+    /// Boot its disks even if they changed while it was stopped; recorded.
+    accept_changed_disks: bool,
+}
+
+/// Starts a stopped persistent session again; returns once its guest is
+/// ready. `409` if its disks changed while it was stopped, unless accepted.
+async fn start_session(State(d): D, Path(id): Path<String>, body: String) -> R<Json<SessionInfo>> {
+    let req: StartSession = if body.trim().is_empty() {
+        StartSession::default()
+    } else {
+        parse_body(&body)?
+    };
+    let s = d.session(&id)?;
+    d.start_session(&s, req.accept_changed_disks)
+        .await
+        .map_err(|e| {
+            let msg = format!("{e:#}");
+            let code = if msg.contains("--accept-changed-disks") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            ApiError(code, msg)
+        })?;
     Ok(Json(d.session_info(&s)))
 }
 

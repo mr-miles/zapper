@@ -229,10 +229,17 @@ pub trait SessionApi {
     fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>>;
     /// Starts a session; returns once its guest is ready.
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>>;
-    /// Stops a session; it stays listed, with its audit log.
+    /// Stops a session; it stays listed, with its audit log, and a
+    /// persistent one with its disks, their hashes recorded.
     async fn stop_session(&self, s: &Arc<Session>, reason: &str);
-    /// Takes a stopped session off the list; a session still starting or
-    /// running stays, as nothing would manage its VM.
+    /// Starts a stopped persistent session again from its kept disks, after
+    /// checking them against the hashes recorded when it stopped: a change
+    /// is recorded, and refused unless `accept_changed_disks`, which is
+    /// recorded too.
+    async fn start_session(&self, s: &Arc<Session>, accept_changed_disks: bool) -> Result<()>;
+    /// Takes a stopped session off the list, a persistent one's disks with
+    /// it; a session still starting or running stays, as nothing would
+    /// manage its VM.
     fn forget_session(&self, id: &str) -> Result<()>;
     /// A session's info, saying so when the driver is off.
     fn session_info(&self, s: &Session) -> SessionInfo;
@@ -275,6 +282,10 @@ impl SessionApi for Core {
 
     async fn stop_session(&self, s: &Arc<Session>, reason: &str) {
         session::stop(&self.d, s, reason).await
+    }
+
+    async fn start_session(&self, s: &Arc<Session>, accept_changed_disks: bool) -> Result<()> {
+        session::start(&self.d, s, accept_changed_disks).await
     }
 
     fn forget_session(&self, id: &str) -> Result<()> {

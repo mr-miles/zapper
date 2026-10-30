@@ -821,6 +821,7 @@ pub(crate) async fn boot_worker(
         mounts: vec![],
         agent_overlay: Some(overlay),
         forwards: vec![],
+        persistent: false,
     };
     let s = d.create_session(new).await?;
     run.journal.append(

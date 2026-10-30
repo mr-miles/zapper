@@ -55,7 +55,7 @@ What happens when a session starts, for each worker at `zapper firm up` or for `
 7. The agent sets up the guest and reports ready.
 8. A terminal is opened to the workload: for a worker, by the foreman, which starts its agent headless through the agent's harness, Claude Code or pi ([the office](#the-office), [agent harnesses](configuration.md#agent-harnesses)); for `zapper run`, by the CLI.
 
-When the workload exits, the daemon stops the VM and deletes its disks. The audit log and the terminal recordings stay.
+When the workload exits, the daemon stops the VM and deletes its disks. The audit log and the terminal recordings stay. A persistent session keeps its disks instead, with their hashes recorded, and boots them again when started; it is listed, stopped, after the daemon restarts ([security: persistent sessions](security.md#persistent-sessions)).
 
 ### The session directory
 

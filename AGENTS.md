@@ -143,6 +143,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - The proxy connects to the address it checked. Loopback, link-local and host addresses are unreachable, and private ranges need `daemon.private_networks`.
 - Passthrough connections are bound to the TLS server name; inspected ones present a per-session CA and override `Host`.
 - The host accepts only the first control connection; the agent accepts terminal connections only from CID 2.
+- A persistent session boots only disks whose hashes match those recorded at its last stop, or whose change (or missing hashes) the operator accepted; both are recorded.
 - A socket service names a file in the daemon's `state/services/` directory, never a path; its program is told the caller in a line the daemon sends first, from the VM the connection came from, before any byte from the guest.
 - The seccomp filter kills foreign-arch and x32 syscalls, so exec checks cannot be bypassed through another syscall table.
 - Anything from the guest is bounded (line, frame, connection and approval limits) and rendered as text in the UI.
@@ -152,7 +153,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - A config change is validated as a whole and applied atomically, or not at all.
 - With a keeper, the record is appended through it and nothing else: the keeper takes appends from the configured uid only, has no operation to read back, rewrite or remove, flushes each line before acknowledging, and the daemon takes no firm turns while the record can't be written.
 
-Applying changes: rebuild with `make build` and restart the daemon; sessions do not survive a restart (stop them first, see Rules). Rule and profile changes need no restart: they apply to running sessions at once.
+Applying changes: rebuild with `make build` and restart the daemon; sessions do not survive a restart (stop them first, see Rules), but persistent ones come back stopped, with their disks. Rule and profile changes need no restart: they apply to running sessions at once.
 
 Code style: rustfmt's defaults and a clean clippy. `make hooks` turns on the pre-commit hook in `.githooks/`, which runs both; keep `make lint` passing.
 

@@ -127,6 +127,15 @@ make test-e2e      # ends with "all e2e checks passed"
 - exec through the 32-bit and x32 syscall tables
 - exec a denied binary
 
+## Persistent sessions
+
+A persistent session (`zapper run --persistent`, `persistent: true`) keeps its disks when it stops, in its `vm/` directory, and can be started again (`zapper start`), also after the daemon restarts; `zapper rm` removes them. Its disks are files the daemon's user can change, so they get tamper evidence in the record:
+
+- **When it stops**, once its VM is off, each disk's SHA-256 is recorded in a `disks` event (`stopped`), and kept beside it in `disks.json`.
+- **When it starts**, each disk is hashed again before Firecracker opens it, and compared: `checked` if the same; `changed` if not, naming what differs, and the start is refused; `unverified` if there are no hashes to compare with (the daemon ended while it ran, without stopping it). `--accept-changed-disks` starts it anyway, recorded as `accepted`.
+
+The events reach the record through the keeper, when there is one, so its chain covers them: a disk changed while stopped, with `disks.json` changed to match it, still shows against the hashes recorded at the stop. While the session runs, no change to its disks is caught ([limitations](#limitations)). Its own secrets (`Session::secrets`, such as a firm worker's token) aren't kept across a daemon restart. A persistent session can't share policy layers with other sessions, so a firm's workers aren't persistent.
+
 ## Limitations
 
 - **Exec checks may race.** The host decides on the path the process passed. A multithreaded process written for it may change that memory between the check and the kernel's own read; the kernel documents this limit of seccomp user notification. The tests haven't shown it, but treat exec policy as a guardrail and rely on network and secrets for the boundary.
@@ -134,7 +143,8 @@ make test-e2e      # ends with "all e2e checks passed"
 - **Firecracker's uid needs subordinate ids.** With ranges for the daemon user in `/etc/subuid` and `/etc/subgid` and the `uidmap` helpers (`daemon.vmm_subids`, on by default), each session's Firecracker runs as a subordinate uid of its own, without capabilities: it owns nothing on the host and can't signal or trace the daemon or another session's VMM. The VMM process that sets up its namespaces keeps the daemon user's uid, as does Firecracker on a host without the ranges or helpers (`zapper check` says which). Either way the kernel interfaces it keeps (`/dev/kvm`, and `/dev/net/tun` with a NIC) are shared with the host, and Firecracker keeps the daemon user's groups, `kvm` among them.
 - **The daemon is one process that holds the secrets and runs the proxy.** It parses HTTP, TLS, JSON and frames from the guest with memory-safe libraries, and a bug in that code would be a bug in the boundary.
 - **Rate and volume limits** for network traffic are planned: see [the README](../README.md#next).
-- **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed.
+- **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed. A persistent session comes back stopped, with its disks, to be started again.
+- **The operator can change a running sandbox's disk without a trace.** A persistent session's disks changed while it is stopped show in the record ([persistent sessions](#persistent-sessions)); while it runs, Firecracker writes them constantly, and a write by the daemon's user looks no different.
 - **A firm tool's effect can outlive a failed record write.** The "no turns while the record can't be written" gate ([the record](#the-record)) is checked when a turn starts, but a worker's tool call appends to the journal *during* the turn. If that append fails (a full disk), the in-memory effect — a funding, a hire, an access decision — has already happened, while the event is missing from the journal the record, replay and the board pack are rebuilt from. So a run can act on a state the record doesn't show. `mail_send` is the exception: a message body lives only in the journal, so a failed write there fails the send rather than deliver a message that reads back empty. Making every state-changing tool fail the same way (append before the effect, or roll back) is not yet done.
 
 Network-specific limitations are on the [network](network.md#limitations) page.

@@ -45,20 +45,28 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     std::fs::create_dir_all(dir.vm())?;
     let engine = &session.resolved.engine;
     let root = dir.root_disk();
-    vm::root_disk(
-        &daemon.paths.images.join(format!("{}.ext4", engine.image)),
-        &root,
-        vm::parse_size(&engine.disk)?,
-    )
-    .await
-    .context("root disk")?;
+    // A persistent session started again boots the disks it kept, checked
+    // already (`lifecycle::start`); otherwise each is made afresh.
+    let kept = |p: &std::path::Path| session.persistent && p.exists();
+    if !kept(&root) {
+        vm::root_disk(
+            &daemon.paths.images.join(format!("{}.ext4", engine.image)),
+            &root,
+            vm::parse_size(&engine.disk)?,
+        )
+        .await
+        .context("root disk")?;
+    }
     let mut disks = Vec::new();
     let mut guest_disks = Vec::new();
     for (i, m) in session.resolved.mounts.iter().enumerate() {
         let path = dir.data_disk(i);
-        let host = vm::mount_disk(m, &session.workdir, &path)
-            .await
-            .with_context(|| format!("mount {}", m.host))?;
+        if !kept(&path) {
+            let host = vm::mount_disk(m, &session.workdir, &path)
+                .await
+                .with_context(|| format!("mount {}", m.host))?;
+            tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
+        }
         let ro = m.mode == MountMode::Ro;
         disks.push((path, ro));
         let device = format!("/dev/vd{}", (b'b' + i as u8) as char);
@@ -67,7 +75,6 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
             path: m.guest.clone(),
             read_only: ro,
         });
-        tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
     }
     // Guest command secrets are minted once, for the VM to hold.
     let to_mint = spec::guest_mints(&daemon.config.read().unwrap(), &session.resolved);

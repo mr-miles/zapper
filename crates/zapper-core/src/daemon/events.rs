@@ -124,6 +124,17 @@ pub enum EventBody {
         event: String,
         detail: serde_json::Value,
     },
+    /// A persistent session's disks, by file name, each its SHA-256:
+    /// `stopped` (hashed once the guest is off), `checked` (the same at a
+    /// start), `changed` (not the same: the start is refused), `accepted` (a
+    /// change the operator let start) or `unverified` (no hashes from its
+    /// last stop to compare with).
+    Disks {
+        state: String,
+        disks: std::collections::BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// An image build through the API (`builds`): `started`, `built` or
     /// `failed`.
     Image {

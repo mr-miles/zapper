@@ -72,11 +72,12 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/profiles` | ✓ | Summaries |
 | `GET\|PUT\|DELETE /v1/profiles/{name}` | | Profile and its resolved form / set / remove |
 | `GET /v1/sessions` | ✓ | Sessions, each with its `labels` (a firm's: `firm`, `run`, `member` and `office`, `worker` or `facility`) |
-| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's |
+| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?, persistent?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's. `persistent`: its disks stay when it stops, to start it again; its info then has `disk_bytes`, what they take on the host |
 | `GET /v1/sessions/{id}` | ✓ | One session |
-| `POST /v1/sessions/{id}/stop` | | Stop, keep listed |
+| `POST /v1/sessions/{id}/stop` | | Stop, keep listed; a persistent session keeps its disks, their hashes recorded |
+| `POST /v1/sessions/{id}/start` | | `{accept_changed_disks?}`: start a stopped persistent session again; returns once the guest is ready. `409` if its disks changed while it was stopped, or weren't hashed when it stopped, unless accepted |
 | `POST /v1/sessions/{id}/prompt` | | `{text}`: a task for a driven session's agent, queued for its next turn → `202` `{queued, driver}`. `409` if the driver is off or the session isn't driven or running, `403` for a firm's worker (mail them instead) |
-| `DELETE /v1/sessions/{id}` | | Stop and forget |
+| `DELETE /v1/sessions/{id}` | | Stop and forget; a persistent session's disks go too |
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |
 | `GET /v1/sessions/{id}/requests/{n}` | ✓ | One request with `request_headers`, `response_headers`, `request_body` and `response_body` (`text` or `base64`, `total`, `kept`, `truncated`, `encoding`); added secret values appear as `***` |
