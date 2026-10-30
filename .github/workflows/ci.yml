@@ -36,7 +36,7 @@ jobs:
     env:
       OFFICE: ${{ matrix.office }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt,clippy
@@ -55,7 +55,7 @@ jobs:
     env:
       OFFICE: ${{ matrix.office }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
@@ -74,7 +74,7 @@ jobs:
     env:
       OFFICE: ${{ matrix.office }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl
@@ -123,7 +123,7 @@ jobs:
           sh "$pkg"/zapper-ci-*/install.sh | tee "$RUNNER_TEMP/again.txt"
           grep -q "exists; not touching it" "$RUNNER_TEMP/again.txt"
           tail -n1 "$conf/zapper.yaml" | grep -qx "# mine"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zapper-${{ matrix.office == 1 && 'office' || 'no-office' }}-${{ github.sha }}
           path: |
@@ -138,8 +138,10 @@ jobs:
   scripts:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
+          # No package manager here: nothing to cache.
+          package-manager-cache: false
       - run: scripts/check-js.sh
