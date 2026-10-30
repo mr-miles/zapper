@@ -156,12 +156,43 @@ pub struct VmSpec<'a> {
     pub durable: bool,
 }
 
-/// What a daemon needs to know of a durable VMM it didn't start: its pid,
-/// and the subordinate id its Firecracker runs as. In `vmm.json`.
+/// What a daemon needs to know of a durable VMM it didn't start: its pid
+/// and when that process started (so a pid reused since isn't taken for
+/// it), and the subordinate id its Firecracker runs as. In `vmm.json`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Vmm {
     pub pid: u32,
+    /// `/proc/<pid>/stat`'s `starttime`, in clock ticks since boot.
+    pub start: u64,
     pub subid: Option<u32>,
+}
+
+impl Vmm {
+    /// The running process `pid`, as it is now; `None` once it has ended.
+    pub fn of(pid: u32, subid: Option<u32>) -> Option<Self> {
+        Some(Self {
+            pid,
+            start: start_time(pid)?,
+            subid,
+        })
+    }
+
+    /// Whether it still runs as session `id`'s VMM: the same process (its
+    /// pid not reused since), `zapper __vmm` with the id among its
+    /// arguments.
+    pub fn runs_for(&self, id: &str) -> bool {
+        start_time(self.pid) == Some(self.start) && is_vmm_of(self.pid, id)
+    }
+}
+
+/// When process `pid` started, in clock ticks since boot: field 22 of
+/// `/proc/<pid>/stat`, counted after the command name's closing `)` (the
+/// name may hold spaces and parentheses).
+fn start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // `rest` starts at field 3 (state).
+    rest.split_whitespace().nth(22 - 3)?.parse().ok()
 }
 
 /// The VMM's `oom_score_adj`, as written to `/proc/self/oom_score_adj`:
@@ -189,10 +220,10 @@ fn raise_oom_score() {
 }
 
 /// A session's VM: the VMM this daemon started, or a persistent session's,
-/// started by an earlier daemon and adopted, known by its pid only.
+/// started by an earlier daemon and adopted, known by its pid and start.
 pub enum VmProc {
     Child(Child),
-    Adopted { pid: u32, session: String },
+    Adopted { vmm: Vmm, session: String },
 }
 
 impl VmProc {
@@ -204,8 +235,8 @@ impl VmProc {
                 .ok()
                 .flatten()
                 .map(|s| format!("vm exited ({s})")),
-            VmProc::Adopted { pid, session } => {
-                (!is_vmm_of(*pid, session)).then(|| "vm exited".to_string())
+            VmProc::Adopted { vmm, session } => {
+                (!vmm.runs_for(session)).then(|| "vm exited".to_string())
             }
         }
     }
@@ -219,22 +250,23 @@ impl VmProc {
                     let _ = c.kill().await;
                 }
             }
-            VmProc::Adopted { pid, session } => {
+            VmProc::Adopted { vmm, session } => {
                 let until = std::time::Instant::now() + grace;
-                while is_vmm_of(*pid, session) && std::time::Instant::now() < until {
+                while vmm.runs_for(session) && std::time::Instant::now() < until {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                if is_vmm_of(*pid, session) {
-                    unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+                if vmm.runs_for(session) {
+                    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
                 }
             }
         }
     }
 }
 
-/// Whether `pid` runs the VMM of session `id`: `zapper __vmm`, with the id
-/// among its arguments (not a pid reused since).
-pub fn is_vmm_of(pid: u32, id: &str) -> bool {
+/// Whether `pid` runs the VMM of session `id` by its command line:
+/// `zapper __vmm`, with the id among its arguments. With [`Vmm::runs_for`]'s
+/// start time, not a pid reused since.
+fn is_vmm_of(pid: u32, id: &str) -> bool {
     let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
         return false;
     };
@@ -357,9 +389,13 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
         }
     }
     if spec.durable {
-        let vmm = Vmm {
-            pid: child.id().unwrap_or(0),
-            subid,
+        let vmm = child.id().and_then(|pid| Vmm::of(pid, subid));
+        let Some(vmm) = vmm else {
+            let _ = child.kill().await;
+            if subid.is_some() {
+                crate::subids::release(spec.id);
+            }
+            bail!("the VMM ended as it started");
         };
         crate::util::write_private(&spec.dir.vmm(), &serde_json::to_vec(&vmm)?)?;
     }

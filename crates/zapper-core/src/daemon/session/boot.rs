@@ -233,12 +233,16 @@ fn watch_vm(daemon: &Arc<Daemon>, session: &Arc<Session>) {
 }
 
 /// Takes on a persistent session whose VM an earlier daemon left running:
-/// its guest's sockets bound again, its VMM watched by pid, and its agent's
-/// control channel taken again when it connects with its token.
-pub(super) async fn adopt(daemon: &Arc<Daemon>, session: &Arc<Session>, pid: u32) -> Result<()> {
+/// its guest's sockets bound again, its VMM watched by pid and start, and
+/// its agent's control channel taken again when it connects with its token.
+pub(super) async fn adopt(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    vmm: vm::Vmm,
+) -> Result<()> {
     serve_guest(daemon, session)?;
     *session.runtime.vm().lock().await = Some(vm::VmProc::Adopted {
-        pid,
+        vmm,
         session: session.id.clone(),
     });
     watch_vm(daemon, session);

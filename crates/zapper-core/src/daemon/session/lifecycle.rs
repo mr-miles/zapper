@@ -265,7 +265,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
                     // Not to be listed or adopted; a VM it left running
                     // isn't left running unwatched.
                     if let Some(vmm) = live_vmm(&dir, &id) {
-                        kill_vmm(vmm.pid, &id);
+                        kill_vmm(&vmm, &id);
                     }
                     tracing::warn!(
                         "session {id}: its session.json can't be read ({e}); not listed, its VM stopped if it ran"
@@ -281,13 +281,13 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         if let (Some(vmm), Ok(rt)) = (&live, tokio::runtime::Handle::try_current()) {
             if let Err(e) = adopt(daemon, saved.clone(), &dir, vmm, &rt) {
                 tracing::warn!("adopting the session in {}: {e:#}", dir.root().display());
-                kill_vmm(vmm.pid, &saved.id);
+                kill_vmm(vmm, &saved.id);
             } else {
                 continue;
             }
         }
         let left_running = match &live {
-            Some(vmm) => kill_vmm(vmm.pid, &saved.id),
+            Some(vmm) => kill_vmm(vmm, &saved.id),
             None => false,
         };
         let _ = std::fs::remove_file(dir.vmm());
@@ -321,18 +321,18 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
 fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
     let vmm: crate::daemon::vm::Vmm =
         serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
-    crate::daemon::vm::is_vmm_of(vmm.pid, id).then_some(vmm)
+    vmm.runs_for(id).then_some(vmm)
 }
 
-/// Stops session `id`'s VMM at `pid` (its Firecracker dies with it); whether
+/// Stops session `id`'s VMM `vmm` (its Firecracker dies with it); whether
 /// it was running.
-fn kill_vmm(pid: u32, id: &str) -> bool {
-    if !crate::daemon::vm::is_vmm_of(pid, id) {
+fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
+    if !vmm.runs_for(id) {
         return false;
     }
-    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
     for _ in 0..50 {
-        if !crate::daemon::vm::is_vmm_of(pid, id) {
+        if !vmm.runs_for(id) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -377,9 +377,9 @@ fn adopt(
             detail: Some("adopted: its VM ran on through a daemon restart".into()),
         },
     );
-    let (d, s, pid) = (daemon.clone(), session, vmm.pid);
+    let (d, s, vmm) = (daemon.clone(), session, vmm.clone());
     rt.spawn(async move {
-        if let Err(e) = super::boot::adopt(&d, &s, pid).await {
+        if let Err(e) = super::boot::adopt(&d, &s, vmm).await {
             stop(&d, &s, &format!("adopting it failed: {e:#}")).await;
             return;
         }
@@ -945,10 +945,7 @@ mod tests {
             .args(["-c", "sleep 30", "__vmm", &s.id])
             .spawn()
             .unwrap();
-        let record = crate::daemon::vm::Vmm {
-            pid: vmm.id(),
-            subid: None,
-        };
+        let record = crate::daemon::vm::Vmm::of(vmm.id(), None).unwrap();
         std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
 
         let back = restart(&t, &s);
@@ -998,16 +995,27 @@ mod tests {
             .arg("30")
             .spawn()
             .unwrap();
-        let record = crate::daemon::vm::Vmm {
-            pid: other.id(),
-            subid: None,
-        };
+        let record = crate::daemon::vm::Vmm::of(other.id(), None).unwrap();
         std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
         let back = restart(&t, &s);
         assert!(!back.is_running());
         assert!(other.try_wait().unwrap().is_none(), "still running");
         other.kill().unwrap();
         let _ = other.wait();
+
+        // Its command line, on a pid that started at another time.
+        let mut look_alike = std::process::Command::new("sh")
+            .args(["-c", "sleep 30", "__vmm", &s.id])
+            .spawn()
+            .unwrap();
+        let mut record = crate::daemon::vm::Vmm::of(look_alike.id(), None).unwrap();
+        record.start += 1;
+        std::fs::write(back.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
+        let again = restart(&t, &back);
+        assert!(!again.is_running(), "not adopted");
+        assert!(look_alike.try_wait().unwrap().is_none(), "not killed");
+        look_alike.kill().unwrap();
+        let _ = look_alike.wait();
     }
 
     /// A persistent session's rules keep their ids over a restart: a
@@ -1048,10 +1056,7 @@ mod tests {
             .args(["-c", "sleep 30", "__vmm", &s.id])
             .spawn()
             .unwrap();
-        let record = crate::daemon::vm::Vmm {
-            pid: vmm.id(),
-            subid: None,
-        };
+        let record = crate::daemon::vm::Vmm::of(vmm.id(), None).unwrap();
         std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
         std::fs::write(s.dir.saved(), b"{ torn").unwrap();
         t.core.daemon().sessions.0.write().unwrap().remove(&s.id);
@@ -1090,10 +1095,31 @@ mod tests {
         assert!(left.is_empty(), "no temporary files left");
     }
 
+    /// A VMM is known by its command line and by when it started: the
+    /// session's stand-in is; another session's, a process that isn't a
+    /// VMM, the same command line on a pid started at another time (reused
+    /// since), and a pid that doesn't run, aren't.
     #[test]
-    fn a_vmm_is_known_by_its_command_line() {
-        assert!(!crate::daemon::vm::is_vmm_of(std::process::id(), "abc234"));
-        assert!(!crate::daemon::vm::is_vmm_of(u32::MAX - 1, "abc234"));
+    fn a_vmm_is_known_by_its_command_line_and_start() {
+        use crate::daemon::vm::Vmm;
+        let mut stand_in = std::process::Command::new("sh")
+            .args(["-c", "sleep 30", "__vmm", "abc234"])
+            .spawn()
+            .unwrap();
+        let vmm = Vmm::of(stand_in.id(), None).unwrap();
+        assert!(vmm.runs_for("abc234"));
+        assert!(!vmm.runs_for("other1"), "another session's");
+        let reused = Vmm {
+            start: vmm.start + 1,
+            ..vmm.clone()
+        };
+        assert!(!reused.runs_for("abc234"), "started at another time");
+        let me = Vmm::of(std::process::id(), None).unwrap();
+        assert!(!me.runs_for("abc234"), "not a VMM");
+        assert!(Vmm::of(u32::MAX - 1, None).is_none());
+        stand_in.kill().unwrap();
+        stand_in.wait().unwrap();
+        assert!(!vmm.runs_for("abc234"), "ended");
     }
 
     #[tokio::test]
