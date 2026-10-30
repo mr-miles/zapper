@@ -32,7 +32,7 @@ pub use crate::daemon::services::{
 pub use crate::daemon::session::{
     NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
 };
-pub use crate::daemon::{Event, EventBody, Pending, Remember};
+pub use crate::daemon::{Catchup, Cursor, Event, EventBody, Pending, Remember};
 
 /// A handle on a running daemon. Cheap to clone.
 #[derive(Clone)]
@@ -553,6 +553,20 @@ pub trait EventApi {
     fn recent_events(&self, session: Option<&str>) -> Vec<Event>;
     /// Events as they happen.
     fn subscribe(&self) -> broadcast::Receiver<Event>;
+    /// This daemon run's ID, which a [`Cursor`] names: `seq` counts from 1
+    /// again after a restart.
+    fn epoch(&self) -> String;
+    /// What to send a subscriber before live events, of one session or all:
+    /// after `after`, what it missed (with gaps for what it can't have);
+    /// else, with `history`, recent history; and, when something was sent,
+    /// the last `seq` it covers, so live events up to it are skipped.
+    /// Subscribe first, then call this, so nothing falls between.
+    fn catch_up(
+        &self,
+        session: Option<&str>,
+        after: Option<&Cursor>,
+        history: bool,
+    ) -> (Vec<Catchup>, Option<u64>);
 }
 
 impl EventApi for Core {
@@ -562,6 +576,19 @@ impl EventApi for Core {
 
     fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.d.events.subscribe()
+    }
+
+    fn epoch(&self) -> String {
+        self.d.events.epoch().to_string()
+    }
+
+    fn catch_up(
+        &self,
+        session: Option<&str>,
+        after: Option<&Cursor>,
+        history: bool,
+    ) -> (Vec<Catchup>, Option<u64>) {
+        self.d.events.catch_up(session, after, history)
     }
 }
 

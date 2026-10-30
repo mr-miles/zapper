@@ -58,7 +58,7 @@ The layer workers run on: zapper's sessions, policy and config.
 
 | Method and path | ui | Purpose |
 |---|---|---|
-| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals |
+| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals, and `epoch`: this daemon run's ID, which event ids start with |
 | `GET /v1/record` | ✓ | Who keeps the record and whether it is being written |
 | `GET /v1/config[?format=json]` | ✓ | Running config, YAML by default, secret values redacted |
 | `PUT /v1/config` | | Replace the running config (validated; `<redacted>` keeps old values) |
@@ -84,7 +84,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/sessions/{id}/terminals/{n}/stream` | ✓ | Server-sent events, read-only: the terminal's kept output, then live output. Each `data:` is `{"r": [rows, cols]}`, `{"o": "<base64 bytes>"}`, or `{"end": exit_code}` |
 | `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool` | | Upgrade (`Upgrade: zapper-shell`) to a terminal; frames below |
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
-| `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)) |
+| `GET /v1/events[?session=ID&history=true&after=EPOCH:SEQ]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)). Each has the SSE `id` `EPOCH:SEQ`. A client that reconnects with `after=`, or the `Last-Event-ID` header an EventSource sends again (which wins over `history`), gets the events since from recent history, then live ones. `{"type": "gap", "summary": …}` says what it can't have: events history no longer holds, events before a daemon restart (another epoch), or events it missed by falling behind. A malformed `after` is `400` |
 | `GET /v1/services` | ✓ | Services and zones: `id`, `kind` (`service` or `zone`), `name`, `port`, `sessions` (labels; every session when empty), `to`, `owner` ([network: services](network.md#services)) |
 | `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port} \| {socket: NAME, tls?}}` → the service with its `id`. `socket` is a file name in the daemon's `state/services/` directory ([network: socket services](network.md#socket-services)) |
 | `DELETE /v1/services/{id}` | | Remove a service added through the API; `409` for another owner's (a firm's) |

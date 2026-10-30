@@ -4,7 +4,7 @@
 
 ## Overview
 
-zapper records what each session does, an office worker's included, as events. Each event goes to the session's audit log, to the live stream (`zapper events`, `GET /v1/events`), and to an in-memory buffer of the latest 2000 events that the UI reads. Terminals are recorded as asciicast files. All of this is written on the host. A firm's run adds its own journal and each worker's agent transcript ([office: state](office.md#state)).
+zapper records what each session does, an office worker's included, as events. Each event goes to the session's audit log, to the live stream (`zapper events`, `GET /v1/events`), and to an in-memory buffer of the latest 2000 events that the UI reads, and that a client reconnecting to the stream resumes from ([API](api.md#sessions-rules-and-config)). Terminals are recorded as asciicast files. All of this is written on the host. A firm's run adds its own journal and each worker's agent transcript ([office: state](office.md#state)).
 
 ## Events
 

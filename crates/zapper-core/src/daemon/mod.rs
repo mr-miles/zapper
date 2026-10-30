@@ -41,7 +41,7 @@ use session::Session;
 // The event model and the stream live in `events`; the approval model and
 // the outstanding approvals in `approvals`.
 pub use approvals::{Pending, Remember};
-pub use events::{Event, EventBody};
+pub use events::{Catchup, Cursor, Event, EventBody};
 
 // Generic helpers live in `crate::util` (the clients' shared helpers);
 // re-exported here so the daemon's modules reach them as `super::now` etc.

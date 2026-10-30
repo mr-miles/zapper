@@ -835,3 +835,101 @@ async fn the_ui_front_page_is_the_mounted_one_or_the_sessions() {
     .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 }
+
+/// The first `n` SSE events of `uri` (with `headers`): each `(id, data)`.
+async fn first_events(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    n: usize,
+) -> Vec<(String, Value)> {
+    let mut req = Request::builder().uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let parsed: Vec<(String, Value)> = text
+                .split("\n\n")
+                .filter(|block| block.contains("data: "))
+                .map(|block| {
+                    let id = block
+                        .lines()
+                        .find_map(|l| l.strip_prefix("id: "))
+                        .unwrap_or("")
+                        .to_string();
+                    let data = block
+                        .lines()
+                        .find_map(|l| l.strip_prefix("data: "))
+                        .and_then(|l| serde_json::from_str(l).ok())
+                        .unwrap_or(Value::Null);
+                    (id, data)
+                })
+                .collect();
+            if parsed.len() >= n {
+                return parsed[..n].to_vec();
+            }
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    })
+    .await
+    .expect("the events stream")
+}
+
+/// A subscriber that reconnects resumes after its last event (`after=`, or
+/// the `Last-Event-ID` an EventSource sends again), and is told when the
+/// daemon restarted since.
+#[tokio::test]
+async fn events_resume_after_the_last_one_seen() {
+    let t = TestCore::new(CONFIG);
+    for _ in 0..3 {
+        session(&t, "web", &[], true);
+    }
+    let app = super::api(t.core.clone(), &Mount::default());
+    let epoch = get(&app, "/v1/status").await.json()["epoch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let all = first_events(&app, "/v1/events?history=true", &[], 2).await;
+    assert_eq!(all[0].0, format!("{epoch}:1"));
+
+    // After event 1, by header (and it wins over history=true): 2 comes next.
+    let last = format!("{epoch}:1");
+    let resumed = first_events(
+        &app,
+        "/v1/events?history=true",
+        &[("last-event-id", &last)],
+        1,
+    )
+    .await;
+    assert_eq!(resumed[0].0, format!("{epoch}:2"));
+    let resumed = first_events(&app, &format!("/v1/events?after={epoch}:2"), &[], 1).await;
+    assert_eq!(resumed[0].0, format!("{epoch}:3"));
+
+    // From another run: a gap saying so, then this run's history.
+    let other = first_events(&app, "/v1/events?after=older:900", &[], 2).await;
+    assert_eq!(other[0].1["type"], "gap", "{:?}", other[0]);
+    assert!(
+        other[0].1["summary"]
+            .as_str()
+            .unwrap()
+            .contains("the daemon restarted"),
+        "{:?}",
+        other[0]
+    );
+    assert_eq!(other[1].0, format!("{epoch}:1"));
+
+    let bad = get(&app, "/v1/events?after=nonsense").await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+}

@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use zapper_core::{
-    ApiError, Core, NewSession, Remember, RuleRemoval, ServiceSpec, ServiceTarget, SessionInfo,
-    TermChunk, TerminalInfo,
+    ApiError, Catchup, Core, Cursor, NewSession, Remember, RuleRemoval, ServiceSpec, ServiceTarget,
+    SessionInfo, TermChunk, TerminalInfo,
 };
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{
@@ -315,6 +315,7 @@ async fn status(State(d): D) -> Json<Value> {
         "sessions": sessions.len(),
         "running": running,
         "pending_approvals": d.approvals().len(),
+        "epoch": d.epoch(),
     }))
 }
 
@@ -762,29 +763,61 @@ struct EventsQuery {
     session: Option<String>,
     #[serde(default)]
     history: bool,
+    /// `EPOCH:SEQ`: resume after this event, as `Last-Event-ID` does.
+    after: Option<String>,
 }
 
 async fn events(
     State(d): D,
     Query(q): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let history = if q.history {
-        d.recent_events(q.session.as_deref())
-    } else {
-        vec![]
+    headers: axum::http::HeaderMap,
+) -> R<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    // Where the subscriber left off: `after=`, or the `Last-Event-ID` an
+    // EventSource sends again when it reconnects, which wins over `history`.
+    let after = q.after.clone().or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    });
+    let after = match after {
+        Some(a) => Some(Cursor::parse(&a).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("{a:?} is not an event to resume after: EPOCH:SEQ"),
+            )
+        })?),
+        None => None,
     };
+    let epoch = d.epoch();
+    // Subscribe first, then read history, so no event falls between them.
+    let rx = d.subscribe();
+    let (catchup, cut) = d.catch_up(q.session.as_deref(), after.as_ref(), q.history);
     let session = q.session.clone();
-    let live = BroadcastStream::new(d.subscribe()).filter_map(move |e| {
+    let live = BroadcastStream::new(rx).filter_map(move |e| {
         let session = session.clone();
         async move {
-            let e = e.ok()?;
-            (session.is_none() || e.session == session).then_some(e)
+            match e {
+                Ok(e) if cut.is_some_and(|c| e.seq <= c) => None,
+                Ok(e) => (session.is_none() || e.session == session).then_some(Catchup::Event(e)),
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Some(
+                    Catchup::Gap(format!("this stream fell behind and missed {n} events")),
+                ),
+            }
         }
     });
-    let stream = stream::iter(history)
-        .chain(live)
-        .map(|e| Ok(SseEvent::default().json_data(e.view()).unwrap_or_default()));
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let stream = stream::iter(catchup).chain(live).map(move |item| {
+        Ok(match item {
+            Catchup::Event(e) => SseEvent::default()
+                .id(format!("{epoch}:{}", e.seq))
+                .json_data(e.view())
+                .unwrap_or_default(),
+            Catchup::Gap(why) => SseEvent::default()
+                .json_data(json!({ "type": "gap", "ts": zapper_core::util::now(), "epoch": epoch, "summary": why }))
+                .unwrap_or_default(),
+        })
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn list_approvals(State(d): D) -> Json<Value> {
