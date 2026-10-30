@@ -56,6 +56,8 @@ The keeper keeps the record append-only ([security: the record](../security.md#t
 
 ### 2. Sandboxes that survive a restart of the daemon
 
+*As built (`fc9db6a`, `766d560`, `c008fdb` on `feat/socket-services`; see below for where it differs):* for persistent sessions only. The CA is kept on disk (`ca.json`, 0600, outside `vm/`), not in the supervisor's memory. The supervisor doesn't enforce the TTL itself: a guest whose daemon is gone can't act, and the adopting daemon counts the lifetime from when the VM started. Under systemd, `KillMode=process`. A driven agent isn't kept running across the restart; it resumes its conversation. A daemon that shuts down cleanly leaves running persistent sessions running.
+
 The daemon can't be made small enough never to need restarting. It is where the code that most needs patching lives (the HTTP and TLS parsers, DNS, the database wire protocols), and upgrades, `daemon.keeper` changes and crashes all restart it. So instead of avoiding restarts, **make them harmless**: the one piece a running VM needs is the process that owns Firecracker, and that piece already exists and is small.
 
 #### The supervisor: `zapper __vmm`, made durable
