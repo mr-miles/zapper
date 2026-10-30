@@ -240,6 +240,95 @@ pub fn recv_fd(sock: RawFd) -> io::Result<OwnedFd> {
     }
 }
 
+/// A pair of connected `SOCK_SEQPACKET` sockets: each message arrives whole,
+/// with the fd sent with it.
+pub fn seqpacket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    check(unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    })?;
+    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
+}
+
+/// Sends one message on a `SOCK_SEQPACKET` socket, with `fd` if given.
+pub fn send_msg(sock: RawFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> {
+    unsafe {
+        let mut iov = libc::iovec {
+            iov_base: data.as_ptr() as *mut libc::c_void,
+            iov_len: data.len(),
+        };
+        let mut cmsg_buf = [0u64; 4];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        if let Some(fd) = fd {
+            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = libc::CMSG_SPACE(4) as _;
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(4) as _;
+            *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = fd;
+        }
+        if libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Receives one message of at most `max` bytes from a `SOCK_SEQPACKET`
+/// socket, and the fd sent with it; `None` when the other end has closed.
+pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>> {
+    let mut data = vec![0u8; max];
+    unsafe {
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr() as *mut libc::c_void,
+            iov_len: data.len(),
+        };
+        let mut cmsg_buf = [0u64; 4];
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = libc::CMSG_SPACE(4) as _;
+        let n = libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC);
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        data.truncate(n as usize);
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        let fd = (!cmsg.is_null() && (*cmsg).cmsg_type == libc::SCM_RIGHTS)
+            .then(|| OwnedFd::from_raw_fd(*(libc::CMSG_DATA(cmsg) as *const libc::c_int)));
+        Ok(Some((data, fd)))
+    }
+}
+
+/// Makes a write to socket `fd` give up after `secs` seconds.
+pub fn set_send_timeout(fd: RawFd, secs: i64) {
+    let tv = libc::timeval {
+        tv_sec: secs,
+        tv_usec: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tv as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
 // seccomp user notification.
 
 const SECCOMP_SET_MODE_FILTER: libc::c_uint = 1;

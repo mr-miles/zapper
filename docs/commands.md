@@ -77,7 +77,8 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | Command | Purpose |
 |---|---|
 | `zapper run [-p PROFILE] [-C DIR] [--keep] [--persistent [--accept-changed-image]] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. `--persistent` (which keeps it) also keeps its disks when it stops, so `zapper start` can start it again, also after the daemon restarts ([persistent sessions](security.md#persistent-sessions)). Labels pick it for services |
-| `zapper attach ID [-- CMD…]` | Another terminal in a running session |
+| `zapper attach ID [--persist] [-- CMD…]` / `zapper attach ID --terminal N` | Another terminal in a running session. `--persist`: its program keeps running when the terminal closes (your connection drops, or you close it), and it prints its number; `--terminal N` attaches to it again, showing what it kept, then live, and closing a client attached already ([architecture: persistent terminals](architecture.md#persistent-terminals)) |
+| `zapper hangup ID N` | End persistent terminal N on purpose: its program gets `SIGHUP` |
 | `zapper exec ID [--system] -- CMD…` | Run a command without a terminal, returning its exit code; `--system` runs it as root without exec supervision, for the operator's own maintenance (e.g. a firm's cluster VM) |
 | `zapper cp ID:/path DIR` | Copy a guest directory out |
 | `zapper ps` | Sessions with state, image and allow/deny counters |

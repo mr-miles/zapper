@@ -16,7 +16,12 @@ use super::Session;
 use crate::daemon::{now, record, Daemon, EventBody};
 
 /// Pumps frames between a client and a guest terminal, recording the
-/// terminal as an asciicast v2 file in the session directory.
+/// terminal as an asciicast v2 file in the session directory. A persistent
+/// terminal attached again (`id` already the session's) goes on with its
+/// watchers and its recording, which takes only what it didn't have of the
+/// output the guest sends again; when its client goes, it is detached, not
+/// closed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_shell<C>(
     daemon: Arc<Daemon>,
     session: Arc<Session>,
@@ -25,26 +30,37 @@ pub(crate) async fn pump_shell<C>(
     id: u64,
     argv: Vec<String>,
     tty: Option<(u16, u16)>,
+    persist: bool,
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let existing = session.terminals.lock().unwrap().get(&id).cloned();
+    let (term, reattached) = match existing.filter(|t| t.persistent) {
+        Some(t) => (t, true),
+        None => {
+            let cast = Recorder::new(session.dir.root(), id, tty, &argv);
+            let t = Arc::new(Terminal::new(
+                id,
+                argv.clone(),
+                tty.unwrap_or((24, 80)),
+                persist,
+                cast,
+            ));
+            session.terminals.lock().unwrap().insert(id, t.clone());
+            (t, false)
+        }
+    };
+    term.state.lock().unwrap().attached = true;
     daemon.emit(
         Some(&session),
         EventBody::Shell {
             id,
-            state: "open".into(),
-            argv: Some(argv.clone()),
+            state: if reattached { "attached" } else { "open" }.into(),
+            argv: Some(term.argv.clone()),
             exit_code: None,
         },
     );
-    let cast = Arc::new(Mutex::new(Recorder::new(
-        session.dir.root(),
-        id,
-        tty,
-        &argv,
-    )));
-    let term = Arc::new(Terminal::new(id, argv.clone(), tty.unwrap_or((24, 80))));
-    session.terminals.lock().unwrap().insert(id, term.clone());
+    let cast = term.cast.clone();
     let watch = term.clone();
     let (mut cr, mut cw) = tokio::io::split(client);
     let (mut gr, mut gw) = guest.into_split();
@@ -70,11 +86,33 @@ pub(crate) async fn pump_shell<C>(
         let _ = gw.shutdown().await;
     });
     let mut exit_code = None;
+    // Where in all the terminal has written the guest's next output starts:
+    // a persistent terminal's says so first (`Attached`), replaying what it
+    // keeps.
+    let mut at = term.state.lock().unwrap().recorded;
     while let Ok(Some(frame)) = read_frame(&mut gr).await {
         match &frame {
+            Frame::Attached { from, .. } => {
+                at = *from;
+                let recorded = term.state.lock().unwrap().recorded;
+                if *from > recorded {
+                    let gap = format!("{} bytes no longer kept by the guest", from - recorded);
+                    cast.lock().unwrap().write("m", gap.as_bytes());
+                    term.state.lock().unwrap().recorded = *from;
+                }
+            }
             Frame::Data(d) | Frame::Stderr(d) => {
-                cast.lock().unwrap().write("o", d);
-                term.push(TermChunk::Output(d.clone()));
+                // Only what wasn't recorded yet: a replay repeats the rest.
+                let start = at;
+                at += d.len() as u64;
+                let mut st = term.state.lock().unwrap();
+                if at > st.recorded {
+                    let new = &d[(st.recorded.saturating_sub(start)) as usize..];
+                    st.recorded = at;
+                    drop(st);
+                    cast.lock().unwrap().write("o", new);
+                    term.push(TermChunk::Output(new.to_vec()));
+                }
             }
             Frame::Exit(c) => exit_code = Some(*c),
             _ => {}
@@ -87,12 +125,17 @@ pub(crate) async fn pump_shell<C>(
     }
     let _ = cw.shutdown().await;
     upstream.abort();
-    term.push(TermChunk::End(exit_code));
+    term.state.lock().unwrap().attached = false;
+    // Its program keeps running in the guest: detached, to attach again.
+    let detached = term.persistent && exit_code.is_none();
+    if !detached {
+        term.push(TermChunk::End(exit_code));
+    }
     daemon.emit(
         Some(&session),
         EventBody::Shell {
             id,
-            state: "closed".into(),
+            state: if detached { "detached" } else { "closed" }.into(),
             argv: None,
             exit_code,
         },
@@ -113,8 +156,12 @@ pub enum TermChunk {
 pub struct Terminal {
     pub id: u64,
     pub argv: Vec<String>,
+    /// Its program outlives its connection, to attach to again.
+    pub persistent: bool,
     state: Mutex<TermState>,
     tx: tokio::sync::broadcast::Sender<TermChunk>,
+    /// Its recording, which a persistent terminal's attachments share.
+    cast: Arc<Mutex<Recorder>>,
 }
 
 struct TermState {
@@ -123,6 +170,10 @@ struct TermState {
     /// Size in effect at the start of `history`.
     base: (u16, u16),
     open: bool,
+    /// A client is attached (a persistent terminal can be open without).
+    attached: bool,
+    /// How much of the terminal's output is recorded.
+    recorded: u64,
     history: VecDeque<TermChunk>,
     bytes: usize,
 }
@@ -137,23 +188,34 @@ pub struct TerminalInfo {
     pub rows: u16,
     pub cols: u16,
     pub open: bool,
+    pub persistent: bool,
+    pub attached: bool,
 }
 
 impl Terminal {
-    fn new(id: u64, argv: Vec<String>, size: (u16, u16)) -> Self {
+    fn new(id: u64, argv: Vec<String>, size: (u16, u16), persistent: bool, cast: Recorder) -> Self {
         let state = TermState {
             size,
             base: size,
             open: true,
+            attached: false,
+            recorded: 0,
             history: Default::default(),
             bytes: 0,
         };
         Terminal {
             id,
             argv,
+            persistent,
             state: Mutex::new(state),
             tx: tokio::sync::broadcast::channel(1024).0,
+            cast: Arc::new(Mutex::new(cast)),
         }
+    }
+
+    /// Ended without a client attached (a hang-up), with its exit code.
+    pub(crate) fn end(&self, exit_code: Option<i32>) {
+        self.push(TermChunk::End(exit_code));
     }
 
     fn push(&self, chunk: TermChunk) {
@@ -196,6 +258,8 @@ impl Terminal {
             rows: st.size.0,
             cols: st.size.1,
             open: st.open,
+            persistent: self.persistent,
+            attached: st.attached,
         }
     }
 }
@@ -247,5 +311,106 @@ impl Recorder {
             let line = serde_json::json!([t, kind, String::from_utf8_lossy(data)]);
             let _ = f.line(line.to_string().as_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod persistent_tests {
+    use super::*;
+    use crate::daemon::session::NewSession;
+    use crate::testing::TestCore;
+
+    /// One attachment of terminal 1: the guest's side sends `frames`, then
+    /// goes; the pump runs to its end.
+    async fn attachment(t: &TestCore, s: &Arc<Session>, frames: &[Frame]) {
+        let (guest, mut fake) = UnixStream::pair().unwrap();
+        let (client, _keep) = tokio::io::duplex(1 << 20);
+        let mut buf = Vec::new();
+        for f in frames {
+            f.write_to(&mut buf).unwrap();
+        }
+        fake.write_all(&buf).await.unwrap();
+        drop(fake);
+        pump_shell(
+            t.core.daemon().clone(),
+            s.clone(),
+            client,
+            guest,
+            1,
+            vec!["sh".into()],
+            Some((24, 80)),
+            true,
+        )
+        .await;
+    }
+
+    /// The output events of `shell-1.cast`, and its markers.
+    fn cast(s: &Session) -> (String, Vec<String>) {
+        let text = std::fs::read_to_string(s.dir.root().join("shell-1.cast")).unwrap();
+        let mut out = String::new();
+        let mut marks = Vec::new();
+        for line in text.lines().skip(1) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            match v[1].as_str() {
+                Some("o") => out.push_str(v[2].as_str().unwrap()),
+                Some("m") => marks.push(v[2].as_str().unwrap().to_string()),
+                _ => {}
+            }
+        }
+        (out, marks)
+    }
+
+    #[tokio::test]
+    async fn a_persistent_terminal_is_recorded_once_across_attachments() {
+        let t = TestCore::new("profiles:\n  web: {}\n");
+        let s = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        attachment(
+            &t,
+            &s,
+            &[
+                Frame::Attached { from: 0, to: 0 },
+                Frame::Data(b"one ".to_vec()),
+            ],
+        )
+        .await;
+        let term = s.terminals.lock().unwrap().get(&1).cloned().unwrap();
+        let info = term.info();
+        assert!(info.open && !info.attached && info.persistent, "detached");
+
+        // Attached again: the guest replays what it keeps, "one ", then more.
+        attachment(
+            &t,
+            &s,
+            &[
+                Frame::Attached { from: 0, to: 9 },
+                Frame::Data(b"one two ".to_vec()),
+                Frame::Data(b"three ".to_vec()),
+            ],
+        )
+        .await;
+        assert_eq!(cast(&s).0, "one two three ");
+        assert!(cast(&s).1.is_empty());
+
+        // Attached after the guest dropped some: a gap, then what follows.
+        attachment(
+            &t,
+            &s,
+            &[
+                Frame::Attached { from: 30, to: 34 },
+                Frame::Data(b"four".to_vec()),
+                Frame::Exit(0),
+            ],
+        )
+        .await;
+        let (out, marks) = cast(&s);
+        assert_eq!(out, "one two three four");
+        assert_eq!(marks, vec!["16 bytes no longer kept by the guest"]);
+        assert!(!term.info().open, "its program exited");
     }
 }

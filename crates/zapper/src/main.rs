@@ -97,9 +97,20 @@ enum Cmd {
     /// Open a terminal in a running session.
     Attach {
         id: String,
+        /// Keep its program running when this terminal closes (your
+        /// connection drops, or you close it), to attach again with
+        /// `--terminal`; `zapper hangup` ends it.
+        #[arg(long, conflicts_with = "terminal")]
+        persist: bool,
+        /// Attach again to this persistent terminal, which is running: you
+        /// see what it kept, then live; a client attached already is closed.
+        #[arg(long)]
+        terminal: Option<u64>,
         #[arg(last = true)]
         command: Vec<String>,
     },
+    /// End a persistent terminal on purpose: its program gets `SIGHUP`.
+    Hangup { id: String, terminal: u64 },
     /// Run a command in a session without a terminal.
     Exec {
         id: String,
@@ -561,7 +572,44 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             return code;
         }
-        Cmd::Attach { id, command } => return attach(&c, &id, &command, false).await,
+        Cmd::Attach {
+            id,
+            persist,
+            terminal,
+            command,
+        } => {
+            let tty = term::stdin_is_tty();
+            let size = tty.then(|| term::size().unwrap_or((24, 80)));
+            let (io, n) = c
+                .terminal(&id, size, &command, false, persist, terminal)
+                .await?;
+            if let (true, Some(n)) = (persist || terminal.is_some(), n) {
+                eprintln!(
+                    "zapper: terminal {n} keeps running if you go: `zapper attach {id} --terminal {n}`, `zapper hangup {id} {n}`"
+                );
+            }
+            return term::run(io, tty).await;
+        }
+        Cmd::Hangup { id, terminal } => {
+            let v = c
+                .json(
+                    Method::DELETE,
+                    &format!("/v1/sessions/{id}/terminals/{terminal}"),
+                    None,
+                )
+                .await?;
+            if cli.json {
+                print_json(&v);
+            } else {
+                eprintln!(
+                    "zapper: terminal {terminal} hung up{}",
+                    v["exit_code"]
+                        .as_i64()
+                        .map(|c| format!(", its program exited {c}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         Cmd::Exec {
             id,
             system,

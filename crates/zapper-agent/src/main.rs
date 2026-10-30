@@ -10,6 +10,7 @@
 mod acct;
 mod control;
 mod forward;
+mod holder;
 mod init;
 #[cfg(feature = "office")]
 mod office;
@@ -37,6 +38,8 @@ fn main() {
     }
     match args.get(1).map(String::as_str) {
         Some("--version") => println!("zapper-agent {}", env!("CARGO_PKG_VERSION")),
+        // A persistent terminal's holder, started by PID 1 (`holder`).
+        Some("hold") => std::process::exit(holder::run()),
         #[cfg(feature = "office")]
         Some("office") => std::process::exit(office::cli(&args[2..])),
         _ => {

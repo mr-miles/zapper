@@ -252,7 +252,9 @@ pub trait SessionApi {
     /// without the session stopping, changes accepted, images changed).
     fn verify_session(&self, id: &str) -> Result<Value>;
     /// Pumps an attached client's frames to and from a terminal opened with
-    /// `Session::open_shell`, recording it.
+    /// `Session::open_shell`, recording it; `persist` for a terminal opened
+    /// persistent (one attached again is known by its id).
+    #[allow(clippy::too_many_arguments)]
     async fn pump_shell<C>(
         &self,
         s: Arc<Session>,
@@ -261,6 +263,7 @@ pub trait SessionApi {
         id: u64,
         argv: Vec<String>,
         tty: Option<(u16, u16)>,
+        persist: bool,
     ) where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
 }
@@ -342,6 +345,7 @@ impl SessionApi for Core {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn pump_shell<C>(
         &self,
         s: Arc<Session>,
@@ -350,10 +354,11 @@ impl SessionApi for Core {
         id: u64,
         argv: Vec<String>,
         tty: Option<(u16, u16)>,
+        persist: bool,
     ) where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty).await
+        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty, persist).await
     }
 }
 

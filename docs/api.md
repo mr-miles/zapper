@@ -82,9 +82,10 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |
 | `GET /v1/sessions/{id}/requests/{n}` | ✓ | One request with `request_headers`, `response_headers`, `request_body` and `response_body` (`text` or `base64`, `total`, `kept`, `truncated`, `encoding`); added secret values appear as `***` |
-| `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open` |
+| `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open`, `persistent`, `attached` |
+| `DELETE /v1/sessions/{id}/terminals/{n}` | | End persistent terminal `n`: its program gets `SIGHUP` → `{terminal, exit_code}` |
 | `GET /v1/sessions/{id}/terminals/{n}/stream` | ✓ | Server-sent events, read-only: the terminal's kept output, then live output. Each `data:` is `{"r": [rows, cols]}`, `{"o": "<base64 bytes>"}`, or `{"end": exit_code}` |
-| `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool` | | Upgrade (`Upgrade: zapper-shell`) to a terminal; frames below |
+| `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool&persist=bool&terminal=N` | | Upgrade (`Upgrade: zapper-shell`) to a terminal, its number in `X-Zapper-Terminal`; frames below. `persist` (a `tty` only): its program keeps running when this connection closes; `terminal=N`: attach to persistent terminal N again, taking over from a client attached already |
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
 | `GET /v1/events[?session=ID&history=true&after=EPOCH:SEQ]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)). Each has the SSE `id` `EPOCH:SEQ`. A client that reconnects with `after=`, or the `Last-Event-ID` header an EventSource sends again (which wins over `history`), gets the events since from recent history, then live ones. `{"type": "gap", "summary": …}` says what it can't have: events history no longer holds, events before a daemon restart (another epoch), or events it missed by falling behind. A malformed `after` is `400` |
 | `GET /v1/images` | ✓ | `{images, builds}`: the images (`name`, `from`, `size`, `built`) and the latest builds (`id`, `name`, `started`, `outcome`, null while it runs) |
@@ -107,6 +108,8 @@ After the upgrade, both directions carry frames: a 1-byte type, a 4-byte big-end
 | 2 resize | client → guest | rows u16, cols u16 |
 | 3 eof | client → guest | stdin closed |
 | 4 exit | guest → client | exit code i32; the last frame |
+| 5 attached | guest → client | from u64, to u64: first on a persistent terminal's connection; the output after it starts at byte `from` of all the terminal wrote (the oldest the guest keeps), and `to` is where it was then |
+| 6 hangup | client → guest | end a persistent terminal: its program gets `SIGHUP` |
 
 `system=true` runs as root without exec supervision. The CLI uses it for `zapper cp`.
 

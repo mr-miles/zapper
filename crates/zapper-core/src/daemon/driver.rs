@@ -482,6 +482,8 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
                 tty: None,
                 env: Default::default(),
                 system: false,
+                persist: false,
+                attach: None,
             };
             let (stream, _) = s.open_shell(req).await?;
             Ok(stream)

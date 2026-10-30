@@ -40,6 +40,7 @@ Each office worker runs in a zapper session, and zapper assumes that whatever ru
 | The 32-bit and x32 syscall tables are blocked, so exec checks can't be bypassed through them | Guest agent (seccomp filter) | No |
 | The workload runs as uid 1000 with `no_new_privs`, so setuid binaries keep its privileges | Guest agent | No |
 | Terminal connections are accepted from the host's CID only | Guest agent | No |
+| A persistent terminal's holder takes its pty and connections only from PID 1, over a socketpair, and never forks or execs; it runs as root with `no_new_privs`, in a session of its own | Guest agent | No |
 | `fs` rules (`hidden`, `ro`) | Guest agent (bind mounts at boot) | No |
 | Process exit accounting | Guest kernel (`acct`) | No |
 

@@ -85,6 +85,10 @@ The daemon accepts one control connection per session. After that the socket is 
 
 The CLI talks to the daemon over a unix socket that only your user can open. The web UI, for watching firms and sessions, the board's writes and answering approvals, uses `127.0.0.1:7878`. Both are described on the [API](api.md) page.
 
+### Persistent terminals
+
+A terminal opened persistent (`zapper attach --persist`, `persist=true`) keeps its program running when its connection to the host closes: the user's SSH or network drops, or they close their terminal. Its program is started as any terminal's, by the agent, as the workload, with every exec checked. The agent then hands its pty to a holder: the agent's own binary (`zapper-agent hold`), one process per terminal, which keeps the terminal's latest 256 KiB of output and passes keystrokes on. When the host attaches again (`zapper attach ID --terminal N`), the agent hands the holder the connection: it is told where the output it gets starts (`attached` frame), sent what was kept, then live output, and the program is made to redraw at the new size. A connection attached before is closed. The holder exits once the program has and an attached host has been told, or 24 hours after, with nobody attached. The host records the terminal once across its attachments, and marks what the guest no longer kept. A guest keeps at most 16 persistent terminals.
+
 ### Checking each program
 
 Before the workload starts, the agent installs a filter in it that the workload can't remove. Every child process inherits it. Each time the workload starts a program:

@@ -113,6 +113,10 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
+        .route(
+            "/sessions/{id}/terminals/{n}",
+            axum::routing::delete(hangup_terminal),
+        )
         .route("/evaluate", post(evaluate))
         .route("/images/{name}/build", post(build_image))
         .route("/approvals/{id}", post(answer));
@@ -722,10 +726,24 @@ struct AttachQuery {
     argv: Option<String>,
     #[serde(default)]
     system: bool,
+    /// Keep the program running when this connection closes, to attach
+    /// again: a terminal (`tty`) only.
+    #[serde(default)]
+    persist: bool,
+    /// Attach to this persistent terminal, which is running, instead of
+    /// starting a program; it takes over from a client attached already.
+    terminal: Option<u64>,
 }
 
 /// Upgrades the connection to a terminal in the guest; frames as in
 /// `zapper_policy::proto::Frame`.
+/// Ends a persistent terminal on purpose: its program gets `SIGHUP`.
+async fn hangup_terminal(State(d): D, Path((id, n)): Path<(String, u64)>) -> R<Json<Value>> {
+    let s = d.session(&id)?;
+    let code = s.hangup(n).await?;
+    Ok(Json(json!({ "terminal": n, "exit_code": code })))
+}
+
 async fn attach(
     State(d): D,
     Path(id): Path<String>,
@@ -749,6 +767,8 @@ async fn attach(
         tty,
         env: Default::default(),
         system: q.system,
+        persist: q.persist,
+        attach: q.terminal,
     };
     let (guest, shell_id) = s.open_shell(shell.clone()).await?;
     let argv = if shell.argv.is_empty() {
@@ -759,7 +779,7 @@ async fn attach(
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
         if let Ok(up) = on_upgrade.await {
-            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty)
+            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty, q.persist)
                 .await;
         }
     });
@@ -767,6 +787,7 @@ async fn attach(
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "upgrade")
         .header(header::UPGRADE, "zapper-shell")
+        .header("x-zapper-terminal", shell_id.to_string())
         .body(Body::empty())
         .unwrap())
 }

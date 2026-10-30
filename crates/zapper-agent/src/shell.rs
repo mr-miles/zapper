@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -50,13 +50,29 @@ pub fn serve(control: Control, spec: GuestSpec) -> ! {
 }
 
 fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
-    let mut reader = BufReader::new(conn.try_clone()?);
+    // The request line a byte at a time: what follows it may go to a
+    // persistent terminal's holder, untouched.
     let mut line = Vec::new();
-    reader
-        .by_ref()
-        .take(MAX_LINE as u64)
-        .read_until(b'\n', &mut line)?;
+    let mut byte = [0u8; 1];
+    while line.len() < MAX_LINE {
+        match (&conn).read(&mut byte)? {
+            0 => break,
+            _ if byte[0] == b'\n' => break,
+            _ => line.push(byte[0]),
+        }
+    }
     let req: ShellRequest = serde_json::from_slice(&line).context("shell request")?;
+    if let Some(id) = req.attach {
+        if let Err(e) = crate::holder::attach(id, &conn, req.tty) {
+            let mut conn = &conn;
+            let _ = conn.write_all(&encode(&Frame::Stderr(
+                format!("zapper: {e:#}\r\n").into_bytes(),
+            )));
+            let _ = conn.write_all(&encode(&Frame::Exit(127)));
+        }
+        return Ok(());
+    }
+    let mut reader = BufReader::new(conn.try_clone()?);
     let writer = Arc::new(Mutex::new(conn));
     let send = {
         let writer = writer.clone();
@@ -82,7 +98,7 @@ fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
         env.entry("TERM".into())
             .or_insert_with(|| "xterm-256color".into());
     }
-    let child = match spawn(&req, &env, spec) {
+    let mut child = match spawn(&req, &env, spec) {
         Ok(c) => c,
         Err(e) => {
             send(Frame::Stderr(format!("zapper: {e:#}\r\n").into_bytes()));
@@ -93,6 +109,21 @@ fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
     if let Some(listener) = child.notify {
         let control = control.clone();
         std::thread::spawn(move || supervise(listener, control));
+    }
+    // A persistent terminal goes to its holder, which keeps it when the
+    // host goes away; PID 1 still reaps the program, and reports its exit.
+    if let (true, Some(size)) = (req.persist, req.tty) {
+        let Some(master) = child.input.take() else {
+            bail!("a terminal without a pty");
+        };
+        let conn = writer.lock().unwrap();
+        if let Err(e) = crate::holder::start(req.id, child.pid, master, size, &conn, control) {
+            drop(conn);
+            send(Frame::Stderr(format!("zapper: {e:#}\r\n").into_bytes()));
+            unsafe { libc::kill(-child.pid, libc::SIGHUP) };
+            send(Frame::Exit(127));
+        }
+        return Ok(());
     }
     let exited = wait_child(child.pid);
 

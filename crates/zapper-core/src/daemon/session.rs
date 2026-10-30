@@ -13,7 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Semaphore};
-use zapper_policy::proto::{Forward, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT};
+use zapper_policy::proto::{
+    Forward, Frame, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT,
+};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, Daemon, Event, EventBody};
@@ -714,10 +716,30 @@ impl Session {
         if !self.is_running() {
             bail!("session {} is not running", self.id);
         }
-        if req.argv.is_empty() {
-            req.argv = self.resolved.agent.command.clone();
+        if req.persist && req.tty.is_none() {
+            bail!("only a terminal (tty) can be persistent");
         }
-        let id = self.runtime.next_shell();
+        let id = match req.attach {
+            // A persistent terminal of this session, still running.
+            Some(n) => {
+                let open = self
+                    .terminals
+                    .lock()
+                    .unwrap()
+                    .get(&n)
+                    .is_some_and(|t| t.persistent && t.info().open);
+                if !open {
+                    bail!("session {} has no persistent terminal {n} open", self.id);
+                }
+                n
+            }
+            None => {
+                if req.argv.is_empty() {
+                    req.argv = self.resolved.agent.command.clone();
+                }
+                self.runtime.next_shell()
+            }
+        };
         req.id = id;
         let mut stream = connect_vsock(
             self.dir.vsock(),
@@ -730,6 +752,42 @@ impl Session {
         stream.write_all(&json).await?;
         self.counters.shells.fetch_add(1, Ordering::Relaxed);
         Ok((stream, id))
+    }
+}
+
+impl Session {
+    /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
+    /// and a client attached to it is closed. Its exit code, if it said one
+    /// in time.
+    pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
+        let req = ShellRequest {
+            id: 0,
+            argv: vec![],
+            tty: None,
+            env: Default::default(),
+            system: false,
+            persist: false,
+            attach: Some(n),
+        };
+        let (mut stream, _) = self.open_shell(req).await?;
+        let mut buf = Vec::new();
+        Frame::Hangup.write_to(&mut buf)?;
+        stream.write_all(&buf).await?;
+        let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Ok(Some(frame)) = terminal::read_frame(&mut stream).await {
+                if let Frame::Exit(c) = frame {
+                    return Some(c);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(t) = self.terminals.lock().unwrap().get(&n) {
+            t.end(code);
+        }
+        Ok(code)
     }
 }
 

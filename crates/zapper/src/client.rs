@@ -118,7 +118,27 @@ impl Client {
         argv: &[String],
         system: bool,
     ) -> Result<TokioIo<hyper::upgrade::Upgraded>> {
+        Ok(self.terminal(id, tty, argv, system, false, None).await?.0)
+    }
+
+    /// A terminal in session `id`: a new one, persistent if `persist`, or
+    /// persistent terminal `attach` attached again. Also its number.
+    pub async fn terminal(
+        &self,
+        id: &str,
+        tty: Option<(u16, u16)>,
+        argv: &[String],
+        system: bool,
+        persist: bool,
+        attach: Option<u64>,
+    ) -> Result<(TokioIo<hyper::upgrade::Upgraded>, Option<u64>)> {
         let mut q = Vec::new();
+        if persist {
+            q.push("persist=true".into());
+        }
+        if let Some(n) = attach {
+            q.push(format!("terminal={n}"));
+        }
         if let Some((r, c)) = tty {
             q.push(format!("tty={r}x{c}"));
         }
@@ -146,7 +166,12 @@ impl Client {
             Self::check(status, &bytes)?;
             bail!("daemon did not open a terminal ({status})");
         }
-        Ok(TokioIo::new(hyper::upgrade::on(resp).await?))
+        let n = resp
+            .headers()
+            .get("x-zapper-terminal")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok());
+        Ok((TokioIo::new(hyper::upgrade::on(resp).await?), n))
     }
 }
 

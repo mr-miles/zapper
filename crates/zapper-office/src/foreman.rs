@@ -75,6 +75,8 @@ async fn start(
         tty: None,
         env: Default::default(),
         system: false,
+        persist: false,
+        attach: None,
     };
     let (stream, _) = s.open_shell(req).await?;
     let watch = Watch {

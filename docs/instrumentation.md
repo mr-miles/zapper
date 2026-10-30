@@ -18,7 +18,7 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `guest` / `exit` | `pid`, `ppid`, `uid`, `comm`, `exit_code`, `signal`, `elapsed_ms`, `user_ms`, `sys_ms`, `mem_kib`, `io_bytes` | Guest kernel process accounting |
 | `guest` / `setup` | `step`, `ok`, `output` (last 8 KiB) | Profile setup commands |
 | `ask` / `answer` | `id`, `kind`, `subject` / `allow`, `remember` | Approvals |
-| `shell` | `id`, `state` (`open`, `closed`), `argv`, `exit_code` | Terminals |
+| `shell` | `id`, `state` (`open`, `closed`; for a persistent terminal also `detached`, when its client goes and its program keeps running, and `attached`, when one attaches again), `argv`, `exit_code` | Terminals |
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
