@@ -189,6 +189,7 @@ fn assemble(
         persistent,
         boots: AtomicU64::new(0),
         saving: Mutex::new(()),
+        lifecycle: tokio::sync::Mutex::new(()),
         accept_changed_image,
         workdir: saved.workdir,
         rules: Rules::new(shared_layers),
@@ -399,10 +400,7 @@ async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let started = Instant::now();
     if let Err(e) = super::boot::launch(&daemon, &session).await {
         let msg = format!("{e:#}");
-        session
-            .runtime
-            .status()
-            .send_replace(Status::Failed(msg.clone()));
+        session.runtime.fail_if_starting(msg.clone());
         daemon.emit(
             Some(&session),
             EventBody::Session {
@@ -472,25 +470,31 @@ pub(crate) async fn start(
     if !session.persistent {
         bail!("session {id} isn't persistent: its disks went when it stopped");
     }
-    if matches!(
-        *session.runtime.status().borrow(),
-        Status::Starting | Status::Running
-    ) {
-        bail!("session {id} is already running");
-    }
+    // Not while a stop is on its disks, and one start at a time: claimed
+    // before the disks are checked, so a second start sees it starting.
+    let lifecycle = session.lifecycle.lock().await;
+    let was = session.runtime.status().borrow().clone();
     let max = daemon.config.read().unwrap().daemon.max_sessions;
     let running = daemon.sessions.running();
     if running >= max {
         bail!("{running} sessions running; daemon.max_sessions is {max}");
     }
-    *session.audit.lock().unwrap() = Some(record::Writer::open(&session.dir.audit())?);
-    if let Err(e) = check_disks(daemon, session, accept_changed).await {
-        *session.audit.lock().unwrap() = None;
-        return Err(e);
+    if !session.runtime.claim_start() {
+        bail!("session {id} is already running");
     }
+    let undo = |e: anyhow::Error| {
+        session.runtime.status().send_replace(was.clone());
+        *session.audit.lock().unwrap() = None;
+        e
+    };
+    *session.audit.lock().unwrap() =
+        Some(record::Writer::open(&session.dir.audit()).map_err(undo)?);
+    check_disks(daemon, session, accept_changed)
+        .await
+        .map_err(undo)?;
+    drop(lifecycle);
     let ttl = session.resolved.engine.ttl_secs;
     *session.expires.lock().unwrap() = (ttl > 0).then(|| now() + ttl as f64);
-    session.runtime.status().send_replace(Status::Starting);
     daemon.emit(
         Some(session),
         EventBody::Session {
@@ -563,17 +567,11 @@ async fn check_disks(daemon: &Arc<Daemon>, session: &Arc<Session>, accept: bool)
 /// `Failed` directly, without sending `Shutdown`, since the guest never came
 /// up).
 pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &str) {
-    {
-        let current = session.runtime.status().borrow().clone();
-        if matches!(current, Status::Stopped(_)) {
-            return;
-        }
-        if !matches!(current, Status::Failed(_)) {
-            session
-                .runtime
-                .status()
-                .send_replace(Status::Stopped(reason.into()));
-        }
+    // A start checking the disks finishes first; another start waits for
+    // this one's teardown.
+    let _lifecycle = session.lifecycle.lock().await;
+    if !session.runtime.begin_stop(reason) {
+        return;
     }
     session.send(HostMsg::Shutdown);
     teardown(daemon, session, Some(reason)).await;

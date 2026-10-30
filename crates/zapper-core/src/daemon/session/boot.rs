@@ -162,17 +162,18 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     })
     .await?;
     *session.runtime.vm().lock().await = Some(vm::VmProc::Child(child));
+    // Stopped while this VM was made: its teardown found none to stop, so
+    // this one is the caller's to end (`teardown` takes it from here).
+    if !matches!(*session.runtime.status().borrow(), Status::Starting) {
+        bail!("stopped while it started");
+    }
 
     {
         let (d, s) = (daemon.clone(), session.clone());
         tokio::spawn(async move {
             if let Err(e) = guest_control(&d, &s, control, control_path, spec).await {
                 tracing::warn!(session = %s.id, "guest control: {e:#}");
-                if matches!(*s.runtime.status().borrow(), Status::Starting) {
-                    s.runtime
-                        .status()
-                        .send_replace(Status::Failed(format!("{e:#}")));
-                }
+                s.runtime.fail_if_starting(format!("{e:#}"));
             }
         });
     }
@@ -223,11 +224,7 @@ fn watch_vm(daemon: &Arc<Daemon>, session: &Arc<Session>) {
             if let Some(reason) = proc.exited() {
                 *vm = None;
                 drop(vm);
-                if matches!(*s.runtime.status().borrow(), Status::Starting) {
-                    s.runtime
-                        .status()
-                        .send_replace(Status::Failed(reason.clone()));
-                }
+                s.runtime.fail_if_starting(reason.clone());
                 super::stop(&d, &s, &reason).await;
                 return;
             }
@@ -458,13 +455,10 @@ async fn serve_control(
             // Only first, on a connection made again (`resume_control`).
             GuestMsg::Resume { .. } => {}
             GuestMsg::Ready => {
-                session.runtime.status().send_replace(Status::Running);
+                session.runtime.mark_ready();
             }
             GuestMsg::Failed { error } => {
-                session
-                    .runtime
-                    .status()
-                    .send_replace(Status::Failed(format!("guest setup: {error}")));
+                session.runtime.fail(format!("guest setup: {error}"));
             }
             GuestMsg::ExecCheck { id, pid, uid, req } => {
                 let Some(permit) = session.runtime.exec_permit() else {
