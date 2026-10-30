@@ -101,6 +101,11 @@ pub struct DaemonConfig {
     pub ask_timeout_secs: u64,
     /// Upper bound on concurrent sessions.
     pub max_sessions: usize,
+    /// Refuse a session when the memory given to the VMs starting or
+    /// running, with its own, would exceed the host's memory times this.
+    /// Unset: never refused, only warned of past 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_overcommit: Option<f64>,
     /// Private networks (CIDR) sessions may reach at all, if a rule allows.
     /// Loopback, link-local (cloud metadata) and the host's own addresses are
     /// never reachable; other private and unique-local addresses only if
@@ -146,6 +151,7 @@ impl Default for DaemonConfig {
             ui: "127.0.0.1:7878".into(),
             ask_timeout_secs: 60,
             max_sessions: 16,
+            memory_overcommit: None,
             private_networks: Vec::new(),
             keeper: None,
             driver: true,
@@ -1173,6 +1179,13 @@ impl Config {
                 ));
             }
         }
+        if let Some(r) = self.daemon.memory_overcommit {
+            if !(r.is_finite() && r > 0.0) {
+                errors.push(format!(
+                    "daemon.memory_overcommit is {r}; it must be a number above 0"
+                ));
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1274,6 +1287,21 @@ mod tests {
             check("{ from: tool, to: /x, mode: 755 }").is_err(),
             "unknown fields are refused"
         );
+    }
+
+    #[test]
+    fn memory_overcommit_is_above_zero() {
+        let c = super::Config::from_yaml("daemon: { memory_overcommit: 1.5 }\n").unwrap();
+        assert_eq!(c.daemon.memory_overcommit, Some(1.5));
+        for bad in ["0", "-1", ".nan"] {
+            let e = super::Config::from_yaml(&format!("daemon: {{ memory_overcommit: {bad} }}\n"))
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                format!("{e:#}").contains("memory_overcommit"),
+                "{bad}: {e:#}"
+            );
+        }
     }
 
     #[test]

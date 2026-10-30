@@ -1,6 +1,7 @@
 //! Helpers the core's clients share with it: ids and time, files only the
 //! user reads, a config with its inline secrets hidden, the terminal
-//! channel's frames, and the warning for listening beyond loopback.
+//! channel's frames, the warning for listening beyond loopback, and the
+//! host's memory.
 
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -22,6 +23,26 @@ pub(crate) fn find_exe(name: &str, dirs: &[&str]) -> Option<std::path::PathBuf> 
     dirs.iter()
         .map(|d| Path::new(d).join(name))
         .find(|p| p.is_file())
+}
+
+/// A field of the host's `/proc/meminfo` (`MemTotal`, `MemAvailable`, …),
+/// in MiB.
+pub fn host_memory_mib(field: &str) -> Option<u64> {
+    meminfo_mib(&std::fs::read_to_string("/proc/meminfo").ok()?, field)
+}
+
+fn meminfo_mib(info: &str, field: &str) -> Option<u64> {
+    info.lines()
+        .find_map(|l| {
+            l.strip_prefix(field)?
+                .strip_prefix(':')?
+                .trim()
+                .strip_suffix("kB")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+        .map(|k| k / 1024)
 }
 
 /// Unix time in seconds.
@@ -77,4 +98,16 @@ pub fn exposed_warning(what: &str) -> String {
          can't reach it: the host's own addresses are closed to them.\n\
          ################################################################\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn meminfo_fields() {
+        let info = "MemTotal:       16314512 kB\nMemFree:         1500000 kB\nMemAvailable:    8157256 kB\n";
+        assert_eq!(super::meminfo_mib(info, "MemTotal"), Some(15932));
+        assert_eq!(super::meminfo_mib(info, "MemAvailable"), Some(7966));
+        assert_eq!(super::meminfo_mib(info, "Mem"), None, "a whole field name");
+        assert_eq!(super::meminfo_mib("MemTotal: 10\n", "MemTotal"), None);
+    }
 }
