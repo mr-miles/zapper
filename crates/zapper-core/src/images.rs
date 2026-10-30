@@ -12,6 +12,7 @@
 //! build's record in the daemon (`daemon::builds`).
 
 use std::io::{BufRead, BufReader};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -62,10 +63,9 @@ fn mkfs_image(oci: &str, log: Log) -> Result<String> {
         Command::new(oci)
             .args(["build", "-t", tag, "-f"])
             .arg(work.join("Containerfile"))
-            .arg(&work),
+            .arg(&*work),
         log,
     );
-    let _ = std::fs::remove_dir_all(&work);
     built.with_context(|| format!("{oci} build of {tag}"))?;
     Ok(tag.into())
 }
@@ -274,17 +274,22 @@ pub struct Build<'a> {
 }
 
 pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
-    if !b
-        .name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    // A file name in `dir`, never hidden (the build's own files are) or a
+    // path out of it.
+    let starts_well = b.name.starts_with(|c: char| c.is_ascii_alphanumeric());
+    if !starts_well
+        || !b
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
     {
         bail!(
-            "image name {:?}: use letters, digits, '-', '_' and '.'",
+            "image name {:?}: use letters, digits, '-', '_' and '.', starting with a letter or digit",
             b.name
         );
     }
     std::fs::create_dir_all(b.dir)?;
+    let _lock = lock(b.dir, b.name)?;
     let oci = engine();
     let work = tempdir()?;
     let reference = if b.run.is_empty() && b.copies.is_empty() && b.after.is_empty() {
@@ -315,7 +320,7 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
             Command::new(&oci)
                 .args(["build", "-t", &tag, "-f"])
                 .arg(work.join("Containerfile"))
-                .arg(&work),
+                .arg(&*work),
             log,
         )
         .with_context(|| format!("{oci} build"))?;
@@ -334,6 +339,8 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
     };
     let out = b.dir.join(format!("{}.ext4", b.name));
     let tmp = b.dir.join(format!(".{}.ext4.tmp", b.name));
+    // Gone however the build ends: renamed into place, or left half-written.
+    let _partial = Removed(tmp.clone());
     let root = work.join("root");
     log(&format!("writing {} ({} MiB)", out.display(), size >> 20));
     let kib = format!("{}k", size / 1024);
@@ -366,18 +373,56 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
             .args(["sh", "-c", script, "sh", &tmp_name, &kib, &owner]);
         run(&mut docker)?;
     }
-    std::fs::rename(&tmp, &out)?;
     // What the image is, as built: checked when a persistent session is
-    // made from it, so an image changed since shows.
-    let sha256 = crate::util::sha256_file(&out)?;
+    // made from it, so an image changed since shows. Written before the
+    // image is put in place, so an image is never there with an older
+    // image's hash: a build that ends between the two leaves the old image
+    // with the new hash, which is refused, not trusted.
+    let sha256 = crate::util::sha256_file(&tmp)?;
     log(&format!("sha256 {sha256}"));
     let meta = json!({ "name": b.name, "sha256": sha256, "from": b.from, "run": b.run, "copy": b.copies.iter().map(|(i, to)| json!({ "from": b.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": b.after, "size": size, "built": crate::util::now() as u64 });
-    std::fs::write(
-        b.dir.join(format!("{}.json", b.name)),
-        serde_json::to_vec_pretty(&meta)?,
-    )?;
-    let _ = std::fs::remove_dir_all(&work);
+    let json = b.dir.join(format!("{}.json", b.name));
+    let json_tmp = b.dir.join(format!(".{}.json.tmp", b.name));
+    std::fs::write(&json_tmp, serde_json::to_vec_pretty(&meta)?)?;
+    std::fs::rename(&json_tmp, &json)?;
+    std::fs::rename(&tmp, &out)?;
     Ok(out)
+}
+
+/// Image `name` in `dir`, held for one build at a time, by this daemon or
+/// a `zapper image build --local` beside it: they would write the same
+/// files. Released when dropped.
+fn lock(dir: &Path, name: &str) -> Result<std::fs::File> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!(".{name}.lock")))?;
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("image {name} is being built by another zapper");
+    }
+    Ok(f)
+}
+
+/// A path removed when dropped (a directory with what it holds), if it is
+/// still there.
+struct Removed(PathBuf);
+
+impl std::ops::Deref for Removed {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        if self.0.is_dir() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        } else {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 }
 
 pub fn list(dir: &Path) -> Result<Vec<serde_json::Value>> {
@@ -411,9 +456,68 @@ pub fn built_hash(dir: &Path, name: &str) -> Option<String> {
     meta["sha256"].as_str().map(str::to_string)
 }
 
-fn tempdir() -> Result<PathBuf> {
+/// A build's work directory, removed with what it holds however the build
+/// ends.
+fn tempdir() -> Result<Removed> {
     let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/var/tmp".into());
     let dir = PathBuf::from(base).join(format!("zapper-image-{}", crate::util::random_id(8)));
     std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    Ok(Removed(dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zapper-images-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn a_work_directory_goes_with_what_it_holds() {
+        let work = tempdir().unwrap();
+        let path = work.to_path_buf();
+        std::fs::create_dir_all(work.join("root/etc")).unwrap();
+        std::fs::write(work.join("rootfs.tar"), b"x").unwrap();
+        drop(work);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn one_build_of_an_image_at_a_time() {
+        let d = dir("lock");
+        std::fs::create_dir_all(&d).unwrap();
+        let held = lock(&d, "web").unwrap();
+        let e = lock(&d, "web").unwrap_err();
+        assert!(e.to_string().contains("being built by another"), "{e}");
+        lock(&d, "other").expect("another image's is free");
+        drop(held);
+        lock(&d, "web").expect("free once the first ends");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_image_name_cant_leave_its_directory() {
+        let d = dir("names");
+        for name in ["../x", "a/b", "", "..", ".hidden", "x y"] {
+            let e = build(
+                Build {
+                    name,
+                    from: "docker.io/library/ubuntu:26.04",
+                    run: &[],
+                    inputs: &[],
+                    copies: &[],
+                    after: &[],
+                    size: None,
+                    dir: &d,
+                },
+                &|_| {},
+            )
+            .unwrap_err();
+            assert!(e.to_string().contains("image name"), "{name:?}: {e}");
+        }
+        assert!(!d.exists(), "refused before anything is written");
+    }
 }

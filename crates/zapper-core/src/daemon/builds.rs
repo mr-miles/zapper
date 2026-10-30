@@ -119,6 +119,15 @@ pub struct Builds {
     all: Mutex<VecDeque<Arc<ImageBuild>>>,
 }
 
+/// The running build's place, emptied when dropped.
+struct Slot(Arc<Mutex<Option<Arc<ImageBuild>>>>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
 impl Builds {
     /// Starts `run` on a blocking thread as the build of `name`, given the
     /// build's id and a log for its lines; `ended` is called with the build
@@ -161,15 +170,23 @@ impl Builds {
         }
         let (b, running) = (build.clone(), self.running.clone());
         tokio::task::spawn_blocking(move || {
-            let outcome = match run(b.id, &|l| b.line(l)) {
-                Ok(path) => Outcome::Built(path.display().to_string()),
-                Err(e) => {
+            // The slot is freed once the build has ended and `ended` has
+            // run, or either panicked.
+            let _slot = Slot(running);
+            let run = std::panic::AssertUnwindSafe(|| run(b.id, &|l| b.line(l)));
+            let outcome = match std::panic::catch_unwind(run) {
+                Ok(Ok(path)) => Outcome::Built(path.display().to_string()),
+                Ok(Err(e)) => {
                     let e = format!("{e:#}");
                     b.line(&e);
                     Outcome::Failed(e)
                 }
+                Err(_) => {
+                    let e = "the build panicked".to_string();
+                    b.line(&e);
+                    Outcome::Failed(e)
+                }
             };
-            running.lock().unwrap().take();
             b.end(outcome);
             ended(&b);
         });
@@ -213,6 +230,17 @@ mod tests {
         }
     }
 
+    /// The slot is freed just after `ended` runs: waits for it.
+    async fn wait_free(builds: &Builds) {
+        for _ in 0..100 {
+            if !builds.busy() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the slot wasn't freed");
+    }
+
     #[tokio::test]
     async fn a_build_is_followed_to_its_end() {
         let builds = Builds::default();
@@ -245,7 +273,7 @@ mod tests {
         let late = b.follow();
         assert_eq!(late.kept, vec!["one", "two"]);
         assert_eq!(late.outcome, Some(outcome));
-        assert!(!builds.busy());
+        wait_free(&builds).await;
         assert_eq!(builds.list()[0].name, "web");
     }
 
@@ -268,9 +296,53 @@ mod tests {
             Some(Outcome::Failed("podman build failed".into()))
         );
         assert_eq!(b.follow().kept, vec!["podman build failed"]);
-        assert!(!builds.busy());
+        wait_free(&builds).await;
         builds
             .start("web", |_, _| Ok(PathBuf::new()), |_| {})
             .unwrap();
+    }
+
+    /// A build that panics ends, failed, and the next is taken.
+    #[tokio::test]
+    async fn a_panicking_build_ends_and_frees_the_slot() {
+        let builds = Builds::default();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let b = builds
+            .start(
+                "web",
+                |_, _| panic!("a bug in the build"),
+                move |b| {
+                    let _ = tx.send(b.id);
+                },
+            )
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), b.id);
+        assert_eq!(
+            b.info().outcome,
+            Some(Outcome::Failed("the build panicked".into()))
+        );
+        wait_free(&builds).await;
+        builds
+            .start("web", |_, _| Ok(PathBuf::new()), |_| {})
+            .unwrap();
+    }
+
+    /// The slot is taken until `ended` has run: a build started from it
+    /// (as the end's event is sent) is refused, not run alongside.
+    #[tokio::test]
+    async fn the_slot_is_held_until_the_end_is_handled() {
+        let builds = Arc::new(Builds::default());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let inner = builds.clone();
+        builds
+            .start(
+                "web",
+                |_, _| Ok(PathBuf::new()),
+                move |_| {
+                    let _ = tx.send(inner.busy());
+                },
+            )
+            .unwrap();
+        assert!(rx.await.unwrap(), "still busy while ended runs");
     }
 }
