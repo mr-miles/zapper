@@ -288,6 +288,10 @@ enum RecordCmd {
     /// Checks a firm's run against the keeper's chains and signatures.
     #[cfg(feature = "office")]
     Verify { firm: String, run: String },
+    /// Checks a session's record: its files against the keeper's chains
+    /// (with a keeper), and its disks' hashes from each stop to the start
+    /// after it; exits 1 on any finding.
+    Session { id: String },
 }
 
 #[derive(Subcommand)]
@@ -915,6 +919,17 @@ async fn run(cli: Cli) -> Result<i32> {
                 RecordCmd::Verify { firm, run } => {
                     (format!("/v1/firms/{firm}/runs/{run}/verify"), true)
                 }
+                RecordCmd::Session { id } => {
+                    let v = c
+                        .json(Method::GET, &format!("/v1/sessions/{id}/verify"), None)
+                        .await?;
+                    if cli.json {
+                        print_json(&v);
+                    } else {
+                        print_session_check(&v);
+                    }
+                    return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
+                }
             };
             let v = c.json(Method::GET, &path, None).await?;
             if cli.json || !verify {
@@ -1009,6 +1024,33 @@ async fn run(cli: Cli) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// `zapper record session`, as people read it.
+fn print_session_check(v: &Value) {
+    let chain = &v["chain"];
+    match chain["ok"].as_bool() {
+        None => println!(
+            "note   chains not checked: {}",
+            chain["note"].as_str().unwrap_or("")
+        ),
+        Some(_) => {
+            for f in chain["files"].as_array().into_iter().flatten() {
+                if f["ok"] == json!(true) {
+                    println!("ok     {} ({} lines)", s(&f["file"]), f["lines"]);
+                } else {
+                    println!("BAD    {}: {}", s(&f["file"]), s(&f["error"]));
+                }
+            }
+        }
+    }
+    let findings = v["findings"].as_array().cloned().unwrap_or_default();
+    for f in &findings {
+        println!("FOUND  event {}: {}", f["seq"], s(&f["finding"]));
+    }
+    if findings.is_empty() {
+        println!("ok     the disks: each start checked what the stop before it recorded");
+    }
 }
 
 /// `zapper image build` through the daemon: it builds from its running

@@ -19,6 +19,7 @@ use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 use super::{tls, Daemon, Event, EventBody};
 
 mod boot;
+pub(crate) mod disks;
 mod lifecycle;
 mod spec;
 mod terminal;
@@ -120,7 +121,6 @@ impl SessionStore {
         if let Some(s) = sessions.remove(id) {
             if s.persistent {
                 let _ = std::fs::remove_dir_all(s.dir.vm());
-                let _ = std::fs::remove_file(s.dir.disk_hashes());
             }
         }
         Ok(())
@@ -185,20 +185,12 @@ impl SessionDir {
             .map(|m| m.blocks() * 512)
             .sum()
     }
-    /// The disks' hashes when the session last stopped, also in its record.
-    pub fn disk_hashes(&self) -> PathBuf {
-        self.root.join("disks.json")
-    }
     /// A persistent session as it was created ([`Saved`]), so a daemon that
     /// starts again lists it, stopped.
     pub fn saved(&self) -> PathBuf {
         self.root.join("session.json")
     }
-    /// There while a persistent session's VM runs: a daemon that finds it
-    /// stopped without hashing its disks.
-    pub fn running_marker(&self) -> PathBuf {
-        self.root.join("running")
-    }
+
     pub fn data_disk(&self, i: usize) -> PathBuf {
         self.vm().join(format!("disk{i}.ext4"))
     }

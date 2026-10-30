@@ -963,3 +963,44 @@ async fn images_are_listed_and_unknown_recipes_refused() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// A session's record checked: a start whose disks differ from the stop
+/// before it is a finding, and `ok` is false; without a keeper, the chains
+/// aren't checked, and it says so.
+#[tokio::test]
+async fn a_sessions_record_shows_a_disk_changed_while_stopped() {
+    let t = TestCore::new(CONFIG);
+    let id = session(&t, "web", &[], true);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let clean = get(&app, &format!("/v1/sessions/{id}/verify")).await;
+    assert_eq!(clean.json()["ok"], json!(true), "{}", clean.body);
+    // No keeper here: the chains aren't checked, and a note says why.
+    assert_eq!(clean.json()["chain"]["ok"], Value::Null, "{}", clean.body);
+    assert!(clean.json()["chain"]["note"].is_string(), "{}", clean.body);
+
+    let audit = t
+        .core
+        .state_dir()
+        .join("sessions")
+        .join(&id)
+        .join("audit.jsonl");
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(audit)
+        .unwrap();
+    for line in [
+        r#"{"seq":90,"type":"session","state":"stopped"}"#,
+        r#"{"seq":91,"type":"disks","state":"stopped","disks":{"root.ext4":"aaaa"}}"#,
+        r#"{"seq":92,"type":"disks","state":"checked","disks":{"root.ext4":"bbbb"}}"#,
+    ] {
+        writeln!(f, "{line}").unwrap();
+    }
+    let v = get(&app, &format!("/v1/sessions/{id}/verify")).await.json();
+    assert_eq!(v["ok"], json!(false), "{v}");
+    assert_eq!(v["findings"][0]["seq"], 92, "{v}");
+    assert!(v["findings"][0]["finding"]
+        .as_str()
+        .unwrap()
+        .contains("root.ext4 changed while stopped"));
+}

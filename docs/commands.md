@@ -83,6 +83,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper ps` | Sessions with state, image and allow/deny counters |
 | `zapper tell ID TEXT…` | Give a driven session's agent a task (`agent.driven`); it waits for the agent's next turn. `zapper events --session ID` follows it |
 | `zapper stop ID` / `zapper rm ID` | Stop a session and keep it listed (a persistent one with its disks, their hashes recorded) / stop it and remove it from the list, a persistent one's disks with it; audit logs stay on disk |
+| `zapper record session ID` | Check a session's record: its files against the keeper's chains (with a keeper), and its disks' hashes from each stop to the start after it; exits 1 on any finding ([security: persistent sessions](security.md#persistent-sessions)) |
 | `zapper start ID [--accept-changed-disks]` | Start a stopped persistent session again from its disks, once they are checked against the hashes recorded when it stopped; a disk changed since is recorded, and refused unless `--accept-changed-disks`, which is recorded too |
 | `zapper audit ID` | The session's audit log (JSON lines) |
 | `zapper events [-s ID] [--history]` | Follow events, one line each, or raw with `--json` |

@@ -68,6 +68,7 @@ fn read_routes() -> Router<Core> {
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/audit", get(get_audit))
+        .route("/sessions/{id}/verify", get(verify_session))
         .route("/sessions/{id}/terminals", get(list_terminals))
         .route("/sessions/{id}/requests", get(list_requests))
         .route("/sessions/{id}/requests/{n}", get(get_request))
@@ -861,6 +862,12 @@ async fn events(
         })
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// A session's record checked: the keeper's chains, and its disks' hashes
+/// from each stop to the start after it.
+async fn verify_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
+    Ok(Json(d.verify_session(&id)?))
 }
 
 async fn list_images(State(d): D) -> R<Json<Value>> {

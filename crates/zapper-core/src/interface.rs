@@ -246,6 +246,11 @@ pub trait SessionApi {
     /// A session's audit log: kept by the session while it is listed, else
     /// from its directory.
     fn audit_path(&self, id: &str) -> Result<PathBuf>;
+    /// Checks a session's record: its files against the keeper's chains,
+    /// when there is a keeper, and what it says of the session's disks (a
+    /// start whose disks differ from the stop before it, a stop recorded
+    /// without the session stopping, changes accepted, images changed).
+    fn verify_session(&self, id: &str) -> Result<Value>;
     /// Pumps an attached client's frames to and from a terminal opened with
     /// `Session::open_shell`, recording it.
     async fn pump_shell<C>(
@@ -298,6 +303,21 @@ impl SessionApi for Core {
             i.driver = json!("disabled");
         }
         i
+    }
+
+    fn verify_session(&self, id: &str) -> Result<Value> {
+        let audit = self.audit_path(id)?;
+        let text = std::fs::read_to_string(&audit)
+            .map_err(|e| anyhow!("no record for session {id}: {e}"))?;
+        let findings = session::disks::findings(&session::disks::events(&text));
+        let dir = self.d.paths.state.join("sessions").join(id);
+        let chain = match daemon::record::rel(&dir).map(|r| daemon::record::verify_dir(&r)) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => json!({ "ok": null, "note": format!("{e:#}") }),
+            None => json!({ "ok": null, "note": "no record" }),
+        };
+        let ok = findings.is_empty() && chain["ok"] != json!(false);
+        Ok(json!({ "session": id, "ok": ok, "chain": chain, "findings": findings }))
     }
 
     fn audit_path(&self, id: &str) -> Result<PathBuf> {
