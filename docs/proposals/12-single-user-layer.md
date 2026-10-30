@@ -88,12 +88,72 @@ The daemon scans `state/sessions/`:
 
 ### 3. Terminals that outlive their connection
 
-zapper-agent keeps each terminal's pty and process group when its host connection closes, instead of `SIGHUP`, and keeps its last 256 KiB of output. The host reattaches by terminal ID and gets the kept output, then live output: `GET /v1/sessions/{id}/attach?terminal=N`, `zapper attach ID --terminal N`.
+A terminal keeps running when its host connection closes, and the host can attach to it again: `GET /v1/sessions/{id}/attach?terminal=N`, `zapper attach ID --terminal N`.
 
-- A daemon restart, or the user's SSH or VS Code connection dropping, then leaves Claude Code running. The user reconnects to the same terminal.
-- A terminal ends when its command exits or the host closes it on purpose (`DELETE …/terminals/N`, or `zapper attach --hangup`).
-- The recording continues in the same `shell-N.cast`, with the gap shown.
-- It gives herdr (and any multiplexer) the missing piece: a pane can attach to an existing terminal.
+- A daemon restart, or the user's SSH or VS Code connection dropping, then leaves Claude Code running, and the user reconnects to the same terminal.
+- A terminal ends when its command exits, or when the host closes it on purpose (`DELETE …/terminals/N`, `zapper attach --hangup`).
+- The recording continues in the same `shell-N.cast`, without gaps when the guest still holds the bytes, and with a marked gap when it doesn't.
+- It gives herdr, and any multiplexer, the missing piece: a pane can attach to an existing terminal.
+
+#### Today
+
+A terminal is tied to the vsock connection that opened it (`zapper-agent/src/shell.rs`, `session`):
+
+1. zapper-agent (PID 1) forks the program: `setsid`, the pty as its controlling terminal (or pipes without a tty), uid 1000, `no_new_privs`, the seccomp exec filter, `execve`.
+2. The `supervise` thread answers the filter's notifications over the control channel. It doesn't depend on the terminal's connection.
+3. Output pumps read the pty master, or the stdout and stderr pipes, and write frames straight to the connection; they stop when a write fails.
+4. The input thread reads frames from the connection; on EOF or an error it sends `SIGHUP` to the process group (`shell.rs:153`).
+5. On exit, zapper-agent sends `Exit(code)` and reports `ShellExit` on the control channel.
+
+When the connection drops, the program gets `SIGHUP`. One that ignores it soon blocks, since nothing drains its pty. The scrollback that watchers see is kept on the host (`daemon/session/terminal.rs`, `Terminal`), so it is lost with the daemon.
+
+#### Where it runs: a holder process per terminal, not PID 1
+
+PID 1 keeps what needs privilege and is already reviewed: forking the program, dropping privileges, installing the exec filter, `supervise`, and reaping the child. Everything that only shuffles bytes moves into a **holder**: the same zapper-agent binary, run as `zapper-agent hold`, one process per terminal, started by PID 1, running as root, with `no_new_privs`.
+
+- PID 1 forks the program as today, then passes the pty master (or the three pipes) to the holder with `SCM_RIGHTS`, and passes host connections for that terminal the same way. The holder never forks or execs anything.
+- PID 1 reaps the program and tells the holder its exit code over their socket.
+- A bug or a panic in a holder ends that terminal, not the VM. A panic in PID 1 powers the guest off.
+- The holder's memory is its own, so the output buffer, and a terminal emulator if one is used ([below](#getting-the-screen-back)), never grow PID 1.
+- The workload can't reach a holder: it runs as root, its socket to PID 1 is a socketpair, and it accepts nothing else.
+- PID 1 keeps a table of terminals (ID → holder, program's process group) and restarts nothing: a holder that dies ends its terminal with `SIGHUP`, as a dropped connection does today.
+
+#### The holder
+
+- **With a tty** (shells, Claude Code's interface): the holder **keeps reading** the pty into a buffer (256 KiB), with a running byte offset, and forwards to the attached connection if there is one. A failed write detaches the connection. The program never blocks, so Claude Code keeps working while nobody is attached; output older than the buffer is lost.
+- **Without a tty** (`zapper exec`, SSH `exec` channels, the driver's headless agent): only with `ShellRequest { persist: true }`, which the driver sets. The holder **stops reading** while detached, so the program blocks when its pipe fills and continues on reattach, losing nothing. The driver's stream-json can't have a gap. Without `persist`, a non-tty terminal hangs up as now: an `exec` whose client has gone is of no use.
+- **Disconnecting** detaches; it doesn't hang up. A new `Hangup` frame from the host ends the terminal on purpose.
+- **Reattaching**: `ShellRequest` gains `attach: Option<u64>` (the terminal) and `from: Option<u64>` (a byte offset). The holder answers with a new frame, `Attached { from, to, rows, cols }` (the oldest and newest bytes it holds, and the size), replays from `from` or from the oldest byte, then streams live output. A second connection **takes over** from the first, as `tmux attach -d` does; read-only watchers stay on the host's stream route.
+- **Exit while detached**: the remaining output and `Exit(code)` go to the next attach, then the holder exits. A detached terminal whose program has exited is removed after 24 hours unattached.
+- **Recording**: the host knows the offset where `shell-N.cast` stopped, and reattaches with `from` set to it, so the recording continues without duplicates, or with a marked gap if those bytes have left the buffer.
+
+#### Getting the screen back
+
+The buffer holds raw output, so its tail can begin inside an escape sequence and doesn't recreate the screen (that Claude Code switched to the alternate screen, for instance). Two ways, in order:
+
+1. **Redraw** (first): after the replay, the holder applies the new client's window size, so the program gets `SIGWINCH` and full-screen programs redraw; if the size is unchanged, it resizes by one row and back. Plain shells just show the tail. This is what `dtach` and `abduco` do, and it needs no emulator.
+2. **An emulator in the holder** (if redraws prove unreliable): the holder keeps an in-memory screen with the `vt100` crate and, on reattach, sends the screen as it is, then live output, as `shpool` does (with its own `shpool_vt100`). In the holder, not PID 1, a parser of the workload's output can't take the VM down.
+
+#### Libraries and tools
+
+| | What it is | Use here |
+|---|---|---|
+| `dtach`, `abduco` | Small C tools: a process on a pty behind a unix socket, detach and attach, a redraw on attach | The model for the holder's tty mode. Not bundled: they run as the user and know nothing of offsets, recordings or zapper's frames |
+| `shpool` | Rust (Apache-2.0): a daemon that keeps named shell sessions, keeps an in-memory render with `shpool_vt100`, and redraws on reattach | The model for the emulator option, and its crate a candidate. Not bundled: it runs as the user, spawns shells itself, and has its own client protocol |
+| `vt100` crate | A terminal parser that keeps screen state, and can produce the escape sequences that redraw it | The emulator option, in the holder |
+| `tmux`, `screen` | Full multiplexers with emulators | Too much, and they would put the workload in charge of its own terminals |
+
+Running one of these tools in the image would break "any image works", and since they run as the workload's user, the workload could kill, rename or attach to them. Building the holder into zapper-agent keeps the terminal out of the workload's reach, keeps exec supervision where it is, and keeps the byte offsets that make recordings continuous.
+
+#### Limits
+
+At most 16 terminals per sandbox, past which a new one is refused; one buffer per terminal, fixed; `Attached` and replayed frames within `MAX_FRAME`. A holder's memory is bounded by its buffer (and the emulator's screen, if used), whatever the workload writes.
+
+#### What stays the same
+
+- zapper-agent accepts terminal connections from the host's CID only, so attaching, reattaching and taking over stay host-only, and terminal IDs needn't be secret.
+- Exec supervision is untouched. While no daemon runs, checks wait for the control channel to resume (§2), then fail closed.
+- The existing frames are unchanged. New: `attach`, `from` and `persist` in `ShellRequest`; the `Attached` and `Hangup` frames.
 
 ### 4. Services served by a facility outside the daemon
 
