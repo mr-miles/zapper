@@ -630,6 +630,7 @@ async fn an_approval_never_gets_past_a_final_rule() {
             port: 443,
             method: None,
             path: None,
+            ..Default::default()
         };
         zapper_policy::evaluate_net(&layers, &req).0.action
     };

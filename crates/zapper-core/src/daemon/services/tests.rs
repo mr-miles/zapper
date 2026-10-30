@@ -437,7 +437,8 @@ async fn requests_to_a_service_are_inspected_over_http_not_tls() {
     assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
     assert!(reply.ends_with("served"), "{reply}");
 
-    // Over TLS the proxy would have to open TLS to the service itself.
+    // Over TLS to a handler that doesn't terminate TLS, the proxy would have
+    // to open TLS to the service itself.
     let io = dial(&t, &s, "web.internal", 443);
     let name = rustls::pki_types::ServerName::try_from("web.internal").unwrap();
     let mut tls = guest_tls(&s).connect(name, io).await.unwrap();
@@ -446,10 +447,155 @@ async fn requests_to_a_service_are_inspected_over_http_not_tls() {
     let _ = tls.read_to_string(&mut reply).await;
     assert!(
         reply.contains(
-            "web.internal is a service; rules with methods, paths or secrets don't apply to it"
+            "web.internal is a service whose TLS isn't the daemon's; rules with methods, paths or secrets don't apply to it"
         ),
         "{reply}"
     );
+}
+
+/// Sends `request` over TLS to `host:443` from `s`, through the proxy; the
+/// reply as text.
+async fn https(t: &TestCore, s: &Arc<Session>, host: &str, request: &str) -> String {
+    let io = dial(t, s, host, 443);
+    let name = rustls::pki_types::ServerName::try_from(host.to_string()).unwrap();
+    let mut tls = guest_tls(s).connect(name, io).await.unwrap();
+    tls.write_all(request.as_bytes()).await.unwrap();
+    let mut reply = String::new();
+    let _ = tls.read_to_string(&mut reply).await;
+    reply
+}
+
+fn get(host: &str, path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+}
+
+#[tokio::test]
+async fn https_to_a_service_behind_the_daemons_tls_is_inspected() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    t.core
+        .add_service(spec(
+            "web.internal",
+            443,
+            &[],
+            Target::Handler {
+                tls: true,
+                handler: Arc::new(Http),
+            },
+        ))
+        .unwrap();
+    allow(
+        &t,
+        &s,
+        "{ kind: net, action: allow, host: web.internal, methods: [GET] }",
+    );
+    allow(&t, &s, "{ kind: net, action: deny, host: web.internal }");
+    let reply = https(&t, &s, "web.internal", &get("web.internal", "/")).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(reply.ends_with("served"), "{reply}");
+    let post =
+        "POST / HTTP/1.1\r\nHost: web.internal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let reply = https(&t, &s, "web.internal", post).await;
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+}
+
+/// Serves HTTP on socket `name`: reads the caller line, then answers every
+/// request on the connection with `200` and the caller's session as body.
+fn http_socket_server(t: &TestCore, name: &str) {
+    let path = t
+        .core
+        .daemon()
+        .paths
+        .state
+        .join(super::SOCKETS_DIR)
+        .join(name);
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(sock);
+                let mut line = String::new();
+                tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+                    .await
+                    .unwrap();
+                let caller: super::Caller = serde_json::from_str(&line).unwrap();
+                loop {
+                    let mut head = String::new();
+                    loop {
+                        let mut l = String::new();
+                        let n = tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut l)
+                            .await
+                            .unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        if l == "\r\n" {
+                            break;
+                        }
+                        head.push_str(&l);
+                    }
+                    let body = &caller.session;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if reader.get_mut().write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_socket_services_paths_are_decided_for_the_calling_session() {
+    let t = TestCore::new(CONFIG);
+    let a = session(&t, &[("team", "a")]);
+    let b = session(&t, &[("team", "b")]);
+    http_socket_server(&t, "drive.sock");
+    t.core
+        .add_service(spec("drive.internal", 443, &[], socket("drive.sock", true)))
+        .unwrap();
+    for s in [&a, &b] {
+        allow(
+            &t,
+            s,
+            "{ kind: net, action: allow, host: drive.internal, path: \"/outbox/{session}/**\" }",
+        );
+        allow(
+            &t,
+            s,
+            "{ kind: net, action: allow, host: drive.internal, methods: [GET], path: \"/teams/{label:team}/**\" }",
+        );
+        allow(&t, s, "{ kind: net, action: deny, host: drive.internal }");
+    }
+    let own = format!("/outbox/{}/report.csv", a.id);
+    let reply = https(&t, &a, "drive.internal", &get("drive.internal", &own)).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    assert!(
+        reply.ends_with(&a.id),
+        "the socket is told the caller: {reply}"
+    );
+    // b can't reach a's folder, and a can't reach b's team.
+    let reply = https(&t, &b, "drive.internal", &get("drive.internal", &own)).await;
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    let reply = https(
+        &t,
+        &a,
+        "drive.internal",
+        &get("drive.internal", "/teams/a/x"),
+    )
+    .await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    let reply = https(
+        &t,
+        &a,
+        "drive.internal",
+        &get("drive.internal", "/teams/b/x"),
+    )
+    .await;
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
 }
 
 fn socket(name: &str, tls: bool) -> Target {

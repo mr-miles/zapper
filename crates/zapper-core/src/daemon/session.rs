@@ -539,6 +539,16 @@ impl Session {
         layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
+    /// `req` as this session asks it: with its ID and labels, for
+    /// `{session}` and `{label:KEY}` in rules' paths.
+    pub fn caller_of(&self, req: &zapper_policy::NetRequest) -> zapper_policy::NetRequest {
+        zapper_policy::NetRequest {
+            session: Some(self.id.clone()),
+            labels: self.labels.clone(),
+            ..req.clone()
+        }
+    }
+
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
     /// session rule ids never clash with config ones.
     pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {

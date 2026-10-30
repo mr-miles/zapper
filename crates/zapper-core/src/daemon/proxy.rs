@@ -156,7 +156,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
     let (decision, effects) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        evaluate_net(&Session::layers_of(&layers), req)
+        evaluate_net(&Session::layers_of(&layers), &s.caller_of(req))
     };
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
@@ -395,6 +395,7 @@ async fn prepare(
         port,
         method: None,
         path: None,
+        ..Default::default()
     };
     // Inspected tunnels are decided per request; others here, once.
     let inspect = {

@@ -57,7 +57,7 @@ When the guest connects to one of these synthetic addresses, the daemon knows wh
 
 ### Services
 
-A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), a [socket](#socket-services) a program on the host serves, an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule; rules with methods, paths or secrets don't apply to a service, since its traffic isn't inspected. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), a [socket](#socket-services) a program on the host serves, an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule. Rules with methods, paths or secrets apply to a service's plain HTTP, and to its HTTPS when the daemon terminates the service's TLS (an in-process handler with TLS, or a socket service with `--tls`): the proxy then decides each request as for any inspected host, and passes it to the service's plain side; a secret whose `hosts` name the service goes to it, as to any upstream. They don't apply to HTTPS to a service at an address or in another session's VM, whose TLS isn't the daemon's: such a connection is refused. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
 
 #### Socket services
 
@@ -67,7 +67,12 @@ A socket service is served by a program on the host outside the daemon, such as 
 {"session":"ab3cd4","labels":{"team":"a"},"name":"drive.internal","port":443}
 ```
 
-The guest's bytes come only after that line, so nothing the guest sends can pose as it. With `--tls`, the daemon terminates TLS with the session's CA for the name asked for (offering HTTP/1.1), and the socket gets the plain stream, as an in-process handler does. A socket nobody listens on refuses the connection ("connecting to socket NAME, which serves HOST").
+The guest's bytes come only after that line, so nothing the guest sends can pose as it. With `--tls`, the daemon terminates TLS with the session's CA for the name asked for (offering HTTP/1.1), and the socket gets the plain stream, as an in-process handler does. A rule with `methods` or `path` for the service's name makes each request inspected and decided first, so the program behind the socket sees only requests the session's rules allow; `{session}` and `{label:KEY}` in a rule's path ([policy](policy.md#net)) give each session its own part of it:
+
+```
+- { kind: net, action: allow, host: drive.internal, path: "/outbox/{session}/**" }
+- { kind: net, action: allow, host: drive.internal, methods: [GET], path: "/teams/{label:team}/**" }
+``` A socket nobody listens on refuses the connection ("connecting to socket NAME, which serves HOST").
 
 ```
 zapper service add drive.internal:443 --to-socket drive.sock --tls --for team=a

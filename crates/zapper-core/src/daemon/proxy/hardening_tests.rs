@@ -25,7 +25,9 @@ fn session(t: &TestCore) -> Arc<Session> {
 }
 
 /// A service handler, registered only so `target()` resolves and the tunnel /
-/// MITM runs; these tests never reach the upstream.
+/// MITM runs; these tests never reach the upstream. Registered without TLS:
+/// HTTPS to it is then refused after a request is decided and its secrets
+/// added, where a handler whose TLS the daemon terminates would be sent it.
 struct NeverServed;
 impl crate::ServiceHandler for NeverServed {
     fn serve(&self, _s: Arc<Session>, _io: Box<dyn crate::ServiceIo>) {}
@@ -104,8 +106,8 @@ async fn an_unresolvable_secret_refuses_the_request() {
     );
     let s = session(&t);
     // A service so target() resolves and the MITM runs; inject fails before
-    // open_tls, so the upstream is never reached.
-    service(&t, "api.example", true);
+    // open_upstream, so the upstream is never reached.
+    service(&t, "api.example", false);
     let io = dial(&t, &s, "api.example", 443);
     let name = rustls::pki_types::ServerName::try_from("api.example").unwrap();
     let tls = guest_tls(&s).connect(name, io).await.unwrap();
@@ -192,8 +194,8 @@ async fn send_with_placeholder(t: &TestCore, s: &Arc<Session>, name: &str) -> St
 
 /// A secret minted by a host command is run on first use and reused for the
 /// requests after it, until it needs refreshing: the command is not run per
-/// request. (The upstream is a service, so the request ends in a 502 after the
-/// secret was resolved and injected.)
+/// request. (The upstream is a service whose TLS isn't the daemon's, so the
+/// request ends in a 502 after the secret was resolved and injected.)
 #[tokio::test]
 async fn a_command_secret_is_minted_once_and_injected() {
     let runs = std::env::temp_dir().join(format!("zapper-mint-runs-{}", std::process::id()));
@@ -206,7 +208,7 @@ async fn a_command_secret_is_minted_once_and_injected() {
         "secrets:\n  tok: {{ command: [sh, -c, {script:?}], hosts: [api.example] }}\nprofiles:\n  web:\n    policy:\n      net:\n        - {{ action: allow, host: api.example, methods: [GET], secrets: [tok] }}\n"
     ));
     let s = session(&t);
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     for i in 0..3 {
         assert_eq!(
             send_with_placeholder(&t, &s, "tok").await,
@@ -241,7 +243,7 @@ async fn a_failing_command_secret_refuses_the_request() {
         "secrets:\n  tok: { command: [sh, -c, \"echo LEAKED_STDOUT; echo 'HTTP 401: Bad credentials' >&2; exit 1\"], hosts: [api.example] }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: api.example, methods: [GET], secrets: [tok] }\n",
     );
     let s = session(&t);
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     assert_eq!(
         send_with_placeholder(&t, &s, "tok").await,
         StatusCode::FORBIDDEN
@@ -278,7 +280,7 @@ fn gh_secret(script: &str) -> zapper_policy::Secret {
 async fn a_session_secret_is_injected_for_its_own_session_only() {
     let t = TestCore::new("profiles:\n  web:\n    policy:\n      net: []\n");
     let (a, b) = (session(&t), session(&t));
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     let rule = || {
         zapper_policy::AnyRule::Net(zapper_policy::NetRule {
             id: Some("gh".into()),

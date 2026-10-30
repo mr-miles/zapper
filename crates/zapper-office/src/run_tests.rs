@@ -584,6 +584,7 @@ fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
         port: 443,
         method: None,
         path: None,
+        ..Default::default()
     };
     let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
     let decide = DecideArgs {
@@ -624,6 +625,7 @@ fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
         port: 443,
         method: None,
         path: None,
+        ..Default::default()
     };
     let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
     security::decide(

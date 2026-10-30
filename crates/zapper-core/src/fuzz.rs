@@ -311,6 +311,7 @@ pub fn policy(data: &[u8]) {
         port: u16::from_be_bytes(*port),
         method: (!method.is_empty()).then(|| method.to_string()),
         path: f.next().map(str::to_string),
+        ..Default::default()
     };
     let layers = [
         (zapper_policy::Scope::Profile("p".into()), profile),

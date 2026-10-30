@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+
+use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use zapper_proto::ExecRequest;
@@ -17,6 +19,13 @@ pub struct NetRequest {
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The calling session, for `{session}` in rules' paths: who asks, not
+    /// part of the request.
+    #[serde(skip)]
+    pub session: Option<String>,
+    /// The calling session's labels, for `{label:KEY}` in rules' paths.
+    #[serde(skip)]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +64,61 @@ fn path_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(g.compile_matcher())
 }
 
+/// A rule's path with `{session}` and `{label:KEY}` replaced by the calling
+/// session's ID and labels, each value escaped so it matches only itself.
+/// `None` when the request has no such session or label: the rule then
+/// matches nothing. Other `{…}` stay globset's alternatives.
+fn expand(pattern: &str, req: &NetRequest) -> Option<String> {
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let value = if let Some(after) = tail.strip_prefix("{session}") {
+            rest = after;
+            req.session.as_deref()?
+        } else if let Some(key) = tail.strip_prefix("{label:").and_then(|t| t.split_once('}')) {
+            rest = key.1;
+            req.labels.get(key.0)?.as_str()
+        } else {
+            out.push('{');
+            rest = &tail[1..];
+            continue;
+        };
+        for c in value.chars() {
+            if "*?[]{}\\,!".contains(c) {
+                out.push('[');
+                out.push(c);
+                out.push(']');
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Checks a path's `{label:KEY}` placeholders name a key.
+fn check_placeholders(pattern: &str) -> Result<()> {
+    let mut rest = pattern;
+    while let Some(i) = rest.find("{label:") {
+        let tail = &rest[i + "{label:".len()..];
+        let Some((key, after)) = tail.split_once('}') else {
+            bail!("{{label:… has no closing }}");
+        };
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("{{label:{key}}} doesn't name a label: letters, digits, - and _");
+        }
+        rest = after;
+    }
+    Ok(())
+}
+
 fn args_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(Glob::new(pattern)?.compile_matcher())
 }
@@ -64,6 +128,7 @@ pub fn check_globs(policy: &Policy) -> Result<()> {
     for r in &policy.net {
         host_glob(&r.host).with_context(|| format!("host {:?}", r.host))?;
         if let Some(p) = &r.path {
+            check_placeholders(p).with_context(|| format!("path {p:?}"))?;
             path_glob(p).with_context(|| format!("path {p:?}"))?;
         }
     }
@@ -97,8 +162,11 @@ impl NetRule {
         }
         if let Some(pattern) = &self.path {
             let Some(path) = &req.path else { return false };
+            let Some(pattern) = expand(pattern, req) else {
+                return false;
+            };
             let path = path.split(['?', '#']).next().unwrap_or("");
-            if !path_glob(pattern).is_ok_and(|g| g.is_match(path)) {
+            if !path_glob(&pattern).is_ok_and(|g| g.is_match(path)) {
                 return false;
             }
         }
@@ -302,6 +370,73 @@ mod tests {
     use super::*;
     use crate::Config;
 
+    fn rule_with_path(path: &str) -> NetRule {
+        serde_yaml::from_str(&format!(
+            "{{ action: allow, host: drive.internal, path: {path:?} }}"
+        ))
+        .unwrap()
+    }
+
+    fn get(path: &str, session: Option<&str>, labels: &[(&str, &str)]) -> NetRequest {
+        NetRequest {
+            host: "drive.internal".into(),
+            port: 443,
+            method: Some("GET".into()),
+            path: Some(path.into()),
+            session: session.map(String::from),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// `{session}` and `{label:KEY}` stand for the calling session's ID and
+    /// labels; a request without them matches nothing, and other braces stay
+    /// globset's alternatives.
+    #[test]
+    fn path_placeholders_are_the_callers() {
+        let own = rule_with_path("/outbox/{session}/**");
+        assert!(own.matches(&get("/outbox/ab3cd4/x.csv", Some("ab3cd4"), &[])));
+        assert!(!own.matches(&get("/outbox/zz9yy8/x.csv", Some("ab3cd4"), &[])));
+        assert!(!own.matches(&get("/outbox/ab3cd4/x.csv", None, &[])));
+
+        let team = rule_with_path("/teams/{label:team}/**");
+        assert!(team.matches(&get("/teams/a/notes.md", Some("s1"), &[("team", "a")])));
+        assert!(!team.matches(&get("/teams/b/notes.md", Some("s1"), &[("team", "a")])));
+        assert!(!team.matches(&get("/teams/a/notes.md", Some("s1"), &[])));
+
+        let either = rule_with_path("/{inbox,shared}/**");
+        assert!(either.matches(&get("/shared/x", Some("s1"), &[])));
+        assert!(!either.matches(&get("/outbox/x", Some("s1"), &[])));
+    }
+
+    /// A substituted value matches only itself, whatever it holds.
+    #[test]
+    fn placeholder_values_are_literal() {
+        let team = rule_with_path("/teams/{label:team}/**");
+        assert!(!team.matches(&get("/teams/a/x", Some("s1"), &[("team", "*")])));
+        assert!(team.matches(&get("/teams/*/x", Some("s1"), &[("team", "*")])));
+        assert!(!team.matches(&get("/teams/a/x", Some("s1"), &[("team", "{a,b}")])));
+    }
+
+    #[test]
+    fn label_placeholders_name_a_key() {
+        let check = |path: &str| {
+            Config::from_yaml(&format!(
+                "policy:\n  net:\n    - {{ action: allow, host: x.internal, path: {path:?} }}\n"
+            ))
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+        };
+        check("/t/{label:team}/**").unwrap();
+        check("/o/{session}/**").unwrap();
+        for bad in ["/t/{label:}/x", "/t/{label:a b}/x", "/t/{label:team"] {
+            let e = check(bad).unwrap_err();
+            assert!(e.contains("label"), "{bad}: {e}");
+        }
+    }
+
     /// Host patterns for one AWS service stop at that service, and no
     /// pattern ending in a domain matches a look-alike that merely contains
     /// it (the cases OneCLI tests for its AWS grants).
@@ -405,6 +540,7 @@ profiles:
             port,
             method: method.map(Into::into),
             path: path.map(Into::into),
+            ..Default::default()
         };
         evaluate_net(&layers, &req).0
     }
@@ -471,6 +607,7 @@ profiles:
             port: 443,
             method: Some("get".into()),
             path: Some("/".into()),
+            ..Default::default()
         };
         assert_eq!(evaluate_net(&layers, &req).1.secrets, ["gh"]);
         // Without the request line the method rule does not match.

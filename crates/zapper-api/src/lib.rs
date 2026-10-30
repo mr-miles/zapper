@@ -741,6 +741,11 @@ async fn evaluate(State(d): D, body: String) -> R<Json<Value>> {
     let layers: Vec<(Scope, &Policy)> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     if let Some(n) = e.net {
         let inspected = needs_inspection(&layers, &n.host, n.port);
+        // As the session would ask it, for `{session}` and `{label:KEY}`.
+        let n = match e.session.as_deref() {
+            Some(id) => d.session(id)?.caller_of(&n),
+            None => n,
+        };
         let (decision, effects) = evaluate_net(&layers, &n);
         return Ok(Json(
             json!({ "decision": decision, "inspected": inspected, "secrets": effects.secrets }),

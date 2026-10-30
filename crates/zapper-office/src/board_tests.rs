@@ -142,6 +142,7 @@ async fn the_board_promotes_a_decision_into_the_running_config() {
         port: 443,
         method: None,
         path: None,
+        ..Default::default()
     };
     let id = crate::security::ask(&run, "pat", &req, None, None, "the docs").unwrap();
     let (status, v) = call(

@@ -319,73 +319,21 @@ pub async fn connect(
         Target::Handler {
             tls: false,
             handler,
-        } => {
-            let (a, b) = tokio::io::duplex(256 * 1024);
-            handler.serve(s.clone(), Box::new(b));
-            Ok(Box::new(a))
-        }
+        } => Ok(serve_handler(s, handler)),
         Target::Handler { tls: true, handler } => {
-            let (a, b) = tokio::io::duplex(256 * 1024);
-            // A handler is given a byte stream, and speaks HTTP/1.1 on it if
-            // it speaks HTTP (the firm's git server does): offer only that,
-            // so a client that would rather have HTTP/2 (git's curl) doesn't
-            // pick a protocol nobody on this side speaks.
-            let mut config = (*s.tls.server_config(host)?).clone();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let config = Arc::new(config);
-            let (s, handler) = (s.clone(), handler.clone());
-            tokio::spawn(async move {
-                let Ok(Ok(tls)) = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    tokio_rustls::TlsAcceptor::from(config).accept(b),
-                )
-                .await
-                else {
-                    return;
-                };
-                handler.serve(s, Box::new(tls));
-            });
-            Ok(Box::new(a))
+            let (s2, handler) = (s.clone(), handler.clone());
+            behind_tls(s, host, move |tls| handler.serve(s2, Box::new(tls)))
         }
-        Target::Socket { name, tls } => {
-            let path = d.paths.state.join(SOCKETS_DIR).join(name);
-            let mut sock = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::UnixStream::connect(&path),
-            )
-            .await
-            .map_err(|_| anyhow!("connecting to socket {name}: timed out"))?
-            .with_context(|| format!("connecting to socket {name}, which serves {host}"))?;
-            let caller = Caller {
-                session: s.id.clone(),
-                labels: s.labels.clone(),
-                name: host.to_string(),
-                port,
-            };
-            let mut line = serde_json::to_vec(&caller)?;
-            line.push(b'\n');
-            tokio::io::AsyncWriteExt::write_all(&mut sock, &line).await?;
-            if !tls {
-                return Ok(Box::new(sock));
-            }
-            let (a, b) = tokio::io::duplex(256 * 1024);
-            // As for a handler: HTTP/1.1 only, since the program behind the
-            // socket gets a byte stream and may speak only that.
-            let mut config = (*s.tls.server_config(host)?).clone();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            let config = Arc::new(config);
-            tokio::spawn(async move {
-                let Ok(Ok(mut tls)) = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    tokio_rustls::TlsAcceptor::from(config).accept(b),
-                )
-                .await
-                else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(&mut tls, &mut sock).await;
-            });
-            Ok(Box::new(a))
+        Target::Socket { name, tls: false } => {
+            Ok(Box::new(open_socket(d, s, host, port, name).await?))
+        }
+        Target::Socket { name, tls: true } => {
+            let mut sock = open_socket(d, s, host, port, name).await?;
+            behind_tls(s, host, move |mut tls| {
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut tls, &mut sock).await;
+                });
+            })
         }
         Target::Addr(addr) => {
             d.addrs
@@ -412,6 +360,88 @@ pub async fn connect(
             Ok(Box::new(stream))
         }
     }
+}
+
+/// The plain side of a target whose TLS the daemon terminates (a handler
+/// or a socket with `tls`): what it is given once TLS is off. For the
+/// inspecting proxy, which terminates the guest's TLS itself and decides
+/// each request before passing it on. `None` for other targets.
+pub async fn connect_plain(
+    d: &super::Daemon,
+    s: &Arc<Session>,
+    host: &str,
+    port: u16,
+    target: &Target,
+) -> Result<Option<Box<dyn Io>>> {
+    match target {
+        Target::Handler { tls: true, handler } => Ok(Some(serve_handler(s, handler))),
+        Target::Socket { name, tls: true } => {
+            Ok(Some(Box::new(open_socket(d, s, host, port, name).await?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A stream to `handler`, serving `s`.
+fn serve_handler(s: &Arc<Session>, handler: &Arc<dyn Handler>) -> Box<dyn Io> {
+    let (a, b) = tokio::io::duplex(256 * 1024);
+    handler.serve(s.clone(), Box::new(b));
+    Box::new(a)
+}
+
+/// Connects to socket `name` in `state/services/` and sends the caller line.
+async fn open_socket(
+    d: &super::Daemon,
+    s: &Arc<Session>,
+    host: &str,
+    port: u16,
+    name: &str,
+) -> Result<tokio::net::UnixStream> {
+    let path = d.paths.state.join(SOCKETS_DIR).join(name);
+    let mut sock = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::UnixStream::connect(&path),
+    )
+    .await
+    .map_err(|_| anyhow!("connecting to socket {name}: timed out"))?
+    .with_context(|| format!("connecting to socket {name}, which serves {host}"))?;
+    let caller = Caller {
+        session: s.id.clone(),
+        labels: s.labels.clone(),
+        name: host.to_string(),
+        port,
+    };
+    let mut line = serde_json::to_vec(&caller)?;
+    line.push(b'\n');
+    tokio::io::AsyncWriteExt::write_all(&mut sock, &line).await?;
+    Ok(sock)
+}
+
+/// A stream the guest's TLS ends on, with the session's CA for `host`;
+/// `serve` gets the plain stream once the handshake is done. HTTP/1.1 only:
+/// what's behind gets a byte stream and speaks HTTP/1.1 if it speaks HTTP
+/// (the firm's git server does), so a client that would rather have HTTP/2
+/// (git's curl) doesn't pick a protocol nobody on this side speaks.
+fn behind_tls<F>(s: &Arc<Session>, host: &str, serve: F) -> Result<Box<dyn Io>>
+where
+    F: FnOnce(tokio_rustls::server::TlsStream<tokio::io::DuplexStream>) + Send + 'static,
+{
+    let (a, b) = tokio::io::duplex(256 * 1024);
+    let mut config = (*s.tls.server_config(host)?).clone();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let config = Arc::new(config);
+    tokio::spawn(async move {
+        let Ok(Ok(tls)) = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_rustls::TlsAcceptor::from(config).accept(b),
+        )
+        .await
+        else {
+            return;
+        };
+        serve(tls);
+    });
+    Ok(Box::new(a))
 }
 
 #[cfg(test)]
