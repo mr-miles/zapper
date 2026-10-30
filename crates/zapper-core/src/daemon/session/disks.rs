@@ -99,6 +99,13 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
     // The event before, for a `disks stopped` event, which follows the
     // session's stop or a failed boot.
     let mut just_stopped = false;
+    // Since the last `disks stopped`: a boot (`session starting`: made, or
+    // started again; an adoption isn't one), and a check of the disks.
+    // Hashes appended to cover a change have no boot before them, and a
+    // start that skipped the check has no check.
+    let mut stopped_once = false;
+    let mut booted = false;
+    let mut checked = false;
     for e in events {
         let mut note = |what: String| {
             out.push(json!({ "seq": e["seq"], "ts": e["ts"], "finding": what }));
@@ -110,26 +117,40 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
                 continue;
             }
             ("session", "running") => last = LastStop::RanSince,
+            ("session", "starting") => {
+                if stopped_once && !checked {
+                    note("a start without its disks checked against the stop before it".into());
+                }
+                booted = true;
+            }
             ("disks", "stopped") => {
                 if !just_stopped {
                     note("disks recorded as stopped without the session stopping before".into());
                 }
+                if stopped_once && !booted {
+                    note("disks recorded as stopped with no run since the stop before".into());
+                }
                 last = LastStop::Hashed(hashes_of(e));
+                (stopped_once, booted, checked) = (true, false, false);
             }
-            ("disks", "checked") => match &last {
-                LastStop::Hashed(before) if *before == hashes_of(e) => {}
-                LastStop::Hashed(before) => note(format!(
-                    "a start checked disks unlike those of the stop before it: {}",
-                    changes(before, &hashes_of(e))
-                )),
-                LastStop::RanSince => {
-                    note("a start checked disks that had run since their last recorded stop".into())
+            ("disks", "checked") => {
+                checked = true;
+                match &last {
+                    LastStop::Hashed(before) if *before == hashes_of(e) => {}
+                    LastStop::Hashed(before) => note(format!(
+                        "a start checked disks unlike those of the stop before it: {}",
+                        changes(before, &hashes_of(e))
+                    )),
+                    LastStop::RanSince => note(
+                        "a start checked disks that had run since their last recorded stop".into(),
+                    ),
+                    LastStop::None => {
+                        note("a start checked disks with no stop recorded before it".into())
+                    }
                 }
-                LastStop::None => {
-                    note("a start checked disks with no stop recorded before it".into())
-                }
-            },
+            }
             ("disks", "changed" | "unverified" | "accepted") => {
+                checked |= state == "accepted";
                 note(format!("disks {state}: {}", str_of(e, "detail")))
             }
             ("disks", "image") => {
@@ -197,15 +218,57 @@ mod tests {
     #[test]
     fn an_honest_record_has_no_findings() {
         let r = [
+            ev(0, "session", "starting", &[]),
             ev(1, "session", "running", &[]),
             ev(2, "session", "stopped", &[]),
             ev(3, "disks", "stopped", &[("root.ext4", "a")]),
             ev(4, "disks", "checked", &[("root.ext4", "a")]),
-            ev(5, "session", "running", &[]),
-            ev(6, "session", "stopped", &[]),
-            ev(7, "disks", "stopped", &[("root.ext4", "b")]),
+            ev(5, "session", "starting", &[]),
+            ev(6, "session", "running", &[]),
+            ev(7, "session", "stopped", &[]),
+            ev(8, "disks", "stopped", &[("root.ext4", "b")]),
+            // Adopted after a daemon restart: not a boot, nothing to check.
+            ev(9, "disks", "checked", &[("root.ext4", "b")]),
+            ev(10, "session", "starting", &[]),
+            ev(11, "session", "running", &[]),
+            ev(12, "session", "running", &[]),
         ];
         assert_eq!(findings(&r), Vec::<Value>::new());
+    }
+
+    /// Two appended lines, a session stop then a disks stop with new hashes,
+    /// covering a disk changed while stopped: there was no run since the
+    /// stop before.
+    #[test]
+    fn a_stop_appended_to_cover_a_change_is_found() {
+        let r = [
+            ev(0, "session", "starting", &[]),
+            ev(1, "session", "running", &[]),
+            ev(2, "session", "stopped", &[]),
+            ev(3, "disks", "stopped", &[("root.ext4", "a")]),
+            ev(4, "session", "stopped", &[]),
+            ev(5, "disks", "stopped", &[("root.ext4", "x")]),
+            ev(6, "disks", "checked", &[("root.ext4", "x")]),
+        ];
+        let f = findings(&r);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0]["seq"], 5);
+        assert!(f[0]["finding"].as_str().unwrap().contains("no run since"));
+    }
+
+    /// A start whose disks were never checked against the stop before it.
+    #[test]
+    fn a_start_without_a_check_is_found() {
+        let r = [
+            ev(0, "session", "starting", &[]),
+            ev(1, "session", "stopped", &[]),
+            ev(2, "disks", "stopped", &[("root.ext4", "a")]),
+            ev(3, "session", "starting", &[]),
+            ev(4, "session", "running", &[]),
+        ];
+        let f = findings(&r);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0]["seq"], 3);
     }
 
     /// A disk changed while stopped, and a start that said `checked`
@@ -238,12 +301,13 @@ mod tests {
             ev(3, "disks", "stopped", &[("root.ext4", "x")]),
             ev(4, "disks", "checked", &[("root.ext4", "x")]),
         ];
+        // Found by both rules: no session stop before it, no run since.
         let f = findings(&r);
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(f[0]["finding"]
+        assert!(f.iter().all(|x| x["seq"] == 3), "{f:?}");
+        assert!(f.iter().any(|x| x["finding"]
             .as_str()
             .unwrap()
-            .contains("without the session stopping"));
+            .contains("without the session stopping")));
     }
 
     #[test]
