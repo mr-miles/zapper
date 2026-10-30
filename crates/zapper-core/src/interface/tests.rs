@@ -75,6 +75,35 @@ fn a_change_applies_whole_or_not_at_all_and_is_an_event() {
     assert!(t.core.with_config(|c| c.profiles.contains_key("x")));
 }
 
+/// A change made while another is between its copy of the config and
+/// applying it: both are kept.
+#[test]
+fn changes_at_once_both_apply() {
+    let t = TestCore::new(RULES);
+    let core = t.core.clone();
+    let (inside, entered) = std::sync::mpsc::channel();
+    let first = std::thread::spawn(move || {
+        core.change("a", |c| {
+            inside.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            c.profiles.insert("a".into(), Default::default());
+            Ok(())
+        })
+        .unwrap()
+    });
+    entered.recv().unwrap();
+    t.core
+        .change("b", |c| {
+            c.profiles.insert("b".into(), Default::default());
+            Ok(())
+        })
+        .unwrap();
+    first.join().unwrap();
+    let c = t.core.config();
+    assert!(c.profiles.contains_key("a"), "the first change kept");
+    assert!(c.profiles.contains_key("b"));
+}
+
 #[test]
 fn diff_save_and_reload() {
     let t = TestCore::new(RULES);

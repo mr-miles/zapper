@@ -60,6 +60,9 @@ pub struct Paths {
 // handle — so its fields are `pub(crate)`, not `pub`.
 pub struct Daemon {
     pub(crate) config: RwLock<Config>,
+    /// Held across a change, from the clone to the swap, so two at once
+    /// can't each start from the config before the other.
+    changing: Mutex<()>,
     pub(crate) startup_path: PathBuf,
     pub(crate) paths: Paths,
     pub(crate) addrs: RwLock<addr::AddressPolicy>,
@@ -187,6 +190,7 @@ impl Daemon {
         let addrs = addr::AddressPolicy::new(&d.private_networks)?;
         let daemon = Arc::new(Daemon {
             config: RwLock::new(config),
+            changing: Mutex::new(()),
             startup_path,
             paths,
             addrs: RwLock::new(addrs),
@@ -220,6 +224,7 @@ impl Daemon {
 
     /// Applies a change to the running config if the result is valid.
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
+        let _changing = self.changing.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = self.config.read().unwrap().clone();
         let old_networks = next.daemon.private_networks.clone();
         let out = f(&mut next)?;
@@ -270,19 +275,24 @@ impl Daemon {
     }
 
     /// Replaces the running config; redacted inline secrets keep their values.
+    /// The values come from the config it replaces, in the same change.
     pub fn replace_config(&self, mut new: Config) -> Result<()> {
-        let old = self.config.read().unwrap().clone();
-        for (name, s) in new.secrets.iter_mut() {
-            if let SecretSource::Value { value } = &mut s.source {
-                if value == REDACTED {
-                    match old.secrets.get(name).map(|o| &o.source) {
-                        Some(SecretSource::Value { value: v }) => *value = v.clone(),
-                        _ => bail!("secret {name}: value is redacted and there is no old value"),
+        self.change("config replaced", |old| {
+            for (name, s) in new.secrets.iter_mut() {
+                if let SecretSource::Value { value } = &mut s.source {
+                    if value == REDACTED {
+                        match old.secrets.get(name).map(|o| &o.source) {
+                            Some(SecretSource::Value { value: v }) => *value = v.clone(),
+                            _ => {
+                                bail!("secret {name}: value is redacted and there is no old value")
+                            }
+                        }
                     }
                 }
             }
-        }
-        self.set_config("config replaced", new)
+            *old = new;
+            Ok(())
+        })
     }
 
     /// Replaces the whole running config, validated and applied atomically.
