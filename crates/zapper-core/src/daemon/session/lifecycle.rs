@@ -168,8 +168,18 @@ fn assemble(
 ) -> Result<Arc<Session>> {
     let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&saved.id));
     let ttl = saved.resolved.engine.ttl_secs;
+    // A persistent session's CA and synthetic names are kept, to be the same
+    // after a daemon restart.
+    let (tls, dns) = if persistent {
+        (
+            tls::SessionTls::kept(&saved.id, &dir.ca())?,
+            dns::SessionDns::kept(&dir.dns()),
+        )
+    } else {
+        (tls::SessionTls::new(&saved.id)?, dns::SessionDns::new())
+    };
     let session = Arc::new(Session {
-        tls: tls::SessionTls::new(&saved.id)?,
+        tls,
         id: saved.id,
         profile: saved.profile,
         created: saved.created,
@@ -185,7 +195,7 @@ fn assemble(
         resolved: saved.resolved,
         counters: Counters::default(),
         usage: Mutex::new(None),
-        dns: dns::SessionDns::new(),
+        dns,
         terminals: Mutex::new(Default::default()),
         requests: Default::default(),
         audit: Mutex::new(audit),
@@ -202,7 +212,7 @@ fn assemble(
 }
 
 /// Writes a persistent session's `session.json`, its own rules as they are.
-fn save(session: &Session) -> Result<()> {
+pub(super) fn save(session: &Session) -> Result<()> {
     let saved = Saved {
         id: session.id.clone(),
         profile: session.profile.clone(),
@@ -234,6 +244,10 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         else {
             continue;
         };
+        // Its VMM, still running, which an earlier daemon left: stopped, as
+        // this daemon doesn't adopt it, so a start can't boot its disks
+        // twice.
+        let left_running = stop_left_vmm(&dir, &saved.id);
         let record =
             std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
         let was_running = disks::last_stop(&disks::events(&record)) == disks::LastStop::RanSince;
@@ -244,7 +258,9 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
                 continue;
             }
         };
-        let why = if was_running {
+        let why = if left_running {
+            "it ran on after the daemon ended, and was stopped; its disks weren't hashed"
+        } else if was_running {
             "the daemon ended while it ran; its disks weren't hashed"
         } else {
             "kept while the daemon restarted"
@@ -255,6 +271,40 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
             .send_replace(Status::Stopped(why.into()));
         daemon.sessions.insert(session);
     }
+}
+
+/// Stops the durable VMM of the session `id` in `dir` if it still runs, after
+/// checking the pid is that VMM's (not a pid reused since); whether one was.
+/// Its Firecracker dies with it.
+fn stop_left_vmm(dir: &SessionDir, id: &str) -> bool {
+    let Some(vmm) = std::fs::read(dir.vmm())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<crate::daemon::vm::Vmm>(&b).ok())
+    else {
+        return false;
+    };
+    let _ = std::fs::remove_file(dir.vmm());
+    if !is_vmm_of(vmm.pid, id) {
+        return false;
+    }
+    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
+    for _ in 0..50 {
+        if !is_vmm_of(vmm.pid, id) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// Whether `pid` runs the VMM of session `id`: `zapper __vmm`, with the id
+/// among its arguments.
+pub(crate) fn is_vmm_of(pid: u32, id: &str) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    args.contains(&&b"__vmm"[..]) && args.contains(&id.as_bytes())
 }
 
 /// Boots a registered (or stopped, persistent) session's VM and waits for its
@@ -722,6 +772,68 @@ mod tests {
         let _ = start(t.core.daemon(), &back, false).await;
         let states: Vec<String> = disk_events(&t, &back).into_iter().map(|e| e.0).collect();
         assert!(states.contains(&"checked".to_string()), "{states:?}");
+    }
+
+    /// What a persistent session keeps to be adopted: its CA, the same after
+    /// a restart; its synthetic names, given out again as before; its rules
+    /// as they change. Removing it removes all of it, so no daemon lists it
+    /// again.
+    #[tokio::test]
+    async fn what_a_persistent_session_keeps_is_kept_and_removed_with_it() {
+        let t = TestCore::new(CONFIG);
+        let s = persistent(&t);
+        let a = s.dns.names().address("a.example").unwrap();
+        let b = s.dns.names().address("b.example").unwrap();
+        s.put_rule(serde_yaml::from_str("{ kind: net, action: allow, host: x.example }").unwrap());
+        stop(t.core.daemon(), &s, "stopped").await;
+        let key = s.tls.public_key();
+
+        let back = restart(&t, &s);
+        assert_eq!(back.dns.names().address("b.example"), Some(b));
+        assert_eq!(back.dns.names().address("a.example"), Some(a));
+        assert_ne!(
+            back.dns.names().address("c.example"),
+            Some(b),
+            "new names go on after"
+        );
+        assert_eq!(
+            back.own_policy().net.len(),
+            1,
+            "the rule added after creation"
+        );
+        // The same CA: its key, so what it signs is trusted as before.
+        assert_eq!(back.tls.public_key(), key);
+        let kept = std::fs::read_to_string(back.dir.ca()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(s.dir.ca()).unwrap(),
+            kept,
+            "one CA, kept once"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(back.dir.ca())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        t.core.forget_session(&back.id).unwrap();
+        for f in [back.dir.saved(), back.dir.ca(), back.dir.dns()] {
+            assert!(!f.exists(), "{}", f.display());
+        }
+        restore(t.core.daemon());
+        assert!(
+            t.core.daemon().sessions.get(&back.id).is_none(),
+            "not listed again"
+        );
+    }
+
+    #[test]
+    fn a_vmm_is_known_by_its_command_line() {
+        assert!(!is_vmm_of(std::process::id(), "abc234"));
+        assert!(!is_vmm_of(u32::MAX - 1, "abc234"));
     }
 
     #[tokio::test]

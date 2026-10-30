@@ -165,6 +165,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         id: &session.id,
         nic: nic_on,
         subids,
+        durable: session.persistent,
     })
     .await?;
     *session.runtime.vm().lock().await = Some(child);

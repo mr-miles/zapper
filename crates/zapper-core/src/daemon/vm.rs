@@ -13,8 +13,8 @@ use super::session::SessionDir;
 
 /// Guest CID; every VM has its own vsock device, so they can share it.
 pub const GUEST_CID: u32 = 3;
-/// Serial console output kept per session; the rest is dropped.
-const CONSOLE_LIMIT: u64 = 1 << 20;
+// Serial console output kept per session; the rest is dropped.
+use crate::vmm::CONSOLE_LIMIT;
 
 pub use zapper_policy::parse_size;
 
@@ -152,11 +152,41 @@ pub struct VmSpec<'a> {
     pub nic: bool,
     /// Run Firecracker as a subordinate uid of its own (`daemon.vmm_subids`).
     pub subids: bool,
+    /// A persistent session's: the VMM outlives the daemon (`vmm::Args`).
+    pub durable: bool,
+}
+
+/// What a daemon needs to know of a durable VMM it didn't start: its pid,
+/// and the subordinate id its Firecracker runs as. In `vmm.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Vmm {
+    pub pid: u32,
+    pub subid: Option<u32>,
 }
 
 /// The VMM's `oom_score_adj`, as written to `/proc/self/oom_score_adj`:
 /// well above the daemon's (0), so the kernel's OOM killer picks a VM first.
 const VMM_OOM_SCORE_ADJ: &[u8] = b"500";
+
+/// Sets this process's `oom_score_adj` to [`VMM_OOM_SCORE_ADJ`], between
+/// fork and exec: raising one's own score needs no privilege, and
+/// Firecracker inherits it. Only async-signal-safe calls.
+fn raise_oom_score() {
+    unsafe {
+        let fd = libc::open(
+            c"/proc/self/oom_score_adj".as_ptr(),
+            libc::O_WRONLY | libc::O_CLOEXEC,
+        );
+        if fd >= 0 {
+            libc::write(
+                fd,
+                VMM_OOM_SCORE_ADJ.as_ptr().cast(),
+                VMM_OOM_SCORE_ADJ.len(),
+            );
+            libc::close(fd);
+        }
+    }
+}
 
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
 pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
@@ -207,6 +237,7 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
         initrd: spec.initrd.to_path_buf(),
         nic: spec.nic,
         sub: ids.is_some(),
+        durable: spec.durable,
     };
     // The daemon's own binary as it runs: /proc/self/exe stays valid when
     // the file on disk is replaced (a rebuild, `make install`), where the
@@ -214,34 +245,39 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     // it would fail to start.
     let mut cmd = Command::new("/proc/self/exe");
     cmd.args(shim.to_args());
-    // The VMM dies with the daemon, even if the daemon crashes. When the
-    // host runs out of memory, the kernel kills a VM before the daemon, which
-    // would end every session: raising one's own score needs no privilege,
-    // and Firecracker inherits it.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            let fd = libc::open(
-                c"/proc/self/oom_score_adj".as_ptr(),
-                libc::O_WRONLY | libc::O_CLOEXEC,
-            );
-            if fd >= 0 {
-                libc::write(
-                    fd,
-                    VMM_OOM_SCORE_ADJ.as_ptr().cast(),
-                    VMM_OOM_SCORE_ADJ.len(),
-                );
-                libc::close(fd);
-            }
-            Ok(())
-        });
+    // When the host runs out of memory, the kernel kills a VM before the
+    // daemon, which would end every session.
+    if spec.durable {
+        // Outlives the daemon: a session of its own (a signal to the
+        // daemon's terminal or process group isn't its), its console
+        // written by itself, capped, as no daemon may be there to read it.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                raise_oom_score();
+                Ok(())
+            });
+        }
+        let console = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(spec.dir.console())?;
+        cmd.stdout(console.try_clone()?).stderr(console);
+    } else {
+        // The VMM dies with the daemon, even if the daemon crashes.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                raise_oom_score();
+                Ok(())
+            });
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
     let mut child = cmd
         .current_dir(&vmdir)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(!spec.durable)
         .spawn()
         .with_context(|| {
             format!(
@@ -250,17 +286,28 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
             )
         })?;
     // Firecracker as a uid of the session's own: the VMM waits for its map.
+    let mut subid = None;
     if let Some(ids) = ids {
         let mapped = match (crate::subids::lease(ids, spec.id), child.id()) {
-            (Ok(n), Some(pid)) => crate::subids::map(ids, pid, n).await,
+            (Ok(n), Some(pid)) => crate::subids::map(ids, pid, n).await.map(|_| n),
             (Err(e), _) => Err(e),
             (_, None) => Err(anyhow::anyhow!("the VMM exited at once")),
         };
-        if let Err(e) = mapped {
-            let _ = child.kill().await;
-            crate::subids::release(spec.id);
-            return Err(e.context("mapping the VMM's subordinate ids"));
+        match mapped {
+            Ok(n) => subid = Some(n),
+            Err(e) => {
+                let _ = child.kill().await;
+                crate::subids::release(spec.id);
+                return Err(e.context("mapping the VMM's subordinate ids"));
+            }
         }
+    }
+    if spec.durable {
+        let vmm = Vmm {
+            pid: child.id().unwrap_or(0),
+            subid,
+        };
+        crate::util::write_private(&spec.dir.vmm(), &serde_json::to_vec(&vmm)?)?;
     }
     let console = spec.dir.console();
     for stream in [

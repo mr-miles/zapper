@@ -109,13 +109,18 @@ impl Core {
     }
 
     /// Runs the clients' shutdown hooks (the office stops its firms), then
-    /// stops sessions: the daemon is going away.
+    /// stops sessions: the daemon is going away. A persistent session that
+    /// runs is left running, for the next daemon.
     pub async fn shutdown(&self) {
         let hooks = self.d.clients.shutdown.read().unwrap().clone();
         for hook in hooks {
             hook(self.clone()).await;
         }
         for s in self.sessions() {
+            if s.persistent && s.is_running() {
+                tracing::info!(session = %s.id, "left running for the next daemon");
+                continue;
+            }
             session::stop(&self.d, &s, "daemon shutdown").await;
         }
     }

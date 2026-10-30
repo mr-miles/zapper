@@ -31,6 +31,43 @@ pub struct Leaf {
 
 impl SessionCa {
     pub fn new(session: &str) -> Result<Self> {
+        let now = time::OffsetDateTime::now_utc();
+        Self::with_key(session, KeyPair::generate()?, now, time::Duration::days(30))
+    }
+
+    /// The CA of a persistent session, kept in `path` (its key and when it
+    /// was made, 0600), made there the first time: the same CA after the
+    /// daemon restarts, so the guest, which trusts it by its name and key,
+    /// goes on trusting what it signs. Valid for ten years, as the session
+    /// may be started again for long.
+    pub fn kept(session: &str, path: &std::path::Path) -> Result<Self> {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Kept {
+            key: String,
+            made: i64,
+        }
+        let life = time::Duration::days(3650);
+        if let Ok(b) = std::fs::read(path) {
+            let k: Kept = serde_json::from_slice(&b).context("the session's CA")?;
+            let made = time::OffsetDateTime::from_unix_timestamp(k.made)?;
+            return Self::with_key(session, KeyPair::from_pem(&k.key)?, made, life);
+        }
+        let key = KeyPair::generate()?;
+        let made = time::OffsetDateTime::now_utc();
+        let kept = Kept {
+            key: key.serialize_pem(),
+            made: made.unix_timestamp(),
+        };
+        crate::util::write_private(path, &serde_json::to_vec(&kept)?)?;
+        Self::with_key(session, key, made, life)
+    }
+
+    fn with_key(
+        session: &str,
+        key: KeyPair,
+        made: time::OffsetDateTime,
+        life: time::Duration,
+    ) -> Result<Self> {
         let mut params = CertificateParams::default();
         params
             .distinguished_name
@@ -40,10 +77,8 @@ impl SessionCa {
             .push(DnType::OrganizationName, "zapper");
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let now = time::OffsetDateTime::now_utc();
-        params.not_before = now - time::Duration::hours(1);
-        params.not_after = now + time::Duration::days(30);
-        let key = KeyPair::generate()?;
+        params.not_before = made - time::Duration::hours(1);
+        params.not_after = made + life;
         let cert = params.self_signed(&key)?;
         let pem = cert.pem();
         Ok(Self { cert, key, pem })
@@ -81,8 +116,12 @@ impl SessionCa {
 /// session's guest-facing TLS state.
 pub(crate) struct SessionTls {
     ca: SessionCa,
-    configs: Mutex<HashMap<String, Arc<ServerConfig>>>,
+    /// Each host's config, and when its leaf was minted.
+    configs: Mutex<HashMap<String, (Arc<ServerConfig>, std::time::Instant)>>,
 }
+
+/// How long a minted leaf (valid for a week) is used before another is.
+const LEAF_USE: std::time::Duration = std::time::Duration::from_secs(6 * 24 * 3600);
 
 impl SessionTls {
     pub fn new(session: &str) -> Result<Self> {
@@ -92,20 +131,40 @@ impl SessionTls {
         })
     }
 
+    /// A persistent session's, with its CA kept in `path` ([`SessionCa::kept`]).
+    pub fn kept(session: &str, path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            ca: SessionCa::kept(session, path)?,
+            configs: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The CA certificate the guest is given to trust (PEM).
     pub fn pem(&self) -> &str {
         &self.ca.pem
     }
 
+    /// The CA's public key, which the guest's trust rests on.
+    #[cfg(test)]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.ca.key.public_key_der()
+    }
+
     /// The server config for terminating an inspected connection to `host`:
-    /// a leaf minted from the CA and assembled on first use, then cached.
+    /// a leaf minted from the CA and assembled on first use, then cached,
+    /// and minted again before it expires (a session can run for weeks).
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let host = host.to_ascii_lowercase();
-        if let Some(c) = self.configs.lock().unwrap().get(&host) {
-            return Ok(c.clone());
+        if let Some((c, at)) = self.configs.lock().unwrap().get(&host) {
+            if at.elapsed() < LEAF_USE {
+                return Ok(c.clone());
+            }
         }
         let config = server_config(self.ca.leaf(&host)?)?;
-        self.configs.lock().unwrap().insert(host, config.clone());
+        self.configs
+            .lock()
+            .unwrap()
+            .insert(host, (config.clone(), std::time::Instant::now()));
         Ok(config)
     }
 }

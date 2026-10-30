@@ -122,7 +122,18 @@ impl SessionStore {
         }
         if let Some(s) = sessions.remove(id) {
             if s.persistent {
+                // What it kept to be started again, or adopted: gone, so no
+                // daemon lists it again. Its record stays.
                 let _ = std::fs::remove_dir_all(s.dir.vm());
+                for kept in [
+                    s.dir.saved(),
+                    s.dir.ca(),
+                    s.dir.dns(),
+                    s.dir.resume_token(),
+                    s.dir.vmm(),
+                ] {
+                    let _ = std::fs::remove_file(kept);
+                }
             }
         }
         Ok(())
@@ -186,6 +197,20 @@ impl SessionDir {
             .filter_map(|p| p.metadata().ok())
             .map(|m| m.blocks() * 512)
             .sum()
+    }
+    /// A persistent session's CA, kept (`tls::SessionCa::kept`).
+    pub fn ca(&self) -> PathBuf {
+        self.root.join("ca.json")
+    }
+    /// The synthetic names a persistent session has been given, in order
+    /// (`dns::SessionDns::kept`).
+    pub fn dns(&self) -> PathBuf {
+        self.root.join("dns.jsonl")
+    }
+    /// A durable VMM's pid and subordinate id (`vm::Vmm`), for a daemon that
+    /// didn't start it.
+    pub fn vmm(&self) -> PathBuf {
+        self.root.join("vmm.json")
     }
     /// A persistent session's resume token: what its agent sends to take
     /// its control channel again (`GuestMsg::Resume`).
@@ -616,7 +641,18 @@ impl Session {
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
     /// session rule ids never clash with config ones.
     pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
-        self.rules.add(rule, position)
+        let rule = self.rules.add(rule, position);
+        self.rules_changed();
+        rule
+    }
+
+    /// A persistent session's rules are kept, for a daemon that adopts it.
+    fn rules_changed(&self) {
+        if self.persistent {
+            if let Err(e) = lifecycle::save(self) {
+                tracing::warn!(session = %self.id, "keeping its rules: {e:#}");
+            }
+        }
     }
 
     /// The rules of the session's own layer.
@@ -629,6 +665,7 @@ impl Session {
     /// network a credential grant needs). It is in the session's events.
     pub fn put_rule(&self, rule: AnyRule) {
         let id = self.rules.put(rule);
+        self.rules_changed();
         self.config_event(format!(
             "rule {id} added to {}",
             Scope::Session(self.id.clone())
@@ -639,6 +676,7 @@ impl Session {
     /// and an event of the session's.
     pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
         let rule = self.rules.remove(id)?;
+        self.rules_changed();
         self.config_event(format!(
             "rule {id} removed from {}",
             Scope::Session(self.id.clone())

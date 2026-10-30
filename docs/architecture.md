@@ -64,7 +64,12 @@ state/sessions/<id>/
   audit.jsonl        every event of the session
   shell-1.cast       terminal recording
   console.log        boot messages
-  vm/                the only part Firecracker can see; deleted at the end
+  session.json       a persistent session: what it is, to be listed again after a restart
+  ca.json            a persistent session's CA: its key, kept (0600)
+  dns.jsonl          a persistent session's synthetic names, in the order given
+  resume.token       a persistent session's resume token (0600)
+  vmm.json           a persistent session's running VMM: its pid and subordinate id
+  vm/                the only part Firecracker can see; deleted at the end (a persistent session's disks stay)
     root.ext4          the guest's disk, a copy of the image
     disk0.ext4         a copy of a mounted host directory
     vm.json            Firecracker's configuration; kept, with metrics.json, next to the audit log at the end
@@ -88,6 +93,12 @@ The CLI talks to the daemon over a unix socket that only your user can open. The
 ### Persistent terminals
 
 A terminal opened persistent (`zapper attach --persist`, `persist=true`) keeps its program running when its connection to the host closes: the user's SSH or network drops, or they close their terminal. Its program is started as any terminal's, by the agent, as the workload, with every exec checked. The agent then hands its pty to a holder: the agent's own binary (`zapper-agent hold`), one process per terminal, which keeps the terminal's latest 256 KiB of output and passes keystrokes on. When the host attaches again (`zapper attach ID --terminal N`), the agent hands the holder the connection: it is told where the output it gets starts (`attached` frame), sent what was kept, then live output, and the program is made to redraw at the new size. A connection attached before is closed. The holder exits once the program has and an attached host has been told, or 24 hours after, with nobody attached. The host records the terminal once across its attachments, and marks what the guest no longer kept. A guest keeps at most 16 persistent terminals.
+
+### A persistent session's VM and the daemon
+
+A persistent session's VMM doesn't die with the daemon: it runs in a session of its own, without the daemon's death signal, and copies Firecracker's console to `console.log` itself (capped), as no daemon may be there to read it; Firecracker still dies with the VMM. A daemon that shuts down leaves a running persistent session running. What a daemon needs to take such a session on is kept beside it: its CA (`ca.json`), so the guest goes on trusting what the daemon signs; its synthetic names, given out again in the same order, so the addresses the guest has cached mean the same; its rules, saved as they change; its resume token; and its VMM's pid. Until a daemon adopts a running session, the next one stops its VMM, checking first that the pid is that session's VMM, and lists the session as stopped; its disks, not hashed, are unverified at its next start.
+
+Under systemd, `KillMode=process` keeps a restart of `zapper serve` from killing the VMMs with it; the default (`control-group`) stops every process of the unit, VMMs included.
 
 ### Checking each program
 

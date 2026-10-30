@@ -39,6 +39,36 @@ impl SessionDns {
         }
     }
 
+    /// A persistent session's: the names it has given out are kept in `path`,
+    /// a line each, in the order given, and given out again from it, so the
+    /// addresses the guest has cached mean the same after the daemon
+    /// restarts.
+    pub fn kept(path: &std::path::Path) -> Self {
+        let dns = Self::new();
+        {
+            let mut names = dns.names();
+            if let Ok(text) = std::fs::read_to_string(path) {
+                for line in text.lines() {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let name = v["name"].as_str().unwrap_or_default();
+                    match v["v"].as_u64() {
+                        Some(4) => drop(names.address(name)),
+                        Some(6) => drop(names.address6(name)),
+                        _ => {}
+                    }
+                }
+            }
+            names.log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok();
+        }
+        dns
+    }
+
     /// The synthetic-name table: names given out by synthetic address, and
     /// what the host's resolver said about each.
     pub fn names(&self) -> MutexGuard<'_, FakeDns> {
@@ -82,6 +112,18 @@ pub struct FakeDns {
     by_ip: HashMap<IpAddr, String>,
     /// Whether looked-up names exist, and when that was found out.
     exists: HashMap<String, (bool, Instant)>,
+    /// Where each name given out is written, for a persistent session.
+    log: Option<std::fs::File>,
+}
+
+impl FakeDns {
+    fn note(&mut self, version: u8, name: &str) {
+        if let Some(f) = self.log.as_mut() {
+            use std::io::Write;
+            let line = serde_json::json!({ "v": version, "name": name });
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
 
 impl FakeDns {
@@ -97,6 +139,7 @@ impl FakeDns {
         let ip = Ipv4Addr::from(BASE + n);
         self.v4.insert(name.to_string(), ip);
         self.by_ip.insert(IpAddr::V4(ip), name.to_string());
+        self.note(4, name);
         Some(ip)
     }
 
@@ -112,6 +155,7 @@ impl FakeDns {
         let ip = Ipv6Addr::from(BASE6 + n);
         self.v6.insert(name.to_string(), ip);
         self.by_ip.insert(IpAddr::V6(ip), name.to_string());
+        self.note(6, name);
         Some(ip)
     }
 
