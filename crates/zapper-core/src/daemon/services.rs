@@ -52,7 +52,7 @@ pub enum Target {
 }
 
 /// The directory under `state` holding the sockets socket services name.
-pub(super) const SOCKETS_DIR: &str = "services";
+pub(crate) const SOCKETS_DIR: &str = "services";
 
 /// The first line on a connection to a socket service: who is calling,
 /// from the VM the connection came from. The guest's own bytes follow it,
@@ -69,7 +69,7 @@ struct Caller {
 /// `name` as a socket's file name in `state/services/`: letters, digits,
 /// `.`, `-` and `_`, not starting with `.`, so it can't name anything
 /// outside that directory.
-fn check_socket(name: &str) -> Result<()> {
+pub(crate) fn check_socket(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')

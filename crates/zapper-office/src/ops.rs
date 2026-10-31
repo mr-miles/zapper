@@ -63,24 +63,114 @@ impl McpServer for Tools {
 /// The MCP server's name, as the workers' harnesses know it.
 pub const SERVER: &str = "office";
 
-/// Serves the office's tools to the firm's workers. A worker of another
-/// run of the firm gets the tools too, and is told on each call that its
-/// firm isn't running.
+/// The office's tools as served: their registration in the gateway, and the
+/// task serving their socket.
+pub struct Served {
+    id: u64,
+    task: Option<tokio::task::AbortHandle>,
+    path: std::path::PathBuf,
+}
+
+/// Serves the office's tools to the firm's workers, from a socket in the
+/// daemon's `state/services/` directory that the gateway asks for each
+/// tool list and call (naming the caller from the VM), as a facility in
+/// another process would. A worker of another run of the firm gets the
+/// tools too, and is told on each call that its firm isn't running.
 pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
     let sessions = [("firm", run.firm.as_str()), ("office", "worker")]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let id = d.add_mcp_server(SERVER, sessions, Arc::new(Tools { d: d.clone() }))?;
-    *run.tools.lock().unwrap() = Some(id);
+    let socket = format!("office-{}.sock", run.firm);
+    let path = d.socket_dir().join(&socket);
+    let _ = std::fs::remove_file(&path);
+    // Bound now, served once there is a runtime to serve it on (always in
+    // the daemon; not in a test that starts a firm without one).
+    let listener = std::os::unix::net::UnixListener::bind(&path)?;
+    listener.set_nonblocking(true)?;
+    let tools = Arc::new(Tools { d: d.clone() });
+    let task = tokio::runtime::Handle::try_current().ok().map(|h| {
+        h.spawn(serve(d.clone(), tools.clone(), listener))
+            .abort_handle()
+    });
+    let id = match d.add_mcp_socket(SERVER, sessions, &socket, tools.instructions(), "office") {
+        Ok(id) => id,
+        Err(e) => {
+            if let Some(t) = task {
+                t.abort();
+            }
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    *run.tools.lock().unwrap() = Some(Served { id, task, path });
     Ok(())
 }
 
 /// Stops serving them, when the firm stops.
 pub fn unregister(d: &Core, run: &FirmRun) {
-    let id = run.tools.lock().unwrap().take();
-    if let Some(id) = id {
-        d.remove_mcp_server(id);
+    let served = run.tools.lock().unwrap().take();
+    if let Some(s) = served {
+        d.remove_mcp_server(s.id);
+        if let Some(t) = s.task {
+            t.abort();
+        }
+        let _ = std::fs::remove_file(&s.path);
+    }
+}
+
+/// Answers the gateway's requests on the tools' socket, one per
+/// connection: the caller as the daemon names it, never as the guest says.
+async fn serve(d: Core, tools: Arc<Tools>, listener: std::os::unix::net::UnixListener) {
+    use zapper_policy::facility::{McpCall, McpMethod, McpReply};
+    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+        return;
+    };
+    while let Ok((stream, _)) = listener.accept().await {
+        let (d, tools) = (d.clone(), tools.clone());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+            let (r, mut w) = stream.into_split();
+            let mut line = Vec::new();
+            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
+            if tokio::io::BufReader::new(r)
+                .take(max + 1)
+                .read_until(b'\n', &mut line)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let answer = async {
+                let call: McpCall = serde_json::from_slice(&line)?;
+                if call.server != SERVER {
+                    bail!("this socket serves {SERVER}, not {}", call.server);
+                }
+                let s = d.session(&call.session)?;
+                match call.method {
+                    McpMethod::ToolsList => tools.tools(&s).await,
+                    McpMethod::ToolsCall => {
+                        let tool = call.tool.unwrap_or_default();
+                        let args = call.arguments.unwrap_or_else(|| json!({}));
+                        tools.call(&s, &tool, args).await
+                    }
+                }
+            };
+            let reply = match answer.await {
+                Ok(v) => McpReply {
+                    result: Some(v),
+                    error: None,
+                },
+                Err(e) => McpReply {
+                    result: None,
+                    error: Some(format!("{e:#}")),
+                },
+            };
+            if let Ok(mut b) = serde_json::to_vec(&reply) {
+                b.push(b'\n');
+                let _ = w.write_all(&b).await;
+            }
+        });
     }
 }
 

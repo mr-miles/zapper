@@ -12,7 +12,7 @@ mod eval;
 pub mod mint;
 pub mod names;
 /// The host–guest protocol, from `zapper-proto`.
-pub use zapper_proto::proto;
+pub use zapper_proto::{facility, proto};
 pub use zapper_proto::{ExecRequest, FsAccess, FsRule};
 mod template;
 

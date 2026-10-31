@@ -1,6 +1,8 @@
 //! The REST API and the UI against a core without VMs
 //! (`zapper_core::testing::TestCore`), request by request.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
@@ -557,6 +559,42 @@ async fn a_new_session_takes_files_mounts_an_agent_overlay_and_forwards() {
 }
 
 #[tokio::test]
+async fn socket_mcp_servers_added_listed_and_removed_by_their_owner() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let r = post(
+        &app,
+        "/v1/mcp",
+        r#"{"name":"tools","sessions":{"team":"a"},"socket":"tools.sock","instructions":"Hi."}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let id = r.json()["id"].as_u64().unwrap();
+    assert_eq!(r.json()["owner"], "operator");
+    let bad = post(&app, "/v1/mcp", r#"{"name":"x","socket":"../api.sock"}"#).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    // A client's is the client's to remove.
+    let theirs = t
+        .core
+        .add_mcp_socket(
+            "office",
+            BTreeMap::new(),
+            "office-acme.sock",
+            None,
+            "office",
+        )
+        .unwrap();
+    let listed = get(&app, "/v1/mcp").await.json();
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{theirs}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn services_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());
@@ -850,6 +888,8 @@ async fn the_ui_has_no_writes_beyond_its_list() {
         (Method::POST, "/sessions"),
         (Method::POST, "/services"),
         (Method::DELETE, "/services/x"),
+        (Method::POST, "/mcp"),
+        (Method::DELETE, "/mcp/1"),
         (Method::DELETE, "/sessions/abc234"),
         (Method::POST, "/sessions/abc234/stop"),
         (Method::POST, "/sessions/abc234/start"),

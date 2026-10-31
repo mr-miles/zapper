@@ -1,0 +1,78 @@
+//! What the daemon tells a facility, a program on the host serving guests
+//! from a socket in the daemon's `state/services/` directory: here, the
+//! requests of an MCP server registered on a socket (`POST /v1/mcp`). The
+//! daemon is the MCP endpoint the guest talks to; it asks the facility one
+//! request per connection, one line each way, naming the caller itself.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// A request to an MCP server on a socket: who calls, from the VM the
+/// guest's connection came from (never from what the guest sent), and what
+/// for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpCall {
+    /// The calling session's id, and its labels.
+    pub session: String,
+    pub labels: BTreeMap<String, String>,
+    /// The server's name, as it is registered.
+    pub server: String,
+    pub method: McpMethod,
+    /// For `tools/call`: the tool, and its arguments as the guest sent them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpMethod {
+    /// The server's tools for the caller: a JSON array of MCP tool
+    /// definitions.
+    #[serde(rename = "tools/list")]
+    ToolsList,
+    /// A tool called: its result, any JSON, goes to the model as text.
+    #[serde(rename = "tools/call")]
+    ToolsCall,
+}
+
+/// A facility's answer: its result, or why not (an error result to the
+/// model, for a tool call).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct McpReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_call_and_a_reply_are_one_json_line_each() {
+        let call = McpCall {
+            session: "abc234".into(),
+            labels: [("firm".to_string(), "acme".to_string())].into(),
+            server: "office".into(),
+            method: McpMethod::ToolsCall,
+            tool: Some("mail_send".into()),
+            arguments: Some(json!({ "to": ["pat"] })),
+        };
+        let line = serde_json::to_string(&call).unwrap();
+        assert!(!line.contains('\n'));
+        assert!(line.contains(r#""method":"tools/call""#), "{line}");
+        assert_eq!(serde_json::from_str::<McpCall>(&line).unwrap(), call);
+        let list: McpCall = serde_json::from_value(json!({
+            "session": "s", "labels": {}, "server": "office", "method": "tools/list"
+        }))
+        .unwrap();
+        assert_eq!((list.method, list.tool), (McpMethod::ToolsList, None));
+        let reply: McpReply = serde_json::from_str(r#"{"error":"no"}"#).unwrap();
+        assert_eq!(reply.error.as_deref(), Some("no"));
+    }
+}

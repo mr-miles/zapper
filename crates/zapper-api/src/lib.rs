@@ -79,6 +79,7 @@ fn read_routes() -> Router<Core> {
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
         .route("/services", get(list_services))
+        .route("/mcp", get(list_mcp))
         .route("/images", get(list_images))
         .route("/images/builds/{id}", get(follow_build))
 }
@@ -110,6 +111,8 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions", post(create_session))
         .route("/services", post(add_service))
         .route("/services/{id}", axum::routing::delete(remove_service))
+        .route("/mcp", post(add_mcp))
+        .route("/mcp/{id}", axum::routing::delete(remove_mcp))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
         .route("/sessions/{id}/start", post(start_session))
@@ -1167,6 +1170,52 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
 const OPERATOR: &str = "operator";
 
 /// Removes a service the operator added; others are their owners'.
+async fn list_mcp(State(d): D) -> Json<Value> {
+    Json(Value::Array(d.mcp_servers()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewMcp {
+    name: String,
+    /// Labels picking the sessions it serves; every session when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+    /// A file name in the daemon's `state/services/` directory.
+    socket: String,
+    instructions: Option<String>,
+}
+
+/// Serves an MCP server a facility serves on a socket, as the operator's.
+async fn add_mcp(State(d): D, body: String) -> R<Json<Value>> {
+    let m: NewMcp = parse_body(&body)?;
+    let id = d.add_mcp_socket(&m.name, m.sessions, &m.socket, m.instructions, OPERATOR)?;
+    let listed = d.mcp_servers().into_iter().find(|s| s["id"] == id);
+    Ok(Json(listed.unwrap_or_else(|| json!({ "id": id }))))
+}
+
+/// Stops serving an MCP server the operator registered; a client's is the
+/// client's to remove.
+async fn remove_mcp(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
+    let Some(m) = d.mcp_servers().into_iter().find(|s| s["id"] == id) else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no MCP server {id}"),
+        ));
+    };
+    if m["owner"] != OPERATOR {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "MCP server {id} is {}'s",
+                m["owner"].as_str().unwrap_or("a client")
+            ),
+        ));
+    }
+    d.remove_mcp_server(id);
+    Ok(Json(m))
+}
+
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
     let Some(s) = d.service(id) else {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("no service {id}")));

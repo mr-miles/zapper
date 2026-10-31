@@ -3,9 +3,12 @@
 //! guest asks the host to decide (`ExecRequest`) and the filesystem rules
 //! the guest applies at boot (`FsRule`). The agent depends on this alone,
 //! not on the config model or the rules' evaluation, which are the host's.
+//! Also what the daemon tells a facility on the host, which needs neither
+//! (`facility`).
 
 use serde::{Deserialize, Serialize};
 
+pub mod facility;
 pub mod proto;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
