@@ -208,10 +208,13 @@ pub(super) async fn check_disks(
     );
     if let Some(detail) = detail {
         if !accept {
-            bail!(
-                "session {}: {detail}; start it with --accept-changed-disks to boot its disks as they are",
-                session.id
-            );
+            return Err(crate::errors::error(
+                crate::errors::ErrorKind::Conflict,
+                format!(
+                    "session {}: {detail}; start it with --accept-changed-disks to boot its disks as they are",
+                    session.id
+                ),
+            ));
         }
         daemon.emit(
             Some(session),

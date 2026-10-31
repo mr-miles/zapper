@@ -57,6 +57,11 @@ async fn a_persistent_sessions_disks_stay_and_are_checked_at_its_start() {
     // Changed on the host while stopped: recorded, and refused.
     std::fs::write(s.dir.root_disk(), b"tampered").unwrap();
     let e = start(t.core.daemon(), &s, false).await.unwrap_err();
+    assert_eq!(
+        crate::errors::kind_of(&e),
+        Some(crate::errors::ErrorKind::Conflict),
+        "the API's 409"
+    );
     let e = format!("{e:#}");
     assert!(e.contains("root.ext4 changed while stopped"), "{e}");
     assert!(e.contains("--accept-changed-disks"), "{e}");

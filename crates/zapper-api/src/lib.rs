@@ -697,17 +697,7 @@ async fn start_session(State(d): D, Path(id): Path<String>, body: String) -> R<J
         parse_body(&body)?
     };
     let s = d.session(&id)?;
-    d.start_session(&s, req.accept_changed_disks)
-        .await
-        .map_err(|e| {
-            let msg = format!("{e:#}");
-            let code = if msg.contains("--accept-changed-disks") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            ApiError(code, msg)
-        })?;
+    d.start_session(&s, req.accept_changed_disks).await?;
     Ok(Json(d.session_info(&s)))
 }
 
