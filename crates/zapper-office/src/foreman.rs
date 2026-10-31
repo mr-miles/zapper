@@ -82,10 +82,7 @@ async fn start(
 
 /// The worker's harness driver, from its profile's `agent.kind`.
 fn driver_of(s: &Session) -> Result<&'static dyn Headless> {
-    let kind = &s.resolved.agent.kind;
-    let h = harness::get(kind).ok_or_else(|| anyhow::anyhow!("no harness {kind}"))?;
-    h.headless()
-        .ok_or_else(|| anyhow::anyhow!("agent kind {} can't run an office worker", h.kind()))
+    harness::headless(&s.resolved.agent.kind)
 }
 
 fn idle_state(run: &FirmRun, w: &WorkerRt) -> WorkerState {

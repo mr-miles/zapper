@@ -476,13 +476,13 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         return;
     };
     let kind = session.resolved.agent.kind.clone();
-    let Some(harness) = super::harness::get(&kind).and_then(|h| h.headless()) else {
+    let harness = match super::harness::headless(&kind) {
+        Ok(h) => h,
         // Validation allows only kinds with a driver; said here all the same.
-        driver.set(
-            Status::Error,
-            Some(format!("agent kind {kind} can't be driven")),
-        );
-        return;
+        Err(e) => {
+            driver.set(Status::Error, Some(format!("{e:#}")));
+            return;
+        }
     };
     let conversations: Conversations = Box::new(move |resume| harness.conversation(resume));
     let s = session.clone();

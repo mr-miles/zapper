@@ -226,6 +226,17 @@ fn pretty(v: &Value) -> String {
 }
 
 /// The harness of an `agent.kind`.
+/// How to run an agent of `kind` headless (a driven session, an office
+/// worker); an error naming the kinds that can be, if this one can't.
+pub fn headless(kind: &str) -> anyhow::Result<&'static dyn Headless> {
+    get(kind).and_then(|h| h.headless()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent kind {kind} can't be run headless (those that can: {})",
+            zapper_policy::DRIVABLE_KINDS.join(", ")
+        )
+    })
+}
+
 pub fn get(kind: &str) -> Option<&'static dyn Harness> {
     match kind {
         "claude-code" => Some(&ClaudeCode),

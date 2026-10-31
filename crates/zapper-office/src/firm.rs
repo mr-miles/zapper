@@ -507,9 +507,10 @@ pub struct Worker {
 pub fn office_profile_problem(config: &Config, profile: &str) -> Option<String> {
     match config.resolve(profile) {
         Err(e) => Some(format!("profile {profile}: {e:#}")),
-        Ok(p) if !["claude-code", "pi"].contains(&p.agent.kind.as_str()) => Some(format!(
-            "profile {profile}: agent kind {} can't run an office worker (claude-code, pi)",
-            p.agent.kind
+        Ok(p) if !zapper_policy::DRIVABLE_KINDS.contains(&p.agent.kind.as_str()) => Some(format!(
+            "profile {profile}: agent kind {} can't run an office worker ({})",
+            p.agent.kind,
+            zapper_policy::DRIVABLE_KINDS.join(", ")
         )),
         Ok(_) => None,
     }

@@ -867,10 +867,8 @@ pub(crate) fn agent_overlay(
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
 ) -> Result<&'static dyn zapper_core::harness::Headless> {
-    let kind = &profile.agent.kind;
-    zapper_core::harness::get(kind)
-        .and_then(|h| h.headless())
-        .ok_or_else(|| anyhow!("profile {}: agent kind {kind} can't run an office worker (those that can: claude-code, pi)", profile.name))
+    zapper_core::harness::headless(&profile.agent.kind)
+        .map_err(|e| anyhow!("profile {}: {e:#}", profile.name))
 }
 
 /// Follow-ups, digests and expiries.
