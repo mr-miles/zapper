@@ -87,12 +87,12 @@ profiles:
 | `model` | | The model. Claude Code: `model` in `~/.claude/settings.json` |
 | `permission_mode` | | How the agent approves its own actions. Claude Code: `permissions.defaultMode` in the managed settings file, `/etc/claude-code/managed-settings.json`, which is root-owned. Set there, Claude Code doesn't ask at each start whether to switch to auto mode, and the workload can't change it. With `bypassPermissions`, the file also sets `skipDangerousModePermissionPrompt` |
 | `instructions` | | Standing instructions, written to the harness's instructions file. Claude Code: `~/.claude/CLAUDE.md` (`claude_md` is accepted too) |
-| `skills` | | A host directory of skills (`<name>/SKILL.md`), mounted read-only where the harness reads them. Claude Code: `~/.claude/skills` |
+| `skills` | | A host directory of skills (`<name>/SKILL.md`), mounted read-only where the harness reads them. Claude Code: `~/.claude/skills`. Refused for `kind: generic`, which has no harness to read them |
 | `mcp_servers` | | MCP servers, `{name: {command, args, env}}`. Claude Code: `mcpServers` in `~/.claude.json` |
 | `turn_end` | | A command run when the agent is about to end a turn; what it prints makes the agent go on. Claude Code: a `Stop` hook |
 | `settings` | | Harness-native settings merged into its main config file. Claude Code: `~/.claude/settings.json` |
 | `config_files` | | Files in the harness's config directory, by path relative to it (Claude Code: `~/.claude`), with `{{secret:NAME}}` as in `files` |
-| `config_mounts` | | Host directories mounted in the harness's config directory: `{host, guest, mode, extra}` with `guest` relative to it, read-only unless `mode: rw` (copied in at boot, like `mounts`) |
+| `config_mounts` | | Host directories mounted in the harness's config directory: `{host, guest, mode, extra}` with `guest` relative to it, read-only unless `mode: rw` (copied in at boot, like `mounts`). Refused for `kind: generic` |
 
 Every session's environment also has:
 

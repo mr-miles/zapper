@@ -1232,6 +1232,11 @@ impl Config {
                 AGENT_KINDS.join(", ")
             );
         }
+        // A generic agent has no harness to put skills or configuration
+        // where it reads them: refused, rather than given nowhere.
+        if agent.kind == "generic" && (agent.skills.is_some() || !agent.config_mounts.is_empty()) {
+            bail!("agent.kind generic takes no skills or config_mounts: no harness reads them");
+        }
         let layers = chain
             .into_iter()
             .map(|(n, p)| (Scope::Profile(n), p.policy.clone()))
@@ -1266,6 +1271,23 @@ pub fn merge(base: &mut Value, over: &Value) {
 
 #[cfg(test)]
 mod tests {
+    use super::Config;
+
+    /// Skills or config mounts for a generic agent, which no harness would
+    /// put anywhere, are refused rather than dropped.
+    #[test]
+    fn a_generic_agent_takes_no_skills() {
+        let c = |agent: &str| Config::from_yaml(&format!("profiles:\n  p:\n    agent: {agent}\n"));
+        let e = c("{ kind: generic, skills: ~/skills }").unwrap_err();
+        assert!(
+            format!("{e:#}").contains("generic takes no skills"),
+            "{e:#}"
+        );
+        assert!(c("{ kind: generic, config_mounts: [{ host: /a, guest: /b }] }").is_err());
+        assert!(c("{ kind: generic }").is_ok());
+        assert!(c("{ kind: pi, skills: ~/skills }").is_ok());
+    }
+
     /// A recipe's copies take from its own args, to absolute paths.
     #[test]
     fn image_recipes_are_checked() {
