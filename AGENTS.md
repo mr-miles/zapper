@@ -129,7 +129,7 @@ Build and test:
 ```
 make build        # release: static musl agent + host binary
 make test         # unit tests, no VMs, seconds
-make lint         # rustfmt (defaults, rustfmt.toml) and clippy with warnings as errors; `make fmt` formats
+make lint         # rustfmt (defaults, rustfmt.toml) and clippy with warnings as errors (the fuzz entry points too); `make fmt` formats
 make test-e2e     # real VMs, network; must end "all e2e checks passed" and "all office e2e checks passed"
 ```
 
