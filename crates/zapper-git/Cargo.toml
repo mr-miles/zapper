@@ -1,0 +1,12 @@
+[package]
+name = "zapper-git"
+description = "Git over HTTP for guests: git http-backend run as a CGI for one request, and the pre-receive hook that keeps branches apart from main"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1"] }
+tokio = { version = "1", features = ["process", "io-util", "rt"] }
