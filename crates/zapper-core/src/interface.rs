@@ -326,7 +326,9 @@ impl SessionApi for Core {
         let chain = match daemon::record::rel(&dir).map(|r| daemon::record::verify_dir(&r)) {
             Some(Ok(v)) => v,
             Some(Err(e)) => json!({ "ok": null, "note": format!("{e:#}") }),
-            None => json!({ "ok": null, "note": "no record" }),
+            None => {
+                json!({ "ok": null, "note": "no keeper: the record's files have no chains to check them against" })
+            }
         };
         let ok = findings.is_empty() && chain["ok"] != json!(false);
         Ok(json!({ "session": id, "ok": ok, "chain": chain, "findings": findings }))

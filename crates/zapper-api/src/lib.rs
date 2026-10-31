@@ -877,7 +877,11 @@ async fn events(
 /// A session's record checked: the keeper's chains, and its disks' hashes
 /// from each stop to the start after it.
 async fn verify_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
-    Ok(Json(d.verify_session(&id)?))
+    // It reads the whole record: off the async threads.
+    let checked = tokio::task::spawn_blocking(move || d.verify_session(&id))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(checked))
 }
 
 async fn list_images(State(d): D) -> R<Json<Value>> {
