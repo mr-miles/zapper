@@ -22,7 +22,9 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon};
 
-pub use crate::daemon::builds::{BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome};
+pub use crate::daemon::builds::{
+    BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome as BuildOutcome,
+};
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
@@ -738,13 +740,13 @@ impl ImageApi for Core {
             },
             move |b| {
                 let body = match b.info().outcome {
-                    Some(Outcome::Built(path)) => {
+                    Some(BuildOutcome::Built(path)) => {
                         let hash = crate::images::built_hash(&images_dir, &b.name)
                             .map(|h| format!(" sha256 {h}"))
                             .unwrap_or_default();
                         event(b, "built", Some(format!("{path}{hash}")))
                     }
-                    Some(Outcome::Failed(e)) => event(b, "failed", Some(e)),
+                    Some(BuildOutcome::Failed(e)) => event(b, "failed", Some(e)),
                     None => return,
                 };
                 d.emit(None, body);

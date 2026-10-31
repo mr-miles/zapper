@@ -46,7 +46,7 @@ fn meminfo_mib(info: &str, field: &str) -> Option<u64> {
 }
 
 /// A file's SHA-256, in hex.
-pub fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).with_context(|| format!("hashing {}", path.display()))?;
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
@@ -75,7 +75,7 @@ pub fn now() -> f64 {
 }
 
 /// Whether `s` has the form of a session id, as `random_id(6)` makes them.
-pub fn is_session_id(s: &str) -> bool {
+pub(crate) fn is_session_id(s: &str) -> bool {
     s.len() == 6 && s.bytes().all(|b| ID_CHARS.contains(&b))
 }
 

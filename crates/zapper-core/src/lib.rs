@@ -27,11 +27,11 @@ pub use daemon::harness;
 /// `zapper-keeper` as a separate user.
 pub use daemon::record;
 pub use interface::{
-    ApprovalApi, BuildInfo, BuildMessage, BuildRequest, Catchup, ConfigApi, Core, Cursor, Decider,
-    Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer, NewSession, Outcome,
-    Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi, ServiceHandler,
-    ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi, SessionInfo, Status,
-    TermChunk, TerminalInfo,
+    ApprovalApi, BuildInfo, BuildMessage, BuildOutcome, BuildRequest, Catchup, ConfigApi, Core,
+    Cursor, Decider, Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer,
+    NewSession, Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi,
+    ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi,
+    SessionInfo, Status, TermChunk, TerminalInfo,
 };
 /// The subordinate-id range a session's Firecracker can take, for `check`
 /// (see [`subids::host_range`]).
