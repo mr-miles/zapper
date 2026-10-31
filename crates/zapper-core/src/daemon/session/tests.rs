@@ -327,6 +327,29 @@ async fn a_running_vm_left_by_an_earlier_daemon_is_adopted() {
     assert!(back.dir.root_disk().exists());
 }
 
+/// A VMM whose adoption fails is stopped, once, and the session listed
+/// again says it ran on after the daemon ended.
+#[tokio::test]
+async fn a_vmm_that_cant_be_adopted_is_stopped_and_said_so() {
+    let t = TestCore::new(CONFIG);
+    let s = persistent(&t);
+    std::fs::create_dir_all(s.dir.vm()).unwrap();
+    let mut vmm = stand_in(&s.id);
+    // Its subordinate id held by another session: the adoption fails.
+    let n = 4096 - 11;
+    crate::subids::claim("someone-else", n).unwrap();
+    let mut record = crate::daemon::vm::Vmm::of(vmm.id(), None).unwrap();
+    record.subid = Some(n);
+    std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
+    let back = restart(&t, &s);
+    crate::subids::release("someone-else");
+    assert!(!vmm.wait().unwrap().success(), "stopped");
+    match back.runtime.current() {
+        Status::Stopped(why) => assert!(why.contains("ran on after the daemon ended"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A pid in `vmm.json` that isn't that session's VMM (reused since) is
 /// neither adopted nor killed.
 #[tokio::test]

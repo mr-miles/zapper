@@ -45,19 +45,18 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         // Its VMM, still running, which an earlier daemon left: adopted, with
         // a runtime to serve it in; else stopped, so a start can't boot its
         // disks twice.
-        let live = live_vmm(&dir, &saved.id);
-        if let (Some(vmm), Ok(rt)) = (&live, tokio::runtime::Handle::try_current()) {
-            if let Err(e) = adopt(daemon, saved.clone(), &dir, vmm, &rt) {
-                tracing::warn!("adopting the session in {}: {e:#}", dir.root().display());
-                kill_vmm(vmm, &saved.id);
-            } else {
-                continue;
+        let mut left_running = false;
+        if let Some(vmm) = live_vmm(&dir, &saved.id) {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                match adopt(daemon, saved.clone(), &dir, &vmm, &rt) {
+                    Ok(()) => continue,
+                    Err(e) => {
+                        tracing::warn!("adopting the session in {}: {e:#}", dir.root().display())
+                    }
+                }
             }
+            left_running = kill_vmm(&vmm, &saved.id);
         }
-        let left_running = match &live {
-            Some(vmm) => kill_vmm(vmm, &saved.id),
-            None => false,
-        };
         let _ = std::fs::remove_file(dir.vmm());
         let record =
             std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
