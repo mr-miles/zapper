@@ -174,7 +174,7 @@ impl Hooked {
         let h = Hooked { dir };
         h.git(&["init", "-q", "--bare", "-b", "main", "repo.git"], ".");
         let hook = h.dir.join("repo.git/hooks/pre-receive");
-        std::fs::write(&hook, super::PRE_RECEIVE).unwrap();
+        std::fs::write(&hook, zapper_git::PRE_RECEIVE).unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         h.git(&["clone", "-q", "repo.git", "work"], ".");

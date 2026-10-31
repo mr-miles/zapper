@@ -595,6 +595,63 @@ async fn socket_mcp_servers_added_listed_and_removed_by_their_owner() {
 }
 
 #[tokio::test]
+async fn a_secret_is_set_and_removed_alone_and_validated() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let put = |name: &str, body: &str| {
+        let (app, uri, body) = (app.clone(), format!("/v1/secrets/{name}"), body.to_string());
+        async move {
+            send(
+                &app,
+                Method::PUT,
+                &uri,
+                &[("content-type", "application/json")],
+                &body,
+            )
+            .await
+        }
+    };
+    let r = put(
+        "gh",
+        r#"{"file":"/tmp/gh.token","hosts":["api.github.com"]}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(t.core.config().secrets["gh"].hosts, ["api.github.com"]);
+    // An inline value is never shown back.
+    let r = put("inline", r#"{"value":"s3cret","hosts":["x.example"]}"#).await;
+    assert!(!r.body.contains("s3cret"), "{}", r.body);
+    // Validated as the whole config is: a proxy secret needs hosts.
+    let r = put("nohosts", r#"{"file":"/tmp/x"}"#).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(!t.core.config().secrets.contains_key("nohosts"));
+    let r = put("bad%20name", r#"{"file":"/tmp/x","hosts":["h"]}"#).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    // In use by a rule, it stays; unused, it goes.
+    let rule = r#"{"scope":"global","rule":{"kind":"net","action":"allow","host":"api.github.com","secrets":["gh"]}}"#;
+    assert_eq!(post(&app, "/v1/rules", rule).await.status, StatusCode::OK);
+    let r = send(&app, Method::DELETE, "/v1/secrets/gh", &[], "").await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.contains("unknown secret gh"), "{}", r.body);
+    // A session's own rule holds it too.
+    let id = session(&t, "web", &[], true);
+    let rule = format!(
+        r#"{{"scope":"session:{id}","rule":{{"kind":"net","action":"allow","host":"x.example","secrets":["inline"]}}}}"#
+    );
+    let added = post(&app, "/v1/rules", &rule).await.json();
+    let r = send(&app, Method::DELETE, "/v1/secrets/inline", &[], "").await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    assert!(r.body.contains(&id), "{}", r.body);
+    let rid = added["id"].as_str().unwrap();
+    send(&app, Method::DELETE, &format!("/v1/rules/{rid}"), &[], "").await;
+    let r = send(&app, Method::DELETE, "/v1/secrets/inline", &[], "").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = send(&app, Method::DELETE, "/v1/secrets/inline", &[], "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn services_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());
@@ -890,6 +947,8 @@ async fn the_ui_has_no_writes_beyond_its_list() {
         (Method::DELETE, "/services/x"),
         (Method::POST, "/mcp"),
         (Method::DELETE, "/mcp/1"),
+        (Method::PUT, "/secrets/x"),
+        (Method::DELETE, "/secrets/x"),
         (Method::DELETE, "/sessions/abc234"),
         (Method::POST, "/sessions/abc234/stop"),
         (Method::POST, "/sessions/abc234/start"),
