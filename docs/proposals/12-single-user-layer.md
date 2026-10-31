@@ -208,6 +208,20 @@ This replaces proposal 11's new `drive` rule kind: the drive becomes an ordinary
 
 The SSH gateway's needs from the core: an upgrade to a raw byte stream for the gateway, and the forward to the guest's loopback (`LOCAL_FORWARD_PORT`) for VS Code. Shell and exec over SSH use `attach`.
 
+*As built (`a0909bc`, `80ceda2`, `06f8169` on `feat/ssh`; see [ssh](../ssh.md)):* shell and exec only, with no forwarding, so no `LOCAL_FORWARD_PORT` and no VS Code. The gateway is the SSH connector's design below, without the workbench: the host's sshd authenticates the key and runs `zapper ssh proxy --key NAME` as its forced command (`restrict`), which takes the sandbox from `SSH_ORIGINAL_COMMAND` and speaks the server's side of SSH (crate `zapper-ssh`, on russh) on its stdio. Its channels become terminals through `attach`, which gains `env` (`TERM`, `LANG`, `LC_*` from the client) and `client` (the key's name, in the terminal's `shell` events). Port, agent and X11 forwarding, subsystems (`sftp`) and legacy `scp` are refused. `zapper ssh config` prints the client's `ssh_config` block, the `known_hosts` line for the gateway's one host key (alias `zapper`), and the `authorized_keys` line.
+
+- **SSH on and off, per sandbox, while it runs.** Off by default; `"ssh": true` at creation (`zapper run --ssh`), `POST /v1/sessions/{id}/ssh {enabled}` (`zapper ssh on|off ID`) later. The daemon enforces it: the gateway's `attach` carries `ssh=true`, refused (`403`, an `ssh` event naming the key) while SSH is off, and the terminals it opened close when SSH goes off. A persistent sandbox keeps the setting.
+- **One SSH terminal per sandbox.** `ssh ID.zapper` is a persistent terminal running the profile's command: started the first time, attached to again by each later connection while its program runs, the last to connect taking over (which boots a connection left behind). A dropped connection leaves the agent running; a persistent sandbox keeps the terminal's number, so `ssh` finds it after a daemon restart. `ssh ID.zapper CMD` is a terminal of its own, ended with its connection.
+
+#### One terminal for human users (to do)
+
+A sandbox has **one terminal for its human users**, reached by `zapper attach` or by SSH, never two running side by side: the person sees the same agent whichever way they connect. As built, SSH shells share one terminal, but `zapper attach ID` still starts a second, its own copy of the profile's command; only `zapper attach ID --terminal N` reaches the SSH one, and the CLI can't list terminals to find N.
+
+- `zapper attach ID` (no command) and `ssh ID.zapper` reach the same persistent terminal, the session's human terminal: started by whichever comes first, taken over by whichever connects last, the one before closed. Its number is kept as the SSH terminal's is now.
+- Terminals for commands stay separate: `zapper attach ID -- CMD`, `zapper exec`, `ssh ID.zapper CMD`, the driver's and the office's foreman's.
+- SSH being off refuses only the gateway's connections; `zapper attach` reaches the human terminal whatever the switch says.
+- A takeover is said to the client it closes ("taken over by …", with the other's client name), and recorded.
+
 ### 8. Clients outside the daemon: event resume
 
 The workbench is a client of the API in another process, as [firm separation](../firm-separation.md#later-if-wanted-a-separate-process) foresees for the office. Such a client needs what the API lacked:
@@ -249,7 +263,7 @@ Ordered so that what also makes zapper with the office (`OFFICE=1`) better separ
 | 5 | **Persist, stop, start** (§1) | Facilities (a firm's cluster) and workers can be stopped and kept; the cluster's state survives a firm going down | Sandboxes the user comes back to |
 | 6 | **Terminals that outlive their connection** (§3) | `persist: true` for the foreman's driver terminals: a worker's agent survives a dropped host connection; terminal handling leaves PID 1 for holder processes | Reconnecting over SSH to the same terminal |
 | 7 | **Survive a restart of the daemon** (§2) | Workers' VMs and terminals outlive a daemon restart. The office still ends its run when the daemon stops ([firm separation: restarts](../firm-separation.md#restarts)); resuming a run is the office's own work, after this | Upgrading zapper without losing sandboxes |
-| 8 | **SSH pieces** from proposal 10 (§7) | — | The SSH connector |
+| 8 | **SSH pieces** from proposal 10 (§7): as built, shell and exec through the host's sshd, on and off per sandbox, one SSH terminal; no forwarding | — | The SSH connector |
 
 [Proxy separation](../proxy-separation.md)'s session process (guest input parsed outside the process that holds the secrets) is the other change that most improves `OFFICE=1`'s separation. It is its own track, and fits with step 7 as follows. That process parses guest input, so it must be restartable like the daemon, not the durable piece. The VMM supervisor holds the CA's key and hands it to both, and both are adopted after a restart. Its step 2 (the control channel and terminal frames move into it) comes after this proposal's step 6, so terminals are already held in the guest when their host side moves.
 
