@@ -16,8 +16,8 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use zapper_policy::proto::{Frame, MAX_LINE};
 
-use crate::daemon::harness::{Conversation, Event, TurnEnd};
-use crate::daemon::session::read_frame;
+use crate::harness::{Conversation, Event, TurnEnd};
+use crate::read_frame;
 
 pub enum Out {
     /// A turn ended.

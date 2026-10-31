@@ -18,7 +18,7 @@ pub(crate) mod dns;
 pub mod driver;
 pub(crate) mod events;
 pub(crate) mod gateway;
-pub mod harness;
+pub use zapper_driver::harness;
 pub(crate) mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;

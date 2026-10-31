@@ -55,7 +55,7 @@ impl Headless for Pi {
         // per worker, reported once so a restart resumes it.
         let (session, told) = match resume {
             Some(id) => (id.to_string(), true),
-            None => (format!("w-{}", crate::daemon::random_id(12)), false),
+            None => (format!("w-{}", crate::random_id(12)), false),
         };
         Box::new(PiConversation {
             session,

@@ -14,6 +14,7 @@ fuzz = []
 [dependencies]
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }
+zapper-driver = { path = "../zapper-driver" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -11,7 +11,7 @@ use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// Claude Code's managed settings file on Linux.
 /// https://code.claude.com/docs/en/managed-settings
-pub(crate) const MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
+pub const MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
 
 /// Claude Code.
 pub(crate) struct ClaudeCode;
@@ -259,7 +259,7 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::harness::Generic;
+    use crate::harness::Generic;
     use zapper_policy::{AgentSpec, Mount, MountMode};
 
     #[test]

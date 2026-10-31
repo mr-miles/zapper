@@ -31,6 +31,23 @@ something open; review and correct as needed. Delete this file before the PR mer
   layers natively (with §2 rule events); left as a later cleanup to keep the migration
   behaviour-preserving.
 
+## §6 — the driver as its own crate
+
+- **Scope taken = the proposal's literal §6(a):** "the harnesses' conversation code and
+  the process driver" moved to `zapper-driver` (deps: `zapper-policy`, tokio, serde, rand).
+  The `Driver` orchestration struct and `drive()` glue (Weak<Daemon>/Session, events,
+  record) stay in `zapper-core/daemon/driver.rs` as the core's user of the crate. The
+  office still calls the core's driver in-process; it only *links* the crate directly once
+  it becomes a separate process (step 4). So no office change in this step.
+- **`read_frame` duplicated.** `zapper-driver` has its own 12-line `read_frame` (proto
+  Frame reader); the core keeps its copy in `session/terminal.rs`. Alternative: hoist one
+  copy into `zapper-proto`. Chose duplication to avoid touching proto + terminal.
+- **`MANAGED_SETTINGS` is now `pub`** (was `pub(crate)` + `#[cfg(test)]` re-export) so the
+  core's `spec.rs` test can read it across the crate boundary. It is part of the harness's
+  public surface now.
+- Core re-exports the crate as `daemon::harness` (`pub use zapper_driver::harness;`) so the
+  existing `crate::daemon::harness::…` paths resolve unchanged.
+
 ## §9 — record check through the interface
 
 - The foreman gates on **`Core::record_writable()` = `record::healthy()`** (the cheap

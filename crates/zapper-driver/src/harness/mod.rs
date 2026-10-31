@@ -22,8 +22,7 @@ mod pi;
 use claude::ClaudeCode;
 use pi::Pi;
 
-#[cfg(test)]
-pub(crate) use claude::MANAGED_SETTINGS;
+pub use claude::MANAGED_SETTINGS;
 
 use std::collections::BTreeMap;
 
