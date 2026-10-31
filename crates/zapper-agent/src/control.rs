@@ -198,3 +198,65 @@ fn read_msg(reader: &mut BufReader<File>) -> Result<Option<HostMsg>> {
     }
     Ok(Some(serde_json::from_slice(&line)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A control channel whose host has been gone since `gone`, if at all;
+    /// what it sends goes nowhere.
+    fn control(gone: Option<Duration>) -> Control {
+        Control {
+            writer: Arc::new(Mutex::new(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/null")
+                    .unwrap(),
+            )),
+            pending: Default::default(),
+            next_id: Arc::new(AtomicU64::new(1)),
+            resume: Some("tok".into()),
+            gone_since: Arc::new(Mutex::new(gone.map(|d| Instant::now() - d))),
+        }
+    }
+
+    fn req() -> ExecRequest {
+        ExecRequest {
+            path: "/bin/true".into(),
+            argv: vec![],
+            cwd: None,
+        }
+    }
+
+    /// With the host gone past `HOST_GONE`, an exec is refused at once (in
+    /// a second or two), not left waiting.
+    #[test]
+    fn an_exec_is_refused_while_the_host_is_gone() {
+        let c = control(Some(HOST_GONE + Duration::from_secs(1)));
+        let asked = Instant::now();
+        assert!(!c.check_exec(10, 1000, req()));
+        assert!(
+            asked.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert!(c.pending.lock().unwrap().is_empty(), "not left waiting");
+    }
+
+    /// An answer that comes (after a reconnection, the host back) is taken.
+    #[test]
+    fn an_answer_is_taken_once_the_host_is_back() {
+        let c = control(Some(Duration::from_secs(5)));
+        let answerer = c.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(50));
+            *answerer.gone_since.lock().unwrap() = None;
+            let waiting = answerer.pending.lock().unwrap().remove(&1);
+            if let Some((tx, _)) = waiting {
+                let _ = tx.send(true);
+                return;
+            }
+        });
+        assert!(c.check_exec(10, 1000, req()));
+    }
+}

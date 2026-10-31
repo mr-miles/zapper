@@ -518,3 +518,55 @@ pub fn c_array(items: &[CString]) -> Vec<*const libc::c_char> {
         .chain(std::iter::once(std::ptr::null()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs a classic BPF program, of the instructions `exec_filter` uses,
+    /// over a syscall: its arch and number.
+    fn run(prog: &[libc::sock_filter], arch: u32, nr: u32) -> u32 {
+        let mut acc = 0u32;
+        let mut pc = 0usize;
+        loop {
+            let i = prog[pc];
+            pc += 1;
+            match i.code {
+                0x20 => {
+                    acc = match i.k {
+                        0 => nr,
+                        4 => arch,
+                        k => panic!("load of seccomp_data offset {k}"),
+                    }
+                }
+                0x15 => pc += if acc == i.k { i.jt } else { i.jf } as usize,
+                0x35 => pc += if acc >= i.k { i.jt } else { i.jf } as usize,
+                0x06 => return i.k,
+                c => panic!("instruction {c:#x}"),
+            }
+        }
+    }
+
+    /// The filter kills a foreign arch and (on x86_64) x32 numbers, so an
+    /// exec can't be made through another table; it notifies execve and
+    /// execveat, and allows the rest.
+    #[test]
+    fn the_exec_filter_leaves_no_way_around_it() {
+        let prog = exec_filter();
+        let execve = libc::SYS_execve as u32;
+        let execveat = libc::SYS_execveat as u32;
+        assert_eq!(run(&prog, ARCH, execve), SECCOMP_RET_USER_NOTIF);
+        assert_eq!(run(&prog, ARCH, execveat), SECCOMP_RET_USER_NOTIF);
+        assert_eq!(run(&prog, ARCH, libc::SYS_read as u32), SECCOMP_RET_ALLOW);
+        // i386's and arm's tables.
+        for foreign in [0x4000_0003u32, 0x4000_0028] {
+            assert_eq!(run(&prog, foreign, 11), SECCOMP_RET_KILL_PROCESS);
+            assert_eq!(run(&prog, foreign, execve), SECCOMP_RET_KILL_PROCESS);
+        }
+        if cfg!(target_arch = "x86_64") {
+            for nr in [0x4000_0000 | execve, 0x4000_0000 | 520, 0x4000_0000] {
+                assert_eq!(run(&prog, ARCH, nr), SECCOMP_RET_KILL_PROCESS, "{nr:#x}");
+            }
+        }
+    }
+}

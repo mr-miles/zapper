@@ -441,6 +441,50 @@ mod tests {
         String::from_utf8_lossy(&output(frames)).contains(text)
     }
 
+    /// A holder takes nothing before its terminal: a connection first is
+    /// refused, and it ends.
+    #[test]
+    fn a_holder_takes_its_terminal_first() {
+        let (ours, theirs) = sys::seqpacket_pair().unwrap();
+        let (_host, guest) = UnixStream::pair().unwrap();
+        send(
+            ours.as_raw_fd(),
+            &Msg::Attach { size: None },
+            Some(guest.as_raw_fd()),
+        )
+        .unwrap();
+        let e = hold(theirs, Box::new(|| {})).unwrap_err();
+        assert!(e.to_string().contains("terminal first"), "{e}");
+    }
+
+    /// A second terminal sent to a holder is ignored: what is attached is
+    /// the first one's output only.
+    #[test]
+    fn a_holder_holds_one_terminal() {
+        let (first, other) = (sys::openpty(24, 80).unwrap(), sys::openpty(24, 80).unwrap());
+        let (mut program, mut intruder) = (File::from(first.slave), File::from(other.slave));
+        let (ours, theirs) = sys::seqpacket_pair().unwrap();
+        std::thread::spawn(move || {
+            let _ = hold(theirs, Box::new(|| {}));
+        });
+        let sock = ours.as_raw_fd();
+        for master in [&first.master, &other.master] {
+            let start = Msg::Start {
+                pid: i32::MAX,
+                rows: 24,
+                cols: 80,
+            };
+            send(sock, &start, Some(master.as_raw_fd())).unwrap();
+        }
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        send(sock, &Msg::Attach { size: None }, Some(guest.as_raw_fd())).unwrap();
+        intruder.write_all(b"intruder\n").unwrap();
+        program.write_all(b"program\n").unwrap();
+        let f = read_until(&mut host, |f| has(f, "program"));
+        assert!(has(&f, "program"), "{f:?}");
+        assert!(!has(&f, "intruder"), "{f:?}");
+    }
+
     /// A holder in this process, on a real pty whose other side the test
     /// writes as the program would: it keeps output while nobody is
     /// attached, replays it to the next host, passes input on, and tells the
