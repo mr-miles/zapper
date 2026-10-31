@@ -55,13 +55,14 @@ pub trait Facility: Send + Sync + 'static {
 }
 
 /// Names the gateway's own routes have, which no facility may take.
-const TAKEN: [&str; 6] = [
+const TAKEN: [&str; 7] = [
     "status",
     "profiles",
     "sessions",
     "events",
     "approvals",
     "facilities",
+    "config",
 ];
 
 /// The workbench's facilities.

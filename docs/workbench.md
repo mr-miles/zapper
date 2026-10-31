@@ -2,7 +2,7 @@
 
 # The workbench
 
-A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Its facilities (secrets, the drive, the configuration's repository, SSH keys, the wizard) come in later phases; this is phase 1: the gateway, its tokens, the session views and the facility interface.
+A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface) and phase 2 (the [secrets](#secrets) facility). The drive, the configuration's repository, SSH keys and the wizard come in later phases.
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
@@ -27,6 +27,7 @@ Run it as the same user as `zapper serve`: it finds zapper's socket the way the 
 | `terminal` | open terminals in its sessions |
 | `answer` | answer its sessions' approvals |
 | `rules` | add and remove rules in its sessions' own layers |
+| `secrets` | manage the [secrets](#secrets); and add a rule that uses one (with `rules`), which has a session use it |
 
 A token never travels in an address, where it would be kept in shell and browser histories and in logs. Automation sends it as `Authorization: Bearer TOKEN`. In the UI you sign in at `/login`: the token goes in a password field, and the page sends it in a request's body; the answer sets it as a strict, `HttpOnly` cookie, and **Sign out** removes it. The browser's requests are checked as zapper's UI's are: a local `Host` on loopback (no DNS rebinding), and for a write (signing in and out among them) the `X-Workbench-UI: 1` header and an `Origin` naming the UI. Without the cookie, the page sends you to `/login`, and the API answers `401`. Responses aren't cached.
 
@@ -57,7 +58,34 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /approvals`; `POST /approvals/{id}` `{allow, remember?}` | [read]; [answer] |
 | `GET /events[?session=ID&history=true&after=EPOCH:SEQ]` | [read] |
 | `GET /facilities` | the facilities and their panels |
+| `GET /config/diff`, `POST /config/save` | what saving would change in zapper's startup file; save zapper's running config there (the owner's token only: it writes everything running) |
+| `GET /secrets`, `GET /secrets/presets`, `PUT /secrets/{name}`, `DELETE /secrets/{name}` | the [secrets](#secrets) facility [secrets] |
 | `/w/v1/<facility>/…` | each facility's own routes |
+
+## Secrets
+
+The first facility: credentials the workbench keeps for zapper, so they never sit in zapper's config file.
+
+- **A value is a file of its own** in `~/.config/zapper-workbench/secrets/` (mode 0600, in a 0700 directory), trimmed of the whitespace a paste brings, at most 64 KiB.
+- **zapper's entry names the file** (`file:` source) with the hosts it may go to and how it reaches a session, set in zapper's running config through `PUT /v1/secrets/{name}`, one secret at a time. zapper reads the file on each use, so replacing a value needs no restart and no config change.
+- **Never shown back.** The list shows each secret's name, mode, hosts, where its value comes from, and what uses it (profiles that write `{{secret:NAME}}`, rules that list it); never a value. Replacing one is a write; nothing reads one.
+- **Only its own.** It changes and removes only secrets whose file is in its directory; one written in zapper's config by hand is listed, but stays the operator's (`409`).
+- **Nothing half done.** A value is written aside, and put in place only once zapper has taken the entry: a secret zapper refuses (a `proxy` secret with no hosts, say) leaves no file behind. A secret something still uses (a rule in the config, a profile, a session's own rule) isn't removed, and keeps its value.
+- **Running, not saved.** Changes go to zapper's running config. **Save zapper's running config…** (the owner's, `POST /w/v1/config/save`) shows the diff and writes it to zapper's startup file: everything running, the secrets' entries among it, never their values.
+
+Presets fill in the hosts and mode, and check what a value looks like (its form, not a call to the service):
+
+| Preset | Hosts | Mode | Value | A profile gives it as |
+|---|---|---|---|---|
+| `claude` | `api.anthropic.com` | `proxy` | `sk-ant-…` (`claude setup-token`) | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `openrouter` | `openrouter.ai` | `proxy` | `sk-or-…` | `OPENROUTER_API_KEY` |
+| `github` | `api.github.com`, `github.com` | `proxy` | `github_pat_…`, `ghp_…` and the like | `GITHUB_TOKEN` |
+| `aws` | `*.amazonaws.com` | `aws` (signed on the host) | credential_process JSON | `AWS_ACCESS_KEY_ID` |
+| `database` | the database's, given | `dbauth` | the password; and `user` | (none: a database `protocol:` rule) |
+
+Without a preset, give `hosts` and `mode` (`proxy`, `guest`, `aws`, `dbauth`); a `guest` secret is readable by everything in the session ([security](security.md#secrets-given-to-a-session-can-be-used-by-it)), and the panel says so. `PUT /w/v1/secrets/{name}` takes `{preset?, value?, hosts?, mode?, plaintext?, user?, database?, mechanism?}`: a value for a new secret, any of them to change one.
+
+A secret reaches a session through a rule that lists it (and, for a profile's agent, `{{secret:NAME}}` in its `env`), which the wizard (phase 4) will write; until then, through the session's rules (`POST /w/v1/sessions/{id}/rules` with `secrets: [NAME]`, which takes the `secrets` right) or the config.
 
 ## Facilities
 

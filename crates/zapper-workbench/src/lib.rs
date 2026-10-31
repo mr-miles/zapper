@@ -6,6 +6,7 @@
 
 pub mod facility;
 pub mod gateway;
+pub mod secrets;
 pub mod sse;
 pub mod tokens;
 pub mod zapper;

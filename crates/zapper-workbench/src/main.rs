@@ -95,7 +95,11 @@ async fn main() -> Result<()> {
             let ctx = Ctx {
                 zapper: Zapper::new(socket_path()),
                 tokens: tokens.clone(),
-                facilities: Arc::new(Facilities::new(vec![])?),
+                facilities: Arc::new(Facilities::new(vec![Arc::new(
+                    zapper_workbench::secrets::Secrets::new(
+                        zapper_workbench::config_dir().join("secrets"),
+                    )?,
+                )])?),
                 work,
                 port: listen.port(),
                 remote: !listen.ip().is_loopback(),

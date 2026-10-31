@@ -249,6 +249,9 @@ async fn create_session(
     if !new.rules.is_empty() {
         need(&g, Right::Rules)?;
     }
+    if new.rules.iter().any(crate::secrets::names_a_secret) {
+        need(&g, Right::Secrets)?;
+    }
     let mut labels = new.labels;
     for (k, v) in g
         .labels
@@ -416,6 +419,10 @@ async fn add_rule(
     Json(new): Json<NewRule>,
 ) -> R<Json<Value>> {
     need(&g, Right::Rules)?;
+    // A rule that names a secret has the session use it: the secrets right.
+    if crate::secrets::names_a_secret(&new.rule) {
+        need(&g, Right::Secrets)?;
+    }
     reached(&ctx, &g, &id).await?;
     let body =
         json!({ "scope": format!("session:{id}"), "rule": new.rule, "position": new.position });
@@ -706,6 +713,41 @@ async fn events(
     )))
 }
 
+/// Only the owner's token: zapper's config as a whole is the operator's.
+fn owner(g: &Grant) -> R<()> {
+    if *g == Grant::owner() {
+        Ok(())
+    } else {
+        Err(Error(
+            StatusCode::FORBIDDEN,
+            "only the owner's token reads or saves zapper's config".into(),
+        ))
+    }
+}
+
+/// What saving would change in zapper's startup file.
+async fn config_diff(State(ctx): State<Ctx>, Extension(g): Extension<Grant>) -> R<Json<Value>> {
+    owner(&g)?;
+    let d = ctx
+        .zapper
+        .call(Method::GET, "/v1/config/diff", None)
+        .await?
+        .ok()?;
+    Ok(Json(json!({ "diff": d })))
+}
+
+/// Saves zapper's running config to its startup file: everything running,
+/// the facilities' changes and any other.
+async fn config_save(State(ctx): State<Ctx>, Extension(g): Extension<Grant>) -> R<Json<Value>> {
+    owner(&g)?;
+    Ok(Json(
+        ctx.zapper
+            .call(Method::POST, "/v1/config/save", None)
+            .await?
+            .ok()?,
+    ))
+}
+
 async fn facilities(State(ctx): State<Ctx>) -> Json<Value> {
     Json(ctx.facilities.view())
 }
@@ -917,6 +959,8 @@ pub fn app(ctx: Ctx) -> Router {
         .route("/approvals/{id}", post(answer))
         .route("/events", get(events))
         .route("/facilities", get(facilities))
+        .route("/config/diff", get(config_diff))
+        .route("/config/save", post(config_save))
         .merge(ctx.facilities.routes());
     let guarded = Router::new()
         .route("/", get(page))
