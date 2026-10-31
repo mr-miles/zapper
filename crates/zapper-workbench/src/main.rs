@@ -32,7 +32,7 @@ enum Cmd {
         #[arg(long, default_value = DEFAULT_LISTEN)]
         listen: SocketAddr,
     },
-    /// Print the UI's address, with the owner's token.
+    /// Print the UI's address (sign in there with a token).
     Url {
         #[arg(long, default_value = DEFAULT_LISTEN)]
         listen: SocketAddr,
@@ -58,19 +58,23 @@ enum TokenCmd {
         #[arg(long, value_delimiter = ',', default_value = "read")]
         rights: Vec<String>,
     },
+    /// Print the owner's token, alone on stdout (to sign in to the UI).
+    Show,
     /// List the tokens (never their values).
     Ls,
     /// Remove a token: refused from then on.
     Rm { name: String },
 }
 
-fn url(tokens: &Tokens, listen: SocketAddr) -> Result<String> {
+/// The UI's address: never with a token in it, which would be kept in
+/// histories and logs.
+fn url(listen: SocketAddr) -> String {
     let host = if listen.ip().is_unspecified() {
         format!("127.0.0.1:{}", listen.port())
     } else {
         listen.to_string()
     };
-    Ok(format!("http://{host}/?token={}", tokens.owner()?))
+    format!("http://{host}/")
 }
 
 #[tokio::main]
@@ -106,10 +110,20 @@ async fn main() -> Result<()> {
             if ctx.remote {
                 eprintln!("zapper-workbench: listening on {listen}, beyond loopback, in plain HTTP: for a trusted network or behind a TLS proxy");
             }
-            eprintln!("zapper-workbench: {}", url(&tokens, listen)?);
+            eprintln!("zapper-workbench: the UI is at {}", url(listen));
+            // The owner's token, the first time only: a service's output is
+            // logged, and this would be at each start.
+            if tokens.owner_is_new() {
+                eprintln!("zapper-workbench: sign in with the owner's token, made now (again: `zapper-workbench token show`):");
+                eprintln!("{}", tokens.owner()?);
+            } else {
+                eprintln!(
+                    "zapper-workbench: sign in with the token `zapper-workbench token show` prints"
+                );
+            }
             axum::serve(listener, gateway::app(ctx)).await?;
         }
-        Cmd::Url { listen } => println!("{}", url(&tokens, listen)?),
+        Cmd::Url { listen } => println!("{}", url(listen)),
         Cmd::Token { cmd } => match cmd {
             TokenCmd::Add {
                 name,
@@ -132,6 +146,7 @@ async fn main() -> Result<()> {
                 eprintln!("zapper-workbench: token {name}, shown this once:");
                 println!("{token}");
             }
+            TokenCmd::Show => println!("{}", tokens.owner()?),
             TokenCmd::Ls => {
                 println!("{:<16} {:<24} RIGHTS", "NAME", "SESSIONS");
                 println!("{:<16} {:<24} all", "owner", "all");

@@ -6,7 +6,8 @@ A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-us
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
-zapper-workbench url                   # that address again, with the owner's token
+zapper-workbench url                   # that address again
+zapper-workbench token show            # the owner's token, alone on stdout: sign in with it at /login
 zapper-workbench token add ci -l project=x --rights read,create,control
 zapper-workbench token ls ; zapper-workbench token rm ci
 ```
@@ -15,7 +16,7 @@ Run it as the same user as `zapper serve`: it finds zapper's socket the way the 
 
 ## Tokens
 
-- **The owner's**, in `~/.config/zapper-workbench/token` (mode 0600 in a 0700 directory), made on first use: every right, every session. The UI's address carries it once; the browser then keeps it as a strict cookie.
+- **The owner's**, in `~/.config/zapper-workbench/token` (mode 0600 in a 0700 directory), made on first use: every right, every session. `serve` prints it when it makes it, the first time, on stderr with the address; after that `token show` prints it (alone, on stdout), so a service's log doesn't get it at every start.
 - **Others**, made with `token add`: each reaches only sessions that have all its labels (`-l key=value`, repeatable; none for every session), with only its rights. The token is printed once and kept only as its SHA-256, in `tokens.json`. Added and removed tokens apply at once.
 
 | Right | Lets the token |
@@ -27,7 +28,7 @@ Run it as the same user as `zapper serve`: it finds zapper's socket the way the 
 | `answer` | answer its sessions' approvals |
 | `rules` | add and remove rules in its sessions' own layers |
 
-Automation sends a token as `Authorization: Bearer TOKEN`. The UI's browser sends the cookie, and is checked as zapper's UI is: a local `Host` on loopback (no DNS rebinding), and for a write the `X-Workbench-UI: 1` header and an `Origin` naming the UI.
+A token never travels in an address, where it would be kept in shell and browser histories and in logs. Automation sends it as `Authorization: Bearer TOKEN`. In the UI you sign in at `/login`: the token goes in a password field, and the page sends it in a request's body; the answer sets it as a strict, `HttpOnly` cookie, and **Sign out** removes it. The browser's requests are checked as zapper's UI's are: a local `Host` on loopback (no DNS rebinding), and for a write (signing in and out among them) the `X-Workbench-UI: 1` header and an `Origin` naming the UI. Without the cookie, the page sends you to `/login`, and the API answers `401`. Responses aren't cached.
 
 ## What the gateway does for a client
 

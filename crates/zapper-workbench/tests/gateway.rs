@@ -469,13 +469,21 @@ async fn a_terminal_is_never_a_system_one_and_names_the_token() {
         .unwrap();
     assert_eq!(guest.request.argv, ["id"]);
     assert!(!guest.request.system);
-    let shell =
-        b.t.core
-            .recent_events(Some(&x))
-            .into_iter()
-            .map(|e| serde_json::to_value(e).unwrap())
-            .find(|e| e["type"] == "shell")
-            .unwrap();
+    // The terminal's event follows its opening by a moment.
+    let mut shell = None;
+    for _ in 0..200 {
+        shell =
+            b.t.core
+                .recent_events(Some(&x))
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap())
+                .find(|e| e["type"] == "shell");
+        if shell.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let shell = shell.expect("a shell event");
     assert_eq!(shell["client"], "workbench:pad");
 
     let reader = b
@@ -596,10 +604,48 @@ async fn an_approval_is_answered_only_for_the_tokens_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_ui_signs_in_from_its_address_and_writes_need_its_header_and_origin() {
+async fn the_ui_signs_in_at_its_login_page_and_writes_need_its_header_and_origin() {
     let b = bench().await;
-    let r = send(&b, Method::GET, &format!("/?token={}", b.owner), &[], None).await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let origin = format!("http://127.0.0.1:{}", b.addr.port());
+    let ui = [("x-workbench-ui", "1"), ("origin", origin.as_str())];
+
+    // Not signed in: the page sends you to sign in; the API says so.
+    let page = send(&b, Method::GET, "/", &[], None).await;
+    assert_eq!(page.status, StatusCode::SEE_OTHER);
+    assert_eq!(page.headers["location"], "/login");
+    let none = send(&b, Method::GET, "/w/v1/sessions", &[], None).await;
+    assert_eq!(none.status, StatusCode::UNAUTHORIZED);
+    let login = send(&b, Method::GET, "/login", &[], None).await;
+    assert_eq!(login.status, StatusCode::OK);
+    assert!(login.body.as_str().unwrap().contains("type=\"password\""));
+
+    // A token in the address is no way in, and sets nothing.
+    let addressed = send(&b, Method::GET, &format!("/?token={}", b.owner), &[], None).await;
+    assert_eq!(addressed.status, StatusCode::SEE_OTHER);
+    assert_eq!(addressed.headers["location"], "/login");
+    assert!(!addressed.headers.contains_key("set-cookie"));
+
+    // Signing in is a write from the UI, the token in its body.
+    let token = Some(json!({ "token": b.owner }));
+    let bare = send(&b, Method::POST, "/login", &[], token.clone()).await;
+    assert_eq!(
+        bare.status,
+        StatusCode::FORBIDDEN,
+        "without the header and Origin"
+    );
+    let wrong = send(
+        &b,
+        Method::POST,
+        "/login",
+        &ui,
+        Some(json!({ "token": "nope" })),
+    )
+    .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    assert!(!wrong.headers.contains_key("set-cookie"));
+    let r = send(&b, Method::POST, "/login", &ui, token).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["token"], "owner");
     let cookie = r.headers["set-cookie"].to_str().unwrap().to_string();
     assert!(
         cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
@@ -610,15 +656,14 @@ async fn the_ui_signs_in_from_its_address_and_writes_need_its_header_and_origin(
     let page = send(&b, Method::GET, "/", &[("cookie", &cookie)], None).await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page.headers.contains_key("content-security-policy"));
+    assert_eq!(page.headers["cache-control"], "no-store");
 
-    let none = send(&b, Method::GET, "/w/v1/sessions", &[], None).await;
-    assert_eq!(none.status, StatusCode::UNAUTHORIZED);
-    let wrong = send(&b, Method::GET, "/?token=nope", &[], None).await;
-    assert_eq!(
-        wrong.status,
-        StatusCode::UNAUTHORIZED,
-        "a wrong token sets nothing"
-    );
+    // Signing out clears it.
+    let out = send(&b, Method::POST, "/logout", &ui, None).await;
+    assert!(out.headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .contains("Max-Age=0"));
 
     // DNS rebinding: another name for this address.
     let stream = tokio::net::TcpStream::connect(b.addr).await.unwrap();

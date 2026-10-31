@@ -34,7 +34,7 @@
 </style>
 </head>
 <body>
-<header><h1>Workbench</h1><span class="who" id="who"></span></header>
+<header><h1>Workbench</h1><span class="who" id="who"></span><button id="signout" style="margin-left:auto">Sign out</button></header>
 <main>
   <div>
     <section>
@@ -195,8 +195,13 @@ async function loadPanels() {
   }
 }
 
+document.getElementById("signout").onclick = async () => {
+  await fetch("/logout", { method: "POST", headers: H }).catch(() => {});
+  location.replace("/login");
+};
+
 async function start() {
-  try { me = await api("GET", "/status"); } catch (e) { document.getElementById("detail").replaceChildren(el("span", e.message, "err")); return; }
+  try { me = await api("GET", "/status"); } catch (e) { location.replace("/login"); return; }
   const labels = Object.entries(me.token.labels).map(([k, v]) => k + "=" + v).join(" ");
   document.getElementById("who").textContent = "token " + me.token.name + (labels ? " · sessions with " + labels : "") + " · zapper " + me.zapper.version;
   if (may("create")) {

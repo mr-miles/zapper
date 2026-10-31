@@ -762,12 +762,66 @@ fn origin_ok(origin: &str, host: &str, port: u16, remote: bool) -> bool {
 
 const COOKIE: &str = "workbench_token";
 
+fn host_of(req_headers: &HeaderMap) -> &str {
+    req_headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+}
+
+/// A browser's request reaches the UI only by a name it may have
+/// (`host_ok`); one that changes something only with the `X-Workbench-UI`
+/// header, which another site's page can't send without a preflight that
+/// is never granted, and an `Origin` naming the UI (`origin_ok`).
+fn from_the_ui(ctx: &Ctx, method: &Method, headers: &HeaderMap) -> Result<(), Error> {
+    let host = host_of(headers);
+    if !host_ok(host, ctx.port, ctx.remote) {
+        return Err(Error(StatusCode::FORBIDDEN, "bad Host header".into()));
+    }
+    if !matches!(*method, Method::GET | Method::HEAD) {
+        let origin = headers
+            .get(header::ORIGIN)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        let marked = headers.get("x-workbench-ui").is_some_and(|v| v == "1");
+        if !marked || !origin_ok(origin, host, ctx.port, ctx.remote) {
+            return Err(Error(
+                StatusCode::FORBIDDEN,
+                "missing X-Workbench-UI or the UI's Origin".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The browser's grant: its cookie's token, set at sign-in (`login`).
+fn browser(ctx: &Ctx, req: &Request) -> Result<Grant, Error> {
+    from_the_ui(ctx, req.method(), req.headers())?;
+    let offered = req
+        .headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|c| c.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .find_map(|c| {
+            c.trim()
+                .strip_prefix(&format!("{COOKIE}="))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    ctx.tokens.grant(&offered).ok_or_else(|| {
+        Error(
+            StatusCode::UNAUTHORIZED,
+            "not signed in: sign in at /login".into(),
+        )
+    })
+}
+
 /// Authenticates a request. Automation sends its token as `Authorization:
 /// Bearer`, which a browser never sends by itself. The UI's browser sends
-/// the cookie set from the token in its address once, so it is checked as
-/// zapper's UI is: an acceptable `Host` always, and for a write the
-/// `X-Workbench-UI` header (which another site's page can't send without a
-/// preflight that is never granted) and an `Origin` naming the UI.
+/// the cookie it was given at sign-in, checked as zapper's UI is
+/// (`from_the_ui`). A token never travels in an address, where it would
+/// be kept in histories and logs.
 async fn guard(State(ctx): State<Ctx>, mut req: Request, next: Next) -> Response {
     let bearer = req
         .headers()
@@ -781,88 +835,64 @@ async fn guard(State(ctx): State<Ctx>, mut req: Request, next: Next) -> Response
             None => return Error(StatusCode::UNAUTHORIZED, "no such token".into()).into_response(),
         },
         None => match browser(&ctx, &req) {
-            Ok(Some(g)) => g,
-            Ok(None) => {
-                // The token in the address: set as the cookie, and gone from it.
-                let token = query_token(&req).unwrap_or_default();
-                let cookie = format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/");
-                let mut resp = Redirect::to(req.uri().path()).into_response();
-                resp.headers_mut()
-                    .insert(header::SET_COOKIE, cookie.parse().unwrap());
-                return resp;
+            Ok(g) => g,
+            // The page itself, not signed in: to the sign-in page.
+            Err(Error(StatusCode::UNAUTHORIZED, _)) if req.uri().path() == "/" => {
+                return Redirect::to("/login").into_response()
             }
             Err(e) => return e.into_response(),
         },
     };
     req.extensions_mut().insert(grant);
+    next.run(req).await
+}
+
+/// What every response carries: no framing, no sniffing, no referrer, and
+/// scripts and styles from the workbench only.
+async fn hardened(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     h.insert("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'".parse().unwrap());
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
     h.insert("referrer-policy", "no-referrer".parse().unwrap());
+    h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     resp
 }
 
-fn query_token(req: &Request) -> Option<String> {
-    req.uri()
-        .query()?
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("token="))
-        .map(str::to_string)
+const LOGIN: &str = include_str!("login.html");
+
+async fn login_page(State(ctx): State<Ctx>, headers: HeaderMap) -> R<Response> {
+    from_the_ui(&ctx, &Method::GET, &headers)?;
+    Ok(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], LOGIN).into_response())
 }
 
-/// The browser's grant, from its cookie; `None` when it brought a good
-/// token in the address, to be set as the cookie.
-fn browser(ctx: &Ctx, req: &Request) -> Result<Option<Grant>, Error> {
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    if !host_ok(host, ctx.port, ctx.remote) {
-        return Err(Error(StatusCode::FORBIDDEN, "bad Host header".into()));
-    }
-    if let Some(t) = query_token(req) {
-        if ctx.tokens.grant(&t).is_some() {
-            return Ok(None);
-        }
-    }
-    let offered = req
-        .headers()
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|c| c.to_str().ok())
-        .flat_map(|c| c.split(';'))
-        .find_map(|c| {
-            c.trim()
-                .strip_prefix(&format!("{COOKIE}="))
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    let Some(grant) = ctx.tokens.grant(&offered) else {
-        return Err(Error(
-            StatusCode::UNAUTHORIZED,
-            "no token: open the address `zapper-workbench url` prints".into(),
-        ));
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignIn {
+    token: String,
+}
+
+/// Signs the browser in with the token it was given, sent in the body:
+/// the cookie, if it is a token. A write from the UI like any other.
+async fn login(State(ctx): State<Ctx>, headers: HeaderMap, Json(s): Json<SignIn>) -> R<Response> {
+    from_the_ui(&ctx, &Method::POST, &headers)?;
+    let token = s.token.trim();
+    let Some(g) = ctx.tokens.grant(token) else {
+        return Err(Error(StatusCode::UNAUTHORIZED, "not a token".into()));
     };
-    if !matches!(*req.method(), Method::GET | Method::HEAD) {
-        let origin = req
-            .headers()
-            .get(header::ORIGIN)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        let marked = req
-            .headers()
-            .get("x-workbench-ui")
-            .is_some_and(|v| v == "1");
-        if !marked || !origin_ok(origin, host, ctx.port, ctx.remote) {
-            return Err(Error(
-                StatusCode::FORBIDDEN,
-                "missing X-Workbench-UI or the UI's Origin".into(),
-            ));
-        }
-    }
-    Ok(Some(grant))
+    let cookie = format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/");
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(json!({ "token": g.name })),
+    )
+        .into_response())
+}
+
+/// Signs the browser out: its cookie gone.
+async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> R<Response> {
+    from_the_ui(&ctx, &Method::POST, &headers)?;
+    let cookie = format!("{COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/");
+    Ok(([(header::SET_COOKIE, cookie)], Json(json!({}))).into_response())
 }
 
 /// The workbench's API and UI, behind the gateway.
@@ -884,11 +914,16 @@ pub fn app(ctx: Ctx) -> Router {
         .route("/events", get(events))
         .route("/facilities", get(facilities))
         .merge(ctx.facilities.routes());
-    Router::new()
+    let guarded = Router::new()
         .route("/", get(page))
         .route("/panels/{file}", get(panel))
         .nest("/w/v1", api)
-        .layer(middleware::from_fn_with_state(ctx.clone(), guard))
+        .layer(middleware::from_fn_with_state(ctx.clone(), guard));
+    Router::new()
+        .route("/login", get(login_page).post(login))
+        .route("/logout", post(logout))
+        .merge(guarded)
+        .layer(middleware::from_fn(hardened))
         .with_state(ctx)
 }
 

@@ -103,6 +103,8 @@ pub struct Kept {
 #[derive(Debug, Clone)]
 pub struct Tokens {
     dir: PathBuf,
+    /// The owner's token was made just now, by `open`.
+    made: bool,
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -147,11 +149,18 @@ impl Tokens {
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("making {}", dir.display()))?;
-        let t = Tokens { dir };
+        let mut t = Tokens { dir, made: false };
         if !t.owner_path().exists() {
             write_private(&t.owner_path(), random_token()?.as_bytes())?;
+            t.made = true;
         }
         Ok(t)
+    }
+
+    /// Whether the owner's token was made when these were opened: the one
+    /// time it is shown without being asked for.
+    pub fn owner_is_new(&self) -> bool {
+        self.made
     }
 
     fn owner_path(&self) -> PathBuf {
@@ -267,7 +276,10 @@ mod tests {
         let t = Tokens::open(d.clone()).unwrap();
         let owner = t.owner().unwrap();
         assert_eq!(owner.len(), 64);
-        assert_eq!(Tokens::open(d.clone()).unwrap().owner().unwrap(), owner);
+        assert!(t.owner_is_new());
+        let again = Tokens::open(d.clone()).unwrap();
+        assert_eq!(again.owner().unwrap(), owner);
+        assert!(!again.owner_is_new());
         use std::os::unix::fs::PermissionsExt as _;
         let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(d.join("token")), 0o600);
