@@ -1,0 +1,171 @@
+//! `zapper-workbench`: serve the workbench, and keep its tokens.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use zapper_workbench::facility::{self, Facilities};
+use zapper_workbench::gateway::{self, Ctx};
+use zapper_workbench::tokens::{Right, Tokens};
+use zapper_workbench::zapper::{socket_path, Zapper};
+
+#[derive(Parser)]
+#[command(
+    name = "zapper-workbench",
+    about = "A layer for single users on zapper"
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+const DEFAULT_LISTEN: &str = "127.0.0.1:7880";
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Serve the workbench's API and UI, over the zapper daemon's socket.
+    Serve {
+        /// Where to listen. Beyond loopback it is plain HTTP: for a trusted
+        /// network, or behind a TLS proxy.
+        #[arg(long, default_value = DEFAULT_LISTEN)]
+        listen: SocketAddr,
+    },
+    /// Print the UI's address, with the owner's token.
+    Url {
+        #[arg(long, default_value = DEFAULT_LISTEN)]
+        listen: SocketAddr,
+    },
+    /// The workbench's tokens.
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Make a token, printed once: for sessions with the labels given (all
+    /// sessions without), with the rights given.
+    Add {
+        name: String,
+        /// `key=value`: the token reaches sessions with every one, and the
+        /// sessions it creates get them (repeatable).
+        #[arg(short, long = "label")]
+        labels: Vec<String>,
+        /// Comma-separated: read, create, control, terminal, answer, rules.
+        #[arg(long, value_delimiter = ',', default_value = "read")]
+        rights: Vec<String>,
+    },
+    /// List the tokens (never their values).
+    Ls,
+    /// Remove a token: refused from then on.
+    Rm { name: String },
+}
+
+fn url(tokens: &Tokens, listen: SocketAddr) -> Result<String> {
+    let host = if listen.ip().is_unspecified() {
+        format!("127.0.0.1:{}", listen.port())
+    } else {
+        listen.to_string()
+    };
+    Ok(format!("http://{host}/?token={}", tokens.owner()?))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "zapper_workbench=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+    let cli = Cli::parse();
+    let tokens = Tokens::open(zapper_workbench::config_dir())?;
+    match cli.cmd {
+        Cmd::Serve { listen } => {
+            let work = zapper_workbench::data_dir().join("work");
+            std::fs::create_dir_all(&work)?;
+            let ctx = Ctx {
+                zapper: Zapper::new(socket_path()),
+                tokens: tokens.clone(),
+                facilities: Arc::new(Facilities::new(vec![])?),
+                work,
+                port: listen.port(),
+                remote: !listen.ip().is_loopback(),
+            };
+            facility::register(&ctx).await?;
+            if ctx.facilities.iter().next().is_some() {
+                tokio::spawn(facility::follow(ctx.clone()));
+            }
+            let listener = tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("listening on {listen}"))?;
+            if ctx.remote {
+                eprintln!("zapper-workbench: listening on {listen}, beyond loopback, in plain HTTP: for a trusted network or behind a TLS proxy");
+            }
+            eprintln!("zapper-workbench: {}", url(&tokens, listen)?);
+            axum::serve(listener, gateway::app(ctx)).await?;
+        }
+        Cmd::Url { listen } => println!("{}", url(&tokens, listen)?),
+        Cmd::Token { cmd } => match cmd {
+            TokenCmd::Add {
+                name,
+                labels,
+                rights,
+            } => {
+                let labels: BTreeMap<String, String> = labels
+                    .iter()
+                    .map(|l| {
+                        l.split_once('=')
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .with_context(|| format!("label {l:?}: key=value"))
+                    })
+                    .collect::<Result<_>>()?;
+                let rights: BTreeSet<Right> = rights
+                    .iter()
+                    .map(|r| Right::parse(r.trim()))
+                    .collect::<Result<_>>()?;
+                let token = tokens.add(&name, labels, rights)?;
+                eprintln!("zapper-workbench: token {name}, shown this once:");
+                println!("{token}");
+            }
+            TokenCmd::Ls => {
+                println!("{:<16} {:<24} RIGHTS", "NAME", "SESSIONS");
+                println!("{:<16} {:<24} all", "owner", "all");
+                for k in tokens.list()? {
+                    let labels = if k.labels.is_empty() {
+                        "all".to_string()
+                    } else {
+                        k.labels
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    let rights: Vec<String> = k
+                        .rights
+                        .iter()
+                        .map(|r| {
+                            serde_json::to_value(r)
+                                .unwrap()
+                                .as_str()
+                                .unwrap()
+                                .to_string()
+                        })
+                        .collect();
+                    println!("{:<16} {:<24} {}", k.name, labels, rights.join(","));
+                }
+            }
+            TokenCmd::Rm { name } => {
+                if !tokens.remove(&name)? {
+                    bail!("no token {name}");
+                }
+                eprintln!("zapper-workbench: token {name} removed");
+            }
+        },
+    }
+    Ok(())
+}
