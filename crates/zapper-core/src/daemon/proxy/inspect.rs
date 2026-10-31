@@ -298,7 +298,7 @@ pub(super) async fn mitm<S>(
 /// request log replaces with `***` wherever they show up.
 pub(crate) struct Injected {
     pub(crate) names: Vec<String>,
-    pub(crate) values: Vec<String>,
+    values: Vec<String>,
 }
 
 #[cfg(test)]

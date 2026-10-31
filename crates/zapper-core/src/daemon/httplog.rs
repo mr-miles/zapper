@@ -45,13 +45,13 @@ impl Captured {
 }
 
 pub struct Record {
-    pub id: u64,
-    pub ts: f64,
-    pub scheme: &'static str,
-    pub method: String,
-    pub host: String,
-    pub port: u16,
-    pub path: Option<String>,
+    id: u64,
+    ts: f64,
+    scheme: &'static str,
+    method: String,
+    host: String,
+    port: u16,
+    path: Option<String>,
     pub action: Action,
     pub rule: Option<String>,
     pub scope: Option<String>,
@@ -61,14 +61,14 @@ pub struct Record {
     pub redact: Vec<String>,
     pub error: Option<String>,
     pub status: Option<u16>,
-    pub req_headers: Vec<(String, String)>,
+    req_headers: Vec<(String, String)>,
     pub resp_headers: Vec<(String, String)>,
     pub req_body: Captured,
     pub resp_body: Captured,
     start: Instant,
-    pub ttfb_ms: Option<f64>,
-    pub total_ms: Option<f64>,
-    pub done: bool,
+    ttfb_ms: Option<f64>,
+    total_ms: Option<f64>,
+    done: bool,
 }
 
 impl Record {
