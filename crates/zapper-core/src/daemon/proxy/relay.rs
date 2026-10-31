@@ -486,8 +486,9 @@ async fn tds_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // TDS always opens with a plaintext PRELOGIN (never a bare ClientHello),
-    // so guest_leg stays plaintext; TLS is negotiated in PRELOGIN below.
+    // A TDS client opens with PRELOGIN, in the clear, negotiating TLS in it
+    // (below); one in TDS 8 strict mode opens with TLS instead and sends its
+    // PRELOGIN inside, which guest_leg terminates first.
     let (mut guest, _) = guest_leg(s, guest, first, host).await?;
 
     // Guest leg: read its PRELOGIN. If it wants encryption, terminate the
