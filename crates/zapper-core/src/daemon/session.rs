@@ -44,7 +44,7 @@ pub use runtime::Status;
 pub(crate) use store::SessionStore;
 
 pub(crate) use adopt::restore;
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) use control::read_guest_line;
 pub(crate) use create::create;
 #[cfg(any(test, feature = "test-util"))]
