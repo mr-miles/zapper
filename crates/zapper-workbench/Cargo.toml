@@ -19,6 +19,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 zapper-ssh = { path = "../zapper-ssh" }
 zapper-proto = { path = "../zapper-proto" }
+zapper-git = { path = "../zapper-git" }
 ring = "0.17"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

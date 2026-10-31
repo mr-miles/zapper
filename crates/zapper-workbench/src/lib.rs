@@ -7,6 +7,7 @@
 pub mod drive;
 pub mod facility;
 pub mod gateway;
+pub mod git;
 pub mod secrets;
 pub mod sse;
 pub mod ssh;

@@ -110,6 +110,9 @@ async fn main() -> Result<()> {
                     Arc::new(zapper_workbench::drive::Drive::new(
                         zapper_workbench::data_dir().join("drive"),
                     )?),
+                    Arc::new(zapper_workbench::git::Git::new(
+                        zapper_workbench::data_dir().join("git"),
+                    )?),
                     Arc::new(zapper_workbench::ssh::Ssh::new(
                         zapper_workbench::ssh_keys(&std::env::current_exe()?)?,
                         zapper_ssh::known_hosts_line(&zapper_ssh::host_key(

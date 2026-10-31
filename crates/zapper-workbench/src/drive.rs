@@ -26,7 +26,6 @@ use axum::{Json, Router};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zapper_proto::facility::ServiceCaller;
 
 use crate::facility::{Facility, Panel};
 use crate::gateway::{Ctx, Error};
@@ -246,48 +245,6 @@ where
     }
 }
 
-/// Reads the caller line zapper sends first, a byte at a time so the HTTP
-/// that follows stays in the stream.
-async fn caller(stream: &mut tokio::net::UnixStream) -> Option<ServiceCaller> {
-    let mut line = Vec::new();
-    let mut b = [0u8; 1];
-    while line.len() < 4096 {
-        match stream.read(&mut b).await {
-            Ok(1) if b[0] == b'\n' => return serde_json::from_slice(&line).ok(),
-            Ok(1) => line.push(b[0]),
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Serves the sessions' side on `listener`: each connection's caller named
-/// by zapper, then HTTP/1.1 from zapper's proxy, already decided.
-pub async fn serve_sessions(files: Files, listener: tokio::net::UnixListener) {
-    while let Ok((mut stream, _)) = listener.accept().await {
-        let files = files.clone();
-        tokio::spawn(async move {
-            let Some(who) = caller(&mut stream).await else {
-                return;
-            };
-            let svc = hyper::service::service_fn(
-                move |req: hyper::Request<hyper::body::Incoming>| {
-                    let (files, who) = (files.clone(), who.clone());
-                    async move {
-                        let (method, path) = (req.method().clone(), req.uri().path().to_string());
-                        let r = serve(files, &method, &path, req.into_body(), For::Session).await;
-                        tracing::info!(session = %who.session, %method, %path, status = r.status().as_u16(), "drive");
-                        Ok::<_, std::convert::Infallible>(r)
-                    }
-                },
-            );
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
-                .await;
-        });
-    }
-}
-
 fn owner(g: &Grant) -> Result<(), Error> {
     if *g == Grant::owner() {
         Ok(())
@@ -312,35 +269,13 @@ async fn user_files(
     Ok(serve(files, &method, &path, req.into_body(), For::Browser).await)
 }
 
-/// Adds the usual rules, in zapper's global layer, if they aren't there:
-/// the drive's name resolves only in the workbench's sessions, so they
-/// reach no other.
+/// Adds the usual rules to zapper's global layer, if they aren't there.
 async fn add_rules(
     axum::extract::State(ctx): axum::extract::State<Ctx>,
     Extension(g): Extension<Grant>,
 ) -> Result<Json<Value>, Error> {
     owner(&g)?;
-    let have = ctx
-        .zapper
-        .call(Method::GET, "/v1/rules?scope=global", None)
-        .await?
-        .ok()?;
-    let mut added = vec![];
-    for rule in usual_rules() {
-        let present = have
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| r["id"] == rule["id"]);
-        if !present {
-            let body = json!({ "scope": "global", "rule": rule });
-            ctx.zapper
-                .call(Method::POST, "/v1/rules", Some(&body))
-                .await?
-                .ok()?;
-            added.push(rule["id"].clone());
-        }
-    }
+    let added = crate::facility::add_global_rules(&ctx, &usual_rules()).await?;
     Ok(Json(json!({ "added": added, "saved": false })))
 }
 
@@ -380,22 +315,14 @@ impl Facility for Drive {
     }
 
     fn start(&self, ctx: &Ctx) {
-        let (files, ctx) = (self.files.clone(), ctx.clone());
-        tokio::spawn(async move {
-            // zapper says where its sockets go; until it can, try again.
-            let dir = loop {
-                if let Ok(a) = ctx.zapper.call(Method::GET, "/v1/status", None).await {
-                    if let Some(d) = a.body["socket_dir"].as_str() {
-                        break PathBuf::from(d);
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            };
-            let path = dir.join(SOCKET);
-            let _ = std::fs::remove_file(&path);
-            match tokio::net::UnixListener::bind(&path) {
-                Ok(l) => serve_sessions(files, l).await,
-                Err(e) => tracing::warn!("the drive's socket {}: {e}", path.display()),
+        let files = self.files.clone();
+        crate::facility::serve_socket(ctx, SOCKET, move |who, req| {
+            let files = files.clone();
+            async move {
+                let (method, path) = (req.method().clone(), req.uri().path().to_string());
+                let r = serve(files, &method, &path, req.into_body(), For::Session).await;
+                tracing::info!(session = %who.session, %method, %path, status = r.status().as_u16(), "drive");
+                r
             }
         });
     }

@@ -2,7 +2,7 @@
 
 # The workbench
 
-A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)) and phase 6 (the [SSH connector](#ssh-keys)). The configuration's repository and the wizard come in later phases.
+A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)), phase 6 (the [SSH connector](#ssh-keys)) and phase 7 (the [repository](#the-repository) served to sessions). Applying the repository to zapper's config (phase 3) and the wizard (phase 4) come later.
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
@@ -62,6 +62,7 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /secrets`, `GET /secrets/presets`, `PUT /secrets/{name}`, `DELETE /secrets/{name}` | the [secrets](#secrets) facility [secrets] |
 | `GET /ssh/keys`, `PUT /ssh/keys/{name}` `{key, reach}`, `DELETE /ssh/keys/{name}`, `GET /ssh/config?host=USER@HOST` | the [SSH keys](#ssh-keys) (the owner's token only) |
 | `GET\|PUT\|DELETE /drive/files/{path}`; `GET /drive/rules/usual`, `POST /drive/rules` | the [drive](#the-drive)'s files, and its usual rules added (the owner's token only) |
+| `GET /git`; `GET /git/rules/usual`, `POST /git/rules` | the [repository](#the-repository): where to clone it, its branches; its usual rule added (the owner's token only) |
 | `/w/v1/<facility>/…` | each facility's own routes |
 
 ## Secrets
@@ -108,6 +109,15 @@ Files in `~/.local/share/zapper-workbench/drive/` (0700, with `inbox/` and `outb
 - **The owner's token only** reaches it through the workbench (the panel: folders, upload, download, remove).
 
 Not yet: `scp` and `sftp` to `drive.zapper` through the SSH connector, which needs an SFTP server in the gateway.
+
+## The repository
+
+The workbench's repository, `~/.local/share/zapper-workbench/git/config.git` (bare, `main`), served to sessions as `git.zapper`, so an agent can propose a change on a branch, which you merge. Applying `main` to zapper's config on each commit is phase 3, still to come; this serves the repository.
+
+- **You** clone it on the host (`git clone ~/.local/share/zapper-workbench/git/config.git`) and push to it there, `main` included.
+- **Sessions** (the workbench's, label `workbench=1`) reach it as a socket service, the drive's way: zapper terminates TLS, names the caller and decides each request against `net` rules; **Let workbench sessions use it…** adds the usual one to zapper's global layer: `{ id: git-config, kind: net, action: allow, host: git.zapper, ports: [443], methods: [GET, POST], path: "/config.git/**" }`. In a session: `git clone https://git.zapper/config.git`.
+- **Branches, never `main`.** A session's request is answered by `git http-backend` with the session as the pusher at the `write` level, and the repository's `pre-receive` hook (the office's, from `zapper-git`) lets it push branches and refuses `main`, `main/…` and tags, saying why. It records who pushed each commit (`zapper-pushed`), and commits a session pushed carry its id as the committer. A push on the host, with no level, is yours: the hook lets it through.
+- **The panel** lists the branches with their last commits (a session's proposals among them); merge one in your clone and push `main`.
 
 ## SSH keys
 
