@@ -32,7 +32,7 @@ pub(crate) struct GuestRuntime {
     exec_checks: Arc<Semaphore>,
     /// Bounds concurrent proxy connections from the guest.
     conns: Arc<Semaphore>,
-    /// The tasks accepting on the guest's sockets (`boot::serve_guest`),
+    /// The tasks accepting on the guest's sockets (`launch::serve_guest`),
     /// ended with the VM: each holds the session.
     listeners: Mutex<Vec<tokio::task::AbortHandle>>,
 }

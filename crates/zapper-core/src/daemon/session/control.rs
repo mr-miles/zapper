@@ -1,268 +1,22 @@
-//! Booting a session's VM and running its guest: building the disks,
-//! rendering the guest spec, binding the vsock listeners and the NIC, starting
-//! Firecracker, and then the guest control channel — the ready/failed
-//! handshake, exec decisions and guest events — over its whole life.
-//!
-//! `lifecycle::create` calls [`launch`]; everything here is the launch
-//! sequence and the long-running tasks it spawns.
+//! The guest agent's control channel: the first connection, a persistent
+//! session's resumption, and the messages on it.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
-use zapper_policy::proto::{
-    Forward, GuestDisk, GuestMsg, HostMsg, CONTROL_PORT, MAX_LINE, MCP_PORT, PROXY_PORT,
-};
-use zapper_policy::{evaluate_exec, Action, AnyRule, ExecRequest, ExecRule, Kind, MountMode};
+use zapper_policy::proto::{GuestMsg, HostMsg, CONTROL_PORT, MAX_LINE};
 
-use super::spec;
-use super::{read_guest_line, Session, Status};
-use crate::daemon::{gateway, nic, proxy, vm, Daemon, EventBody};
+use super::exec::decide_exec;
+use super::{Session, Status};
+use crate::daemon::{Daemon, EventBody};
 
-/// The guest ports the host connects to over vsock: those the session was
-/// created with, then the profile's `engine.ports` not among them.
-fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
-    let mut v = given.to_vec();
-    for p in &engine.ports {
-        if !v.iter().any(|f| f.vsock_port == *p as u32) {
-            v.push(Forward {
-                vsock_port: *p as u32,
-                tcp_port: *p,
-                nic: engine.network == zapper_policy::NetworkMode::Nic,
-            });
-        }
-    }
-    v
-}
-
-/// Before a persistent session's disk is made from its image: the image's
-/// hash, compared with the one recorded when it was built, in a `disks`
-/// event (`image`). One changed since is refused unless
-/// `accept_changed_image`; one built before images were hashed is recorded
-/// as unverified, and used.
-async fn check_image(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    image: &std::path::Path,
-) -> Result<()> {
-    let name = session.resolved.engine.image.clone();
-    let path = image.to_path_buf();
-    let hash = tokio::task::spawn_blocking(move || crate::util::sha256_file(&path)).await??;
-    let built = crate::images::built_hash(&daemon.paths.images, &name);
-    let (changed, detail) = match &built {
-        Some(b) if *b == hash => (false, format!("image {name} as it was built")),
-        Some(_) => (true, format!("image {name} changed since it was built")),
-        None => (
-            false,
-            format!("image {name} was built before images were hashed: unverified (rebuild it to have one)"),
-        ),
-    };
-    let accepted = changed && session.accept_changed_image;
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: "image".into(),
-            disks: [(format!("{name}.ext4"), hash)].into(),
-            detail: Some(if accepted {
-                format!("{detail}; used as it is, as asked")
-            } else {
-                detail.clone()
-            }),
-        },
-    );
-    if changed && !accepted {
-        bail!("{detail}; give accept_changed_image (--accept-changed-image) to make the session from it as it is");
-    }
-    Ok(())
-}
-
-pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
-    let dir = &session.dir;
-    std::fs::create_dir_all(dir.vm())?;
-    let engine = &session.resolved.engine;
-    let root = dir.root_disk();
-    // A persistent session started again boots the disks it kept, checked
-    // already (`lifecycle::start`); otherwise each is made afresh.
-    let kept = |p: &std::path::Path| session.persistent && p.exists();
-    if !kept(&root) {
-        let image = daemon.paths.images.join(format!("{}.ext4", engine.image));
-        if session.persistent {
-            check_image(daemon, session, &image).await?;
-        }
-        vm::root_disk(&image, &root, vm::parse_size(&engine.disk)?)
-            .await
-            .context("root disk")?;
-    }
-    let mut disks = Vec::new();
-    let mut guest_disks = Vec::new();
-    for (i, m) in session.resolved.mounts.iter().enumerate() {
-        let path = dir.data_disk(i);
-        if !kept(&path) {
-            let host = vm::mount_disk(m, &session.workdir, &path)
-                .await
-                .with_context(|| format!("mount {}", m.host))?;
-            tracing::debug!(session = %session.id, "mount {} -> {}", host.display(), m.guest);
-        }
-        let ro = m.mode == MountMode::Ro;
-        disks.push((path, ro));
-        let device = format!("/dev/vd{}", (b'b' + i as u8) as char);
-        guest_disks.push(GuestDisk {
-            device,
-            path: m.guest.clone(),
-            read_only: ro,
-        });
-    }
-    // Guest command secrets are minted once, for the VM to hold.
-    let to_mint = spec::guest_mints(&daemon.config.read().unwrap(), &session.resolved);
-    let mut minted = std::collections::HashMap::new();
-    for (name, m) in to_mint {
-        let v = crate::mint::resolve(&m)
-            .await
-            .with_context(|| format!("secret {name}: minting the secret"))?;
-        minted.insert(name, v);
-    }
-    let spec = {
-        let c = daemon.config.read().unwrap();
-        spec::build(
-            &c,
-            &minted,
-            &session.resolved,
-            &session.id,
-            session.tls.pem(),
-            guest_disks,
-            session.extra_files.clone(),
-            forwards(&session.resolved.engine, &session.forwards),
-        )?
-    };
-
-    // Guest-initiated vsock connections arrive on `<uds>_<port>`.
-    let control_path = dir.vsock_port(CONTROL_PORT);
-    let control = UnixListener::bind(&control_path)?;
-    serve_guest(daemon, session)?;
-    let nic_on = engine.network == zapper_policy::NetworkMode::Nic;
-
-    let subids = daemon.config.read().unwrap().daemon.vmm_subids;
-    let child = vm::start(vm::VmSpec {
-        firecracker: &daemon.paths.firecracker,
-        kernel: daemon.paths.kernels.join(&engine.kernel),
-        initrd: &daemon.paths.initrd,
-        root,
-        disks,
-        engine,
-        dir,
-        id: &session.id,
-        nic: nic_on,
-        subids,
-        durable: session.persistent,
-    })
-    .await?;
-    *session.runtime.vm().lock().await = Some(vm::VmProc::Child(child));
-    // Stopped while this VM was made: its teardown found none to stop, so
-    // this one is the caller's to end (`teardown` takes it from here).
-    if !matches!(*session.runtime.status().borrow(), Status::Starting) {
-        bail!("stopped while it started");
-    }
-
-    {
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            if let Err(e) = guest_control(&d, &s, control, control_path, spec).await {
-                tracing::warn!(session = %s.id, "guest control: {e:#}");
-                s.runtime.fail_if_starting(format!("{e:#}"));
-            }
-        });
-    }
-    watch_vm(daemon, session);
-    Ok(())
-}
-
-/// The guest's sockets besides the control channel: the egress proxy (vsock
-/// mode), the MCP gateway, and the NIC's capture. Bound afresh, an earlier
-/// daemon's left behind removed (Firecracker's own `v.sock` is never one).
-fn serve_guest(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
-    let dir = &session.dir;
-    let bind = |path: PathBuf| {
-        let _ = std::fs::remove_file(&path);
-        UnixListener::bind(&path)
-    };
-    // A boot's listeners end with it (`GuestRuntime::clear_guest`); any
-    // left from before (an adoption after a failed start) go first.
-    let rt = &session.runtime;
-    rt.end_listeners();
-    let proxy_listener = bind(dir.vsock_port(PROXY_PORT))?;
-    // The MCP gateway, to the servers registered for the session.
-    let mcp = bind(dir.vsock_port(MCP_PORT))?;
-    let task = tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
-    rt.hold_listener(task.abort_handle());
-    if session.resolved.engine.network == zapper_policy::NetworkMode::Nic {
-        let listener = bind(dir.nic_socket())?;
-        let task = tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
-        rt.hold_listener(task.abort_handle());
-    }
-    let (d, s) = (daemon.clone(), session.clone());
-    let limit = rt.conns();
-    let task = tokio::spawn(crate::daemon::accept_loop(
-        proxy_listener,
-        limit,
-        move |stream| {
-            let (d, s) = (d.clone(), s.clone());
-            async move {
-                proxy::serve(d, s, stream).await;
-            }
-        },
-    ));
-    rt.hold_listener(task.abort_handle());
-    Ok(())
-}
-
-/// Stops the session when its VM exits.
-fn watch_vm(daemon: &Arc<Daemon>, session: &Arc<Session>) {
-    let (d, s) = (daemon.clone(), session.clone());
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let mut vm = s.runtime.vm().lock().await;
-            let Some(proc) = vm.as_mut() else { return };
-            if let Some(reason) = proc.exited() {
-                *vm = None;
-                drop(vm);
-                s.runtime.fail_if_starting(reason.clone());
-                super::stop(&d, &s, &reason).await;
-                return;
-            }
-        }
-    });
-}
-
-/// Takes on a persistent session whose VM an earlier daemon left running:
-/// its guest's sockets bound again, its VMM watched by pid and start, and
-/// its agent's control channel taken again when it connects with its token.
-pub(super) async fn adopt(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    vmm: vm::Vmm,
-) -> Result<()> {
-    serve_guest(daemon, session)?;
-    *session.runtime.vm().lock().await = Some(vm::VmProc::Adopted {
-        vmm,
-        session: session.id.clone(),
-    });
-    watch_vm(daemon, session);
-    let (d, s) = (daemon.clone(), session.clone());
-    tokio::spawn(async move {
-        if let Err(e) = resume_control(&d, &s).await {
-            tracing::warn!(session = %s.id, "taking the control channel again: {e:#}");
-        }
-    });
-    Ok(())
-}
-
-async fn guest_control(
+pub(super) async fn guest_control(
     daemon: &Arc<Daemon>,
     session: &Arc<Session>,
     listener: UnixListener,
@@ -375,11 +129,11 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
 }
 
 /// Connections checked for a resumption at once.
-const RESUME_CHECKS: usize = 64;
+pub(super) const RESUME_CHECKS: usize = 64;
 
 /// Records the control connections refused since last time, if any: how
 /// many, and why the last was.
-fn note_refused(
+pub(super) fn note_refused(
     daemon: &Arc<Daemon>,
     session: &Arc<Session>,
     refused: &std::sync::Mutex<(u64, String)>,
@@ -403,7 +157,10 @@ fn note_refused(
 
 /// Reads a resumed connection's first line: `Resume` with `token`, and the
 /// persistent terminals the guest keeps.
-async fn resumed(stream: &mut tokio::net::UnixStream, token: &str) -> Result<Vec<u64>, String> {
+pub(super) async fn resumed(
+    stream: &mut tokio::net::UnixStream,
+    token: &str,
+) -> Result<Vec<u64>, String> {
     // A byte at a time: the exec checks the agent asks again follow the line
     // at once, and must stay in the stream for `serve_control`.
     let line = tokio::time::timeout(Duration::from_secs(2), async {
@@ -431,7 +188,7 @@ async fn resumed(stream: &mut tokio::net::UnixStream, token: &str) -> Result<Vec
 
 /// Serves a guest's control connection until it closes: its messages in, and
 /// the host's out (`first` before any).
-async fn serve_control(
+pub(super) async fn serve_control(
     daemon: &Arc<Daemon>,
     session: &Arc<Session>,
     stream: tokio::net::UnixStream,
@@ -502,183 +259,29 @@ async fn serve_control(
     Ok(())
 }
 
-async fn decide_exec(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    pid: i32,
-    uid: u32,
-    req: ExecRequest,
-) -> bool {
-    let started = Instant::now();
-    let decision = {
-        let c = daemon.config.read().unwrap();
-        let layers = session.layers(&c);
-        evaluate_exec(&Session::layers_of(&layers), &req)
-    };
-    let allow = match decision.action {
-        Action::Allow => true,
-        Action::Deny => false,
-        Action::Ask => {
-            let suggestion = AnyRule::Exec(ExecRule {
-                id: None,
-                action: Action::Allow,
-                path: req.path.clone(),
-                args: None,
-                final_: false,
-                comment: Some("approved".into()),
-            });
-            daemon
-                .ask(
-                    session,
-                    Kind::Exec,
-                    format!("exec {}", req.argv.join(" ")),
-                    suggestion,
-                )
-                .await
-        }
-    };
-    let counter = if allow {
-        &session.counters.exec_allowed
-    } else {
-        &session.counters.exec_denied
-    };
-    counter.fetch_add(1, Ordering::Relaxed);
-    daemon.emit(
-        Some(session),
-        EventBody::Exec {
-            pid,
-            uid,
-            path: req.path,
-            argv: req.argv,
-            cwd: req.cwd,
-            action: if allow { Action::Allow } else { Action::Deny },
-            rule: decision.rule,
-            scope: decision.scope.map(|s| s.to_string()),
-            wait_ms: started.elapsed().as_secs_f64() * 1000.0,
-        },
-    );
-    allow
-}
-
-#[cfg(test)]
-mod forward_tests {
-    use zapper_policy::proto::Forward;
-    use zapper_policy::{Engine, NetworkMode};
-
-    #[test]
-    fn a_profiles_ports_join_the_sessions_forwards_once() {
-        let given = [Forward {
-            vsock_port: 6443,
-            tcp_port: 6443,
-            nic: true,
-        }];
-        let engine = Engine {
-            ports: vec![6443, 8080],
-            ..Engine::default()
-        };
-        let f = super::forwards(&engine, &given);
-        let ports: Vec<(u32, u16, bool)> = f
-            .iter()
-            .map(|f| (f.vsock_port, f.tcp_port, f.nic))
-            .collect();
-        assert_eq!(ports, [(6443, 6443, true), (8080, 8080, true)]);
-        // Without a NIC, to the guest's loopback.
-        let vsock = Engine {
-            ports: vec![8080],
-            network: NetworkMode::Vsock,
-            ..Engine::default()
-        };
-        assert!(!super::forwards(&vsock, &[])[0].nic);
+/// One line from the guest's control channel, at most `MAX_LINE` bytes:
+/// `None` at the end, an error for a longer one. Shared by the guest-control
+/// loop and nothing else.
+pub(crate) async fn read_guest_line(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    let n = reader
+        .take(MAX_LINE as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .await?;
+    if n == 0 {
+        return Ok(None);
     }
-}
-
-#[cfg(test)]
-mod image_tests {
-    use super::*;
-    use crate::daemon::session::NewSession;
-    use crate::testing::TestCore;
-
-    /// An image `web` in the images directory, built (its hash recorded)
-    /// with `built`, then holding `now`.
-    fn image(t: &TestCore, built: Option<&[u8]>, now: &[u8]) -> std::path::PathBuf {
-        let dir = &t.core.daemon().paths.images;
-        std::fs::create_dir_all(dir).unwrap();
-        let path = dir.join("web.ext4");
-        if let Some(b) = built {
-            std::fs::write(&path, b).unwrap();
-            let hash = crate::util::sha256_file(&path).unwrap();
-            std::fs::write(
-                dir.join("web.json"),
-                serde_json::json!({ "sha256": hash }).to_string(),
-            )
-            .unwrap();
-        }
-        std::fs::write(&path, now).unwrap();
-        path
+    if n > MAX_LINE {
+        bail!("guest sent an oversized message");
     }
-
-    fn session(t: &TestCore, accept: bool) -> Arc<Session> {
-        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
-        new.persistent = true;
-        new.accept_changed_image = accept;
-        t.core.test_session(new, true).unwrap()
-    }
-
-    fn image_event(t: &TestCore, s: &Session) -> String {
-        t.core
-            .daemon()
-            .recent_events(Some(&s.id))
-            .into_iter()
-            .rev()
-            .find_map(|e| match e.body {
-                EventBody::Disks { state, detail, .. } if state == "image" => detail,
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    const CONFIG: &str = "profiles:\n  web: { engine: { image: web } }\n";
-
-    #[tokio::test]
-    async fn a_persistent_sessions_image_is_checked_against_its_build() {
-        let t = TestCore::new(CONFIG);
-        let path = image(&t, Some(b"as built"), b"as built");
-        let s = session(&t, false);
-        check_image(t.core.daemon(), &s, &path).await.unwrap();
-        assert_eq!(image_event(&t, &s), "image web as it was built");
-
-        let path = image(&t, Some(b"as built"), b"changed");
-        let e = check_image(t.core.daemon(), &s, &path).await.unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("image web changed since it was built"),
-            "{e}"
-        );
-        assert_eq!(image_event(&t, &s), "image web changed since it was built");
-
-        let accepting = session(&t, true);
-        check_image(t.core.daemon(), &accepting, &path)
-            .await
-            .unwrap();
-        assert!(image_event(&t, &accepting).ends_with("used as it is, as asked"));
-    }
-
-    #[tokio::test]
-    async fn an_image_built_before_hashing_is_unverified_and_used() {
-        let t = TestCore::new(CONFIG);
-        let path = image(&t, None, b"old");
-        let s = session(&t, false);
-        check_image(t.core.daemon(), &s, &path).await.unwrap();
-        assert!(
-            image_event(&t, &s).contains("unverified"),
-            "{}",
-            image_event(&t, &s)
-        );
-    }
+    Ok(Some(line))
 }
 
 #[cfg(test)]
 mod resume_tests {
+    use super::super::launch::serve_guest;
     use super::*;
     use crate::daemon::session::NewSession;
     use crate::testing::TestCore;

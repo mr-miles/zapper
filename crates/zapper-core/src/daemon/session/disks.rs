@@ -8,8 +8,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use std::sync::Arc;
+
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
+
+use super::persist::save;
+use super::Session;
+use crate::daemon::{Daemon, EventBody};
 
 pub(crate) type Hashes = BTreeMap<String, String>;
 
@@ -164,6 +170,137 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
         just_stopped = false;
     }
     out
+}
+
+/// Hashes a stopped session's disks and compares them with what its record
+/// says they were when it last stopped (the record, not a file beside it:
+/// with a keeper it is append-only); records what it found (`disks`).
+pub(super) async fn check_disks(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    accept: bool,
+) -> Result<()> {
+    let dir = session.dir.clone();
+    let now = tokio::task::spawn_blocking(move || hash(&dir.disks())).await??;
+    let record = std::fs::read_to_string(session.audit_path()).unwrap_or_default();
+    let (state, detail) = match last_stop(&events(&record)) {
+        LastStop::Hashed(before) if before == now => ("checked", None),
+        LastStop::Hashed(before) => ("changed", Some(changes(&before, &now))),
+        LastStop::RanSince => (
+            "unverified",
+            Some(
+                "it ran after its disks were last hashed, without stopping: the daemon ended while it ran"
+                    .to_string(),
+            ),
+        ),
+        LastStop::None => (
+            "unverified",
+            Some("no hashes from its last stop to compare with".to_string()),
+        ),
+    };
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: state.into(),
+            disks: now.clone(),
+            detail: detail.clone(),
+        },
+    );
+    if let Some(detail) = detail {
+        if !accept {
+            bail!(
+                "session {}: {detail}; start it with --accept-changed-disks to boot its disks as they are",
+                session.id
+            );
+        }
+        daemon.emit(
+            Some(session),
+            EventBody::Disks {
+                state: "accepted".into(),
+                disks: now,
+                detail: Some(format!("started as they are: {detail}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// A persistent session's VM is off: its disks stay, the rest of the VMM's
+/// directory (sockets) goes, and the disks' hashes are recorded, in its
+/// record, to be checked against when it starts again.
+pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
+    let sd = &session.dir;
+    for e in std::fs::read_dir(sd.vm()).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "ext4") {
+            continue;
+        }
+        let _ = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+    }
+    if let Err(e) = save(session) {
+        tracing::warn!(session = %session.id, "saving the session: {e:#}");
+    }
+    let kept = sd.disks();
+    let hashed = tokio::task::spawn_blocking(move || hash(&kept)).await;
+    let (hashes, detail) = match hashed {
+        Ok(Ok(h)) => (h, None),
+        Ok(Err(e)) => (BTreeMap::new(), Some(format!("hashing: {e:#}"))),
+        Err(e) => (BTreeMap::new(), Some(format!("hashing: {e}"))),
+    };
+    // In the record, which the next start checks the disks against.
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: "stopped".into(),
+            disks: hashes,
+            detail,
+        },
+    );
+}
+
+/// Before a persistent session's disk is made from its image: the image's
+/// hash, compared with the one recorded when it was built, in a `disks`
+/// event (`image`). One changed since is refused unless
+/// `accept_changed_image`; one built before images were hashed is recorded
+/// as unverified, and used.
+pub(super) async fn check_image(
+    daemon: &Arc<Daemon>,
+    session: &Arc<Session>,
+    image: &std::path::Path,
+) -> Result<()> {
+    let name = session.resolved.engine.image.clone();
+    let path = image.to_path_buf();
+    let hash = tokio::task::spawn_blocking(move || crate::util::sha256_file(&path)).await??;
+    let built = crate::images::built_hash(&daemon.paths.images, &name);
+    let (changed, detail) = match &built {
+        Some(b) if *b == hash => (false, format!("image {name} as it was built")),
+        Some(_) => (true, format!("image {name} changed since it was built")),
+        None => (
+            false,
+            format!("image {name} was built before images were hashed: unverified (rebuild it to have one)"),
+        ),
+    };
+    let accepted = changed && session.accept_changed_image;
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: "image".into(),
+            disks: [(format!("{name}.ext4"), hash)].into(),
+            detail: Some(if accepted {
+                format!("{detail}; used as it is, as asked")
+            } else {
+                detail.clone()
+            }),
+        },
+    );
+    if changed && !accepted {
+        bail!("{detail}; give accept_changed_image (--accept-changed-image) to make the session from it as it is");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,5 +458,90 @@ mod tests {
             ev(4, "disks", "accepted", &[("root.ext4", "x")]),
         ];
         assert_eq!(findings(&r).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::daemon::session::NewSession;
+    use crate::testing::TestCore;
+
+    /// An image `web` in the images directory, built (its hash recorded)
+    /// with `built`, then holding `now`.
+    fn image(t: &TestCore, built: Option<&[u8]>, now: &[u8]) -> std::path::PathBuf {
+        let dir = &t.core.daemon().paths.images;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("web.ext4");
+        if let Some(b) = built {
+            std::fs::write(&path, b).unwrap();
+            let hash = crate::util::sha256_file(&path).unwrap();
+            std::fs::write(
+                dir.join("web.json"),
+                serde_json::json!({ "sha256": hash }).to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(&path, now).unwrap();
+        path
+    }
+
+    fn session(t: &TestCore, accept: bool) -> Arc<Session> {
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.persistent = true;
+        new.accept_changed_image = accept;
+        t.core.test_session(new, true).unwrap()
+    }
+
+    fn image_event(t: &TestCore, s: &Session) -> String {
+        t.core
+            .daemon()
+            .recent_events(Some(&s.id))
+            .into_iter()
+            .rev()
+            .find_map(|e| match e.body {
+                EventBody::Disks { state, detail, .. } if state == "image" => detail,
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    const CONFIG: &str = "profiles:\n  web: { engine: { image: web } }\n";
+
+    #[tokio::test]
+    async fn a_persistent_sessions_image_is_checked_against_its_build() {
+        let t = TestCore::new(CONFIG);
+        let path = image(&t, Some(b"as built"), b"as built");
+        let s = session(&t, false);
+        check_image(t.core.daemon(), &s, &path).await.unwrap();
+        assert_eq!(image_event(&t, &s), "image web as it was built");
+
+        let path = image(&t, Some(b"as built"), b"changed");
+        let e = check_image(t.core.daemon(), &s, &path).await.unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("image web changed since it was built"),
+            "{e}"
+        );
+        assert_eq!(image_event(&t, &s), "image web changed since it was built");
+
+        let accepting = session(&t, true);
+        check_image(t.core.daemon(), &accepting, &path)
+            .await
+            .unwrap();
+        assert!(image_event(&t, &accepting).ends_with("used as it is, as asked"));
+    }
+
+    #[tokio::test]
+    async fn an_image_built_before_hashing_is_unverified_and_used() {
+        let t = TestCore::new(CONFIG);
+        let path = image(&t, None, b"old");
+        let s = session(&t, false);
+        check_image(t.core.daemon(), &s, &path).await.unwrap();
+        assert!(
+            image_event(&t, &s).contains("unverified"),
+            "{}",
+            image_event(&t, &s)
+        );
     }
 }

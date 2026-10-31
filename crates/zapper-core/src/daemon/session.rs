@@ -1,6 +1,10 @@
 //! One sandbox: a microVM, its guest channel, policy layer and audit trail.
-//! The session's state and queries live here; starting and stopping it is in
-//! `lifecycle`, and its interactive terminals in `terminal`.
+//! The session's state and queries live here; the rest is in a module per
+//! job: making it (`create`), running and stopping it (`run`), its VM
+//! (`launch`), the guest's control channel (`control`), exec decisions
+//! (`exec`), its disks (`disks`), what it keeps (`persist`), what an earlier
+//! daemon left (`adopt`), its terminals (`terminal`), and its store,
+//! directory, rules and runtime.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,24 +13,29 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{bail, Result};
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use zapper_policy::proto::{
-    Forward, Frame, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT,
-};
+use zapper_policy::proto::{Forward, Frame, GuestFile, HostMsg, ShellRequest, SHELL_PORT};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, Daemon, Event, EventBody};
 
-mod boot;
+mod adopt;
+mod control;
+mod create;
 mod dir;
 pub(crate) mod disks;
-mod lifecycle;
+mod exec;
+mod launch;
+mod persist;
 mod rules;
+mod run;
 mod runtime;
 mod spec;
 mod store;
 mod terminal;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use dir::SessionDir;
 pub(crate) use rules::Rules;
@@ -34,9 +43,13 @@ pub(crate) use runtime::GuestRuntime;
 pub use runtime::Status;
 pub(crate) use store::SessionStore;
 
+pub(crate) use adopt::restore;
+#[cfg(test)]
+pub(crate) use control::read_guest_line;
+pub(crate) use create::create;
 #[cfg(any(test, feature = "test-util"))]
-pub(crate) use lifecycle::register;
-pub(crate) use lifecycle::{create, restore, start, stop};
+pub(crate) use create::register;
+pub(crate) use run::{start, stop};
 pub(crate) use terminal::pump_shell;
 pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
@@ -310,7 +323,7 @@ impl Session {
     /// A persistent session's rules are kept, for a daemon that adopts it.
     fn rules_changed(&self) {
         if self.persistent {
-            if let Err(e) = lifecycle::save(self) {
+            if let Err(e) = persist::save(self) {
                 tracing::warn!(session = %self.id, "keeping its rules: {e:#}");
             }
         }
@@ -557,24 +570,4 @@ pub(crate) struct Saved {
     pub files: Vec<GuestFile>,
     pub forwards: Vec<Forward>,
     pub driven: bool,
-}
-
-/// One line from the guest's control channel, at most `MAX_LINE` bytes:
-/// `None` at the end, an error for a longer one. Shared by the guest-control
-/// loop (`lifecycle`) and nothing else.
-pub(crate) async fn read_guest_line(
-    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
-) -> Result<Option<Vec<u8>>> {
-    let mut line = Vec::new();
-    let n = reader
-        .take(MAX_LINE as u64 + 1)
-        .read_until(b'\n', &mut line)
-        .await?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if n > MAX_LINE {
-        bail!("guest sent an oversized message");
-    }
-    Ok(Some(line))
 }

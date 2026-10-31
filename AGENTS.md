@@ -92,7 +92,7 @@ crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gat
   src/vmm.rs               `zapper __vmm`: runs Firecracker confined in its own namespaces and root
   src/netns.rs             the guest's network in the VMM's namespace, and traffic capture
   src/daemon/harness.rs    agent harnesses: Claude Code and pi behind `Harness`/`Driver`/`Conversation`; HARNESS.md for both, and opencode
-  src/daemon/session.rs    session lifecycle, guest control channel, exec decisions, recordings
+  src/daemon/session.rs    a session; session/ a module per job: create, run, launch, control, exec, disks, persist, adopt, terminal
   src/daemon/proxy.rs      egress proxy: tunnels, TLS inspection, secret injection
   src/daemon/services.rs   names the daemon connects itself (a firm's git and cluster), zones
   src/daemon/gateway.rs    the MCP gateway: servers registered in the daemon, over each VM's MCP port
