@@ -33,14 +33,14 @@ KERNEL  ?= k8s
 OFFICE  ?= 1
 ifeq ($(OFFICE),0)
 FEATURES := --no-default-features
-HOST     := -p zapper -p zapper-keeper
-BINS     := zapper zapper-agent
+HOST     := -p zapper -p zapper-keeper -p zapper-workbench
+BINS     := zapper zapper-agent zapper-workbench
 EXCLUDE  := --exclude zapper-office --exclude zapper-inspect --exclude zapper-runs --exclude zapper-fake
 FAKE     :=
 else
 FEATURES :=
-HOST     := -p zapper -p zapper-keeper -p zapper-inspect
-BINS     := zapper zapper-agent zapper-inspect
+HOST     := -p zapper -p zapper-keeper -p zapper-inspect -p zapper-workbench
+BINS     := zapper zapper-agent zapper-inspect zapper-workbench
 EXCLUDE  :=
 # The fake Claude Code and pi of the office's e2e tests, static like the
 # agent: the office-fake image installs it.

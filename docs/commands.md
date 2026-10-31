@@ -7,8 +7,8 @@
 | Target | Purpose |
 |---|---|
 | `make deps` | Download Firecracker, verifying its checksum, and the guest kernel into `~/.local/share/zapper` |
-| `make build` | Release build of the static musl `zapper-agent`, `zapper` and `zapper-inspect`, in `target/release` |
-| `make install` | Install the three into `~/.local/bin` (set `PREFIX` for another place) |
+| `make build` | Release build of the static musl `zapper-agent`, `zapper`, `zapper-inspect` and `zapper-workbench`, in `target/release` |
+| `make install` | Install the four into `~/.local/bin` (set `PREFIX` for another place) |
 | `make image [IMAGE=name]` | Build an image from its recipe in the config (`images:`, as `zapper image build NAME`): `office` (office workers: Claude Code and pi at pinned versions, git, kubectl, podman, a headless browser), `k3s` (a firm's cluster), `office-fake` (a fake Claude Code and pi, for the office's e2e tests), and `ubuntu-26.04` (default; the base profiles) |
 | `make kernel [KERNEL=k8s]` | Build a guest kernel from the Firecracker config plus `config/kernel/<name>.config`, in a container; `k8s` is the cluster's |
 | `make check` | `zapper check` |

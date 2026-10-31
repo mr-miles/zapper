@@ -35,7 +35,7 @@ Never run `sudo` without the user's explicit consent, and run only what you list
 
 ```
 make deps                       # Firecracker (checksum-verified) and kernel
-make install                    # zapper, zapper-agent and zapper-inspect into ~/.local/bin
+make install                    # zapper, zapper-agent, zapper-inspect and zapper-workbench into ~/.local/bin
 make image                      # ubuntu-26.04: the base profiles, and a plain session to check the setup
 make image IMAGE=office         # Claude Code and pi: `zapper run -p claude`, and The Office's workers
 ```
