@@ -59,7 +59,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         }
         let _ = std::fs::remove_file(dir.vmm());
         let was_running = disks::last_stop_in(&dir) == disks::LastStop::RanSince;
-        let session = match assemble(daemon, saved, vec![], true, false, None, true) {
+        let session = match assemble(daemon, saved, vec![], true, false, None) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("restoring session in {}: {e:#}", dir.root().display());
@@ -115,7 +115,7 @@ pub(super) fn adopt(
     rt: &tokio::runtime::Handle,
 ) -> Result<()> {
     let audit = record::Writer::open(&dir.audit())?;
-    let session = assemble(daemon, saved, vec![], true, false, Some(audit), true)?;
+    let session = assemble(daemon, saved, vec![], true, false, Some(audit))?;
     if let Some(n) = vmm.subid {
         crate::subids::claim(&session.id, n)?;
     }

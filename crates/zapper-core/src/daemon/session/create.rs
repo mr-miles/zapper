@@ -48,7 +48,8 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         workdir: new.workdir.clone(),
         resolved,
         labels: new.labels.clone(),
-        rules: new.policy.clone(),
+        // Added below, each given an id of the session's own.
+        rules: Default::default(),
         files: new.files.clone(),
         forwards: new.forwards.clone(),
         driven,
@@ -60,8 +61,11 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         new.persistent,
         new.accept_changed_image,
         Some(audit),
-        false,
     )?;
+    // Saved once, below, not per rule.
+    for rule in new.policy.rules() {
+        session.rules.add(rule, None);
+    }
     if session.persistent {
         save(&session)?;
     }
@@ -157,8 +161,9 @@ pub(crate) async fn create(daemon: Arc<Daemon>, new: NewSession) -> Result<Arc<S
     Ok(session)
 }
 
-/// The session `saved` describes, not yet listed: its rules, a CA of its
-/// own, the driver if it is driven, and its lifetime from now.
+/// The session `saved` describes, not yet listed: its rules, kept with
+/// their ids (which clients revoke them by), a CA of its own, and the
+/// driver if it is driven.
 pub(super) fn assemble(
     daemon: &Arc<Daemon>,
     saved: Saved,
@@ -169,7 +174,6 @@ pub(super) fn assemble(
     persistent: bool,
     accept_changed_image: bool,
     audit: Option<record::Writer>,
-    restored: bool,
 ) -> Result<Arc<Session>> {
     let dir = daemon.paths.session_dir(&saved.id);
     // A persistent session's CA and synthetic names are kept, to be the same
@@ -217,16 +221,7 @@ pub(super) fn assemble(
         extra_files: saved.files,
         forwards: saved.forwards,
     });
-    if restored {
-        // Kept with their ids, which clients revoke them by.
-        session.rules.restore(saved.rules);
-    } else {
-        // A new session's rules get ids of the session's own; saved once,
-        // by `register`, not per rule.
-        for rule in saved.rules.rules() {
-            session.rules.add(rule, None);
-        }
-    }
+    session.rules.restore(saved.rules);
     Ok(session)
 }
 
