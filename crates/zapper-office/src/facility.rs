@@ -700,6 +700,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         forwards,
         persistent: false,
         accept_changed_image: false,
+        ssh: false,
     };
     let _ = config;
     let s = d.create_session(new).await.context("booting the cluster")?;

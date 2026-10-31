@@ -45,6 +45,8 @@ pub(super) fn save(session: &Session) -> Result<()> {
         files: session.extra_files.clone(),
         forwards: session.forwards.clone(),
         driven: session.driver.is_some(),
+        ssh: session.ssh_enabled(),
+        ssh_terminal: session.ssh_terminal(),
     };
     crate::util::write_private(&session.dir.saved(), &serde_json::to_vec_pretty(&saved)?)
 }

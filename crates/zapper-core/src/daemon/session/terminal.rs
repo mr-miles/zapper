@@ -31,6 +31,8 @@ pub(crate) async fn pump_shell<C>(
     let super::ShellOpened {
         stream: guest,
         request,
+        client: who,
+        ssh,
     } = opened;
     let (id, argv, tty, persist) = (request.id, request.argv, request.tty, request.persist);
     let existing = session.terminals.lock().unwrap().get(&id).cloned();
@@ -57,6 +59,7 @@ pub(crate) async fn pump_shell<C>(
             state: if reattached { "attached" } else { "open" }.into(),
             argv: Some(term.argv.clone()),
             exit_code: None,
+            client: who.clone(),
         },
     );
     let cast = term.cast.clone();
@@ -87,51 +90,67 @@ pub(crate) async fn pump_shell<C>(
     // a persistent terminal's says so first (`Attached`), replaying what it
     // keeps.
     let mut at = term.state.lock().unwrap().recorded;
-    while let Ok(Some(frame)) = read_frame(&mut gr).await {
-        match &frame {
-            Frame::Attached { from, .. } => {
-                at = *from;
-                let mut st = term.state.lock().unwrap();
-                let note = if std::mem::take(&mut st.adopted) {
-                    // Adopted: what came before this was recorded by an
-                    // earlier daemon, or not at all; record from here.
-                    st.recorded = *from;
-                    Some(
-                        "output before this was recorded by an earlier daemon, if at all"
-                            .to_string(),
-                    )
-                } else if *from > st.recorded {
-                    let gap = format!("{} bytes no longer kept by the guest", from - st.recorded);
-                    st.recorded = *from;
-                    Some(gap)
-                } else {
-                    None
-                };
-                drop(st);
-                if let Some(note) = note {
-                    cast.lock().unwrap().write("m", note.as_bytes());
-                }
-            }
-            Frame::Data(d) | Frame::Stderr(d) => {
-                // Only what wasn't recorded yet: a replay repeats the rest.
-                let start = at;
-                at += d.len() as u64;
-                let mut st = term.state.lock().unwrap();
-                if at > st.recorded {
-                    let new = &d[(st.recorded.saturating_sub(start)) as usize..];
-                    st.recorded = at;
+    // An SSH terminal ends when the session's SSH is turned off.
+    let mut ssh_on = session.ssh.subscribe();
+    let ssh_off = async move {
+        if !ssh {
+            return std::future::pending().await;
+        }
+        let _ = ssh_on.wait_for(|on| !on).await;
+    };
+    let downstream = async {
+        while let Ok(Some(frame)) = read_frame(&mut gr).await {
+            match &frame {
+                Frame::Attached { from, .. } => {
+                    at = *from;
+                    let mut st = term.state.lock().unwrap();
+                    let note = if std::mem::take(&mut st.adopted) {
+                        // Adopted: what came before this was recorded by an
+                        // earlier daemon, or not at all; record from here.
+                        st.recorded = *from;
+                        Some(
+                            "output before this was recorded by an earlier daemon, if at all"
+                                .to_string(),
+                        )
+                    } else if *from > st.recorded {
+                        let gap =
+                            format!("{} bytes no longer kept by the guest", from - st.recorded);
+                        st.recorded = *from;
+                        Some(gap)
+                    } else {
+                        None
+                    };
                     drop(st);
-                    cast.lock().unwrap().write("o", new);
-                    term.push(TermChunk::Output(new.to_vec()));
+                    if let Some(note) = note {
+                        cast.lock().unwrap().write("m", note.as_bytes());
+                    }
                 }
+                Frame::Data(d) | Frame::Stderr(d) => {
+                    // Only what wasn't recorded yet: a replay repeats the rest.
+                    let start = at;
+                    at += d.len() as u64;
+                    let mut st = term.state.lock().unwrap();
+                    if at > st.recorded {
+                        let new = &d[(st.recorded.saturating_sub(start)) as usize..];
+                        st.recorded = at;
+                        drop(st);
+                        cast.lock().unwrap().write("o", new);
+                        term.push(TermChunk::Output(new.to_vec()));
+                    }
+                }
+                Frame::Exit(c) => exit_code = Some(*c),
+                _ => {}
             }
-            Frame::Exit(c) => exit_code = Some(*c),
-            _ => {}
+            if cw.write_all(&frame.encode()).await.is_err() || exit_code.is_some() {
+                break;
+            }
         }
-        if cw.write_all(&frame.encode()).await.is_err() || exit_code.is_some() {
-            break;
-        }
+    };
+    tokio::select! {
+        _ = downstream => {}
+        _ = ssh_off => {}
     }
+    drop(gr);
     let _ = cw.shutdown().await;
     upstream.abort();
     term.state.lock().unwrap().attached = false;
@@ -147,6 +166,7 @@ pub(crate) async fn pump_shell<C>(
             state: if detached { "detached" } else { "closed" }.into(),
             argv: None,
             exit_code,
+            client: who,
         },
     );
 }
@@ -406,6 +426,8 @@ mod persistent_tests {
                 persist: true,
                 ..Default::default()
             },
+            client: None,
+            ssh: false,
         };
         pump_shell(t.core.daemon().clone(), s.clone(), client, opened).await;
     }

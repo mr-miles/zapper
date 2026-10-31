@@ -76,8 +76,11 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 
 | Command | Purpose |
 |---|---|
-| `zapper run [-p PROFILE] [-C DIR] [--keep] [--persistent [--accept-changed-image]] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. `--persistent` (which keeps it) also keeps its disks when it stops, so `zapper start` can start it again, also after the daemon restarts ([persistent sessions](security.md#persistent-sessions)). Labels pick it for services |
+| `zapper run [-p PROFILE] [-C DIR] [--keep] [--persistent [--accept-changed-image]] [--ssh] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. `--ssh` lets SSH reach it ([SSH](ssh.md)). `--persistent` (which keeps it) also keeps its disks when it stops, so `zapper start` can start it again, also after the daemon restarts ([persistent sessions](security.md#persistent-sessions)). Labels pick it for services |
 | `zapper attach ID [--persist] [-- CMD…]` / `zapper attach ID --terminal N` | Another terminal in a running session. `--persist`: its program keeps running when the terminal closes (your connection drops, or you close it), and it prints its number; `--terminal N` attaches to it again, showing what it kept, then live, and closing a client attached already ([architecture: persistent terminals](architecture.md#persistent-terminals)) |
+| `zapper ssh on ID` / `zapper ssh off ID` | Let SSH reach a sandbox, or stop it: off refuses SSH from then on and closes the terminals SSH has open in it, while it runs ([SSH](ssh.md)) |
+| `zapper ssh proxy [ID[.zapper]] [--key NAME]` | The SSH gateway: SSH on stdin and stdout, for the sandbox named (else by `$SSH_ORIGINAL_COMMAND`); the forced command of a key in `authorized_keys`, `NAME` recorded with each terminal it opens |
+| `zapper ssh config [--host USER@HOST]` | Print the `~/.ssh/config` block and `known_hosts` line for your machine, and the `authorized_keys` line for this host |
 | `zapper hangup ID N` | End persistent terminal N on purpose: its program gets `SIGHUP` |
 | `zapper exec ID [--system] -- CMD…` | Run a command without a terminal, returning its exit code; `--system` runs it as root without exec supervision, for the operator's own maintenance (e.g. a firm's cluster VM) |
 | `zapper cp ID:/path DIR` | Copy a guest directory out |

@@ -109,6 +109,7 @@ crates/zapper/           the CLI and `serve`: starts the core, the office (featu
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
 crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
+crates/zapper-ssh/       the SSH gateway: SSH spoken on one stream (`zapper ssh proxy`, a key's forced command), its channels carried to a sandbox's terminals through the API
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
 crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests
 config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
@@ -146,6 +147,7 @@ Invariants (a change that breaks one is wrong even if it compiles; [testing](doc
 - The host accepts only the first control connection, and afterwards, for a persistent session, only one whose first line carries the session's resume token; the agent accepts terminal connections only from CID 2.
 - A persistent session boots only disks whose hashes match those recorded at its last stop, or whose change (or missing hashes) the operator accepted; both are recorded.
 - A socket service names a file in the daemon's `state/services/` directory, never a path; its program is told the caller in a line the daemon sends first, from the VM the connection came from, before any byte from the guest.
+- SSH reaches a sandbox only while its SSH is on (enforced by the daemon, which refuses and records the gateway's terminals otherwise, and closes them when it is turned off); the gateway maps SSH only onto terminals run as the workload user, and refuses port, agent and X11 forwarding and subsystems.
 - The seccomp filter kills foreign-arch and x32 syscalls, so exec checks cannot be bypassed through another syscall table.
 - Anything from the guest is bounded (line, frame, connection and approval limits) and rendered as text in the UI.
 - The UI's writes are answering approvals, prompting a driven session that isn't a firm's, and the board's firm actions (mail and marking it read, start/stop/pause, security decisions and promoting them into the running config, background checks, credential grants and decisions, budget decisions, funding and releasing workers, drive uploads, deleting a past run, notes on runs); each requires the token cookie and `X-Zapper-UI: 1`; on loopback (the default) a local `Host` and `Origin`, and listening elsewhere (`daemon.ui`, for a remote host) an `Origin` naming the `Host` the request came to. Whatever the UI and the dashboard listen on, the VMs can't reach them: the host's own addresses are closed to them.

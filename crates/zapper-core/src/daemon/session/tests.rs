@@ -575,3 +575,178 @@ async fn a_runs_lifetime_is_what_it_shows() {
     let back = restart(&t, &s);
     assert_eq!(back.info().expires, None, "stopped: no lifetime running");
 }
+
+// SSH, turned on and off per session.
+
+fn ssh_events(t: &TestCore, s: &Session) -> Vec<(String, Option<String>)> {
+    t.core
+        .recent_events(Some(&s.id))
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::Ssh { state, client, .. } => Some((state, client)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn next_data(client: &mut tokio::io::DuplexStream) -> Vec<u8> {
+    match terminal::read_frame(client).await.unwrap() {
+        Some(Frame::Data(d)) => d,
+        other => panic!("not data: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ssh_is_refused_until_turned_on_and_turning_it_off_closes_its_terminals() {
+    let t = TestCore::new(CONFIG);
+    let new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    let s = t.core.test_session(new, true).unwrap();
+    let mut vm = crate::testing::shell_vm(&s);
+    let sh = || ShellRequest::exec(vec!["sh".into()]);
+
+    let e = s
+        .open_ssh_shell(sh(), Some("laptop".into()))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        crate::errors::kind_of(&e),
+        Some(crate::errors::ErrorKind::Forbidden)
+    );
+    assert!(!s.info().ssh);
+
+    s.set_ssh(true).unwrap();
+    assert!(s.info().ssh);
+    let opened = s.open_ssh_shell(sh(), Some("laptop".into())).await.unwrap();
+    let mut guest = vm.recv().await.unwrap();
+    let (mut client, ours) = tokio::io::duplex(4096);
+    let pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    guest.say("hello").await;
+    assert_eq!(next_data(&mut client).await, b"hello\n");
+
+    s.set_ssh(false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), pump)
+        .await
+        .expect("the SSH terminal closes")
+        .unwrap();
+    assert!(terminal::read_frame(&mut client).await.unwrap().is_none());
+    assert!(
+        guest.line().await.is_none(),
+        "the guest's side is closed too"
+    );
+    assert_eq!(
+        ssh_events(&t, &s),
+        [
+            ("refused".to_string(), Some("laptop".to_string())),
+            ("enabled".to_string(), None),
+            ("disabled".to_string(), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn turning_ssh_off_leaves_other_terminals_open() {
+    let t = TestCore::new(CONFIG);
+    let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    new.ssh = true;
+    let s = t.core.test_session(new, true).unwrap();
+    let mut vm = crate::testing::shell_vm(&s);
+    let opened = s
+        .open_shell(ShellRequest::exec(vec!["sh".into()]))
+        .await
+        .unwrap();
+    let mut guest = vm.recv().await.unwrap();
+    let (mut client, ours) = tokio::io::duplex(4096);
+    let _pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    s.set_ssh(false).unwrap();
+    guest.say("still here").await;
+    assert_eq!(next_data(&mut client).await, b"still here\n");
+}
+
+#[tokio::test]
+async fn a_persistent_session_keeps_its_ssh_setting() {
+    let t = TestCore::new(CONFIG);
+    let s = persistent(&t);
+    s.set_ssh(true).unwrap();
+    let saved: Saved = serde_json::from_slice(&std::fs::read(s.dir.saved()).unwrap()).unwrap();
+    assert!(saved.ssh);
+}
+
+#[tokio::test]
+async fn an_ssh_shell_is_one_persistent_terminal_attached_to_again() {
+    let t = TestCore::new(CONFIG);
+    let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    new.ssh = true;
+    let s = t.core.test_session(new, true).unwrap();
+    let mut vm = crate::testing::shell_vm(&s);
+    let shell = |size| ShellRequest {
+        tty: Some(size),
+        ..Default::default()
+    };
+
+    // The first starts the agent, persistent; its connection drops.
+    let opened = s.open_ssh_shell(shell((24, 80)), None).await.unwrap();
+    let first = opened.request.id;
+    let guest = vm.recv().await.unwrap();
+    assert!(guest.request.persist);
+    assert_eq!(
+        guest.request.argv, s.resolved.agent.command,
+        "the profile's command"
+    );
+    let (client, ours) = tokio::io::duplex(4096);
+    let pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    drop(client);
+    // The guest's holder detaches when the host's side ends: it closes its.
+    drop(guest);
+    tokio::time::timeout(Duration::from_secs(5), pump)
+        .await
+        .expect("detached")
+        .unwrap();
+
+    // The next attaches to it again, at its own size.
+    let opened = s.open_ssh_shell(shell((50, 200)), None).await.unwrap();
+    assert_eq!(opened.request.id, first);
+    let again = vm.recv().await.unwrap();
+    assert_eq!(again.request.attach, Some(first));
+    assert_eq!(again.request.tty, Some((50, 200)));
+
+    // A command is a terminal of its own, not the agent's.
+    let opened = s
+        .open_ssh_shell(ShellRequest::exec(vec!["ls".into()]), None)
+        .await
+        .unwrap();
+    assert_ne!(opened.request.id, first);
+    let exec = vm.recv().await.unwrap();
+    assert!(!exec.request.persist && exec.request.attach.is_none());
+
+    // Once the agent has exited, the next shell starts it afresh.
+    let (client, ours) = tokio::io::duplex(4096);
+    let opened = s.open_ssh_shell(shell((24, 80)), None).await.unwrap();
+    let guest = vm.recv().await.unwrap();
+    let pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    guest.exit(0).await;
+    tokio::time::timeout(Duration::from_secs(5), pump)
+        .await
+        .expect("ended")
+        .unwrap();
+    drop(client);
+    let opened = s.open_ssh_shell(shell((24, 80)), None).await.unwrap();
+    assert_ne!(opened.request.id, first);
+    let fresh = vm.recv().await.unwrap();
+    assert!(fresh.request.persist && fresh.request.attach.is_none());
+}
+
+#[tokio::test]
+async fn a_persistent_session_keeps_its_ssh_terminal() {
+    let t = TestCore::new(CONFIG);
+    let s = persistent(&t);
+    s.set_ssh(true).unwrap();
+    let _vm = crate::testing::shell_vm(&s);
+    let req = ShellRequest {
+        tty: Some((24, 80)),
+        ..Default::default()
+    };
+    let opened = s.open_ssh_shell(req, None).await.unwrap();
+    let saved: Saved = serde_json::from_slice(&std::fs::read(s.dir.saved()).unwrap()).unwrap();
+    assert_eq!(saved.ssh_terminal, Some(opened.request.id));
+}

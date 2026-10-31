@@ -46,6 +46,7 @@ zapper run -C $(mktemp -d)               # shell on a copy of an empty directory
 zapper run -p claude --keep              # Claude Code on a copy of the current directory; other hosts are asks
 zapper run -p PROFILE --keep             # keep it after the command exits
 zapper attach ID                         # another terminal (profile command, or -- CMD)
+zapper run -p claude --keep --ssh        # also reachable as `ssh ID.zapper`; `zapper ssh on|off ID` while it runs (docs/ssh.md)
 zapper tell ID "a task"                  # a driven session (agent.driven): queued for its next turn; not a firm's worker (mail them)
 zapper run -p k3s --keep --label team=a  # labels pick sessions for services
 zapper service add k3s.internal:6443 --to-session ID:6443 --for team=a   # then a net rule for it; zapper service ls / rm

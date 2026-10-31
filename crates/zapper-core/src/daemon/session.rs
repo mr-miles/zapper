@@ -91,10 +91,16 @@ async fn connect_vsock(path: PathBuf, port: u32, refused: &str) -> Result<UnixSt
 
 /// A terminal channel opened to the guest (`Session::open_shell`): the
 /// stream, and the request as it was sent, its terminal id given and its
-/// command filled in.
+/// command filled in; and who opened it, for its events.
 pub struct ShellOpened {
     pub stream: UnixStream,
     pub request: ShellRequest,
+    /// The client that opened it, as it named itself (`Session::open_shell`
+    /// leaves it unset).
+    pub client: Option<String>,
+    /// Opened through the SSH gateway (`Session::open_ssh_shell`): closed
+    /// if the session's SSH is turned off.
+    pub ssh: bool,
 }
 
 #[derive(Default, Serialize)]
@@ -162,6 +168,15 @@ pub struct Session {
     daemon: Weak<Daemon>,
     extra_files: Vec<GuestFile>,
     forwards: Vec<Forward>,
+    /// Whether the SSH gateway may open terminals in it: turned on and off
+    /// while it runs (`set_ssh`); its SSH terminals watch it, to close when
+    /// it goes off.
+    ssh: tokio::sync::watch::Sender<bool>,
+    /// The persistent terminal SSH shells attach to, while its program runs:
+    /// one per session, the agent, kept through dropped connections.
+    ssh_terminal: Mutex<Option<u64>>,
+    /// Held while an SSH shell is opened, so two at once don't start two.
+    ssh_opening: tokio::sync::Mutex<()>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +188,8 @@ pub struct SessionInfo {
     pub(crate) created: f64,
     pub(crate) expires: Option<f64>,
     pub(crate) persistent: bool,
+    /// Whether the SSH gateway may open terminals in it.
+    pub(crate) ssh: bool,
     /// For a persistent session: what its disks take on the host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disk_bytes: Option<u64>,
@@ -209,6 +226,7 @@ impl Session {
             created: self.created,
             expires: *self.expires.lock().unwrap(),
             persistent: self.persistent,
+            ssh: self.ssh_enabled(),
             disk_bytes: self.persistent.then(|| self.dir.disk_bytes()),
             image: self.resolved.engine.image.clone(),
             vcpus: self.resolved.engine.vcpus,
@@ -478,7 +496,107 @@ impl Session {
         Ok(ShellOpened {
             stream,
             request: req,
+            client: None,
+            ssh: false,
         })
+    }
+
+    /// Whether the SSH gateway may open terminals in the session.
+    pub fn ssh_enabled(&self) -> bool {
+        *self.ssh.borrow()
+    }
+
+    /// Turns the session's SSH on or off, recorded; off also closes the
+    /// terminals the gateway has open (a persistent one is detached, and
+    /// keeps running). A persistent session keeps the setting.
+    pub fn set_ssh(&self, enabled: bool) -> Result<()> {
+        if self.ssh.send_replace(enabled) == enabled {
+            return Ok(());
+        }
+        if let Some(d) = self.daemon.upgrade() {
+            d.emit(
+                Some(self),
+                EventBody::Ssh {
+                    state: if enabled { "enabled" } else { "disabled" }.into(),
+                    client: None,
+                    reason: None,
+                },
+            );
+        }
+        if self.persistent {
+            persist::save(self)?;
+        }
+        Ok(())
+    }
+
+    /// Opens a terminal for `client` through the SSH gateway, as
+    /// `open_shell`, if the session's SSH is on; refused and recorded if not.
+    pub async fn open_ssh_shell(
+        &self,
+        req: ShellRequest,
+        client: Option<String>,
+    ) -> Result<ShellOpened> {
+        if !self.ssh_enabled() {
+            if let Some(d) = self.daemon.upgrade() {
+                d.emit(
+                    Some(self),
+                    EventBody::Ssh {
+                        state: "refused".into(),
+                        client: client.clone(),
+                        reason: Some("SSH is off for this session".into()),
+                    },
+                );
+            }
+            return Err(crate::errors::forbidden(format!(
+                "SSH is off for session {} (`zapper ssh on {}`)",
+                self.id, self.id
+            )));
+        }
+        // A shell (a terminal running the profile's command) is the
+        // session's one SSH terminal: attached to again while its program
+        // runs, taking over from a connection attached already; started,
+        // persistent, when there is none. Anything else is a terminal of its
+        // own, ended with its connection.
+        if req.tty.is_none() || !req.argv.is_empty() {
+            let mut opened = self.open_shell(req).await?;
+            opened.client = client;
+            opened.ssh = true;
+            return Ok(opened);
+        }
+        let _one_at_a_time = self.ssh_opening.lock().await;
+        let held = self.ssh_terminal();
+        let running = held.filter(|n| {
+            self.terminals
+                .lock()
+                .unwrap()
+                .get(n)
+                .is_some_and(|t| t.persistent && t.info().open)
+        });
+        let req = match running {
+            Some(n) => ShellRequest {
+                tty: req.tty,
+                ..ShellRequest::attach(n)
+            },
+            None => ShellRequest {
+                persist: true,
+                ..req
+            },
+        };
+        let mut opened = self.open_shell(req).await?;
+        if held != Some(opened.request.id) {
+            *self.ssh_terminal.lock().unwrap() = Some(opened.request.id);
+            if self.persistent {
+                persist::save(self)?;
+            }
+        }
+        opened.client = client;
+        opened.ssh = true;
+        Ok(opened)
+    }
+
+    /// The session's SSH terminal's number, if it has had one.
+    pub(crate) fn ssh_terminal(&self) -> Option<u64> {
+        *self.ssh_terminal.lock().unwrap()
     }
 
     /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
@@ -528,6 +646,9 @@ pub struct NewSession {
     /// For a persistent session: make it from its image even if the image
     /// changed since it was built, which is recorded.
     pub accept_changed_image: bool,
+    /// Let the SSH gateway open terminals in it from the start
+    /// (`Session::set_ssh` turns it on and off later).
+    pub ssh: bool,
 }
 
 impl NewSession {
@@ -544,6 +665,7 @@ impl NewSession {
             forwards: vec![],
             persistent: false,
             accept_changed_image: false,
+            ssh: false,
         }
     }
 }
@@ -564,4 +686,10 @@ pub(crate) struct Saved {
     pub files: Vec<GuestFile>,
     pub forwards: Vec<Forward>,
     pub driven: bool,
+    /// SSH on (`Session::set_ssh`); off for one saved before there was SSH.
+    #[serde(default)]
+    pub ssh: bool,
+    /// The persistent terminal SSH shells attach to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_terminal: Option<u64>,
 }

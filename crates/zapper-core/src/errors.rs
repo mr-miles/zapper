@@ -12,6 +12,9 @@ pub enum ErrorKind {
     /// It can't be done as things are, but could be (a start whose disks
     /// changed, until the change is accepted).
     Conflict,
+    /// It isn't allowed as things are set (SSH into a session it is off
+    /// for).
+    Forbidden,
 }
 
 /// An error of a kind: its words, and the kind.
@@ -45,6 +48,11 @@ pub fn not_found(msg: impl fmt::Display) -> anyhow::Error {
 /// It can't be done as things are: a [`ErrorKind::Conflict`].
 pub fn conflict(msg: impl fmt::Display) -> anyhow::Error {
     error(ErrorKind::Conflict, msg)
+}
+
+/// It isn't allowed: a [`ErrorKind::Forbidden`].
+pub fn forbidden(msg: impl fmt::Display) -> anyhow::Error {
+    error(ErrorKind::Forbidden, msg)
 }
 
 /// The kind of `e`, if it has one (anywhere in its chain, so context added

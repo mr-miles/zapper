@@ -111,9 +111,22 @@ pub enum EventBody {
         argv: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Who opened or attached it, as the client named itself (an SSH
+        /// key's name, through the gateway).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
     },
     Config {
         change: String,
+    },
+    /// The session's SSH: `enabled`, `disabled`, or `refused` (a terminal
+    /// the gateway asked for while it was off), with who asked.
+    Ssh {
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// A service or zone added or removed (`services`).
     Service {

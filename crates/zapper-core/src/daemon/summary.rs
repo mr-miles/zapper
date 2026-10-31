@@ -46,6 +46,7 @@ impl EventBody {
             EventBody::Answer { allow, .. } => yes(*allow),
             EventBody::Dns { allowed, .. } => yes(*allowed),
             EventBody::Mcp { ok: false, .. } => Some("deny"),
+            EventBody::Ssh { state, .. } if state == "refused" => Some("deny"),
             EventBody::Disks { state, .. } if state == "changed" => Some("deny"),
             EventBody::Driver { event, detail }
                 if event == "error" || detail["outcome"] == "failed" =>
@@ -128,8 +129,10 @@ impl EventBody {
                 state,
                 argv,
                 exit_code,
+                client,
             } => format!(
-                "shell {id} {state}{}{}",
+                "shell {id} {state}{}{}{}",
+                opt(client, |c| format!(" by {c}")),
                 opt(&argv.as_ref().map(|a| a.join(" ")), |a| format!(": {a}")),
                 opt(exit_code, |c| format!(" exit {c}")),
             ),
@@ -137,6 +140,15 @@ impl EventBody {
                 format!("{state}{}", opt(detail, |d| format!(": {d}")))
             }
             EventBody::Config { change } => change.clone(),
+            EventBody::Ssh {
+                state,
+                client,
+                reason,
+            } => format!(
+                "ssh {state}{}{}",
+                opt(client, |c| format!(" for {c}")),
+                opt(reason, |r| format!(": {r}")),
+            ),
             EventBody::Service { change, service } => format!(
                 "{change} {} {}{} → {}{} ({})",
                 service.kind,

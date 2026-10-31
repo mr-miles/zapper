@@ -21,6 +21,7 @@ impl From<anyhow::Error> for ApiError {
         let code = match kind_of(&e) {
             Some(ErrorKind::NotFound) => StatusCode::NOT_FOUND,
             Some(ErrorKind::Conflict) => StatusCode::CONFLICT,
+            Some(ErrorKind::Forbidden) => StatusCode::FORBIDDEN,
             // Errors not given a kind yet: one that names what isn't there.
             None if msg.starts_with("no ") => StatusCode::NOT_FOUND,
             None => StatusCode::BAD_REQUEST,
@@ -45,6 +46,10 @@ mod tests {
         assert_eq!(
             status(error(ErrorKind::Conflict, "no: changed")),
             StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(error(ErrorKind::Forbidden, "off")),
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             status(anyhow::anyhow!("no session x")),
