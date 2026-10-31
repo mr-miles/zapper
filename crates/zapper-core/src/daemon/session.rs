@@ -109,14 +109,14 @@ pub struct Counters {
 
 pub struct Session {
     pub id: String,
-    pub profile: String,
-    pub created: f64,
+    pub(crate) profile: String,
+    pub(crate) created: f64,
     /// When its `ttl_secs` ends this run: from its start, as it may be
     /// started again (`persistent`).
     expires: Mutex<Option<f64>>,
     /// Its disks stay when it stops, and it can be started again; they go
     /// when it is forgotten (`zapper rm`).
-    pub persistent: bool,
+    pub(crate) persistent: bool,
     /// How many times it has booted: a run's timers end with it.
     boots: AtomicU64,
     /// Held across a persistent session's save, from the snapshot of its
@@ -129,7 +129,7 @@ pub struct Session {
     /// since it was built (recorded); not kept.
     pub(crate) accept_changed_image: bool,
     pub resolved: ResolvedProfile,
-    pub workdir: PathBuf,
+    pub(crate) workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
     pub(crate) rules: Rules,
     /// Secrets only this session's rules can use: a credential scoped to
@@ -166,42 +166,42 @@ pub struct Session {
 
 #[derive(Serialize)]
 pub struct SessionInfo {
-    pub id: String,
-    pub profile: String,
+    pub(crate) id: String,
+    pub(crate) profile: String,
     #[serde(flatten)]
-    pub status: Status,
-    pub created: f64,
-    pub expires: Option<f64>,
-    pub persistent: bool,
+    pub(crate) status: Status,
+    pub(crate) created: f64,
+    pub(crate) expires: Option<f64>,
+    pub(crate) persistent: bool,
     /// For a persistent session: what its disks take on the host.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub disk_bytes: Option<u64>,
-    pub image: String,
-    pub vcpus: u8,
-    pub memory_mib: u32,
-    pub kernel: String,
+    pub(crate) disk_bytes: Option<u64>,
+    pub(crate) image: String,
+    pub(crate) vcpus: u8,
+    pub(crate) memory_mib: u32,
+    pub(crate) kernel: String,
     /// `nic` or `vsock`.
-    pub network: zapper_policy::NetworkMode,
-    pub user: String,
-    pub root: bool,
-    pub workdir: String,
-    pub counters: serde_json::Value,
-    pub usage: Option<zapper_policy::proto::GuestEvent>,
-    pub rules: usize,
+    pub(crate) network: zapper_policy::NetworkMode,
+    pub(crate) user: String,
+    pub(crate) root: bool,
+    pub(crate) workdir: String,
+    pub(crate) counters: serde_json::Value,
+    pub(crate) usage: Option<zapper_policy::proto::GuestEvent>,
+    pub(crate) rules: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub firm: Option<String>,
+    pub(crate) firm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub member: Option<String>,
+    pub(crate) member: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
+    pub(crate) labels: BTreeMap<String, String>,
     /// The driver's state for a driven session; `"disabled"` with the
     /// driver off (`daemon.driver: false`).
     #[serde(skip_serializing_if = "serde_json::Value::is_null")]
-    pub driver: serde_json::Value,
+    pub(crate) driver: serde_json::Value,
 }
 
 impl Session {
-    pub fn info(&self) -> SessionInfo {
+    pub(crate) fn info(&self) -> SessionInfo {
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
@@ -230,7 +230,7 @@ impl Session {
 
     /// The socket of the session's VM's vsock, for connecting to a port in
     /// the guest (`CONNECT <port>`).
-    pub fn vsock_path(&self) -> PathBuf {
+    pub(crate) fn vsock_path(&self) -> PathBuf {
         self.dir.vsock()
     }
 
@@ -282,7 +282,7 @@ impl Session {
         self.terminals.lock().unwrap().get(&id).cloned()
     }
 
-    pub fn record(&self, event: &Event) {
+    pub(crate) fn record(&self, event: &Event) {
         if let Some(f) = self.audit.lock().unwrap().as_mut() {
             let line = serde_json::to_vec(event).unwrap_or_default();
             let _ = f.line(&line);
@@ -297,13 +297,13 @@ impl Session {
     /// Policy layers, most specific first. Uses the running config, so rule
     /// changes apply to running sessions at once; a profile removed from the
     /// running config falls back to its layers at session start.
-    pub fn layers(&self, config: &Config) -> Vec<(Scope, Policy)> {
+    pub(crate) fn layers(&self, config: &Config) -> Vec<(Scope, Policy)> {
         self.rules
             .layers(&self.id, &self.profile, &self.resolved, config)
     }
 
     /// A clone of the session's own policy layer.
-    pub fn own_policy(&self) -> Policy {
+    pub(crate) fn own_policy(&self) -> Policy {
         self.rules.own()
     }
 
@@ -340,7 +340,7 @@ impl Session {
     /// Adds a rule to the session layer under a fresh `s-<session>-<kind>-<n>`
     /// id, so session rule ids clash neither with config ones nor with
     /// another session's.
-    pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
+    pub(crate) fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
         let rule = self.rules.add(rule, position);
         self.rules_changed();
         rule

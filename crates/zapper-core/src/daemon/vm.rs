@@ -14,7 +14,7 @@ use super::session::SessionDir;
 use crate::vmm::CONSOLE_LIMIT;
 
 /// Guest CID; every VM has its own vsock device, so they can share it.
-pub const GUEST_CID: u32 = 3;
+const GUEST_CID: u32 = 3;
 
 pub use zapper_policy::parse_size;
 

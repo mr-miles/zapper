@@ -14,7 +14,7 @@ use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 pub(crate) const MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
 
 /// Claude Code.
-pub struct ClaudeCode;
+pub(crate) struct ClaudeCode;
 
 impl Harness for ClaudeCode {
     fn kind(&self) -> &'static str {

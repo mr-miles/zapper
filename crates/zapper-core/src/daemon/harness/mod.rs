@@ -19,8 +19,8 @@
 mod claude;
 mod pi;
 
-pub use claude::ClaudeCode;
-pub use pi::Pi;
+use claude::ClaudeCode;
+use pi::Pi;
 
 #[cfg(test)]
 pub(crate) use claude::MANAGED_SETTINGS;
@@ -236,7 +236,7 @@ pub fn get(kind: &str) -> Option<&'static dyn Harness> {
 }
 
 /// Any command; nothing to set up beyond `agent.files` and `env`.
-pub struct Generic;
+pub(crate) struct Generic;
 
 impl Harness for Generic {
     fn kind(&self) -> &'static str {

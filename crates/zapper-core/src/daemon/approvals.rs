@@ -13,13 +13,13 @@ use zapper_policy::{AnyRule, Kind};
 /// A pending `ask` decision.
 #[derive(Debug, Clone, Serialize)]
 pub struct Pending {
-    pub id: String,
-    pub session: String,
-    pub kind: Kind,
-    pub subject: String,
-    pub created: f64,
+    pub(crate) id: String,
+    pub(crate) session: String,
+    pub(crate) kind: Kind,
+    pub(crate) subject: String,
+    pub(crate) created: f64,
     /// Rule added if the answer is remembered.
-    pub suggestion: AnyRule,
+    pub(crate) suggestion: AnyRule,
     /// Fired with the answer; set by `ask`, taken by `answer` (both on Daemon).
     #[serde(skip)]
     pub(super) tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,

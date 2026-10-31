@@ -278,7 +278,7 @@ pub struct Build<'a> {
 
 /// An image's name: a file name in the images directory, never hidden (a
 /// build's own files are) or a path out of it.
-pub fn check_name(name: &str) -> Result<()> {
+fn check_name(name: &str) -> Result<()> {
     let starts_well = name.starts_with(|c: char| c.is_ascii_alphanumeric());
     if !starts_well
         || !name
@@ -449,7 +449,7 @@ pub fn list(dir: &Path) -> Result<Vec<serde_json::Value>> {
 
 /// The SHA-256 recorded when the image `name` in `dir` was built; `None`
 /// for one built before images were hashed.
-pub fn built_hash(dir: &Path, name: &str) -> Option<String> {
+pub(crate) fn built_hash(dir: &Path, name: &str) -> Option<String> {
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.json"))).ok()?).ok()?;
     meta["sha256"].as_str().map(str::to_string)

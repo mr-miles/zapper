@@ -13,7 +13,7 @@ use zapper_policy::{merge, ResolvedProfile};
 use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// pi: configuration in `~/.pi/agent`, driven over `pi --mode rpc`.
-pub struct Pi;
+pub(crate) struct Pi;
 
 impl Harness for Pi {
     fn kind(&self) -> &'static str {
