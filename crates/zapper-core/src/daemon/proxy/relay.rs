@@ -500,13 +500,14 @@ where
         tds::prelogin_encryption(&pre).unwrap_or(tds::ENCRYPT_NOT_SUP),
         tds::ENCRYPT_ON | tds::ENCRYPT_REQ
     );
-    let reply_enc = if guest_wants_tls {
+    // Both legs as the guest asked: encrypted if it wants it, else not.
+    let encryption = if guest_wants_tls {
         tds::ENCRYPT_ON
     } else {
         tds::ENCRYPT_NOT_SUP
     };
     guest
-        .write_all(&tds::frame(tds::PKT_RESPONSE, &tds::prelogin(reply_enc)))
+        .write_all(&tds::frame(tds::PKT_RESPONSE, &tds::prelogin(encryption)))
         .await
         .map_err(|e| format!("sending PRELOGIN to the guest: {e}"))?;
     let mut guest: Box<dyn services::Io> = if guest_wants_tls {
@@ -524,13 +525,8 @@ where
     // used it. (TDS declares the client's intent in PRELOGIN before the server
     // replies, so this is the one knob.)
     let mut sbuf = Vec::new();
-    let want = if guest_wants_tls {
-        tds::ENCRYPT_ON
-    } else {
-        tds::ENCRYPT_NOT_SUP
-    };
     server
-        .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(want)))
+        .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(encryption)))
         .await
         .map_err(|e| format!("sending PRELOGIN: {e}"))?;
     let (_t, _s, preresp) = tds::read_packet(&mut server, &mut sbuf).await?;
