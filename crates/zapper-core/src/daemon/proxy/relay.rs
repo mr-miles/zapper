@@ -630,7 +630,7 @@ async fn guest_leg<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if first.first() == Some(&0x16) {
+    if tls::starts_handshake(&first) {
         let tls = accept_guest_tls(s, host, Prefixed::new(first, io)).await?;
         Ok((Box::new(tls), true))
     } else {

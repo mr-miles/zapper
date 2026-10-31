@@ -28,6 +28,17 @@ enum Sender {
     H2(hyper::client::conn::http2::SendRequest<Body>),
 }
 
+/// Headers for one hop only, never forwarded: the guest's connection
+/// to the proxy is not the proxy's to the upstream.
+const HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "upgrade",
+    "te",
+];
 /// The pooled upstream for one inspected (TLS-terminated) guest connection: at
 /// most one live `Sender`, reconnected when missing or stale, shared across the
 /// connection's requests.
@@ -58,22 +69,13 @@ impl Upstream {
         if !ready {
             *guard = Some(open_upstream(d, s, host, addr).await?);
         }
-        let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
-        let out = shape(is_h2);
-        let result = if is_h2 {
-            let mut sender = match guard.as_mut() {
-                Some(Sender::H2(s)) => s.clone(),
-                _ => unreachable!(),
-            };
-            drop(guard);
-            sender.send_request(out).await
-        } else {
-            let r = match guard.as_mut() {
-                Some(Sender::H1(s)) => s.send_request(out).await,
-                _ => unreachable!(),
-            };
-            drop(guard);
-            r
+        let result = match guard.as_mut().expect("connected above") {
+            Sender::H2(s) => {
+                let mut sender = s.clone();
+                drop(guard);
+                sender.send_request(shape(true)).await
+            }
+            Sender::H1(s) => s.send_request(shape(false)).await,
         };
         result.map_err(|e| e.to_string())
     }

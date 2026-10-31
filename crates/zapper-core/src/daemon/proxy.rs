@@ -46,16 +46,6 @@ mod sanitize;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
-const HOP_HEADERS: [&str; 7] = [
-    "connection",
-    "proxy-connection",
-    "proxy-authorization",
-    "proxy-authenticate",
-    "keep-alive",
-    "upgrade",
-    "te",
-];
-
 fn text(status: StatusCode, msg: impl Into<String>) -> Response<Body> {
     let body = Full::new(Bytes::from(format!("zapper: {}\n", msg.into())))
         .map_err(|n: Infallible| match n {})
@@ -535,7 +525,7 @@ async fn stream<S>(
     let Some(first) = peek(&mut io).await else {
         return;
     };
-    let is_tls = first.first() == Some(&0x16);
+    let is_tls = tls::starts_handshake(&first);
     match verdict {
         Some(v) if v.effects.protocol != NetProtocol::Tcp => {
             relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
@@ -576,7 +566,7 @@ async fn peek<S: AsyncRead + Unpin>(io: &mut S) -> Option<Vec<u8>> {
             buf.extend_from_slice(&chunk[..n]);
             match tls::tls_record_len(&buf) {
                 Some(len) if buf.len() < len && buf.len() < 17 * 1024 => continue,
-                _ if buf.len() < 5 && buf.first() == Some(&0x16) => continue,
+                _ if buf.len() < 5 && tls::starts_handshake(&buf) => continue,
                 _ => return Ok(()),
             }
         }
@@ -615,7 +605,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     addr: &Target,
     v: Verdict,
 ) {
-    let scheme = if first.first() == Some(&0x16) {
+    let scheme = if tls::starts_handshake(&first) {
         "tls"
     } else {
         "tcp"

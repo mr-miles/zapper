@@ -263,6 +263,12 @@ where
         .map_err(|e| format!("TLS to {host}: {e}"))
 }
 
+/// Whether `buf` starts a TLS handshake record (`0x16`): a ClientHello, as
+/// the first byte a TLS client sends.
+pub(crate) fn starts_handshake(buf: &[u8]) -> bool {
+    buf.first() == Some(&0x16)
+}
+
 /// Client config for upstream connections, verifying against the Mozilla
 /// roots.
 pub fn client_config() -> Arc<ClientConfig> {
@@ -289,7 +295,7 @@ pub fn client_config() -> Arc<ClientConfig> {
 /// `Ok(None)`: not TLS, or TLS without SNI. `Err(())`: a TLS record that is
 /// incomplete or malformed.
 pub(crate) fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
-    if buf.first() != Some(&0x16) {
+    if !starts_handshake(buf) {
         return Ok(None);
     }
     let rec_len = u16::from_be_bytes([*buf.get(3).ok_or(())?, *buf.get(4).ok_or(())?]) as usize;
@@ -330,7 +336,7 @@ pub(crate) fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
 
 /// How many bytes the first TLS record needs, if `buf` starts one.
 pub fn tls_record_len(buf: &[u8]) -> Option<usize> {
-    if buf.first() == Some(&0x16) && buf.len() >= 5 {
+    if starts_handshake(buf) && buf.len() >= 5 {
         Some(5 + u16::from_be_bytes([buf[3], buf[4]]) as usize)
     } else {
         None
