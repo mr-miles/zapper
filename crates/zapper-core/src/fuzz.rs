@@ -382,11 +382,11 @@ pub fn pg_startup(data: &[u8]) {
     }
 }
 
-/// The SCRAM server-first / server-final parsing (`pgwire::scram`), shared by
+/// The SCRAM server-first / server-final parsing (`dbwire::scram`), shared by
 /// Postgres, MongoDB and Kafka: the proxy reads these from the server, so they
 /// must never panic on arbitrary bytes, for either hash.
 pub fn scram_server(data: &[u8]) {
-    use crate::daemon::dbwire::pgwire::scram;
+    use crate::daemon::dbwire::scram;
     for hash in [scram::Hash::Sha256, scram::Hash::Sha512] {
         let client = scram::Client::with_hash(hash, "user", "pencil", "clientnonce");
         if let Ok(fin) = client.client_final(data) {

@@ -1,6 +1,6 @@
 //! Minimal MongoDB wire bits for the MongoDB auth-relay: the
 //! proxy authenticates the server leg with SCRAM-SHA-256 carried over `OP_MSG`
-//! commands (`saslStart`/`saslContinue`), reusing [`super::pgwire::scram`], then
+//! commands (`saslStart`/`saslContinue`), reusing [`super::scram`], then
 //! the relay splices. The guest holds no password and never authenticates; its
 //! `hello` and commands run on the pre-authenticated server connection.
 //!
@@ -9,7 +9,7 @@
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use super::pgwire::scram;
+use super::scram;
 
 const OP_MSG: i32 = 2013;
 const MAX_MSG: usize = 48 * 1024 * 1024; // MongoDB's default max message size.

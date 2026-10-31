@@ -14,6 +14,7 @@ pub(crate) mod mongodb;
 pub(crate) mod mysql;
 pub(crate) mod pgwire;
 pub(crate) mod redis;
+pub(crate) mod scram;
 pub(crate) mod tds;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
