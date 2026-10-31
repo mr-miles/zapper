@@ -120,7 +120,7 @@ pub(super) fn adopt(
     let audit = record::Writer::open(&dir.audit())?;
     let session = assemble(daemon, saved, vec![], true, false, Some(audit), true)?;
     if let Some(n) = vmm.subid {
-        crate::subids::claim(&session.id, n);
+        crate::subids::claim(&session.id, n)?;
     }
     let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
     let ttl = session.resolved.engine.ttl_secs;

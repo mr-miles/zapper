@@ -125,9 +125,18 @@ pub fn lease(ids: &SubIds, session: &str) -> Result<u32> {
 }
 
 /// Takes offset `n` for `session` again: a daemon that adopts a VMM an
-/// earlier one started with it.
-pub fn claim(session: &str, n: u32) {
-    LEASES.lock().unwrap().insert(session.to_string(), n);
+/// earlier one started with it. Refused if another session holds it: two
+/// sessions' Firecrackers as one uid would share what each may touch.
+pub fn claim(session: &str, n: u32) -> Result<()> {
+    let mut leases = LEASES.lock().unwrap();
+    if let Some((other, _)) = leases
+        .iter()
+        .find(|(s, m)| **m == n && s.as_str() != session)
+    {
+        bail!("subordinate id {n} is held by session {other}");
+    }
+    leases.insert(session.to_string(), n);
+    Ok(())
 }
 
 pub fn release(session: &str) {
@@ -203,6 +212,21 @@ pub async fn map(ids: &SubIds, pid: u32, n: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An offset another session holds can't be claimed; a session's own
+    /// can, again.
+    #[test]
+    fn a_claimed_offset_is_one_sessions() {
+        // An offset no test leases (they take the lowest free).
+        let n = MAX - 7;
+        claim("claim-a", n).unwrap();
+        let e = claim("claim-b", n).unwrap_err();
+        assert!(e.to_string().contains("held by session claim-a"), "{e}");
+        claim("claim-a", n).unwrap();
+        release("claim-a");
+        claim("claim-b", n).unwrap();
+        release("claim-b");
+    }
 
     #[test]
     fn ranges_by_name_or_id() {
