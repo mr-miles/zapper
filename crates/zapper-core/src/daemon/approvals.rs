@@ -34,6 +34,15 @@ pub enum Remember {
     Session,
 }
 
+impl Remember {
+    /// Its name, as it is written in the API (its serde name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Remember::Session => "session",
+        }
+    }
+}
+
 /// How many approvals one session may have outstanding at once.
 const MAX_PER_SESSION: usize = 32;
 

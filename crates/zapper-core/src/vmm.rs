@@ -414,7 +414,10 @@ fn console(out: Option<std::process::ChildStdout>, err: Option<std::process::Chi
                     break;
                 }
                 if written.fetch_add(n as u64, Ordering::Relaxed) < CONSOLE_LIMIT {
-                    let _ = std::io::stdout().write_all(&buf[..n]);
+                    // Flushed each time: stdout holds a partial line, which
+                    // the VMM's exit would lose.
+                    let mut o = std::io::stdout().lock();
+                    let _ = o.write_all(&buf[..n]).and_then(|()| o.flush());
                 }
             }
         });

@@ -95,7 +95,8 @@ pub struct DaemonConfig {
     pub kernels: String,
     /// Directory of per-session state: sockets, disks, audit logs.
     pub state: String,
-    /// Address of the read-only web UI; empty disables it.
+    /// Address of the web UI (answering approvals, and the board's firm
+    /// actions); empty disables it.
     pub ui: String,
     /// How long an `ask` decision waits for an approval before denying.
     pub ask_timeout_secs: u64,
@@ -241,7 +242,7 @@ impl SecretMode {
 /// The wire protocol a net rule governs. `tcp` (the default) is today's
 /// behaviour — HTTP inspection or a plain tunnel. Every other value routes an
 /// allowed connection to that database's auth-relay, which injects the rule's
-/// `dbauth` secret instead of taking the HTTP path (proposal 07).
+/// `dbauth` secret instead of taking the HTTP path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetProtocol {
@@ -370,7 +371,6 @@ pub fn parse_size(s: &str) -> Result<u64> {
     Ok(n * mult)
 }
 
-/// Expands a leading `~/` to `$HOME`.
 /// Where relative paths in the config are resolved: the config file's
 /// directory, set once when the config is found.
 static CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -482,9 +482,10 @@ pub struct NetRule {
     /// URL path glob (no query string). Setting it makes the proxy inspect TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// The wire protocol. `postgres` routes an allowed connection to the
-    /// database auth-relay and injects the named `dbauth` secret, instead of
-    /// the HTTP path. Default `tcp`.
+    /// The wire protocol. A database's (`postgres`, `redis`, `mysql`, …)
+    /// routes an allowed connection to the database auth-relay, which
+    /// injects the named `dbauth` secret, instead of the HTTP path. Default
+    /// `tcp`.
     #[serde(default, skip_serializing_if = "NetProtocol::is_tcp")]
     pub protocol: NetProtocol,
     /// Secrets whose placeholders are replaced with their values in the
@@ -503,7 +504,7 @@ pub struct NetRule {
 
 impl NetRule {
     /// Whether matching or applying this rule needs the decrypted HTTP request.
-    /// A `postgres` rule is never HTTP-inspected — it goes to the auth-relay
+    /// A database rule is never HTTP-inspected — it goes to the auth-relay
     /// ([`db_relay`](Self::db_relay)) instead, even though it names a secret.
     pub fn needs_inspection(&self) -> bool {
         self.protocol == NetProtocol::Tcp
@@ -625,6 +626,13 @@ pub struct Engine {
     /// other sessions reach (`zapper service add --to-session ID:PORT`):
     /// each goes to the guest's NIC address, or loopback without a NIC.
     pub ports: Vec<u16>,
+}
+
+impl Engine {
+    /// Whether the guest has a NIC (else vsock is its only channel).
+    pub fn nic(&self) -> bool {
+        self.network == NetworkMode::Nic
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -986,6 +994,20 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
+        self.check_rules(&mut errors);
+        self.check_secrets(&mut errors);
+        self.check_images(&mut errors);
+        self.check_profiles(&mut errors);
+        self.check_daemon(&mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("invalid config:\n  {}", errors.join("\n  "))
+        }
+    }
+
+    /// Every layer's rules: unique ids, valid globs, the secrets they name, a database rule's shape.
+    fn check_rules(&self, errors: &mut Vec<String>) {
         let mut seen = BTreeSet::new();
         let mut layers = vec![(Scope::Global, &self.policy)];
         layers.extend(
@@ -1004,14 +1026,18 @@ impl Config {
             }
             for r in &policy.net {
                 let id = r.id.as_deref().unwrap_or("?");
-                let refs = r.set_headers.values().flat_map(|v| crate::secret_refs(v));
-                for s in r.secrets.iter().cloned().chain(refs) {
-                    if !self.secrets.contains_key(&s) {
+                let refs: Vec<String> = r
+                    .set_headers
+                    .values()
+                    .flat_map(|v| crate::secret_refs(v))
+                    .collect();
+                for s in r.secrets.iter().chain(&refs) {
+                    if !self.secrets.contains_key(s) {
                         errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
                     }
                 }
-                for s in r.set_headers.values().flat_map(|v| crate::secret_refs(v)) {
-                    if matches!(self.secrets.get(&s), Some(x) if x.mode == SecretMode::Aws) {
+                for s in &refs {
+                    if matches!(self.secrets.get(s), Some(x) if x.mode == SecretMode::Aws) {
                         errors.push(format!(
                             "{scope}: rule {id}: aws secret {s} signs requests; it can't be a header's value"
                         ));
@@ -1044,6 +1070,10 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// The secrets: their sources and modes, and fake AWS key ids that don't collide.
+    fn check_secrets(&self, errors: &mut Vec<String>) {
         for (name, s) in &self.secrets {
             if let SecretSource::Command {
                 command,
@@ -1107,6 +1137,10 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// The image recipes: their names, args and copies.
+    fn check_images(&self, errors: &mut Vec<String>) {
         for (name, r) in &self.images {
             if name.is_empty()
                 || !name
@@ -1141,16 +1175,18 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Each profile resolved, with ports the guest can offer and a driven agent the driver can run.
+    fn check_profiles(&self, errors: &mut Vec<String>) {
         for name in self.profiles.keys() {
-            if let Err(e) = self.resolve(name) {
-                errors.push(format!("profile {name}: {e:#}"));
-            }
-        }
-        for (name, p) in self
-            .profiles
-            .keys()
-            .filter_map(|n| Some((n, self.resolve(n).ok()?)))
-        {
+            let p = match self.resolve(name) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(format!("profile {name}: {e:#}"));
+                    continue;
+                }
+            };
             for port in &p.engine.ports {
                 let reserved = [
                     crate::proto::CONTROL_PORT,
@@ -1179,17 +1215,16 @@ impl Config {
                 ));
             }
         }
+    }
+
+    /// The daemon's own settings.
+    fn check_daemon(&self, errors: &mut Vec<String>) {
         if let Some(r) = self.daemon.memory_overcommit {
             if !(r.is_finite() && r > 0.0) {
                 errors.push(format!(
                     "daemon.memory_overcommit is {r}; it must be a number above 0"
                 ));
             }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            bail!("invalid config:\n  {}", errors.join("\n  "))
         }
     }
 
@@ -1232,6 +1267,11 @@ impl Config {
                 AGENT_KINDS.join(", ")
             );
         }
+        // A generic agent has no harness to put skills or configuration
+        // where it reads them: refused, rather than given nowhere.
+        if agent.kind == "generic" && (agent.skills.is_some() || !agent.config_mounts.is_empty()) {
+            bail!("agent.kind generic takes no skills or config_mounts: no harness reads them");
+        }
         let layers = chain
             .into_iter()
             .map(|(n, p)| (Scope::Profile(n), p.policy.clone()))
@@ -1266,6 +1306,23 @@ pub fn merge(base: &mut Value, over: &Value) {
 
 #[cfg(test)]
 mod tests {
+    use super::Config;
+
+    /// Skills or config mounts for a generic agent, which no harness would
+    /// put anywhere, are refused rather than dropped.
+    #[test]
+    fn a_generic_agent_takes_no_skills() {
+        let c = |agent: &str| Config::from_yaml(&format!("profiles:\n  p:\n    agent: {agent}\n"));
+        let e = c("{ kind: generic, skills: ~/skills }").unwrap_err();
+        assert!(
+            format!("{e:#}").contains("generic takes no skills"),
+            "{e:#}"
+        );
+        assert!(c("{ kind: generic, config_mounts: [{ host: /a, guest: /b }] }").is_err());
+        assert!(c("{ kind: generic }").is_ok());
+        assert!(c("{ kind: pi, skills: ~/skills }").is_ok());
+    }
+
     /// A recipe's copies take from its own args, to absolute paths.
     #[test]
     fn image_recipes_are_checked() {

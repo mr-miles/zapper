@@ -159,11 +159,13 @@ fn header_lines(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// over plain HTTP only with `plaintext`.
 ///
 /// The first byte picks the host, plain HTTP, which secrets the rule adds
-/// and whether a `set_headers` template is used; the rest is headers.
+/// and whether a `set_headers` template is used; the second, which secret
+/// the template names; the rest is headers.
 pub fn headers(data: &[u8]) {
-    let Some((&flags, rest)) = data.split_first() else {
+    let [flags, choice, rest @ ..] = data else {
         return;
     };
+    let (flags, choice) = (*flags, *choice);
     let host = HOSTS[(flags & 3) as usize];
     let plaintext = flags & 4 != 0;
     let names = ["a", "ab", "c"];
@@ -177,7 +179,7 @@ pub fn headers(data: &[u8]) {
         set_headers: if flags & 64 != 0 {
             vec![(
                 "x-key".into(),
-                format!("k={{{{secret:{}}}}}", names[(flags >> 7) as usize % 3]),
+                format!("k={{{{secret:{}}}}}", names[choice as usize % 3]),
             )]
         } else {
             vec![]
@@ -363,7 +365,7 @@ pub fn http2_uri(data: &[u8]) {
 }
 
 /// The Postgres wire pieces used by database credential injection
-/// (`daemon::pgwire`): the SSLRequest/startup parsers and the message framer
+/// (`daemon::dbwire::pgwire`): the SSLRequest/startup parsers and the message framer
 /// must never panic or read out of bounds on arbitrary bytes.
 pub fn pg_startup(data: &[u8]) {
     use crate::daemon::dbwire::pgwire;
@@ -432,7 +434,7 @@ pub fn tds_packet(data: &[u8]) {
     }
 }
 
-/// MongoDB reply parsing (`daemon::mongodb`): the little-endian BSON walker and
+/// MongoDB reply parsing (`daemon::dbwire::mongodb`): the little-endian BSON walker and
 /// the OP_MSG reply framer, run over arbitrary bytes.
 pub fn mongodb_reply(data: &[u8]) {
     use crate::daemon::dbwire::mongodb;
@@ -442,7 +444,7 @@ pub fn mongodb_reply(data: &[u8]) {
     while block_on(mongodb::read_reply(&mut src, &mut buf)).is_ok() {}
 }
 
-/// Kafka response parsing (`daemon::kafka`): the SaslAuthenticate body parser
+/// Kafka response parsing (`daemon::dbwire::kafka`): the SaslAuthenticate body parser
 /// and the response framer, run over arbitrary bytes.
 pub fn kafka_response(data: &[u8]) {
     use crate::daemon::dbwire::kafka;

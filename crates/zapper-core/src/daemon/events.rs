@@ -22,6 +22,10 @@ const RECENT_EVENTS: usize = 2000;
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
     pub seq: u64,
+    /// The daemon run it was emitted in (`seq` counts from 1 in each): with
+    /// it, a `seq` names one line of a record written by several runs (a
+    /// persistent session's).
+    pub epoch: String,
     /// Unix time, seconds.
     pub ts: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +192,9 @@ impl Cursor {
 
 /// What a subscriber is sent before live events: events from recent
 /// history, and notices of what it can't be sent.
+// Nearly all are events: boxing them to shrink the rare gap would cost an
+// allocation each.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Catchup {
     Event(Event),
@@ -270,6 +277,7 @@ impl EventBus {
             let mut recent = self.recent.lock().unwrap();
             let event = Event {
                 seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                epoch: self.epoch.clone(),
                 ts: now(),
                 session: session.map(|s| s.id.clone()),
                 body,

@@ -1,143 +1,100 @@
 //! One sandbox: a microVM, its guest channel, policy layer and audit trail.
-//! The session's state and queries live here; starting and stopping it is in
-//! `lifecycle`, and its interactive terminals in `terminal`.
+//! The session's state and queries live here; the rest is in a module per
+//! job: making it (`create`), running and stopping it (`run`), its VM
+//! (`launch`), the guest's control channel (`control`), exec decisions
+//! (`exec`), its disks (`disks`), what it keeps (`persist`), what an earlier
+//! daemon left (`adopt`), its terminals (`terminal`), and its store,
+//! directory, rules and runtime.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{bail, Result};
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, watch, Semaphore};
-use zapper_policy::proto::{
-    Forward, Frame, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT,
-};
+use zapper_policy::proto::{Forward, Frame, GuestFile, HostMsg, ShellRequest, SHELL_PORT};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, Daemon, Event, EventBody};
 
-mod boot;
+mod adopt;
+mod control;
+mod create;
+mod dir;
 pub(crate) mod disks;
-mod lifecycle;
+mod exec;
+mod launch;
+mod persist;
+mod rules;
+mod run;
+mod runtime;
 mod spec;
+mod store;
 mod terminal;
+#[cfg(test)]
+mod tests;
 
+pub(crate) use dir::SessionDir;
+pub(crate) use rules::Rules;
+pub(crate) use runtime::GuestRuntime;
+pub use runtime::Status;
+pub(crate) use store::SessionStore;
+
+pub(crate) use adopt::restore;
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) use control::read_guest_line;
+pub(crate) use create::create;
 #[cfg(any(test, feature = "test-util"))]
-pub(crate) use lifecycle::register;
-pub(crate) use lifecycle::{create, restore, start, stop};
+pub(crate) use create::register;
+pub(crate) use run::{start, stop};
 pub(crate) use terminal::pump_shell;
 pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "state", content = "detail", rename_all = "lowercase")]
-pub enum Status {
-    Starting,
-    Running,
-    Failed(String),
-    Stopped(String),
+/// Records a `session` event of `s`: its new `state`, and why.
+fn session_event(daemon: &Daemon, s: &Session, state: &str, detail: impl Into<String>) {
+    daemon.emit(
+        Some(s),
+        EventBody::Session {
+            state: state.into(),
+            detail: Some(detail.into()),
+        },
+    );
+}
+
+/// `detail`, and a warning after it if there is one.
+fn with_warning(detail: String, warning: &Option<String>) -> String {
+    match warning {
+        Some(w) => format!("{detail}; {w}"),
+        None => detail,
+    }
 }
 
 /// Opens the session's vsock at `path` and asks the guest for `port`,
 /// returning the stream once the guest answers `OK `. A connect/write failure
 /// propagates; a refusal is reported as `refused: <the guest's line>`.
-async fn connect_vsock(path: PathBuf, port: &str, refused: &str) -> Result<UnixStream> {
+async fn connect_vsock(path: PathBuf, port: u32, refused: &str) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(&path).await?;
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 64 {
-        stream.read_exact(&mut byte).await?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
+    let line = super::read_line_unbuffered(&mut stream, 64)
+        .await?
+        .unwrap_or_default();
     if !line.starts_with(b"OK ") {
         bail!("{refused}: {}", String::from_utf8_lossy(&line));
     }
     Ok(stream)
 }
 
-/// The daemon's live sessions, by id. Behind one lock; readers take a cloned
-/// snapshot so the lock is never held across other work.
-pub(crate) struct SessionStore(RwLock<BTreeMap<String, Arc<Session>>>);
-
-impl SessionStore {
-    pub(crate) fn new() -> SessionStore {
-        SessionStore(RwLock::new(BTreeMap::new()))
-    }
-
-    pub(crate) fn get(&self, id: &str) -> Option<Arc<Session>> {
-        self.0.read().unwrap().get(id).cloned()
-    }
-
-    pub(crate) fn all(&self) -> Vec<Arc<Session>> {
-        self.0.read().unwrap().values().cloned().collect()
-    }
-
-    pub(crate) fn insert(&self, session: Arc<Session>) {
-        self.0.write().unwrap().insert(session.id.clone(), session);
-    }
-
-    /// How many sessions are starting or running, for the session limit.
-    pub(crate) fn running(&self) -> usize {
-        self.live().count()
-    }
-
-    /// The memory given to the VMs starting or running, in MiB.
-    pub(crate) fn memory_mib(&self) -> u64 {
-        self.live()
-            .map(|s| s.resolved.engine.memory_mib as u64)
-            .sum()
-    }
-
-    fn live(&self) -> impl Iterator<Item = Arc<Session>> {
-        self.all().into_iter().filter(|s| {
-            matches!(
-                *s.runtime.status().borrow(),
-                Status::Starting | Status::Running
-            )
-        })
-    }
-
-    /// Take a stopped session off the list; a starting or running one stays,
-    /// as nothing would manage its VM.
-    /// Takes a stopped session off the list; a persistent one's disks go
-    /// with it.
-    pub(crate) fn forget(&self, id: &str) -> Result<()> {
-        let mut sessions = self.0.write().unwrap();
-        if let Some(s) = sessions.get(id) {
-            if matches!(
-                *s.runtime.status().borrow(),
-                Status::Starting | Status::Running
-            ) {
-                bail!("session {id} is still running; stop it first");
-            }
-        }
-        if let Some(s) = sessions.remove(id) {
-            if s.persistent {
-                // What it kept to be started again, or adopted: gone, so no
-                // daemon lists it again. Its record stays.
-                let _ = std::fs::remove_dir_all(s.dir.vm());
-                for kept in [
-                    s.dir.saved(),
-                    s.dir.ca(),
-                    s.dir.dns(),
-                    s.dir.resume_token(),
-                    s.dir.vmm(),
-                    s.dir.conversation(),
-                ] {
-                    let _ = std::fs::remove_file(kept);
-                }
-            }
-        }
-        Ok(())
-    }
+/// A terminal channel opened to the guest (`Session::open_shell`): the
+/// stream, and the request as it was sent, its terminal id given and its
+/// command filled in.
+pub struct ShellOpened {
+    pub stream: UnixStream,
+    pub request: ShellRequest,
 }
 
 #[derive(Default, Serialize)]
@@ -150,393 +107,24 @@ pub struct Counters {
     pub shells: AtomicU64,
 }
 
-/// A session's directory and the files and sockets laid out under it: the
-/// single owner of that layout. `vm` (the VMM process), the record and the
-/// driver are handed paths from here rather than joining their own, so the
-/// structure lives in one place.
-#[derive(Clone)]
-pub(crate) struct SessionDir {
-    root: PathBuf,
-}
-
-impl SessionDir {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-    /// The session directory itself: console log, recordings and the audit
-    /// log live here, outside the part the VMM sees.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-    /// The part the VMM sees: disks, its config, metrics and sockets.
-    pub fn vm(&self) -> PathBuf {
-        self.root.join("vm")
-    }
-    pub fn root_disk(&self) -> PathBuf {
-        self.vm().join("root.ext4")
-    }
-    /// The disks in the VMM's directory, by file name: kept while a
-    /// persistent session is stopped.
-    pub fn disks(&self) -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = std::fs::read_dir(self.vm())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "ext4"))
-            .collect();
-        v.sort();
-        v
-    }
-    /// What the disks take on the host: their allocated blocks, not their
-    /// sparse size.
-    pub fn disk_bytes(&self) -> u64 {
-        use std::os::unix::fs::MetadataExt;
-        self.disks()
-            .iter()
-            .filter_map(|p| p.metadata().ok())
-            .map(|m| m.blocks() * 512)
-            .sum()
-    }
-    /// A persistent session's CA, kept (`tls::SessionCa::kept`).
-    pub fn ca(&self) -> PathBuf {
-        self.root.join("ca.json")
-    }
-    /// The synthetic names a persistent session has been given, in order
-    /// (`dns::SessionDns::kept`).
-    pub fn dns(&self) -> PathBuf {
-        self.root.join("dns.jsonl")
-    }
-    /// A durable VMM's pid and subordinate id (`vm::Vmm`), for a daemon that
-    /// didn't start it.
-    pub fn vmm(&self) -> PathBuf {
-        self.root.join("vmm.json")
-    }
-    /// A persistent session's resume token: what its agent sends to take
-    /// its control channel again (`GuestMsg::Resume`).
-    pub fn resume_token(&self) -> PathBuf {
-        self.root.join("resume.token")
-    }
-    /// A persistent session as it was created ([`Saved`]), so a daemon that
-    /// starts again lists it, stopped.
-    pub fn saved(&self) -> PathBuf {
-        self.root.join("session.json")
-    }
-
-    pub fn data_disk(&self, i: usize) -> PathBuf {
-        self.vm().join(format!("disk{i}.ext4"))
-    }
-    /// The VM's vsock socket; guest-initiated connections arrive on
-    /// `<vsock>_<port>`.
-    pub fn vsock(&self) -> PathBuf {
-        self.vm().join("v.sock")
-    }
-    pub fn vsock_port(&self, port: u32) -> PathBuf {
-        PathBuf::from(format!("{}_{port}", self.vsock().display()))
-    }
-    /// The daemon's socket for the guest's captured traffic (`netns`).
-    pub fn nic_socket(&self) -> PathBuf {
-        self.vm().join(crate::netns::SOCKET)
-    }
-    /// Firecracker's own config and metrics, under the VMM's directory.
-    pub fn vm_config(&self) -> PathBuf {
-        self.vm().join("vm.json")
-    }
-    pub fn metrics(&self) -> PathBuf {
-        self.vm().join("metrics.json")
-    }
-    pub fn console(&self) -> PathBuf {
-        self.root.join("console.log")
-    }
-    pub fn audit(&self) -> PathBuf {
-        self.root.join("audit.jsonl")
-    }
-    pub fn driver_log(&self) -> PathBuf {
-        self.root.join("driver.jsonl")
-    }
-
-    /// A persistent session's driven agent's conversation id
-    /// (`driver::Driver::kept`).
-    pub fn conversation(&self) -> PathBuf {
-        self.root.join("conversation.json")
-    }
-}
-
-/// A session's rule state: its own policy layer, and the shared layers a
-/// client keeps for it (a firm role, between the session's layer and its
-/// profile's). The owner of the session's rules; `Session` wraps these with
-/// the identity and events they need.
-pub(crate) struct Rules {
-    /// The session's id, in the ids `add` mints.
-    session: String,
-    own: RwLock<Policy>,
-    shared: Vec<(Scope, Arc<RwLock<Policy>>)>,
-}
-
-impl Rules {
-    pub fn new(session: &str, shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
-        Self {
-            session: session.to_string(),
-            own: RwLock::new(Policy::default()),
-            shared,
-        }
-    }
-
-    /// A clone of the session's own layer.
-    pub fn own(&self) -> Policy {
-        self.own.read().unwrap().clone()
-    }
-
-    /// The rules of the session's own layer.
-    pub fn list(&self) -> Vec<AnyRule> {
-        self.own.read().unwrap().rules()
-    }
-
-    /// Adds a rule to the own layer under a fresh `s-<session>-<kind>-<n>`
-    /// id, so session rule ids clash neither with config ones nor with
-    /// another session's.
-    pub fn add(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
-        let mut policy = self.own.write().unwrap();
-        let taken: Vec<String> = policy
-            .rules()
-            .iter()
-            .filter_map(|r| r.id().map(str::to_string))
-            .collect();
-        let kind = rule.kind();
-        let id = (1..)
-            .map(|n| format!("s-{}-{kind}-{n}", self.session))
-            .find(|i| !taken.contains(i))
-            .unwrap();
-        rule.set_id(id);
-        policy.insert(rule.clone(), position);
-        rule
-    }
-
-    /// Replaces the rule with `rule`'s id and puts it first; returns that id.
-    /// Callers always pass an id'd rule (an officer's approval, a grant); the
-    /// `"?"` fallback never fires.
-    pub fn put(&self, rule: AnyRule) -> String {
-        let id = rule.id().unwrap_or("?").to_string();
-        let mut p = self.own.write().unwrap();
-        p.remove(&id);
-        p.insert(rule, Some(0));
-        id
-    }
-
-    /// The own layer as it was kept (a persistent session's, restored):
-    /// its rules with the ids they had, which clients remove them by.
-    pub fn restore(&self, policy: Policy) {
-        *self.own.write().unwrap() = policy;
-    }
-
-    /// Removes a rule from the own layer, returning it if it was there.
-    pub fn remove(&self, id: &str) -> Option<AnyRule> {
-        self.own.write().unwrap().remove(id)
-    }
-
-    /// The session's policy layers, most specific first: own, shared, the
-    /// profile's (from the running config, falling back to those resolved at
-    /// start), then global.
-    pub fn layers(
-        &self,
-        id: &str,
-        profile: &str,
-        resolved: &ResolvedProfile,
-        config: &Config,
-    ) -> Vec<(Scope, Policy)> {
-        let mut v = vec![(Scope::Session(id.to_string()), self.own())];
-        for (scope, policy) in &self.shared {
-            v.push((scope.clone(), policy.read().unwrap().clone()));
-        }
-        match config.resolve(profile) {
-            Ok(p) => v.extend(p.layers),
-            Err(_) => v.extend(resolved.layers.iter().cloned()),
-        }
-        v.push((Scope::Global, config.policy.clone()));
-        v
-    }
-}
-
-/// A session's live machinery: its lifecycle status, the Firecracker
-/// process, the control channel to the guest agent, and the counters that
-/// gate shells and exec decisions. All of it is created when the VM boots
-/// and dropped when it stops; the owner of "the session while it runs".
-pub(crate) struct GuestRuntime {
-    status: watch::Sender<Status>,
-    vm: tokio::sync::Mutex<Option<super::vm::VmProc>>,
-    /// The control channel to the guest agent, once it connects.
-    guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
-    next_shell: AtomicU64,
-    /// Bounds concurrent exec decisions.
-    exec_checks: Arc<Semaphore>,
-    /// Bounds concurrent proxy connections from the guest.
-    conns: Arc<Semaphore>,
-    /// The tasks accepting on the guest's sockets (`boot::serve_guest`),
-    /// ended with the VM: each holds the session.
-    listeners: Mutex<Vec<tokio::task::AbortHandle>>,
-}
-
-impl GuestRuntime {
-    pub fn new() -> Self {
-        Self {
-            status: watch::channel(Status::Starting).0,
-            vm: tokio::sync::Mutex::new(None),
-            guest: Mutex::new(None),
-            next_shell: AtomicU64::new(1),
-            exec_checks: Arc::new(Semaphore::new(64)),
-            conns: Arc::new(Semaphore::new(256)),
-            listeners: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// The lifecycle-status channel: subscribe to it, borrow it, or send a
-    /// transition through it.
-    pub fn status(&self) -> &watch::Sender<Status> {
-        &self.status
-    }
-
-    /// Starting → Running: the guest is ready. From no other state: a stop
-    /// that came first stands.
-    pub fn mark_ready(&self) -> bool {
-        self.status.send_if_modified(|s| {
-            let starting = matches!(s, Status::Starting);
-            if starting {
-                *s = Status::Running;
-            }
-            starting
-        })
-    }
-
-    /// Starting → Failed(`why`): it never came up. A session stopped
-    /// meanwhile stays stopped.
-    pub fn fail_if_starting(&self, why: String) -> bool {
-        self.status.send_if_modified(|s| {
-            let starting = matches!(s, Status::Starting);
-            if starting {
-                *s = Status::Failed(why);
-            }
-            starting
-        })
-    }
-
-    /// Starting or Running → Failed(`why`). A stopped one stays stopped.
-    pub fn fail(&self, why: String) -> bool {
-        self.status.send_if_modified(|s| {
-            let up = matches!(s, Status::Starting | Status::Running);
-            if up {
-                *s = Status::Failed(why);
-            }
-            up
-        })
-    }
-
-    /// Stopped or Failed → Starting: claims a start, which only one caller
-    /// gets; false while it is starting or running.
-    pub fn claim_start(&self) -> bool {
-        self.status.send_if_modified(|s| {
-            let down = matches!(s, Status::Stopped(_) | Status::Failed(_));
-            if down {
-                *s = Status::Starting;
-            }
-            down
-        })
-    }
-
-    /// → Stopped(`reason`), a failure kept as it is: whether this caller is
-    /// the one stopping it (not if it was stopped already).
-    pub fn begin_stop(&self, reason: &str) -> bool {
-        let mut first = false;
-        self.status.send_if_modified(|s| match s {
-            Status::Stopped(_) => false,
-            Status::Failed(_) => {
-                first = true;
-                false
-            }
-            _ => {
-                first = true;
-                *s = Status::Stopped(reason.into());
-                true
-            }
-        });
-        first
-    }
-
-    /// The Firecracker process handle: set at boot, taken at teardown.
-    pub fn vm(&self) -> &tokio::sync::Mutex<Option<super::vm::VmProc>> {
-        &self.vm
-    }
-
-    /// Records the guest's control channel once it connects.
-    pub fn set_guest(&self, tx: mpsc::Sender<HostMsg>) {
-        *self.guest.lock().unwrap() = Some(tx);
-    }
-
-    /// Drops the control channel and ends the tasks accepting on the
-    /// guest's sockets (teardown).
-    pub fn clear_guest(&self) {
-        *self.guest.lock().unwrap() = None;
-        self.end_listeners();
-    }
-
-    /// Keeps a task accepting on one of the guest's sockets, to end with
-    /// the VM.
-    pub fn hold_listener(&self, task: tokio::task::AbortHandle) {
-        self.listeners.lock().unwrap().push(task);
-    }
-
-    /// Ends the tasks accepting on the guest's sockets.
-    pub fn end_listeners(&self) {
-        for task in self.listeners.lock().unwrap().drain(..) {
-            task.abort();
-        }
-    }
-
-    /// Sends a message to the guest agent, if the channel is up.
-    pub fn send(&self, msg: HostMsg) {
-        if let Some(tx) = self.guest.lock().unwrap().as_ref() {
-            let _ = tx.try_send(msg);
-        }
-    }
-
-    /// The next terminal id.
-    pub fn next_shell(&self) -> u64 {
-        self.next_shell.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// New terminals get numbers after `n`, one the guest already has.
-    pub fn shells_after(&self, n: u64) {
-        self.next_shell.fetch_max(n + 1, Ordering::Relaxed);
-    }
-
-    /// A permit for one concurrent exec decision, or `None` over the cap.
-    pub fn exec_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        self.exec_checks.clone().try_acquire_owned().ok()
-    }
-
-    /// The semaphore bounding concurrent proxy connections, for `accept_loop`.
-    pub fn conns(&self) -> Arc<Semaphore> {
-        self.conns.clone()
-    }
-}
-
 pub struct Session {
     pub id: String,
     pub profile: String,
     pub created: f64,
     /// When its `ttl_secs` ends this run: from its start, as it may be
     /// started again (`persistent`).
-    pub(crate) expires: Mutex<Option<f64>>,
+    expires: Mutex<Option<f64>>,
     /// Its disks stay when it stops, and it can be started again; they go
     /// when it is forgotten (`zapper rm`).
     pub persistent: bool,
     /// How many times it has booted: a run's timers end with it.
-    pub(crate) boots: AtomicU64,
+    boots: AtomicU64,
     /// Held across a persistent session's save, from the snapshot of its
     /// rules to the write, so an older snapshot can't be written last.
-    pub(crate) saving: Mutex<()>,
+    saving: Mutex<()>,
     /// Held by a stop through its teardown, and by a start until it has
     /// checked the disks: neither runs while the other is on the disks.
-    pub(crate) lifecycle: tokio::sync::Mutex<()>,
+    lifecycle: tokio::sync::Mutex<()>,
     /// Make a persistent session from its image even if the image changed
     /// since it was built (recorded); not kept.
     pub(crate) accept_changed_image: bool,
@@ -554,14 +142,14 @@ pub struct Session {
     /// The session's CA and the guest-facing server configs minted from it.
     pub(crate) tls: tls::SessionTls,
     pub(crate) counters: Counters,
-    pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
+    usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
     /// The session's resolver state: synthetic names, rate limit, lookup cap.
     pub(crate) dns: super::dns::SessionDns,
     /// The session's HTTP traffic, for inspecting it from the UI.
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
-    pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    pub(crate) audit: Mutex<Option<super::record::Writer>>,
+    terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
+    audit: Mutex<Option<super::record::Writer>>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
@@ -612,12 +200,10 @@ pub struct SessionInfo {
 
 impl Session {
     pub fn info(&self) -> SessionInfo {
-        let c = &self.counters;
-        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
-            status: self.runtime.status().borrow().clone(),
+            status: self.runtime.current(),
             created: self.created,
             expires: *self.expires.lock().unwrap(),
             persistent: self.persistent,
@@ -630,11 +216,7 @@ impl Session {
             user: self.resolved.agent.user.clone(),
             root: self.resolved.agent.root,
             workdir: self.workdir.display().to_string(),
-            counters: serde_json::json!({
-                "net_allowed": get(&c.net_allowed), "net_denied": get(&c.net_denied),
-                "exec_allowed": get(&c.exec_allowed), "exec_denied": get(&c.exec_denied),
-                "exits": get(&c.exits), "shells": get(&c.shells),
-            }),
+            counters: serde_json::to_value(&self.counters).unwrap_or_default(),
             usage: self.usage.lock().unwrap().clone(),
             rules: self.rules.list().len(),
             firm: self.label("firm").map(str::to_string),
@@ -655,7 +237,7 @@ impl Session {
     pub async fn connect_port(&self, port: u32) -> Result<UnixStream> {
         connect_vsock(
             self.vsock_path(),
-            &port.to_string(),
+            port,
             &format!("the VM refused port {port}"),
         )
         .await
@@ -667,15 +249,12 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(*self.runtime.status().borrow(), Status::Running)
+        matches!(self.runtime.current(), Status::Running)
     }
 
     /// Whether the session has ended, stopped or failed.
     pub fn ended(&self) -> bool {
-        matches!(
-            *self.runtime.status().borrow(),
-            Status::Stopped(_) | Status::Failed(_)
-        )
+        !self.runtime.current().is_live()
     }
 
     /// The session's HTTP requests and connections, oldest first.
@@ -735,6 +314,17 @@ impl Session {
         layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
+    /// `f` over the session's layers as the running config has them now:
+    /// the config read, the layers cloned out, then `f`, with no lock held.
+    pub(crate) fn with_layers<T>(
+        &self,
+        daemon: &Daemon,
+        f: impl FnOnce(&[(Scope, &Policy)]) -> T,
+    ) -> T {
+        let layers = self.layers(&daemon.config.read().unwrap());
+        f(&Session::layers_of(&layers))
+    }
+
     /// `req` as this session asks it: with its ID and labels, for
     /// `{session}` and `{label:KEY}` in rules' paths.
     pub fn caller_of(&self, req: &zapper_policy::NetRequest) -> zapper_policy::NetRequest {
@@ -756,7 +346,7 @@ impl Session {
     /// A persistent session's rules are kept, for a daemon that adopts it.
     fn rules_changed(&self) {
         if self.persistent {
-            if let Err(e) = lifecycle::save(self) {
+            if let Err(e) = persist::save(self) {
                 tracing::warn!(session = %self.id, "keeping its rules: {e:#}");
             }
         }
@@ -841,16 +431,6 @@ impl Session {
         true
     }
 
-    /// The source of a session secret: where its value comes from, not the
-    /// value.
-    pub fn secret_source(&self, name: &str) -> Option<zapper_policy::SecretSource> {
-        self.secrets
-            .read()
-            .unwrap()
-            .get(name)
-            .map(|s| s.source.clone())
-    }
-
     /// The names of the session's own secrets (never their values).
     pub fn secret_names(&self) -> Vec<String> {
         self.secrets.read().unwrap().keys().cloned().collect()
@@ -867,7 +447,7 @@ impl Session {
     }
 
     /// Opens a terminal in the guest.
-    pub async fn open_shell(&self, mut req: ShellRequest) -> Result<(UnixStream, u64)> {
+    pub async fn open_shell(&self, mut req: ShellRequest) -> Result<ShellOpened> {
         if !self.is_running() {
             bail!("session {} is not running", self.id);
         }
@@ -896,17 +476,16 @@ impl Session {
             }
         };
         req.id = id;
-        let mut stream = connect_vsock(
-            self.dir.vsock(),
-            &SHELL_PORT.to_string(),
-            "guest refused terminal",
-        )
-        .await?;
+        let mut stream =
+            connect_vsock(self.vsock_path(), SHELL_PORT, "guest refused terminal").await?;
         let mut json = serde_json::to_vec(&req)?;
         json.push(b'\n');
         stream.write_all(&json).await?;
         self.counters.shells.fetch_add(1, Ordering::Relaxed);
-        Ok((stream, id))
+        Ok(ShellOpened {
+            stream,
+            request: req,
+        })
     }
 }
 
@@ -915,16 +494,8 @@ impl Session {
     /// and a client attached to it is closed. Its exit code, if it said one
     /// in time.
     pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
-        let req = ShellRequest {
-            id: 0,
-            argv: vec![],
-            tty: None,
-            env: Default::default(),
-            system: false,
-            persist: false,
-            attach: Some(n),
-        };
-        let (mut stream, _) = self.open_shell(req).await?;
+        let req = ShellRequest::attach(n);
+        let mut stream = self.open_shell(req).await?.stream;
         let mut buf = Vec::new();
         Frame::Hangup.write_to(&mut buf)?;
         stream.write_all(&buf).await?;
@@ -1003,189 +574,4 @@ pub(crate) struct Saved {
     pub files: Vec<GuestFile>,
     pub forwards: Vec<Forward>,
     pub driven: bool,
-}
-
-/// One line from the guest's control channel, at most `MAX_LINE` bytes:
-/// `None` at the end, an error for a longer one. Shared by the guest-control
-/// loop (`lifecycle`) and nothing else.
-pub(crate) async fn read_guest_line(
-    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
-) -> Result<Option<Vec<u8>>> {
-    let mut line = Vec::new();
-    let n = reader
-        .take(MAX_LINE as u64 + 1)
-        .read_until(b'\n', &mut line)
-        .await?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if n > MAX_LINE {
-        bail!("guest sent an oversized message");
-    }
-    Ok(Some(line))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn net_rule() -> AnyRule {
-        AnyRule::Net(
-            serde_json::from_value(serde_json::json!({ "action": "allow", "host": "x.example" }))
-                .unwrap(),
-        )
-    }
-
-    fn exec_rule() -> AnyRule {
-        AnyRule::Exec(
-            serde_json::from_value(serde_json::json!({ "action": "allow", "path": "/bin/ls" }))
-                .unwrap(),
-        )
-    }
-
-    #[test]
-    fn session_dir_lays_the_vm_files_apart_from_the_logs() {
-        let d = SessionDir::new(PathBuf::from("/s"));
-        assert_eq!(d.root(), Path::new("/s"));
-        // Under the VMM's `vm` subdirectory: disks, sockets, config, metrics.
-        assert_eq!(d.vm(), Path::new("/s/vm"));
-        assert_eq!(d.root_disk(), Path::new("/s/vm/root.ext4"));
-        assert_eq!(d.data_disk(0), Path::new("/s/vm/disk0.ext4"));
-        assert_eq!(d.vsock(), Path::new("/s/vm/v.sock"));
-        assert_eq!(d.vsock_port(5), Path::new("/s/vm/v.sock_5"));
-        assert_eq!(d.nic_socket(), Path::new("/s/vm/nic.sock"));
-        assert_eq!(d.vm_config(), Path::new("/s/vm/vm.json"));
-        assert_eq!(d.metrics(), Path::new("/s/vm/metrics.json"));
-        // Logs, recordings and the audit log stay outside it.
-        assert_eq!(d.console(), Path::new("/s/console.log"));
-        assert_eq!(d.audit(), Path::new("/s/audit.jsonl"));
-        assert_eq!(d.driver_log(), Path::new("/s/driver.jsonl"));
-    }
-
-    #[test]
-    fn rules_mint_per_kind_ids_and_reuse_a_freed_one() {
-        let r = Rules::new("sid", vec![]);
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-2"));
-        // Each kind has its own sequence.
-        assert_eq!(r.add(exec_rule(), None).id(), Some("s-sid-exec-1"));
-        // The lowest free id is reused once one is removed.
-        assert!(r.remove("s-sid-net-1").is_some());
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
-        // Removing it again finds nothing.
-        assert!(r.remove("s-sid-net-1").is_some());
-        assert!(r.remove("s-sid-net-1").is_none());
-    }
-
-    #[test]
-    fn put_replaces_a_rule_by_id_and_puts_it_first() {
-        let r = Rules::new("sid", vec![]);
-        r.add(net_rule(), None); // s-sid-net-1
-        r.add(net_rule(), None); // s-sid-net-2
-        let replacement: AnyRule = AnyRule::Net(
-            serde_json::from_value(
-                serde_json::json!({ "id": "s-sid-net-1", "action": "deny", "host": "y.example" }),
-            )
-            .unwrap(),
-        );
-        r.put(replacement);
-        let rules = r.list();
-        assert_eq!(rules.len(), 2, "replaced, not added");
-        assert_eq!(
-            rules[0].id(),
-            Some("s-sid-net-1"),
-            "the replacement is first"
-        );
-        assert!(
-            matches!(&rules[0], AnyRule::Net(n) if n.action == zapper_policy::Action::Deny),
-            "it is the new rule"
-        );
-    }
-
-    #[test]
-    fn layers_fall_back_to_the_resolved_profile_when_it_leaves_the_config() {
-        let c1 = Config::from_yaml(
-            "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: a.test }\n",
-        )
-        .unwrap();
-        let resolved = c1.resolve("web").unwrap();
-        // A running config that no longer has `web`.
-        let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
-        let layers = Rules::new("sid", vec![]).layers("sid", "web", &resolved, &c2);
-        let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
-        assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
-        assert_eq!(scopes.last(), Some(&Scope::Global));
-        // The profile layer came from the resolved snapshot, not from c2.
-        assert!(
-            layers
-                .iter()
-                .any(|(s, p)| matches!(s, Scope::Profile(n) if n == "web") && !p.net.is_empty()),
-            "fell back to the resolved web layers: {scopes:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod status_tests {
-    use super::{GuestRuntime, Status};
-
-    fn at(r: &GuestRuntime, s: Status) {
-        r.status().send_replace(s);
-    }
-
-    /// A session stopped while it started stays stopped: its guest's late
-    /// `Ready`, or failure, doesn't bring it back.
-    #[test]
-    fn a_stop_stands_against_a_late_ready() {
-        let r = GuestRuntime::new();
-        assert!(r.begin_stop("stopped by operator"));
-        assert!(!r.mark_ready());
-        assert!(!r.fail("guest setup: x".into()));
-        assert!(!r.fail_if_starting("vm exited".into()));
-        assert_eq!(
-            *r.status().borrow(),
-            Status::Stopped("stopped by operator".into())
-        );
-        assert!(!r.begin_stop("again"), "stopped once");
-    }
-
-    #[test]
-    fn ready_only_from_starting() {
-        let r = GuestRuntime::new();
-        assert!(r.mark_ready());
-        assert_eq!(*r.status().borrow(), Status::Running);
-        at(&r, Status::Failed("x".into()));
-        assert!(!r.mark_ready());
-        // A failure is kept by a stop, which still goes ahead.
-        assert!(r.begin_stop("stopped"));
-        assert_eq!(*r.status().borrow(), Status::Failed("x".into()));
-    }
-
-    /// A start is claimed once: not while one is starting or running, and by
-    /// one of many callers at once.
-    #[test]
-    fn a_start_is_claimed_once() {
-        let r = GuestRuntime::new();
-        assert!(!r.claim_start(), "starting already");
-        at(&r, Status::Running);
-        assert!(!r.claim_start(), "running");
-        at(&r, Status::Stopped("x".into()));
-        let r = std::sync::Arc::new(r);
-        let won = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                let (r, won) = (r.clone(), won.clone());
-                std::thread::spawn(move || {
-                    if r.claim_start() {
-                        won.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().unwrap();
-        }
-        assert_eq!(won.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(*r.status().borrow(), Status::Starting);
-    }
 }

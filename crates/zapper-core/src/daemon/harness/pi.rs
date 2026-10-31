@@ -10,8 +10,7 @@ use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{merge, ResolvedProfile};
 
-use super::claude::claude_activity;
-use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
+use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// pi: configuration in `~/.pi/agent`, driven over `pi --mode rpc`.
 pub struct Pi;
@@ -41,12 +40,12 @@ impl Harness for Pi {
         files.extend(pi_files(profile, &self.config_dir(home)));
     }
 
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         Some(self)
     }
 }
 
-impl Driver for Pi {
+impl Headless for Pi {
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation> {
         // pi opens a session by an id the host picks, or creates it: one id
         // per worker, reported once so a restart resumes it.
@@ -85,12 +84,9 @@ struct PiConversation {
 impl PiConversation {
     fn command(&mut self, kind: &str, text: &str) -> Vec<u8> {
         self.next += 1;
-        let mut line = serde_json::to_vec(
+        super::json_line(
             &json!({ "id": format!("z-{}", self.next), "type": kind, "message": text }),
         )
-        .expect("JSON");
-        line.push(b'\n');
-        line
     }
 
     fn end(&mut self, aborted: bool) -> TurnEnd {
@@ -174,8 +170,8 @@ impl Conversation for PiConversation {
                 }
             }
             Some("tool_execution_start") => {
-                let call = json!({ "message": { "content": [{ "type": "tool_use", "name": v["toolName"], "input": v["args"] }] } });
-                out.extend(claude_activity(&call).map(Event::Activity));
+                let name = v["toolName"].as_str().unwrap_or("tool");
+                out.push(Event::Activity(super::tool_activity(name, &v["args"])));
             }
             Some("message_end") if v["message"]["role"] == "assistant" => {
                 let m = &v["message"];
@@ -221,19 +217,12 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
         merge(&mut settings, &json!({ "defaultModel": m }));
     }
     let pretty = super::pretty;
-    let mut files = vec![GuestFile {
-        path: format!("{dir}/settings.json"),
-        content: pretty(&settings),
-        mode: 0o644,
-        user_owned: true,
-    }];
+    let mut files = vec![super::user_file(
+        format!("{dir}/settings.json"),
+        pretty(&settings),
+    )];
     if let Some(md) = &agent.instructions {
-        files.push(GuestFile {
-            path: format!("{dir}/AGENTS.md"),
-            content: md.clone(),
-            mode: 0o644,
-            user_owned: true,
-        });
+        files.push(super::user_file(format!("{dir}/AGENTS.md"), md.clone()));
     }
     // MCP tools are declared to the model directly: pi's default reaches
     // them only from codemode scripts, which the skills don't use.
@@ -244,12 +233,10 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
                 s["exposure"] = json!("direct");
             }
         }
-        files.push(GuestFile {
-            path: format!("{dir}/mcp.json"),
-            content: pretty(&json!({ "mcpServers": servers })),
-            mode: 0o644,
-            user_owned: true,
-        });
+        files.push(super::user_file(
+            format!("{dir}/mcp.json"),
+            pretty(&json!({ "mcpServers": servers })),
+        ));
     }
     files
 }
@@ -310,7 +297,7 @@ mod tests {
     #[test]
     fn pi_output() {
         // Events as pi 1.3 printed them against an OpenAI-compatible endpoint.
-        let mut d = Pi.driver().unwrap().conversation(None);
+        let mut d = Pi.headless().unwrap().conversation(None);
         let argv = d.argv();
         assert_eq!(&argv[..4], ["pi", "--mode", "rpc", "--session-id"]);
         let id = argv[4].clone();
@@ -395,7 +382,7 @@ mod tests {
         assert_eq!(f["type"], "follow_up");
         assert_ne!(p["id"], f["id"]);
         // Resumed: the same session, not reported again.
-        let mut r = Pi.driver().unwrap().conversation(Some(&id));
+        let mut r = Pi.headless().unwrap().conversation(Some(&id));
         assert_eq!(r.argv()[4], id);
         assert!(r.read(&json!({ "type": "agent_start" })).is_empty());
     }

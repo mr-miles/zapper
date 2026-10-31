@@ -823,6 +823,9 @@ async fn a_dbauth_secret_goes_only_to_its_hosts() {
         refused.contains("secret prod isn't for 10.1.2.3"),
         "{refused}"
     );
+    // The request log says so too: refused, not allowed.
+    let logged = s.requests.lock().unwrap().list();
+    assert_eq!(logged[0]["action"], "deny", "{logged:?}");
 
     // Within the secret's hosts: not refused for that. The relay goes on to
     // dial 10.0.0.9, which here may fail at once or hang, so what follows

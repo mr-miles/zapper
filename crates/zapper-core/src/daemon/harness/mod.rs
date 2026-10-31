@@ -1,8 +1,9 @@
 //! Agent harnesses: the coding agent a session runs. A harness says where
-//! and how the agent reads its configuration, and, for office workers, how
-//! to hold a conversation with it headless. The rest of zapper only sees
-//! these interfaces: another harness (pi, opencode) is one more
-//! implementation and a name in `agent.kind` (zapper_policy::AGENT_KINDS).
+//! and how the agent reads its configuration, and, for a driven session or
+//! an office worker, how to hold a conversation with it headless. The rest
+//! of zapper only sees these interfaces: another harness (opencode, say) is
+//! one more implementation and a name in `agent.kind`
+//! (zapper_policy::AGENT_KINDS).
 //!
 //! - `claude-code`: Claude Code (`claude -p`, stream-json in and out) — `claude`.
 //! - `pi`: pi (`pi --mode rpc`, JSON commands in, session events out) — `pi`.
@@ -75,12 +76,13 @@ pub trait Harness: Send + Sync {
         }
         v
     }
-    /// How to hold a conversation with it as an office worker, if it can.
-    fn driver(&self) -> Option<&dyn Driver>;
+    /// How to hold a conversation with it headless (a driven session, an
+    /// office worker), if it can.
+    fn headless(&self) -> Option<&dyn Headless>;
 }
 
-/// Starts conversations: one long one per office worker.
-pub trait Driver: Send + Sync {
+/// Starts conversations: one long one per driven session or office worker.
+pub trait Headless: Send + Sync {
     /// A conversation, continuing `resume` (an id from `Event::Session`).
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation>;
 }
@@ -91,11 +93,8 @@ pub trait Driver: Send + Sync {
 pub trait Conversation: Send {
     /// The command line.
     fn argv(&self) -> Vec<String>;
-    /// Lines to send first (a protocol's handshake); none for Claude Code.
-    fn opening(&mut self) -> Vec<Vec<u8>> {
-        Vec::new()
-    }
-    /// The line that gives the agent a prompt (a wake), with its newline.
+    /// The line that gives the agent a prompt (a task, or an office
+    /// worker's wake), with its newline.
     fn prompt(&mut self, text: &str) -> Vec<u8>;
     /// What an output line means.
     fn read(&mut self, line: &Value) -> Vec<Event>;
@@ -116,7 +115,8 @@ pub trait Conversation: Send {
     }
 }
 
-/// Something the foreman needs from the agent's output.
+/// Something the driver (or the office's foreman) needs from the agent's
+/// output.
 #[derive(Debug, PartialEq)]
 pub enum Event {
     /// The conversation's id, for resuming it after the process restarts.
@@ -125,10 +125,6 @@ pub enum Event {
     Activity(String),
     /// A turn ended.
     TurnEnd(TurnEnd),
-    /// A line to write back (a reply the protocol expects; Claude Code's
-    /// stream-json has none, opencode's ACP does).
-    #[allow(dead_code)]
-    Send(Vec<u8>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -175,6 +171,55 @@ pub(super) fn rate_limited(text: &str) -> bool {
             .any(|n| n == "429" || n == "529")
 }
 
+/// `v` as one JSON line, newline included: what the agents read on stdin.
+pub(super) fn json_line(v: &Value) -> Vec<u8> {
+    let mut line = serde_json::to_vec(v).expect("JSON");
+    line.push(b'\n');
+    line
+}
+
+/// A file of the agent's configuration, in its user's home, theirs and
+/// readable.
+pub(super) fn user_file(path: String, content: String) -> GuestFile {
+    GuestFile {
+        path,
+        content,
+        mode: 0o644,
+        user_owned: true,
+    }
+}
+
+/// What the agent is doing, from a tool call's name and input: `Edit
+/// pricing.md`.
+pub(super) fn tool_activity(name: &str, input: &Value) -> String {
+    let name = zapper_policy::proto::mcp_tool_name(name);
+    let arg = [
+        "file_path",
+        "path",
+        "command",
+        "pattern",
+        "url",
+        "subject",
+        "query",
+        "description",
+    ]
+    .iter()
+    .find_map(|k| input[*k].as_str())
+    .map(|s| {
+        let s = s.lines().next().unwrap_or("");
+        // Show a path's basename, but keep a value with spaces whole — it is a
+        // command or prose, not a path.
+        let s = s
+            .rsplit('/')
+            .next()
+            .filter(|_| !s.contains(' '))
+            .unwrap_or(s);
+        s.chars().take(60).collect::<String>()
+    })
+    .unwrap_or_default();
+    format!("{name} {arg}").trim().to_string()
+}
+
 /// Pretty-prints JSON for a config file.
 pub(super) fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap()
@@ -211,7 +256,7 @@ impl Harness for Generic {
     fn mounts(&self, _: &AgentSpec, _: &str) -> Vec<Mount> {
         Vec::new()
     }
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         None
     }
 }
@@ -246,11 +291,18 @@ mod tests {
             assert_eq!(get(k).unwrap().kind(), *k);
         }
         assert!(get("opencode").is_none());
-        assert!(get("claude-code").unwrap().driver().is_some());
-        assert!(get("pi").unwrap().driver().is_some());
+        assert!(get("claude-code").unwrap().headless().is_some());
+        assert!(get("pi").unwrap().headless().is_some());
         assert!(
-            get("generic").unwrap().driver().is_none(),
+            get("generic").unwrap().headless().is_none(),
             "a generic command can't be driven as a worker"
         );
+        // The config's list of what can be driven is these harnesses'.
+        let drivable: Vec<&str> = zapper_policy::AGENT_KINDS
+            .iter()
+            .copied()
+            .filter(|k| get(k).unwrap().headless().is_some())
+            .collect();
+        assert_eq!(drivable, zapper_policy::DRIVABLE_KINDS);
     }
 }

@@ -27,7 +27,6 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
-use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
     Kind, NetEffects, NetProtocol, NetRequest, NetRule,
@@ -35,7 +34,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, services, tls, Daemon, EventBody};
+use super::{addr, httplog, services, tls, Daemon, EventBody};
 
 mod inspect;
 // Re-exported for the fuzz targets (crate::fuzz), which exercise these parsers.
@@ -46,16 +45,6 @@ mod relay;
 mod sanitize;
 
 type Body = BoxBody<Bytes, hyper::Error>;
-
-const HOP_HEADERS: [&str; 7] = [
-    "connection",
-    "proxy-connection",
-    "proxy-authorization",
-    "proxy-authenticate",
-    "keep-alive",
-    "upgrade",
-    "te",
-];
 
 fn text(status: StatusCode, msg: impl Into<String>) -> Response<Body> {
     let body = Full::new(Bytes::from(format!("zapper: {}\n", msg.into())))
@@ -153,11 +142,7 @@ impl Verdict {
 }
 
 async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
-    let (decision, effects) = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        evaluate_net(&Session::layers_of(&layers), &s.caller_of(req))
-    };
+    let (decision, effects) = s.with_layers(d, |layers| evaluate_net(layers, &s.caller_of(req)));
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
     let allowed = match decision.action {
@@ -223,11 +208,11 @@ fn note_verdict(rec: &httplog::Shared, v: &Verdict) {
 /// Records a connection refused before anything was sent, so the request
 /// log (and a firm's security officers) see refusals too.
 fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict) {
-    let rec =
-        s.requests
-            .lock()
-            .unwrap()
-            .start(scheme, "CONNECT", &req.host, req.port, None, vec![]);
+    let rec = s
+        .requests
+        .lock()
+        .unwrap()
+        .start_connect(scheme, &req.host, req.port);
     note_verdict(&rec, v);
     let why = v
         .pending
@@ -236,12 +221,13 @@ fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict
     note_failure(s, &rec, 403, why);
 }
 
-/// Ends a record that got no upstream response.
+/// Ends a record that got no upstream response. A 403 is a refusal, so
+/// the record says it was denied, whatever said so.
 fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<String>) {
     {
         let mut r = rec.lock().unwrap();
         r.status = Some(status);
-        if status == 403 && error.is_none() {
+        if status == 403 {
             r.action = Action::Deny;
         }
         r.error = error;
@@ -318,7 +304,7 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
 /// daemon connects itself, by the name asked for.
 #[derive(Clone)]
 enum Target {
-    Addr(SocketAddr),
+    Addr(addr::Checked),
     Service(String, u16, services::Target),
 }
 
@@ -346,7 +332,7 @@ async fn dial_target(
 }
 
 /// Resolves on the host and returns the first address sessions may reach.
-async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<SocketAddr, String> {
+async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<addr::Checked, String> {
     let addrs: Vec<SocketAddr> = match tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::lookup_host((host, port)),
@@ -360,15 +346,17 @@ async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<SocketAddr, String
     let policy = d.addrs.read().unwrap();
     let mut why = "no addresses";
     for a in &addrs {
-        match policy.check(a.ip()) {
-            Ok(()) => return Ok(*a),
+        match policy.checked(*a) {
+            Ok(checked) => return Ok(checked),
             Err(e) => why = e,
         }
     }
     Err(format!("{host} resolves to a forbidden address: {why}"))
 }
 
-async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
+/// Connects to an address the address policy allowed.
+pub(crate) async fn dial(addr: addr::Checked) -> std::io::Result<TcpStream> {
+    let addr = addr.addr();
     match tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(addr)).await {
         Ok(r) => r,
         Err(_) => Err(std::io::Error::new(
@@ -402,15 +390,12 @@ async fn prepare(
     // looked up on the host, as the DNS resolver refuses it: else a rule
     // with a path, which makes every connection to its host inspected,
     // would let a guest have any name looked up.
-    let (inspect, reachable) = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        let layers = Session::layers_of(&layers);
+    let (inspect, reachable) = s.with_layers(d, |layers| {
         (
-            needs_inspection(&layers, &endpoint.host, port),
-            resolvable(&layers, &endpoint.host),
+            needs_inspection(layers, &endpoint.host, port),
+            resolvable(layers, &endpoint.host),
         )
-    };
+    });
     if inspect && !reachable && d.services.route(s, &endpoint.host, port).is_none() {
         let why = format!("refused {} (no rule allows this name)", endpoint.host);
         log(
@@ -540,7 +525,7 @@ async fn stream<S>(
     let Some(first) = peek(&mut io).await else {
         return;
     };
-    let is_tls = first.first() == Some(&0x16);
+    let is_tls = tls::starts_handshake(&first);
     match verdict {
         Some(v) if v.effects.protocol != NetProtocol::Tcp => {
             relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
@@ -581,7 +566,7 @@ async fn peek<S: AsyncRead + Unpin>(io: &mut S) -> Option<Vec<u8>> {
             buf.extend_from_slice(&chunk[..n]);
             match tls::tls_record_len(&buf) {
                 Some(len) if buf.len() < len && buf.len() < 17 * 1024 => continue,
-                _ if buf.len() < 5 && buf.first() == Some(&0x16) => continue,
+                _ if buf.len() < 5 && tls::starts_handshake(&buf) => continue,
                 _ => return Ok(()),
             }
         }
@@ -620,19 +605,16 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     addr: &Target,
     v: Verdict,
 ) {
-    let scheme = if first.first() == Some(&0x16) {
+    let scheme = if tls::starts_handshake(&first) {
         "tls"
     } else {
         "tcp"
     };
-    let rec = s.requests.lock().unwrap().start(
-        scheme,
-        "CONNECT",
-        &endpoint.host,
-        endpoint.port,
-        None,
-        vec![],
-    );
+    let rec = s
+        .requests
+        .lock()
+        .unwrap()
+        .start_connect(scheme, &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
     let logp = |error: Option<String>| {
         log(
@@ -650,7 +632,6 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     };
     if let Err(error) = server_name_matches(&first, &endpoint.host) {
         logp(Some(error.clone()));
-        rec.lock().unwrap().action = Action::Deny;
         note_failure(s, &rec, 403, Some(error));
         return;
     }
@@ -724,8 +705,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
 }
 
-/// The upstream side of an inspected connection: a reusable client speaking
-/// whichever protocol the real server negotiated by ALPN.
 #[cfg(test)]
 mod approval_tests;
 

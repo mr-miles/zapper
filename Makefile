@@ -78,6 +78,8 @@ test:
 lint:
 	cargo fmt --all -- --check
 	cargo clippy --workspace $(EXCLUDE) --all-targets --release $(FEATURES) -- -D warnings
+	# The fuzz targets' entry points (feature `fuzz`), which no other build has.
+	cargo clippy -p zapper-core --features fuzz --all-targets --release -- -D warnings
 
 fmt:
 	cargo fmt --all

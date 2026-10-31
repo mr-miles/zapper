@@ -8,7 +8,7 @@ zapper records what each session does, an office worker's included, as events. E
 
 ## Events
 
-Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
+Each event has `seq`, `epoch` (the daemon run it was emitted in: `seq` counts from 1 in each, so in a persistent session's record, written by several runs, the two together name one line), `ts` (Unix seconds), `session` and `type`:
 
 | `type` | Fields | Source |
 |---|---|---|

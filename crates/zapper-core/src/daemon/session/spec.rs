@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{anyhow, Context, Result};
 use zapper_policy::proto::{GuestDisk, GuestFile, GuestSpec};
 use zapper_policy::{
-    placeholder, render, secret_refs, Config, FsRule, NetworkMode, ResolvedProfile, SecretMode,
+    placeholder, render, secret_refs, Config, FsRule, ResolvedProfile, SecretMode,
 };
 
 const CA_PATH: &str = "/usr/local/share/ca-certificates/zapper.crt";
@@ -91,7 +91,7 @@ pub fn build(
 ) -> Result<GuestSpec> {
     let agent = &profile.agent;
     let home = format!("/home/{}", agent.user);
-    let nic = profile.engine.network == NetworkMode::Nic;
+    let nic = profile.engine.nic();
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     if !nic {
         // In vsock mode, programs reach the network through the forwarder.

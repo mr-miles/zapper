@@ -25,18 +25,16 @@ The office uses only these to set a worker up: the preamble as `instructions`, t
 - `skills_dir(home)`: where it reads skills; by default `<config_dir>/skills`.
 - `guest(profile, home, env, files)`: files and environment from the neutral keys, such as settings, the instructions file, the MCP config, the turn-end hook, and switching off update checks.
 - `mounts(agent, home)`: the skills directory and `config_mounts`; the default implementation is usually enough.
-- `driver()`: how to run it as an office worker, if it can be one.
+- `headless()`: how to run it headless (a driven session, an office worker), if it can be.
 
-**`Driver` and `Conversation`**: running the agent headless, one long conversation per worker. The foreman opens a terminal channel (no tty) to the command, writes lines to its stdin, and reads JSON lines from its stdout. A `Conversation` is one agent process. It is stateful, so protocols with request ids and sessions keep them there.
+**`Headless` and `Conversation`**: running the agent headless, one long conversation per driven session or worker. The driver (or the office's foreman) opens a terminal channel (no tty) to the command, writes lines to its stdin, and reads JSON lines from its stdout. A `Conversation` is one agent process. It is stateful, so protocols with request ids and sessions keep them there.
 
 - `argv()`: the command line, continuing an earlier conversation when given a session id.
-- `opening()`: lines to send first, such as a protocol handshake.
 - `prompt(text)`: the line that gives the agent a prompt (a wake).
 - `read(line)`: what an output line means, as `Event`s:
   - `Session(id)`: the conversation's id, for resuming it after a restart.
   - `Activity(text)`: what the agent is doing now (`Edit pricing.md`), for the UI.
   - `TurnEnd { tokens, outcome, detail }`: the turn ended. `tokens` counts input, output and cache writes against budgets. `outcome` is `Done`, `RateLimited` (the foreman retries the same wake later) or `Failed(why)` (the wake is kept and the worker is marked in error). `detail` goes into the journal's `turn end` record.
-  - `Send(line)`: a reply the protocol expects, which the foreman writes back.
 - `steers()` and `steer(text)`: hand the agent a message while it works, where the harness supports that natively. Without it, the `turn_end` command hands mail over when the agent is about to stop (`foreman::stop_check`).
 
 The fake Claude (`zapper-fake`, installed as `claude` in the `office-fake` image) is the test double for office e2e tests. It speaks Claude Code's stream-json and runs the `turn_end` hook from the settings the way Claude Code does. A new harness either gets its own fake or is tested through the same events.
@@ -101,13 +99,13 @@ opencode is [anomalyco/opencode](https://github.com/anomalyco/opencode), npm `@o
 
 **Driving.** opencode has no stdin streaming prompt mode like `claude -p`. Two ways fit:
 
-1. **ACP over stdio (preferred).** `opencode acp` speaks the Agent Client Protocol: JSON-RPC 2.0, one message per line on stdin and stdout, which fits `Conversation` as it is.
-   - `opening`: `initialize`, then `session/new` (or `session/load` with the id to resume).
+1. **ACP over stdio (preferred).** `opencode acp` speaks the Agent Client Protocol: JSON-RPC 2.0, one message per line on stdin and stdout. It needs two things `Conversation` no longer has (they were removed while no harness used them): lines to send first, and a reply written back for a request from the agent.
+   - Opening: `initialize`, then `session/new` (or `session/load` with the id to resume).
    - `prompt`: a `session/prompt` request with the session id from `session/new`'s response, which the conversation keeps.
    - `read`:
      - `session/update` notifications → `Activity` (tool calls) and text.
      - The `session/prompt` response with its `stopReason` → `TurnEnd`.
-     - Requests from the agent, such as `session/request_permission` → `Send(reply)`, allowing them as the profile's `permission_mode` says.
+     - Requests from the agent, such as `session/request_permission` → a reply written back, allowing them as the profile's `permission_mode` says.
    - Token usage: check what opencode's ACP reports per turn. If it doesn't report usage, read it from `opencode` with `session.step.ended` events, or count from the database.
 2. **HTTP.** `opencode serve` (or `--standalone`) per worker, with `POST /api/session/:id/prompt` and the `GET /api/event` SSE stream. Its run lifecycle events end turns: `session.execution.succeeded`, `.failed {error}`, `.interrupted`. `session.step.ended {tokens: {input, output, reasoning, cache: {read, write}}}` gives usage, and `session.retry.scheduled` gives rate limits. This needs a small bridge in the guest (`zapper-agent` turning the HTTP and SSE into lines), because the foreman speaks over a terminal channel. The SSE stream has no replay.
 
@@ -123,7 +121,7 @@ opencode is [anomalyco/opencode](https://github.com/anomalyco/opencode), npm `@o
 
 1. Add its name to `AGENT_KINDS` (`crates/zapper-policy/src/config.rs`) and to `harness::get`.
 2. Implement `Harness`: `config_dir`, `skills_dir` if it isn't `<config_dir>/skills`, and `guest`, which writes its settings, instructions file and MCP config from the neutral keys and switches off update checks.
-3. To run office workers, implement `Driver` and `Conversation` for its headless protocol, mapping its output to `Session`, `Activity`, `TurnEnd` and `Send`, and `steer` if it takes messages while it works.
+3. To drive it headless (a driven session, an office worker), implement `Headless` and `Conversation` for its headless protocol, mapping its output to `Session`, `Activity` and `TurnEnd`, and `steer` if it takes messages while it works.
 4. Build an image that installs it at a pinned version, and a profile with `agent.kind` set to it.
 5. Unit-test the mapping of its output (like `harness::tests::claude_output`), and for office workers add an e2e firm that uses it, with a fake that speaks its protocol or with the real agent.
 6. Update [configuration](docs/configuration.md#agent-harnesses) and this page.

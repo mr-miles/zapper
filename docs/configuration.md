@@ -87,12 +87,12 @@ profiles:
 | `model` | | The model. Claude Code: `model` in `~/.claude/settings.json` |
 | `permission_mode` | | How the agent approves its own actions. Claude Code: `permissions.defaultMode` in the managed settings file, `/etc/claude-code/managed-settings.json`, which is root-owned. Set there, Claude Code doesn't ask at each start whether to switch to auto mode, and the workload can't change it. With `bypassPermissions`, the file also sets `skipDangerousModePermissionPrompt` |
 | `instructions` | | Standing instructions, written to the harness's instructions file. Claude Code: `~/.claude/CLAUDE.md` (`claude_md` is accepted too) |
-| `skills` | | A host directory of skills (`<name>/SKILL.md`), mounted read-only where the harness reads them. Claude Code: `~/.claude/skills` |
+| `skills` | | A host directory of skills (`<name>/SKILL.md`), mounted read-only where the harness reads them. Claude Code: `~/.claude/skills`. Refused for `kind: generic`, which has no harness to read them |
 | `mcp_servers` | | MCP servers, `{name: {command, args, env}}`. Claude Code: `mcpServers` in `~/.claude.json` |
 | `turn_end` | | A command run when the agent is about to end a turn; what it prints makes the agent go on. Claude Code: a `Stop` hook |
 | `settings` | | Harness-native settings merged into its main config file. Claude Code: `~/.claude/settings.json` |
 | `config_files` | | Files in the harness's config directory, by path relative to it (Claude Code: `~/.claude`), with `{{secret:NAME}}` as in `files` |
-| `config_mounts` | | Host directories mounted in the harness's config directory: `{host, guest, mode, extra}` with `guest` relative to it, read-only unless `mode: rw` (copied in at boot, like `mounts`) |
+| `config_mounts` | | Host directories mounted in the harness's config directory: `{host, guest, mode, extra}` with `guest` relative to it, read-only unless `mode: rw` (copied in at boot, like `mounts`). Refused for `kind: generic` |
 
 Every session's environment also has:
 
@@ -104,7 +104,7 @@ For `claude-code`, zapper also sets `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DIS
 
 ### Agent harnesses
 
-The agent keys above are neutral: each harness (`crates/zapper-core/src/daemon/harness.rs`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to run office workers, `Driver`, which starts a `Conversation`: the command line, a handshake if the protocol has one, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure, a reply to write back), and handing over a message while the agent works if it can.
+The agent keys above are neutral: each harness (`crates/zapper-core/src/daemon/harness/`) writes them where and how its agent reads them, and the office gives its workers their preamble, skills, tools and turn-end hook through them, so it doesn't depend on one agent. A harness implements `Harness` (its config directory, its skills directory, files and environment from the neutral keys, mounts) and, to drive it headless (a driven session, an office worker), `Headless`, which starts a `Conversation`: the command line, how a prompt goes in, what each output line means (the session id for resuming, the current tool, the end of a turn with its tokens, a rate limit or failure), and handing over a message while the agent works if it can.
 
 `claude-code` and `pi` are implemented; opencode isn't yet. [HARNESS.md](../HARNESS.md) describes the interfaces in full and how each implements them; in short:
 

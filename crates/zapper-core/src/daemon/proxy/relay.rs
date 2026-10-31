@@ -1,4 +1,4 @@
-//! The database auth-terminating relay (proposal 07): a child of the egress
+//! The database auth-terminating relay: a child of the egress
 //! proxy that handles a database `protocol:` rule. The guest connects with no
 //! password; the proxy presents it as authenticated, authenticates to the real
 //! server with the host-held `dbauth` secret, then splices. Each protocol's
@@ -10,17 +10,12 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{NetProtocol, NetRequest};
 
 use super::{dial, log, note_failure, note_verdict, NetLog, Prefixed, Target, Verdict};
 use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds};
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
-
-/// How long the guest has to finish its TLS handshake, as for an inspected
-/// connection.
-const GUEST_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Terminates the guest's TLS with the session CA for `host`, over `io` (which
 /// replays any bytes already read from the guest), returning the plaintext
@@ -33,11 +28,7 @@ async fn accept_guest_tls<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-    tokio::time::timeout(GUEST_TLS_TIMEOUT, TlsAcceptor::from(config).accept(io))
-        .await
-        .map_err(|_| "TLS from guest: no handshake within 15s".to_string())?
-        .map_err(|e| format!("TLS from guest: {e}"))
+    s.tls.accept(io, host, tls::Alpn::Any).await
 }
 
 /// A `dbauth` credential resolved from the config: the user the proxy
@@ -87,7 +78,7 @@ async fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
     })
 }
 
-/// The database auth-terminating relay (proposal 07): the guest connects with
+/// The database auth-terminating relay: the guest connects with
 /// no password; the proxy presents it as authenticated, authenticates to the
 /// real server with the host-held `dbauth` secret, then splices the session.
 /// Only the startup/auth handshake is parsed — never the query stream. The
@@ -105,14 +96,11 @@ pub(super) async fn relay_database<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let proto = v.effects.protocol;
-    let rec = s.requests.lock().unwrap().start(
-        proto.scheme(),
-        "CONNECT",
-        &endpoint.host,
-        endpoint.port,
-        None,
-        vec![],
-    );
+    let rec =
+        s.requests
+            .lock()
+            .unwrap()
+            .start_connect(proto.scheme(), &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
     let fail = |status, error: String| {
         log(
@@ -144,21 +132,18 @@ pub(super) async fn relay_database<S>(
     // The credential goes only to its secret's hosts, as an injected one
     // does: a rule wider than them doesn't widen where the secret goes.
     if let Some(n) = &name {
-        let for_host = d
-            .config
-            .read()
-            .unwrap()
-            .secrets
-            .get(n)
-            .is_some_and(|sec| sec.allows_host(&endpoint.host));
-        if !for_host {
-            return fail(
-                403,
-                format!(
-                    "secret {n} isn't for {}: it isn't among the secret's hosts",
-                    endpoint.host
-                ),
-            );
+        let checked = match d.config.read().unwrap().secrets.get(n) {
+            Some(sec) => crate::daemon::secrets::check(
+                n,
+                sec,
+                crate::daemon::secrets::Use::Database,
+                &endpoint.host,
+                false,
+            ),
+            None => Err(format!("unknown secret {n}")),
+        };
+        if let Err(e) = checked {
+            return fail(403, e);
         }
     }
     let cred = match db_cred(d, name.as_deref()).await {
@@ -286,7 +271,7 @@ where
                 buf.drain(..8);
                 let tls = accept_guest_tls(s, host, Prefixed::new(buf, guest)).await?;
                 let mut tls: Box<dyn services::Io> = Box::new(tls);
-                let startup = pgwire::read_startup(&mut tls, Vec::new()).await?;
+                let startup = pgwire::read_startup(&mut tls).await?;
                 return Ok((tls, true, startup));
             }
             // Not a preamble: a plaintext StartupMessage (sslmode=disable).
@@ -302,7 +287,7 @@ where
         buf.extend_from_slice(&chunk[..n]);
     }
     let mut guest: Box<dyn services::Io> = Box::new(Prefixed::new(buf, guest));
-    let startup = pgwire::read_startup(&mut guest, Vec::new()).await?;
+    let startup = pgwire::read_startup(&mut guest).await?;
     Ok((guest, false, startup))
 }
 
@@ -448,7 +433,7 @@ where
             .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
             .await
             .map_err(|e| format!("sending SSLRequest: {e}"))?;
-        let mut b: Box<dyn services::Io> = Box::new(connect_server_tls(server, host).await?);
+        let mut b: Box<dyn services::Io> = Box::new(tls::connect(server, host).await?);
         b.write_all(&mysql::packet(
             2,
             &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
@@ -482,10 +467,11 @@ where
 }
 
 /// MS SQL Server (TDS), SQL authentication only: answer the guest's PRELOGIN
-/// with ENCRYPT_NOT_SUP (plaintext login leg), read and ignore its LOGIN7, log
-/// in to the real server with the host-held credential — tunnelling TLS in
-/// PRELOGIN packets when the server wants encryption — then forward the
-/// server's login response to the guest and splice.
+/// as it asked (its TLS, in PRELOGIN packets, terminated with the session CA
+/// when it wants encryption), read and ignore its LOGIN7, log in to the real
+/// server with the host-held credential (tunnelling TLS in PRELOGIN packets
+/// when the server wants encryption), then forward the server's login
+/// response to the guest and splice.
 async fn tds_exchange<S>(
     s: &Arc<Session>,
     guest: S,
@@ -497,8 +483,9 @@ async fn tds_exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // TDS always opens with a plaintext PRELOGIN (never a bare ClientHello),
-    // so guest_leg stays plaintext; TLS is negotiated in PRELOGIN below.
+    // A TDS client opens with PRELOGIN, in the clear, negotiating TLS in it
+    // (below); one in TDS 8 strict mode opens with TLS instead and sends its
+    // PRELOGIN inside, which guest_leg terminates first.
     let (mut guest, _) = guest_leg(s, guest, first, host).await?;
 
     // Guest leg: read its PRELOGIN. If it wants encryption, terminate the
@@ -513,13 +500,14 @@ where
         tds::prelogin_encryption(&pre).unwrap_or(tds::ENCRYPT_NOT_SUP),
         tds::ENCRYPT_ON | tds::ENCRYPT_REQ
     );
-    let reply_enc = if guest_wants_tls {
+    // Both legs as the guest asked: encrypted if it wants it, else not.
+    let encryption = if guest_wants_tls {
         tds::ENCRYPT_ON
     } else {
         tds::ENCRYPT_NOT_SUP
     };
     guest
-        .write_all(&tds::frame(tds::PKT_RESPONSE, &tds::prelogin(reply_enc)))
+        .write_all(&tds::frame(tds::PKT_RESPONSE, &tds::prelogin(encryption)))
         .await
         .map_err(|e| format!("sending PRELOGIN to the guest: {e}"))?;
     let mut guest: Box<dyn services::Io> = if guest_wants_tls {
@@ -537,13 +525,8 @@ where
     // used it. (TDS declares the client's intent in PRELOGIN before the server
     // replies, so this is the one knob.)
     let mut sbuf = Vec::new();
-    let want = if guest_wants_tls {
-        tds::ENCRYPT_ON
-    } else {
-        tds::ENCRYPT_NOT_SUP
-    };
     server
-        .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(want)))
+        .write_all(&tds::frame(tds::PKT_PRELOGIN, &tds::prelogin(encryption)))
         .await
         .map_err(|e| format!("sending PRELOGIN: {e}"))?;
     let (_t, _s, preresp) = tds::read_packet(&mut server, &mut sbuf).await?;
@@ -557,7 +540,7 @@ where
         // Tunnel the TLS handshake in PRELOGIN packets, then pass through.
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let wrapper = tds::TdsTls::new(server, handshaking.clone());
-        let tls = connect_server_tls(wrapper, host).await?;
+        let tls = tls::connect(wrapper, host).await?;
         handshaking.store(false, Ordering::Relaxed);
         Box::new(tls)
     } else {
@@ -634,22 +617,6 @@ fn plaintext_leg_ok(plaintext: bool, host: &str) -> Result<(), String> {
     }
 }
 
-/// Connects the server leg over TLS with real certificate validation.
-async fn connect_server_tls<S>(
-    stream: S,
-    host: &str,
-) -> Result<tokio_rustls::client::TlsStream<S>, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    TlsConnector::from(tls::client_config())
-        .connect(name, stream)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))
-}
-
 /// The guest leg for a database whose TLS (if any) is a normal ClientHello:
 /// terminate it with the per-session CA when the guest uses TLS, otherwise take
 /// the plaintext bytes as they are. Either carries no secret. Returns the
@@ -663,7 +630,7 @@ async fn guest_leg<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    if first.first() == Some(&0x16) {
+    if tls::starts_handshake(&first) {
         let tls = accept_guest_tls(s, host, Prefixed::new(first, io)).await?;
         Ok((Box::new(tls), true))
     } else {
@@ -685,7 +652,7 @@ async fn server_leg(
         plaintext_leg_ok(plaintext, host)?;
         return Ok(Box::new(tcp));
     }
-    Ok(Box::new(connect_server_tls(tcp, host).await?))
+    Ok(Box::new(tls::connect(tcp, host).await?))
 }
 
 /// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the
@@ -712,7 +679,7 @@ async fn pg_server_leg(
         .await
         .map_err(|e| format!("reading the server's TLS reply: {e}"))?;
     match reply[0] {
-        b'S' => Ok(Box::new(connect_server_tls(tcp, host).await?)),
+        b'S' => Ok(Box::new(tls::connect(tcp, host).await?)),
         // The guest used TLS but the server offers none: only a plaintext
         // secret permits sending the credential in the clear.
         b'N' => {

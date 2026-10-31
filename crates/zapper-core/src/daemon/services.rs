@@ -336,17 +336,15 @@ pub async fn connect(
             })
         }
         Target::Addr(addr) => {
-            d.addrs
+            let checked = d
+                .addrs
                 .read()
                 .unwrap()
-                .check(addr.ip())
+                .checked(*addr)
                 .map_err(|e| anyhow!("{addr}: {e}"))?;
-            let tcp = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::TcpStream::connect(addr),
-            )
-            .await
-            .map_err(|_| anyhow!("connecting to {addr}: timed out"))??;
+            let tcp = super::proxy::dial(checked)
+                .await
+                .with_context(|| format!("connecting to {addr}"))?;
             Ok(Box::new(tcp))
         }
         Target::Session { id, port } => {
@@ -427,19 +425,15 @@ where
     F: FnOnce(tokio_rustls::server::TlsStream<tokio::io::DuplexStream>) + Send + 'static,
 {
     let (a, b) = tokio::io::duplex(256 * 1024);
-    let mut config = (*s.tls.server_config(host)?).clone();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    let config = Arc::new(config);
+    // Made before the handshake, so a host it can't have a leaf for fails
+    // the connection, not the task.
+    s.tls.server_config(host)?;
+    let (s, host) = (s.clone(), host.to_string());
     tokio::spawn(async move {
-        let Ok(Ok(tls)) = tokio::time::timeout(
-            Duration::from_secs(15),
-            tokio_rustls::TlsAcceptor::from(config).accept(b),
-        )
-        .await
-        else {
-            return;
-        };
-        serve(tls);
+        match s.tls.accept(b, &host, super::tls::Alpn::Http1).await {
+            Ok(tls) => serve(tls),
+            Err(e) => tracing::debug!(session = %s.id, "{host}: {e}"),
+        }
     });
     Ok(Box::new(a))
 }

@@ -286,7 +286,7 @@ async fn run(
     spawn: Spawn,
     report: Arc<dyn Report>,
     transcript: Box<dyn Fn(Value) + Send + Sync>,
-    turn_timeout: Option<Duration>,
+    turn_timeout: Duration,
 ) {
     use tokio::time::Instant;
     let watch: Arc<dyn Observer> = Arc::new(Watch {
@@ -294,7 +294,6 @@ async fn run(
         report: report.clone(),
         transcript,
     });
-    let turn_timeout = turn_timeout.unwrap_or(TURN_TIMEOUT);
     let mut proc: Option<Proc> = None;
     let mut restarts: VecDeque<Instant> = VecDeque::new();
     let mut backoff_until = Instant::now();
@@ -342,37 +341,20 @@ async fn run(
         let started = Instant::now();
         let deadline = started + turn_timeout;
         let p = proc.as_mut().unwrap();
-        let outcome = match p.send(&prompt).await {
-            Ok(()) => loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break Out::Late,
-                    o = p.events.recv() => match o {
-                        Some(Out::Write(line)) => {
-                            if p.write(line).await.is_err() {
-                                break Out::Exit(None);
-                            }
-                        }
-                        Some(o) => break o,
-                        None => break Out::Exit(None),
-                    },
-                    // Prompts during the turn, for harnesses that take them
-                    // while the agent works.
-                    _ = driver.wake.notified(), if p.steers => {
-                        let more = driver.take_queue();
-                        if !more.is_empty() {
-                            report.event("steered", json!({ "prompts": more.len() }));
-                            let line = p.conv.lock().unwrap().steer(&more.join("\n\n"));
-                            if let Some(line) = line {
-                                if p.write(line).await.is_err() {
-                                    break Out::Exit(None);
-                                }
-                            }
-                        }
-                    }
-                    _ = driver.stopping.notified() => return,
-                }
-            },
-            Err(_) => Out::Exit(None),
+        // Prompts during the turn, for harnesses that take them while the
+        // agent works.
+        let more = || {
+            let more = driver.take_queue();
+            (!more.is_empty()).then(|| {
+                report.event("steered", json!({ "prompts": more.len() }));
+                more.join("\n\n")
+            })
+        };
+        let Some(outcome) = p
+            .turn(&prompt, deadline, &driver.wake, &driver.stopping, more)
+            .await
+        else {
+            return;
         };
         let ms = started.elapsed().as_millis() as u64;
         match outcome {
@@ -426,8 +408,6 @@ async fn run(
                     driver.set(Status::Idle, None);
                 }
             }
-            // Written while waiting for the turn's end.
-            Out::Write(_) => {}
             Out::Exit(code) => {
                 proc = None;
                 driver.requeue(prompts);
@@ -496,7 +476,7 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         return;
     };
     let kind = session.resolved.agent.kind.clone();
-    let Some(harness) = super::harness::get(&kind).and_then(|h| h.driver()) else {
+    let Some(harness) = super::harness::get(&kind).and_then(|h| h.headless()) else {
         // Validation allows only kinds with a driver; said here all the same.
         driver.set(
             Status::Error,
@@ -509,16 +489,8 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
     let spawn: Spawn = Box::new(move |argv| {
         let s = s.clone();
         Box::pin(async move {
-            let req = zapper_policy::proto::ShellRequest {
-                id: 0,
-                argv,
-                tty: None,
-                env: Default::default(),
-                system: false,
-                persist: false,
-                attach: None,
-            };
-            let (stream, _) = s.open_shell(req).await?;
+            let req = zapper_policy::proto::ShellRequest::exec(argv);
+            let stream = s.open_shell(req).await?.stream;
             Ok(stream)
         })
     });
@@ -533,7 +505,14 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
             let _ = f.line(&serde_json::to_vec(&v).unwrap_or_default());
         }
     });
-    tokio::spawn(run(driver, conversations, spawn, report, transcript, None));
+    tokio::spawn(run(
+        driver,
+        conversations,
+        spawn,
+        report,
+        transcript,
+        TURN_TIMEOUT,
+    ));
 }
 
 #[cfg(test)]

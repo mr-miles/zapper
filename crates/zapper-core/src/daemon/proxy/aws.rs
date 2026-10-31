@@ -125,41 +125,12 @@ pub fn signed(headers: &HeaderMap, query: &str) -> Option<Signed> {
     })
 }
 
-fn hex_val(b: u8) -> Option<u8> {
-    (b as char).to_digit(16).map(|d| d as u8)
-}
-
-/// Percent-decoded (not `+`).
-fn decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            if let (Some(h), Some(l)) = (
-                b.get(i + 1).copied().and_then(hex_val),
-                b.get(i + 2).copied().and_then(hex_val),
-            ) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// AWS's URI encoding: every byte but the unreserved ones, and `/` when
 /// `slash` says so, as `%XX` in capitals.
 fn encode(s: &str, slash: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'.' | b'_' | b'~')
-            || (slash && b == b'/')
-        {
+        if super::sanitize::unreserved(b) || (slash && b == b'/') {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -175,7 +146,10 @@ fn query_pairs(query: &str) -> Vec<(String, String)> {
         .filter(|p| !p.is_empty())
         .map(|p| {
             let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            (decode(k), decode(v))
+            (
+                super::sanitize::percent_decode(k, false),
+                super::sanitize::percent_decode(v, false),
+            )
         })
         .collect()
 }
@@ -669,7 +643,7 @@ pub(super) async fn resign(
     let found = {
         let config = d.config.read().unwrap();
         listed.iter().find_map(|name| {
-            let secret = config.secrets.get(name).or_else(|| own.get(name))?;
+            let secret = crate::daemon::secrets::find(&config, &own, name)?;
             (secret.mode == zapper_policy::SecretMode::Aws
                 && zapper_policy::aws_key_id(name) == signed.key_id)
                 .then(|| (name.clone(), secret.clone()))
@@ -681,14 +655,13 @@ pub(super) async fn resign(
             signed.key_id
         ));
     };
-    if !secret.allows_host(host) {
-        return Err(format!("secret {name} may not sign for {host}"));
-    }
-    if plaintext && !secret.plaintext {
-        return Err(format!(
-            "secret {name} may not sign over plain HTTP (set plaintext: true on it to allow)"
-        ));
-    }
+    crate::daemon::secrets::check(
+        &name,
+        &secret,
+        crate::daemon::secrets::Use::Sign,
+        host,
+        !plaintext,
+    )?;
     let creds = match crate::mint::secret_value(&secret.source).await {
         Ok(v) => match Creds::parse(&v) {
             Ok(c) => c,

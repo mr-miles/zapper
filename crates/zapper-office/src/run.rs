@@ -866,10 +866,10 @@ pub(crate) fn agent_overlay(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn zapper_core::harness::Driver> {
+) -> Result<&'static dyn zapper_core::harness::Headless> {
     let kind = &profile.agent.kind;
     zapper_core::harness::get(kind)
-        .and_then(|h| h.driver())
+        .and_then(|h| h.headless())
         .ok_or_else(|| anyhow!("profile {}: agent kind {kind} can't run an office worker (those that can: claude-code, pi)", profile.name))
 }
 

@@ -1,4 +1,4 @@
-//! Minimal RESP bits for the Redis/Valkey auth-relay (proposal 07): the proxy
+//! Minimal RESP bits for the Redis/Valkey auth-relay: the proxy
 //! issues one `AUTH` on the server leg with the host-held credential and checks
 //! the reply, then the relay splices. The guest holds no password and never
 //! authenticates — its commands run on the pre-authenticated server connection,

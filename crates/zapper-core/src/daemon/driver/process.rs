@@ -22,8 +22,6 @@ use crate::daemon::session::read_frame;
 pub enum Out {
     /// A turn ended.
     End(TurnEnd),
-    /// A line the protocol wants written back.
-    Write(Vec<u8>),
     /// The process exited.
     Exit(Option<i32>),
     /// The turn ran past the turn timeout.
@@ -70,14 +68,47 @@ impl Proc {
         let line = self.conv.lock().unwrap().prompt(text);
         self.write(line).await
     }
+
+    /// One turn: `prompt` sent, then what ends it, the turn's end, the
+    /// process's, or `deadline` passing (`Out::Late`). While it runs, each
+    /// `wake` of a harness that steers asks `more` for what came meanwhile
+    /// and gives it to the agent. `None` if `stopping` came first. The
+    /// driver's and the office's foreman's turn.
+    pub async fn turn(
+        &mut self,
+        prompt: &str,
+        deadline: tokio::time::Instant,
+        wake: &tokio::sync::Notify,
+        stopping: &tokio::sync::Notify,
+        mut more: impl FnMut() -> Option<String>,
+    ) -> Option<Out> {
+        if self.send(prompt).await.is_err() {
+            return Some(Out::Exit(None));
+        }
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => return Some(Out::Late),
+                o = self.events.recv() => return Some(o.unwrap_or(Out::Exit(None))),
+                _ = wake.notified(), if self.steers => {
+                    let Some(text) = more() else { continue };
+                    let line = self.conv.lock().unwrap().steer(&text);
+                    if let Some(line) = line {
+                        if self.write(line).await.is_err() {
+                            return Some(Out::Exit(None));
+                        }
+                    }
+                }
+                _ = stopping.notified() => return None,
+            }
+        }
+    }
 }
 
 pub async fn start(
     stream: UnixStream,
-    mut conv: Box<dyn Conversation>,
+    conv: Box<dyn Conversation>,
     observer: Arc<dyn Observer>,
 ) -> Result<Proc> {
-    let opening = conv.opening();
     let steers = conv.steers();
     let conv = Arc::new(std::sync::Mutex::new(conv));
     let reader = conv.clone();
@@ -151,9 +182,6 @@ pub async fn start(
                         Event::TurnEnd(t) => {
                             let _ = tx.send(Out::End(t)).await;
                         }
-                        Event::Send(line) => {
-                            let _ = tx.send(Out::Write(line)).await;
-                        }
                     }
                 }
             }
@@ -164,15 +192,11 @@ pub async fn start(
         }
         let _ = tx.send(Out::Exit(code)).await;
     });
-    let mut p = Proc {
+    Ok(Proc {
         stdin,
         events,
         conv,
         steers,
         reader: reader_task,
-    };
-    for line in opening {
-        p.write(line).await?;
-    }
-    Ok(p)
+    })
 }

@@ -103,7 +103,13 @@ pub fn host() -> Result<&'static SubIds, &'static str> {
 pub fn host_range() -> Result<(u32, u32), String> {
     let ids = host().map_err(str::to_string)?;
     let start = ids.uids.start;
-    Ok((start, start + ids.uids.count.min(MAX) - 1))
+    Ok((start, start + limit(ids) - 1))
+}
+
+/// How many sessions can each have an id: as many as both the uid and the
+/// gid ranges hold, at most the sessions cap.
+fn limit(ids: &SubIds) -> u32 {
+    ids.uids.count.min(ids.gids.count).min(MAX)
 }
 
 /// Each session's offset into the ranges, while its VM runs.
@@ -115,7 +121,7 @@ pub fn lease(ids: &SubIds, session: &str) -> Result<u32> {
     if let Some(n) = leases.get(session) {
         return Ok(*n);
     }
-    let limit = ids.uids.count.min(ids.gids.count).min(MAX);
+    let limit = limit(ids);
     let taken: std::collections::BTreeSet<u32> = leases.values().copied().collect();
     let Some(n) = (0..limit).find(|n| !taken.contains(n)) else {
         bail!("all {limit} subordinate ids are in use");
@@ -125,9 +131,18 @@ pub fn lease(ids: &SubIds, session: &str) -> Result<u32> {
 }
 
 /// Takes offset `n` for `session` again: a daemon that adopts a VMM an
-/// earlier one started with it.
-pub fn claim(session: &str, n: u32) {
-    LEASES.lock().unwrap().insert(session.to_string(), n);
+/// earlier one started with it. Refused if another session holds it: two
+/// sessions' Firecrackers as one uid would share what each may touch.
+pub fn claim(session: &str, n: u32) -> Result<()> {
+    let mut leases = LEASES.lock().unwrap();
+    if let Some((other, _)) = leases
+        .iter()
+        .find(|(s, m)| **m == n && s.as_str() != session)
+    {
+        bail!("subordinate id {n} is held by session {other}");
+    }
+    leases.insert(session.to_string(), n);
+    Ok(())
 }
 
 pub fn release(session: &str) {
@@ -204,6 +219,21 @@ pub async fn map(ids: &SubIds, pid: u32, n: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// An offset another session holds can't be claimed; a session's own
+    /// can, again.
+    #[test]
+    fn a_claimed_offset_is_one_sessions() {
+        // An offset no test leases (they take the lowest free).
+        let n = MAX - 7;
+        claim("claim-a", n).unwrap();
+        let e = claim("claim-b", n).unwrap_err();
+        assert!(e.to_string().contains("held by session claim-a"), "{e}");
+        claim("claim-a", n).unwrap();
+        release("claim-a");
+        claim("claim-b", n).unwrap();
+        release("claim-b");
+    }
+
     #[test]
     fn ranges_by_name_or_id() {
         let text = "root:100000:65536\nmiles:165536:65536\n1000:300000:10\nempty:1:0\n";
@@ -241,6 +271,13 @@ mod tests {
             newuidmap: "/usr/bin/newuidmap".into(),
             newgidmap: "/usr/bin/newgidmap".into(),
         }
+    }
+
+    /// What `zapper check` reports and what leases hand out agree: the
+    /// smaller of the two ranges.
+    #[test]
+    fn the_smaller_range_is_the_limit() {
+        assert_eq!(limit(&ids()), 2);
     }
 
     /// Each session holds its own offset until released; the smaller range

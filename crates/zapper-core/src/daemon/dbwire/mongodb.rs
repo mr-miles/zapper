@@ -1,4 +1,4 @@
-//! Minimal MongoDB wire bits for the MongoDB auth-relay (proposal 07): the
+//! Minimal MongoDB wire bits for the MongoDB auth-relay: the
 //! proxy authenticates the server leg with SCRAM-SHA-256 carried over `OP_MSG`
 //! commands (`saslStart`/`saslContinue`), reusing [`super::pgwire::scram`], then
 //! the relay splices. The guest holds no password and never authenticates; its

@@ -6,15 +6,39 @@
 //! helpers directly; `stream()` and `handle()` enter it via mitm/plain/
 //! plain_inspected.
 
+use crate::daemon::secrets::{self, Use};
 use std::collections::{BTreeMap, HashMap};
 
 use super::*;
+
+/// An HTTP/1.1 client over `io`, its connection driven in a task of its own.
+async fn h1<IO>(io: IO) -> Result<SendRequestH1, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(io))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(conn);
+    Ok(sender)
+}
 
 enum Sender {
     H1(hyper::client::conn::http1::SendRequest<Body>),
     H2(hyper::client::conn::http2::SendRequest<Body>),
 }
 
+/// Headers for one hop only, never forwarded: the guest's connection
+/// to the proxy is not the proxy's to the upstream.
+const HOP_HEADERS: [&str; 7] = [
+    "connection",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "upgrade",
+    "te",
+];
 /// The pooled upstream for one inspected (TLS-terminated) guest connection: at
 /// most one live `Sender`, reconnected when missing or stale, shared across the
 /// connection's requests.
@@ -45,22 +69,13 @@ impl Upstream {
         if !ready {
             *guard = Some(open_upstream(d, s, host, addr).await?);
         }
-        let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
-        let out = shape(is_h2);
-        let result = if is_h2 {
-            let mut sender = match guard.as_mut() {
-                Some(Sender::H2(s)) => s.clone(),
-                _ => unreachable!(),
-            };
-            drop(guard);
-            sender.send_request(out).await
-        } else {
-            let r = match guard.as_mut() {
-                Some(Sender::H1(s)) => s.send_request(out).await,
-                _ => unreachable!(),
-            };
-            drop(guard);
-            r
+        let result = match guard.as_mut().expect("connected above") {
+            Sender::H2(s) => {
+                let mut sender = s.clone();
+                drop(guard);
+                sender.send_request(shape(true)).await
+            }
+            Sender::H1(s) => s.send_request(shape(false)).await,
         };
         result.map_err(|e| e.to_string())
     }
@@ -122,11 +137,7 @@ async fn dial_plain(
     target: &Target,
 ) -> Result<SendRequestH1, String> {
     let tcp = dial_target(d, s, target).await.map_err(|e| e.to_string())?;
-    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(conn);
-    Ok(sender)
+    h1(tcp).await
 }
 
 /// Logs a policy refusal of an inspected request, finishes its record, and
@@ -244,9 +255,9 @@ pub(super) async fn mitm<S>(
         path: None,
         ..Default::default()
     };
-    let config = match s.tls.server_config(&host) {
-        Ok(c) => c,
-        Err(e) => {
+    let tls = match s.tls.accept(io, &host, tls::Alpn::Any).await {
+        Ok(t) => t,
+        Err(error) => {
             log(
                 &d,
                 &s,
@@ -256,54 +267,12 @@ pub(super) async fn mitm<S>(
                     inspected: true,
                     status: None,
                     secrets: vec![],
-                    error: Some(format!("{e:#}")),
+                    error: Some(error),
                 },
             );
             return;
         }
     };
-    let tls = match tokio::time::timeout(
-        Duration::from_secs(15),
-        TlsAcceptor::from(config).accept(io),
-    )
-    .await
-    {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(format!("TLS from guest: {e}")),
-                },
-            );
-            return;
-        }
-        Err(_) => return,
-    };
-    if let Some(sni) = tls.get_ref().1.server_name() {
-        if !sni.eq_ignore_ascii_case(&host) {
-            let error = Some(format!("TLS server name {sni} does not match CONNECT host"));
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error,
-                },
-            );
-            return;
-        }
-    }
     let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
     let upstream: Upstream = Default::default();
     let svc = service_fn(move |req| {
@@ -325,8 +294,6 @@ pub(super) async fn mitm<S>(
     }
 }
 
-/// Replaces secret placeholders in headers and applies `set_headers`, for
-/// the secrets this host may receive. Returns the secrets used.
 /// Secrets added to a request: their names, and their values, which the
 /// request log replaces with `***` wherever they show up.
 pub(crate) struct Injected {
@@ -370,10 +337,9 @@ pub(super) async fn inject_for(
         used(effects, headers)
             .into_iter()
             .filter_map(|name| {
-                let secret = config.secrets.get(&name).or_else(|| own.get(&name))?;
-                let sendable = secret.allows_host(host) && (!plaintext || secret.plaintext);
-                let aws = secret.mode == zapper_policy::SecretMode::Aws;
-                let spec = secret.source.mint_spec().filter(|_| sendable && !aws)?;
+                let secret = secrets::find(&config, &own, &name)?;
+                let sendable = secrets::check(&name, secret, Use::Header, host, !plaintext).is_ok();
+                let spec = secret.source.mint_spec().filter(|_| sendable)?;
                 Some((name, spec))
             })
             .collect()
@@ -396,18 +362,20 @@ pub(super) async fn inject_for(
     )
 }
 
+/// Whether a header of the request holds `placeholder`.
+fn carries(headers: &hyper::HeaderMap, placeholder: &str) -> bool {
+    headers
+        .values()
+        .any(|v| v.to_str().is_ok_and(|s| s.contains(placeholder)))
+}
+
 /// The secrets a request would use: those of the rule's whose placeholder
 /// it carries, and those its headers are set from.
 fn used(effects: &NetEffects, headers: &hyper::HeaderMap) -> Vec<String> {
     let mut names: Vec<String> = effects
         .secrets
         .iter()
-        .filter(|name| {
-            let ph = placeholder(name);
-            headers
-                .values()
-                .any(|v| v.to_str().is_ok_and(|s| s.contains(&ph)))
-        })
+        .filter(|name| carries(headers, &placeholder(name)))
         .cloned()
         .collect();
     for (_, template) in &effects.set_headers {
@@ -432,17 +400,9 @@ pub(crate) fn inject_with(
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
-        let secret = config
-            .secrets
-            .get(name)
-            .or_else(|| own.get(name))
-            .ok_or_else(|| format!("unknown secret {name}"))?;
-        if !secret.allows_host(host) {
-            return Err(format!("secret {name} may not be sent to {host}"));
-        }
-        if plaintext && !secret.plaintext {
-            return Err(format!("secret {name} may not be sent over plain HTTP (set plaintext: true on it to allow)"));
-        }
+        let secret =
+            secrets::find(config, own, name).ok_or_else(|| format!("unknown secret {name}"))?;
+        secrets::check(name, secret, Use::Header, host, !plaintext)?;
         match secret.source.mint_spec() {
             Some(_) => match minted.get(name) {
                 Some(v) => v
@@ -459,15 +419,12 @@ pub(crate) fn inject_with(
     for name in &effects.secrets {
         // An `aws` secret signs the request (`aws::resign`); its value never
         // goes into a header.
-        let aws = config.secrets.get(name).or_else(|| own.get(name));
+        let aws = secrets::find(config, own, name);
         if aws.is_some_and(|s| s.mode == zapper_policy::SecretMode::Aws) {
             continue;
         }
         let ph = placeholder(name);
-        let present = headers
-            .values()
-            .any(|v| v.to_str().is_ok_and(|s| s.contains(&ph)));
-        if !present {
+        if !carries(headers, &ph) {
             continue;
         }
         let value = value_of(name)?;
@@ -751,22 +708,13 @@ async fn open_upstream(
                          paths or secrets don't apply to it"
                     )
                 })?;
-            let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(plain))
-                .await
-                .map_err(|e| e.to_string())?;
-            tokio::spawn(conn);
-            return Ok(Sender::H1(sender));
+            return Ok(Sender::H1(h1(plain).await?));
         }
     };
     let tcp = dial(*addr)
         .await
         .map_err(|e| format!("connecting to {host}: {e}"))?;
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    let tls = TlsConnector::from(tls::client_config())
-        .connect(name, tcp)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))?;
+    let tls = tls::connect(tcp, host).await?;
     // Speak whatever the server negotiated by ALPN.
     let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
     if h2 {
@@ -777,11 +725,7 @@ async fn open_upstream(
         tokio::spawn(conn);
         Ok(Sender::H2(sender))
     } else {
-        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        Ok(Sender::H1(sender))
+        Ok(Sender::H1(h1(tls).await?))
     }
 }
 

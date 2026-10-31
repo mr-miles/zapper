@@ -1034,11 +1034,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     let out = images::build(
                         images::Build {
                             name: &name,
-                            from: &r.from,
-                            run: &r.run,
-                            inputs: &r.inputs,
-                            copies: &r.copies,
-                            after: &r.after,
+                            recipe: &r,
                             size: size.as_deref(),
                             dir: &dir,
                         },
@@ -1563,7 +1559,7 @@ async fn check(config_path: &Path) -> Result<i32> {
         .profiles
         .keys()
         .filter_map(|n| config.resolve(n).ok())
-        .any(|p| p.engine.network == zapper_policy::NetworkMode::Nic);
+        .any(|p| p.engine.nic());
     if uses_nic && ok {
         let (ok, why) = probe(true)?;
         let what = if ok {
@@ -1689,6 +1685,7 @@ mod tests {
             (!matches!(body, zapper_core::EventBody::Service { .. })).then(|| "abc234".to_string());
         let e = zapper_core::Event {
             seq: 1,
+            epoch: "ab3cd4ef".into(),
             ts: 3661.0,
             session,
             body,

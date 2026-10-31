@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{merge, AgentSpec, ResolvedProfile};
 
-use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
+use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// Claude Code's managed settings file on Linux.
 /// https://code.claude.com/docs/en/managed-settings
@@ -40,12 +40,12 @@ impl Harness for ClaudeCode {
         files.extend(claude_files(profile, home, env.get("ANTHROPIC_API_KEY")));
     }
 
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         Some(self)
     }
 }
 
-impl Driver for ClaudeCode {
+impl Headless for ClaudeCode {
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation> {
         Box::new(ClaudeConversation {
             resume: resume.map(str::to_string),
@@ -83,10 +83,9 @@ impl Conversation for ClaudeConversation {
     }
 
     fn prompt(&mut self, text: &str) -> Vec<u8> {
-        let msg = json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": text }] } });
-        let mut line = serde_json::to_vec(&msg).expect("JSON");
-        line.push(b'\n');
-        line
+        super::json_line(
+            &json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": text }] } }),
+        )
     }
 
     fn read(&mut self, v: &Value) -> Vec<Event> {
@@ -116,39 +115,12 @@ impl Conversation for ClaudeConversation {
     }
 }
 
-/// What Claude is doing, from a tool call: `Edit pricing.md`. Shared with pi,
-/// whose tool-execution events carry the same shape.
-pub(super) fn claude_activity(event: &Value) -> Option<String> {
+/// What Claude is doing, from the last tool call in an assistant message.
+fn claude_activity(event: &Value) -> Option<String> {
     let content = event["message"]["content"].as_array()?;
     let tool = content.iter().rev().find(|c| c["type"] == "tool_use")?;
     let name = tool["name"].as_str().unwrap_or("tool");
-    let name = zapper_policy::proto::mcp_tool_name(name);
-    let input = &tool["input"];
-    let arg = [
-        "file_path",
-        "path",
-        "command",
-        "pattern",
-        "url",
-        "subject",
-        "query",
-        "description",
-    ]
-    .iter()
-    .find_map(|k| input[*k].as_str())
-    .map(|s| {
-        let s = s.lines().next().unwrap_or("");
-        // Show a path's basename, but keep a value with spaces whole — it is a
-        // command or prose, not a path.
-        let s = s
-            .rsplit('/')
-            .next()
-            .filter(|_| !s.contains(' '))
-            .unwrap_or(s);
-        s.chars().take(60).collect::<String>()
-    })
-    .unwrap_or_default();
-    Some(format!("{name} {arg}").trim().to_string())
+    Some(super::tool_activity(name, &tool["input"]))
 }
 
 /// Tokens of a turn: input, output and cache writes.
@@ -163,8 +135,8 @@ fn claude_tokens(result: &Value) -> u64 {
     )
 }
 
-/// A turn that failed before Claude could work: the API refused it (bad
-/// token, overload).
+/// A turn that failed before Claude could work: the API refused it (a bad
+/// token, say; an overload is a rate limit, found before this).
 fn claude_api_failure(result: &Value) -> Option<String> {
     if result["is_error"] != json!(true) {
         return None;
@@ -252,12 +224,10 @@ fn claude_managed(agent: &AgentSpec) -> Option<Value> {
 fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>) -> Vec<GuestFile> {
     let agent = &profile.agent;
     let mut files = vec![
-        GuestFile {
-            path: format!("{home}/.claude/settings.json"),
-            content: super::pretty(&claude_settings(agent)),
-            mode: 0o644,
-            user_owned: true,
-        },
+        super::user_file(
+            format!("{home}/.claude/settings.json"),
+            super::pretty(&claude_settings(agent)),
+        ),
         GuestFile {
             path: format!("{home}/.claude.json"),
             content: super::pretty(&claude_state(agent, api_key)),
@@ -266,12 +236,10 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>)
         },
     ];
     if let Some(md) = &agent.instructions {
-        files.push(GuestFile {
-            path: format!("{home}/.claude/CLAUDE.md"),
-            content: md.clone(),
-            mode: 0o644,
-            user_owned: true,
-        });
+        files.push(super::user_file(
+            format!("{home}/.claude/CLAUDE.md"),
+            md.clone(),
+        ));
     }
     if let Some(m) = claude_managed(agent) {
         files.push(GuestFile {
@@ -345,7 +313,7 @@ mod tests {
 
     #[test]
     fn claude_output() {
-        let mut d = ClaudeCode.driver().unwrap().conversation(Some("s-0"));
+        let mut d = ClaudeCode.headless().unwrap().conversation(Some("s-0"));
         assert_eq!(d.argv().last().unwrap(), "s-0");
         let e = json!({ "type": "assistant", "session_id": "s-1", "message": { "content": [{ "type": "tool_use", "name": "Edit", "input": { "file_path": "/work/pricing.md" } }] } });
         assert_eq!(
@@ -375,7 +343,7 @@ mod tests {
             Outcome::Done
         );
         assert_eq!(end(json!({ "type": "result", "is_error": false, "result": "rate limit, API Error, in prose" })).outcome, Outcome::Done);
-        assert!(d.opening().is_empty() && d.steer("x").is_none());
+        assert!(d.steer("x").is_none());
         let line = d.prompt("hello");
         assert_eq!(
             serde_json::from_slice::<Value>(&line).unwrap()["message"]["content"][0]["text"],

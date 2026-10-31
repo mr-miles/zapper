@@ -697,17 +697,7 @@ async fn start_session(State(d): D, Path(id): Path<String>, body: String) -> R<J
         parse_body(&body)?
     };
     let s = d.session(&id)?;
-    d.start_session(&s, req.accept_changed_disks)
-        .await
-        .map_err(|e| {
-            let msg = format!("{e:#}");
-            let code = if msg.contains("--accept-changed-disks") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            ApiError(code, msg)
-        })?;
+    d.start_session(&s, req.accept_changed_disks).await?;
     Ok(Json(d.session_info(&s)))
 }
 
@@ -762,25 +752,19 @@ async fn attach(
         None => vec![],
     };
     let shell = ShellRequest {
-        id: 0,
         argv,
         tty,
-        env: Default::default(),
         system: q.system,
         persist: q.persist,
         attach: q.terminal,
+        ..Default::default()
     };
-    let (guest, shell_id) = s.open_shell(shell.clone()).await?;
-    let argv = if shell.argv.is_empty() {
-        s.resolved.agent.command.clone()
-    } else {
-        shell.argv
-    };
+    let opened = s.open_shell(shell).await?;
+    let shell_id = opened.request.id;
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
         if let Ok(up) = on_upgrade.await {
-            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty, q.persist)
-                .await;
+            d.pump_shell(s, TokioIo::new(up), opened).await;
         }
     });
     Ok(Response::builder()
@@ -888,7 +872,11 @@ async fn events(
 /// A session's record checked: the keeper's chains, and its disks' hashes
 /// from each stop to the start after it.
 async fn verify_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
-    Ok(Json(d.verify_session(&id)?))
+    // It reads the whole record: off the async threads.
+    let checked = tokio::task::spawn_blocking(move || d.verify_session(&id))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(checked))
 }
 
 async fn list_images(State(d): D) -> R<Json<Value>> {
@@ -1037,7 +1025,7 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
         target,
         owner: OPERATOR.into(),
     })?;
-    Ok(Json(json!(d.services().into_iter().find(|s| s.id == id))))
+    Ok(Json(json!(d.service(id))))
 }
 
 /// Who registers services through the API.
@@ -1045,7 +1033,7 @@ const OPERATOR: &str = "operator";
 
 /// Removes a service the operator added; others are their owners'.
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
-    let Some(s) = d.services().into_iter().find(|s| s.id == id) else {
+    let Some(s) = d.service(id) else {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("no service {id}")));
     };
     if s.owner != OPERATOR {

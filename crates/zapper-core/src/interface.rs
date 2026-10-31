@@ -3,7 +3,7 @@
 //! Clients hold a `Core` and call it; the daemon's state stays behind it.
 //!
 //! The surface is split into per-concern traits — [`ConfigApi`], [`SessionApi`],
-//! [`RuleApi`], [`ApprovalApi`], [`ServiceApi`], [`EventApi`] — all implemented
+//! [`RuleApi`], [`ApprovalApi`], [`ServiceApi`], [`EventApi`], [`ImageApi`] — all implemented
 //! by `Core`, so a function can depend on just the slice it uses (`&impl
 //! SessionApi`) rather than the whole handle. `use zapper_core::prelude::*;`
 //! brings them all into scope. Construction and app-wide plumbing (start,
@@ -16,13 +16,14 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon};
 
-pub use crate::daemon::builds::{BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome};
+pub use crate::daemon::builds::{
+    BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome as BuildOutcome,
+};
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
@@ -31,7 +32,7 @@ pub use crate::daemon::services::{
     Target as ServiceTarget,
 };
 pub use crate::daemon::session::{
-    NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
+    NewSession, Session, SessionInfo, ShellOpened, Status, TermChunk, TerminalInfo,
 };
 pub use crate::daemon::{Catchup, Cursor, Event, EventBody, Pending, Remember};
 
@@ -89,7 +90,7 @@ impl Core {
     pub fn test_session(&self, new: NewSession, running: bool) -> Result<Arc<Session>> {
         let s = session::register(&self.d, &new)?;
         if running {
-            s.runtime.status().send_replace(session::Status::Running);
+            s.runtime.force(session::Status::Running);
         }
         Ok(s)
     }
@@ -125,16 +126,21 @@ impl Core {
         }
     }
 
-    /// Emits a service-change event for a service that is still there.
-    fn service_event(&self, change: &str, id: u64) {
+    /// Emits a service-change event.
+    fn service_event(&self, change: &str, service: ServiceInfo) {
+        self.d.emit(
+            None,
+            EventBody::Service {
+                change: change.into(),
+                service,
+            },
+        );
+    }
+
+    /// Emits the event of a service just added, as it is now.
+    fn service_added(&self, id: u64) {
         if let Some(service) = self.d.services.info(id) {
-            self.d.emit(
-                None,
-                EventBody::Service {
-                    change: change.into(),
-                    service,
-                },
-            );
+            self.service_event("added", service);
         }
     }
 }
@@ -230,8 +236,6 @@ pub trait SessionApi {
     fn session(&self, id: &str) -> Result<Arc<Session>>;
     /// Every session.
     fn sessions(&self) -> Vec<Arc<Session>>;
-    /// The sessions with a label set to a value, e.g. `firm` = `acme`.
-    fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>>;
     /// Starts a session; returns once its guest is ready.
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>>;
     /// Stops a session; it stays listed, with its audit log, and a
@@ -259,17 +263,8 @@ pub trait SessionApi {
     /// Pumps an attached client's frames to and from a terminal opened with
     /// `Session::open_shell`, recording it; `persist` for a terminal opened
     /// persistent (one attached again is known by its id).
-    #[allow(clippy::too_many_arguments)]
-    async fn pump_shell<C>(
-        &self,
-        s: Arc<Session>,
-        client: C,
-        guest: UnixStream,
-        id: u64,
-        argv: Vec<String>,
-        tty: Option<(u16, u16)>,
-        persist: bool,
-    ) where
+    async fn pump_shell<C>(&self, s: Arc<Session>, client: C, opened: ShellOpened)
+    where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
 }
 
@@ -280,13 +275,6 @@ impl SessionApi for Core {
 
     fn sessions(&self) -> Vec<Arc<Session>> {
         self.d.sessions.all()
-    }
-
-    fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>> {
-        self.sessions()
-            .into_iter()
-            .filter(|s| s.label(key) == Some(value))
-            .collect()
     }
 
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>> {
@@ -316,14 +304,12 @@ impl SessionApi for Core {
     fn verify_session(&self, id: &str) -> Result<Value> {
         let audit = self.audit_path(id)?;
         let text = std::fs::read_to_string(&audit)
-            .map_err(|e| anyhow!("no record for session {id}: {e}"))?;
+            .map_err(|e| crate::errors::not_found(format!("no record for session {id}: {e}")))?;
         let findings = session::disks::findings(&session::disks::events(&text));
-        let dir = self.d.paths.state.join("sessions").join(id);
-        let chain = match daemon::record::rel(&dir).map(|r| daemon::record::verify_dir(&r)) {
-            Some(Ok(v)) => v,
-            Some(Err(e)) => json!({ "ok": null, "note": format!("{e:#}") }),
-            None => json!({ "ok": null, "note": "no record" }),
-        };
+        let dir = self.d.paths.session_dir(id);
+        // Without a keeper, nothing to check the files against: said so.
+        let chain = daemon::record::verify_state_dir(dir.root())
+            .unwrap_or_else(|e| json!({ "ok": null, "note": format!("{e:#}") }));
         let ok = findings.is_empty() && chain["ok"] != json!(false);
         Ok(json!({ "session": id, "ok": ok, "chain": chain, "findings": findings }))
     }
@@ -337,33 +323,16 @@ impl SessionApi for Core {
                 if !daemon::is_session_id(id) {
                     return Err(anyhow!("{id:?} is not a session id"));
                 }
-                Ok(daemon::record::view(
-                    &self
-                        .d
-                        .paths
-                        .state
-                        .join("sessions")
-                        .join(id)
-                        .join("audit.jsonl"),
-                ))
+                Ok(daemon::record::view(&self.d.paths.session_dir(id).audit()))
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn pump_shell<C>(
-        &self,
-        s: Arc<Session>,
-        client: C,
-        guest: UnixStream,
-        id: u64,
-        argv: Vec<String>,
-        tty: Option<(u16, u16)>,
-        persist: bool,
-    ) where
+    async fn pump_shell<C>(&self, s: Arc<Session>, client: C, opened: ShellOpened)
+    where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty, persist).await
+        session::pump_shell(self.d.clone(), s, client, opened).await
     }
 }
 
@@ -449,9 +418,11 @@ impl RuleApi for Core {
                 .filter(|s| s.rules().iter().any(|r| r.id() == Some(id)))
                 .collect();
             return match holders.as_slice() {
-                [] => Err(anyhow!("no rule {id}")),
+                [] => Err(crate::errors::not_found(format!("no rule {id}"))),
                 [s] => {
-                    let r = s.remove_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;
+                    let r = s
+                        .remove_rule(id)
+                        .ok_or_else(|| crate::errors::not_found(format!("no rule {id}")))?;
                     Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),
@@ -464,7 +435,9 @@ impl RuleApi for Core {
             };
         }
         let (scope, rule) = self.d.change(&format!("rule {id} removed"), |c| {
-            let scope = c.find_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;
+            let scope = c
+                .find_rule(id)
+                .ok_or_else(|| crate::errors::not_found(format!("no rule {id}")))?;
             let rule = c.policy_mut(&scope).unwrap().remove(id).unwrap();
             Ok((scope, rule))
         })?;
@@ -542,6 +515,8 @@ pub trait ServiceApi {
     fn remove_service(&self, id: u64) -> Option<ServiceInfo>;
     /// The services and zones.
     fn services(&self) -> Vec<ServiceInfo>;
+    /// A service or zone by id.
+    fn service(&self, id: u64) -> Option<ServiceInfo>;
     /// Serves `server` as the MCP server `name` to the sessions `sessions`
     /// picks (by label; every session when empty), through the gateway on
     /// their MCP vsock port. Its id, for removing it.
@@ -558,7 +533,7 @@ pub trait ServiceApi {
 impl ServiceApi for Core {
     fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
         let id = self.d.services.add(spec)?;
-        self.service_event("added", id);
+        self.service_added(id);
         Ok(id)
     }
 
@@ -569,24 +544,22 @@ impl ServiceApi for Core {
         owner: &str,
     ) -> Result<u64> {
         let id = self.d.services.add_zone(domain, sessions, owner)?;
-        self.service_event("added", id);
+        self.service_added(id);
         Ok(id)
     }
 
     fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
         let info = self.d.services.remove(id)?;
-        self.d.emit(
-            None,
-            EventBody::Service {
-                change: "removed".into(),
-                service: info.clone(),
-            },
-        );
+        self.service_event("removed", info.clone());
         Some(info)
     }
 
     fn services(&self) -> Vec<ServiceInfo> {
         self.d.services.list()
+    }
+
+    fn service(&self, id: u64) -> Option<ServiceInfo> {
+        self.d.services.info(id)
     }
 
     fn add_mcp_server(
@@ -667,6 +640,7 @@ pub trait ImageApi {
     /// [`ImageBuild::follow`]. A recipe that doesn't resolve is refused here,
     /// before anything runs.
     fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>>;
+    /// A build by id, running or among the latest kept.
     fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>>;
     /// The build running and the latest that ended.
     fn image_builds(&self) -> Vec<BuildInfo>;
@@ -709,11 +683,7 @@ impl ImageApi for Core {
                 crate::images::build(
                     crate::images::Build {
                         name: &image,
-                        from: &recipe.from,
-                        run: &recipe.run,
-                        inputs: &recipe.inputs,
-                        copies: &recipe.copies,
-                        after: &recipe.after,
+                        recipe: &recipe,
                         size: size.as_deref(),
                         dir: &dir,
                     },
@@ -722,13 +692,13 @@ impl ImageApi for Core {
             },
             move |b| {
                 let body = match b.info().outcome {
-                    Some(Outcome::Built(path)) => {
+                    Some(BuildOutcome::Built(path)) => {
                         let hash = crate::images::built_hash(&images_dir, &b.name)
                             .map(|h| format!(" sha256 {h}"))
                             .unwrap_or_default();
                         event(b, "built", Some(format!("{path}{hash}")))
                     }
-                    Some(Outcome::Failed(e)) => event(b, "failed", Some(e)),
+                    Some(BuildOutcome::Failed(e)) => event(b, "failed", Some(e)),
                     None => return,
                 };
                 d.emit(None, body);

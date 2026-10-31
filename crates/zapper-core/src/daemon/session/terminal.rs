@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use zapper_policy::proto::{Frame, MAX_FRAME};
 
 use super::Session;
@@ -21,19 +20,19 @@ use crate::daemon::{now, record, Daemon, EventBody};
 /// watchers and its recording, which takes only what it didn't have of the
 /// output the guest sends again; when its client goes, it is detached, not
 /// closed.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_shell<C>(
     daemon: Arc<Daemon>,
     session: Arc<Session>,
     client: C,
-    guest: UnixStream,
-    id: u64,
-    argv: Vec<String>,
-    tty: Option<(u16, u16)>,
-    persist: bool,
+    opened: super::ShellOpened,
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let super::ShellOpened {
+        stream: guest,
+        request,
+    } = opened;
+    let (id, argv, tty, persist) = (request.id, request.argv, request.tty, request.persist);
     let existing = session.terminals.lock().unwrap().get(&id).cloned();
     let (term, reattached) = match existing.filter(|t| t.persistent) {
         Some(t) => (t, true),
@@ -42,7 +41,7 @@ pub(crate) async fn pump_shell<C>(
             let t = Arc::new(Terminal::new(
                 id,
                 argv.clone(),
-                tty.unwrap_or((24, 80)),
+                tty.unwrap_or(DEFAULT_SIZE),
                 persist,
                 cast,
             ));
@@ -169,7 +168,7 @@ impl Session {
                 continue;
             }
             let cast = Recorder::reopen(self.dir.root(), id);
-            let t = Terminal::new(id, vec![], (24, 80), true, cast);
+            let t = Terminal::new(id, vec![], DEFAULT_SIZE, true, cast);
             // Where its recording stopped is an earlier daemon's: it goes on
             // from the first output the guest sends again.
             t.state.lock().unwrap().adopted = true;
@@ -324,6 +323,14 @@ pub async fn read_frame(
     Frame::decode(header[0], body).map(Some)
 }
 
+/// A terminal's size when none is given: rows, columns.
+const DEFAULT_SIZE: (u16, u16) = (24, 80);
+
+/// Where terminal `id`'s recording is, in the session's directory `dir`.
+fn cast_path(dir: &Path, id: u64) -> std::path::PathBuf {
+    dir.join(format!("shell-{id}.cast"))
+}
+
 /// asciicast v2 writer.
 struct Recorder {
     file: Option<record::Writer>,
@@ -335,8 +342,8 @@ struct Recorder {
 
 impl Recorder {
     fn new(dir: &Path, id: u64, tty: Option<(u16, u16)>, argv: &[String]) -> Self {
-        let file = record::Writer::open(&dir.join(format!("shell-{id}.cast"))).ok();
-        let (rows, cols) = tty.unwrap_or((24, 80));
+        let file = record::Writer::open(&cast_path(dir, id)).ok();
+        let (rows, cols) = tty.unwrap_or(DEFAULT_SIZE);
         let mut r = Recorder {
             file,
             start: Instant::now(),
@@ -352,7 +359,7 @@ impl Recorder {
     /// Goes on with terminal `id`'s recording, written by an earlier daemon,
     /// after a marker: its times from its header's `timestamp`, as before.
     fn reopen(dir: &Path, id: u64) -> Self {
-        let path = dir.join(format!("shell-{id}.cast"));
+        let path = cast_path(dir, id);
         let mut r = if path.exists() {
             // The header is the first line; the rest may be long.
             let header = std::fs::File::open(&path).ok().and_then(|f| {
@@ -387,6 +394,7 @@ mod persistent_tests {
     use super::*;
     use crate::daemon::session::NewSession;
     use crate::testing::TestCore;
+    use tokio::net::UnixStream;
 
     /// One attachment of terminal 1: the guest's side sends `frames`, then
     /// goes; the pump runs to its end.
@@ -399,17 +407,17 @@ mod persistent_tests {
         }
         fake.write_all(&buf).await.unwrap();
         drop(fake);
-        pump_shell(
-            t.core.daemon().clone(),
-            s.clone(),
-            client,
-            guest,
-            1,
-            vec!["sh".into()],
-            Some((24, 80)),
-            true,
-        )
-        .await;
+        let opened = super::super::ShellOpened {
+            stream: guest,
+            request: zapper_policy::proto::ShellRequest {
+                id: 1,
+                argv: vec!["sh".into()],
+                tty: Some((24, 80)),
+                persist: true,
+                ..Default::default()
+            },
+        };
+        pump_shell(t.core.daemon().clone(), s.clone(), client, opened).await;
     }
 
     /// The output events of `shell-1.cast`, and its markers.

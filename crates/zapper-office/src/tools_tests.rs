@@ -530,6 +530,38 @@ async fn access_already_allowed_is_not_asked_for() {
     assert!(r["request"].is_string(), "{r}");
 }
 
+/// "Already allowed" is judged as the proxy would judge the worker's
+/// request: a rule for the worker's own folder (`{session}`) allows it
+/// there, and not in another's.
+#[tokio::test]
+async fn already_allowed_is_judged_as_the_workers_request() {
+    let (t, run) = run();
+    let pat = session_of(&run, "pat");
+    pat.put_rule(
+        serde_yaml::from_str(
+            "{ kind: net, id: own-folder, action: allow, host: drive.example, methods: [GET], path: \"/outbox/{session}/**\" }",
+        )
+        .unwrap(),
+    );
+    let ask = |path: String| {
+        let (t, run) = (&t, &run);
+        async move {
+            ok(
+                t,
+                run,
+                "pat",
+                "request_access",
+                json!({ "host": "drive.example", "methods": ["get"], "path": path, "reason": "my files" }),
+            )
+            .await
+        }
+    };
+    let own = ask(format!("/outbox/{}/x", pat.id)).await;
+    assert_eq!(own["allowed"], true, "{own}");
+    let other = ask("/outbox/zz9yy8/x".to_string()).await;
+    assert!(other["request"].is_string(), "{other}");
+}
+
 /// Nobody decides their own access request: an officer's own network or
 /// credential request goes to someone else, and deciding it themselves is
 /// refused.

@@ -26,15 +26,9 @@ pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
 async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std::io::Result<()> {
     // The capture shim's one-line command (`TCP <ip> <port>` or `DNS <len>`)
     // fits well under 64 bytes; read that much, then the protocol takes over.
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 64 {
-        stream.read_exact(&mut byte).await?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
+    let Some(line) = super::read_line_unbuffered(&mut stream, 64).await? else {
+        return Ok(());
+    };
     let line = String::from_utf8_lossy(&line).into_owned();
     let parts: Vec<&str> = line.split(' ').collect();
     match parts.as_slice() {
@@ -119,11 +113,7 @@ async fn resolve_name(
 ) -> (u8, Option<IpAddr>, Option<String>) {
     // `ask` decides access, not resolution: a name some request could reach,
     // with or without an approval, is looked up.
-    let reachable = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        resolvable(&Session::layers_of(&layers), &q.name)
-    };
+    let reachable = s.with_layers(d, |layers| resolvable(layers, &q.name));
     if !reachable {
         return (dns::REFUSED, None, Some("no rule allows this name".into()));
     }

@@ -17,7 +17,7 @@ use zapper_policy::proto::ShellRequest;
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
 use zapper_core::driver::{self, Observer, Out, Proc};
-use zapper_core::harness::{self, Driver, Outcome};
+use zapper_core::harness::{self, Headless, Outcome};
 use zapper_core::Core;
 use zapper_core::Session;
 
@@ -69,16 +69,8 @@ async fn start(
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
     let conv = driver_of(s)?.conversation(resume);
-    let req = ShellRequest {
-        id: 0,
-        argv: conv.argv(),
-        tty: None,
-        env: Default::default(),
-        system: false,
-        persist: false,
-        attach: None,
-    };
-    let (stream, _) = s.open_shell(req).await?;
+    let req = ShellRequest::exec(conv.argv());
+    let stream = s.open_shell(req).await?.stream;
     let watch = Watch {
         run: run.clone(),
         w: w.clone(),
@@ -89,10 +81,10 @@ async fn start(
 }
 
 /// The worker's harness driver, from its profile's `agent.kind`.
-fn driver_of(s: &Session) -> Result<&'static dyn Driver> {
+fn driver_of(s: &Session) -> Result<&'static dyn Headless> {
     let kind = &s.resolved.agent.kind;
     let h = harness::get(kind).ok_or_else(|| anyhow::anyhow!("no harness {kind}"))?;
-    h.driver()
+    h.headless()
         .ok_or_else(|| anyhow::anyhow!("agent kind {} can't run an office worker", h.kind()))
 }
 
@@ -297,35 +289,14 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + turn_timeout;
         let p = proc.as_mut().unwrap();
-        let outcome = match p.send(&prompt).await {
-            Ok(()) => loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break Out::Late,
-                    o = p.events.recv() => match o {
-                        Some(Out::Write(line)) => {
-                            if p.write(line).await.is_err() {
-                                break Out::Exit(None);
-                            }
-                        }
-                        Some(o) => break o,
-                        None => break Out::Exit(None),
-                    },
-                    // Mail during the turn, for harnesses that take it
-                    // while the agent works.
-                    _ = w.wake.notified(), if p.steers => {
-                        if let Some(text) = hand_over(&run, &w, "steered") {
-                            let line = p.conv.lock().unwrap().steer(&text);
-                            if let Some(line) = line {
-                                if p.write(line).await.is_err() {
-                                    break Out::Exit(None);
-                                }
-                            }
-                        }
-                    }
-                    _ = run.stopping.notified() => return,
-                }
-            },
-            Err(_) => Out::Exit(None),
+        // Mail during the turn, for harnesses that take it while the agent
+        // works.
+        let more = || hand_over(&run, &w, "steered");
+        let Some(outcome) = p
+            .turn(&prompt, deadline, &w.wake, &run.stopping, more)
+            .await
+        else {
+            return;
         };
         let ms = started.elapsed().as_millis() as u64;
         match outcome {
@@ -407,8 +378,6 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                     backoff_until = now() + rest;
                 }
             }
-            // Written while waiting for the turn's end.
-            Out::Write(_) => {}
             Out::Exit(code) => {
                 proc = None;
                 requeue(&w, ids);

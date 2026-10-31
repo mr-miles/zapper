@@ -11,10 +11,10 @@ use zapper_policy::{expand_home, Engine, Mount, MountMode};
 
 use super::session::SessionDir;
 
+use crate::vmm::CONSOLE_LIMIT;
+
 /// Guest CID; every VM has its own vsock device, so they can share it.
 pub const GUEST_CID: u32 = 3;
-// Serial console output kept per session; the rest is dropped.
-use crate::vmm::CONSOLE_LIMIT;
 
 pub use zapper_policy::parse_size;
 
@@ -139,7 +139,6 @@ pub struct VmSpec<'a> {
     pub firecracker: &'a Path,
     pub kernel: PathBuf,
     pub initrd: &'a Path,
-    pub root: PathBuf,
     /// Extra disks, attached as `/dev/vdb`, `/dev/vdc`, …
     pub disks: Vec<(PathBuf, bool)>,
     pub engine: &'a Engine,
@@ -277,7 +276,7 @@ fn is_vmm_of(pid: u32, id: &str) -> bool {
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
 pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     let mut drives = vec![json!({
-        "drive_id": "root", "path_on_host": spec.root, "is_root_device": false, "is_read_only": false,
+        "drive_id": "root", "path_on_host": spec.dir.root_disk(), "is_root_device": false, "is_read_only": false,
     })];
     for (i, (path, ro)) in spec.disks.iter().enumerate() {
         drives.push(json!({ "drive_id": format!("d{i}"), "path_on_host": path, "is_root_device": false, "is_read_only": ro }));
@@ -400,6 +399,8 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
         crate::util::write_private(&spec.dir.vmm(), &serde_json::to_vec(&vmm)?)?;
     }
     let console = spec.dir.console();
+    // One limit for the console, both streams counted against it.
+    let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     for stream in [
         child
             .stdout
@@ -410,36 +411,63 @@ pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     .into_iter()
     .flatten()
     {
-        let console = console.clone();
-        tokio::spawn(async move {
-            let Ok(mut out) = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&console)
-                .await
-            else {
-                return;
-            };
-            let mut stream = stream;
-            let mut buf = vec![0u8; 8192];
-            let mut written = 0u64;
-            while let Ok(n) = stream.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                if written < CONSOLE_LIMIT {
-                    let _ = out.write_all(&buf[..n]).await;
-                    written += n as u64;
-                }
-            }
-        });
+        tokio::spawn(copy_capped(stream, console.clone(), written.clone()));
     }
     Ok(child)
+}
+
+/// Appends `stream` to the file at `path` while what the streams sharing
+/// `written` have written is under `CONSOLE_LIMIT`; reads, and drops, the
+/// rest, so the VMM never blocks on a full pipe.
+async fn copy_capped(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+    path: PathBuf,
+    written: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    use std::sync::atomic::Ordering;
+    let Ok(mut out) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+    else {
+        return;
+    };
+    let mut buf = vec![0u8; 8192];
+    while let Ok(n) = stream.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+        if written.fetch_add(n as u64, Ordering::Relaxed) < CONSOLE_LIMIT {
+            let _ = out.write_all(&buf[..n]).await;
+        }
+    }
+    // A tokio file finishes its writes in the background: without this, its
+    // last one can be lost when it is dropped.
+    let _ = out.flush().await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two streams into one console keep to one limit between them.
+    #[tokio::test]
+    async fn a_consoles_streams_share_its_limit() {
+        let path = std::env::temp_dir().join(format!("zapper-console-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let big = vec![b'x'; (CONSOLE_LIMIT as usize) * 3 / 4];
+        let (a, b) = (big.clone(), big);
+        tokio::join!(
+            copy_capped(&a[..], path.clone(), written.clone()),
+            copy_capped(&b[..], path.clone(), written.clone()),
+        );
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert!(len <= CONSOLE_LIMIT + 8192, "{len}");
+        assert!(len >= CONSOLE_LIMIT, "{len}");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn sizes() {

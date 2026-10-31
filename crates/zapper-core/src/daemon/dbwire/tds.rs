@@ -1,12 +1,12 @@
-//! Minimal TDS (MS SQL Server) bits for the SQL Server auth-relay (proposal
-//! 07), SQL authentication only (no Kerberos/NTLM/integrated security).
+//! Minimal TDS (MS SQL Server) bits for the SQL Server auth-relay, SQL authentication only (no Kerberos/NTLM/integrated security).
 //!
-//! The guest connects with no password. The proxy answers its PRELOGIN with
-//! `ENCRYPT_NOT_SUP` (steering it to a plaintext login leg), reads and ignores
-//! its LOGIN7, and separately logs in to the real server with the host-held
-//! credential — performing the TLS-in-PRELOGIN handshake when the server wants
-//! encryption — then forwards the server's login response to the guest and the
-//! relay splices.
+//! The guest connects with no password. The proxy answers its PRELOGIN as
+//! the guest asked: with `ENCRYPT_ON`, terminating the TLS it then starts
+//! in PRELOGIN packets with the session CA, else in the clear. It reads and
+//! ignores the guest's LOGIN7, logs in to the real server with the
+//! host-held credential (TLS-in-PRELOGIN when the server wants encryption),
+//! then forwards the server's login response to the guest and the relay
+//! splices.
 //!
 //! TDS packet headers are big-endian; LOGIN7's own fields are little-endian.
 //! The TLS-in-TDS handshake path is built to the MS-TDS spec but, unlike the

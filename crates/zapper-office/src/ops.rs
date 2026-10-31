@@ -206,12 +206,15 @@ fn allowed_by(
     };
     let mut rule = None;
     for method in methods {
+        // As the proxy would judge it: the worker's own request, so its
+        // `{session}` and `{label:…}` rules apply as they would there.
         let req = NetRequest {
             host: host.to_string(),
             port,
             method,
             path: path.map(str::to_string),
-            ..Default::default()
+            session: Some(c.s.id.clone()),
+            labels: c.s.labels.clone(),
         };
         let (d, _) = zapper_policy::evaluate_net(&layers, &req);
         if d.action != zapper_policy::Action::Allow {
