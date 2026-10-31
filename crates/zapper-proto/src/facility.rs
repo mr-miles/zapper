@@ -1,13 +1,28 @@
 //! What the daemon tells a facility, a program on the host serving guests
-//! from a socket in the daemon's `state/services/` directory: here, the
-//! requests of an MCP server registered on a socket (`POST /v1/mcp`). The
-//! daemon is the MCP endpoint the guest talks to; it asks the facility one
-//! request per connection, one line each way, naming the caller itself.
+//! from a socket in the daemon's `state/services/` directory: who calls a
+//! socket service, in the first line of each connection
+//! ([`ServiceCaller`]); and the requests of an MCP server registered on a
+//! socket (`POST /v1/mcp`), for which the daemon is the MCP endpoint the
+//! guest talks to, asking the facility one request per connection, one line
+//! each way, naming the caller itself.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// The first line on a connection to a socket service: who is calling,
+/// from the VM the connection came from. The guest's own bytes follow it
+/// (with TLS terminated, for a service the daemon terminates it for), so
+/// nothing the guest sends can pose as it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceCaller {
+    pub session: String,
+    pub labels: BTreeMap<String, String>,
+    /// The name the guest asked for, and the port.
+    pub name: String,
+    pub port: u16,
+}
 
 /// A request to an MCP server on a socket: who calls, from the VM the
 /// guest's connection came from (never from what the guest sent), and what

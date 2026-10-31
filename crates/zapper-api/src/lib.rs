@@ -335,6 +335,9 @@ async fn status(State(d): D) -> Json<Value> {
         "running": running,
         "pending_approvals": d.approvals().len(),
         "epoch": d.epoch(),
+        // Where a facility's socket goes, for a socket service or MCP
+        // server to name it.
+        "socket_dir": d.socket_dir(),
     }))
 }
 

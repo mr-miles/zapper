@@ -58,7 +58,7 @@ The layer workers run on: zapper's sessions, policy and config.
 
 | Method and path | ui | Purpose |
 |---|---|---|
-| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals, and `epoch`: this daemon run's ID, which event ids start with |
+| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals, `epoch` (this daemon run's ID, which event ids start with), and `socket_dir`: where a facility puts the socket a socket service or MCP server names |
 | `GET /v1/record` | ✓ | Who keeps the record and whether it is being written |
 | `GET /v1/config[?format=json]` | ✓ | Running config, YAML by default, secret values redacted |
 | `PUT /v1/config` | | Replace the running config (validated; `<redacted>` keeps old values) |
