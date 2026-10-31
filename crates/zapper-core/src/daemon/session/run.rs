@@ -105,10 +105,12 @@ pub(crate) async fn start(
     // before the disks are checked, so a second start sees it starting.
     let lifecycle = session.lifecycle.lock().await;
     let was = session.runtime.status().borrow().clone();
-    let memory_warning = admit(daemon, &session.profile, session.resolved.engine.memory_mib)?;
+    let (memory_warning, admitted) =
+        admit(daemon, &session.profile, session.resolved.engine.memory_mib)?;
     if !session.runtime.claim_start() {
         bail!("session {id} is already running");
     }
+    drop(admitted);
     let undo = |e: anyhow::Error| {
         session.runtime.status().send_replace(was.clone());
         *session.audit.lock().unwrap() = None;

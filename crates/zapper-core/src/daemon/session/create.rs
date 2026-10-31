@@ -31,7 +31,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         let extra = h.mounts(&resolved.agent, &home);
         resolved.mounts.extend(extra);
     }
-    let memory_warning = admit(daemon, &new.profile, resolved.engine.memory_mib)?;
+    let (memory_warning, admitted) = admit(daemon, &new.profile, resolved.engine.memory_mib)?;
     let id = random_id(6);
     let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&id));
     std::fs::create_dir_all(dir.root())?;
@@ -65,6 +65,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         save(&session)?;
     }
     daemon.sessions.insert(session.clone());
+    drop(admitted);
     daemon.emit(
         Some(&session),
         EventBody::Session {
@@ -80,8 +81,15 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
 
 /// Whether another VM may start, before it is listed as starting: within
 /// `daemon.max_sessions`, and the host's memory (see [`memory_admission`]).
-/// A warning, logged, when it may but the memory is short.
-pub(super) fn admit(daemon: &Daemon, profile: &str, memory_mib: u32) -> Result<Option<String>> {
+/// A warning, logged, when it may but the memory is short. The admission
+/// holds until the guard returned is dropped, which the caller does once
+/// the session counts as starting, so admissions at once see each other.
+pub(super) fn admit<'a>(
+    daemon: &'a Daemon,
+    profile: &str,
+    memory_mib: u32,
+) -> Result<(Option<String>, std::sync::MutexGuard<'a, ()>)> {
+    let admitting = daemon.sessions.admitting();
     let (max, overcommit) = {
         let c = daemon.config.read().unwrap();
         (c.daemon.max_sessions, c.daemon.memory_overcommit)
@@ -102,7 +110,7 @@ pub(super) fn admit(daemon: &Daemon, profile: &str, memory_mib: u32) -> Result<O
     if let Some(w) = &warning {
         tracing::warn!("profile {profile}: {w}");
     }
-    Ok(warning)
+    Ok((warning, admitting))
 }
 
 /// The host's memory against a new VM's, in MiB. `total` and `available`

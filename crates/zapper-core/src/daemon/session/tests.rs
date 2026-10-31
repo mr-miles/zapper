@@ -512,3 +512,26 @@ async fn a_ttl_stops_its_own_run_only() {
         Status::Stopped("ttl expired".into())
     );
 }
+
+/// Sessions made at once are admitted one after another: no more than
+/// `daemon.max_sessions` get through, however they race.
+#[test]
+fn sessions_made_at_once_keep_to_the_limit() {
+    let t = TestCore::with_daemon("max_sessions: 4", CONFIG);
+    let barrier = Arc::new(std::sync::Barrier::new(16));
+    let made: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let (t, barrier) = (&t, barrier.clone());
+                scope.spawn(move || {
+                    let new = NewSession::plain("web".into(), t.workdir(), Default::default());
+                    barrier.wait();
+                    register(t.core.daemon(), &new).is_ok()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(made.iter().filter(|m| **m).count(), 4, "{made:?}");
+    assert_eq!(t.core.daemon().sessions.running(), 4);
+}

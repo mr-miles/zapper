@@ -1,19 +1,26 @@
 //! The daemon's live sessions.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use anyhow::{bail, Result};
 
 use super::{Session, Status};
 
 /// The daemon's live sessions, by id. Behind one lock; readers take a cloned
-/// snapshot so the lock is never held across other work.
-pub(crate) struct SessionStore(pub(super) RwLock<BTreeMap<String, Arc<Session>>>);
+/// snapshot so the lock is never held across other work. The second lock is
+/// held by an admission (`create::admit`) until the session it admits counts
+/// as starting, so two can't both pass the limits.
+pub(crate) struct SessionStore(pub(super) RwLock<BTreeMap<String, Arc<Session>>>, Mutex<()>);
 
 impl SessionStore {
     pub(crate) fn new() -> SessionStore {
-        SessionStore(RwLock::new(BTreeMap::new()))
+        SessionStore(RwLock::new(BTreeMap::new()), Mutex::new(()))
+    }
+
+    /// Held while a session is admitted and until it counts as starting.
+    pub(super) fn admitting(&self) -> MutexGuard<'_, ()> {
+        self.1.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<Session>> {
