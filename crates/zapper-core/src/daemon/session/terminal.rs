@@ -328,6 +328,9 @@ pub async fn read_frame(
 struct Recorder {
     file: Option<record::Writer>,
     start: Instant,
+    /// Seconds from the recording's header (its `timestamp`) to `start`:
+    /// times go on from those an earlier daemon wrote.
+    offset: f64,
 }
 
 impl Recorder {
@@ -337,6 +340,7 @@ impl Recorder {
         let mut r = Recorder {
             file,
             start: Instant::now(),
+            offset: 0.0,
         };
         let header = serde_json::json!({ "version": 2, "width": cols, "height": rows, "timestamp": now() as u64, "command": argv.join(" ") });
         if let Some(f) = r.file.as_mut() {
@@ -345,14 +349,22 @@ impl Recorder {
         r
     }
 
-    /// Goes on with terminal `id`'s recording, written by an earlier daemon:
-    /// its times start again from zero, after a marker.
+    /// Goes on with terminal `id`'s recording, written by an earlier daemon,
+    /// after a marker: its times from its header's `timestamp`, as before.
     fn reopen(dir: &Path, id: u64) -> Self {
         let path = dir.join(format!("shell-{id}.cast"));
         let mut r = if path.exists() {
+            // The header is the first line; the rest may be long.
+            let header = std::fs::File::open(&path).ok().and_then(|f| {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(f), &mut line).ok()?;
+                serde_json::from_str::<serde_json::Value>(&line).ok()
+            });
+            let began = header.and_then(|h| h["timestamp"].as_f64());
             Recorder {
                 file: record::Writer::open(&path).ok(),
                 start: Instant::now(),
+                offset: began.map_or(0.0, |b| (now() - b).max(0.0)),
             }
         } else {
             Recorder::new(dir, id, None, &[])
@@ -363,7 +375,7 @@ impl Recorder {
 
     fn write(&mut self, kind: &str, data: &[u8]) {
         if let Some(f) = self.file.as_mut() {
-            let t = self.start.elapsed().as_secs_f64();
+            let t = self.offset + self.start.elapsed().as_secs_f64();
             let line = serde_json::json!([t, kind, String::from_utf8_lossy(data)]);
             let _ = f.line(line.to_string().as_bytes());
         }
@@ -414,6 +426,32 @@ mod persistent_tests {
             }
         }
         (out, marks)
+    }
+
+    /// A recording gone on with after a restart keeps counting from its
+    /// header, not from zero.
+    #[test]
+    fn a_reopened_recording_goes_on_from_its_start() {
+        let dir = std::env::temp_dir().join(format!("zapper-cast-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shell-1.cast");
+        let began = now() - 100.0;
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n[1.5,\"o\",\"before\"]\n",
+                serde_json::json!({ "version": 2, "width": 80, "height": 24, "timestamp": began as u64 })
+            ),
+        )
+        .unwrap();
+        drop(Recorder::reopen(&dir, 1));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mark: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(mark[1], "m");
+        let t = mark[0].as_f64().unwrap();
+        assert!((99.0..110.0).contains(&t), "{t}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
