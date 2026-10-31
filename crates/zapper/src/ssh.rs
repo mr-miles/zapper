@@ -71,16 +71,6 @@ async fn switch(c: &Client, id: &str, enabled: bool, json_out: bool) -> Result<(
     Ok(())
 }
 
-/// The sandbox a target names: `ID` or `ID.zapper`, the ID a session's.
-fn sandbox_id(target: &str) -> Result<String> {
-    let id = target.trim();
-    let id = id.strip_suffix(".zapper").unwrap_or(id);
-    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        bail!("{target:?} doesn't name a sandbox: `ssh ID.zapper`");
-    }
-    Ok(id.to_string())
-}
-
 /// A sandbox reached through the daemon's API, as the key `key`.
 struct Api {
     c: Client,
@@ -104,7 +94,7 @@ async fn proxy(c: &Client, target: Option<String>, key: Option<String>) -> Resul
     let target = target
         .or_else(|| std::env::var("SSH_ORIGINAL_COMMAND").ok())
         .context("no sandbox named: `ssh ID.zapper`")?;
-    let id = sandbox_id(&target)?;
+    let id = zapper_ssh::sandbox_id(&target)?;
     let info = c
         .json(Method::GET, &format!("/v1/sessions/{id}"), None)
         .await?;
@@ -162,26 +152,4 @@ fn config(host: Option<String>) -> Result<()> {
         "# Then, for a sandbox with SSH on (`zapper run --ssh`, `zapper ssh on ID`): ssh ID.zapper"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_target_names_a_sandbox_with_or_without_its_suffix() {
-        assert_eq!(sandbox_id("abc234.zapper").unwrap(), "abc234");
-        assert_eq!(sandbox_id("abc234").unwrap(), "abc234");
-        assert_eq!(sandbox_id(" abc234.zapper\n").unwrap(), "abc234");
-        for bad in [
-            "",
-            ".zapper",
-            "abc;rm -rf /",
-            "../x",
-            "a b",
-            "abc234.example",
-        ] {
-            assert!(sandbox_id(bad).is_err(), "{bad:?}");
-        }
-    }
 }

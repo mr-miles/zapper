@@ -145,3 +145,15 @@ impl Zapper {
         Ok((TokioIo::new(hyper::upgrade::on(resp).await?), n))
     }
 }
+
+/// `s` as a URL's query value.
+pub fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
+}

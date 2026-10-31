@@ -422,7 +422,7 @@ async fn bring_in(run: &Arc<FirmRun>, name: &str) -> Result<()> {
 async fn install_hook(run: &FirmRun, name: &str, dir: &Path) -> Result<()> {
     git(dir, &["config", "http.receivepack", "true"], None).await?;
     let hook = if run.config.main_is_local(name) {
-        super::facility::PRE_RECEIVE
+        zapper_git::PRE_RECEIVE
     } else {
         PRE_RECEIVE_REMOTE
     };

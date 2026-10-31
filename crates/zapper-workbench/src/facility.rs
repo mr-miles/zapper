@@ -50,18 +50,29 @@ pub trait Facility: Send + Sync + 'static {
         vec![]
     }
 
-    /// Each of zapper's events (`/v1/events`), as the stream carries it.
+    /// Starts what it runs beside its routes (a socket it serves), when the
+    /// workbench starts.
+    fn start(&self, _ctx: &Ctx) {}
+
+    /// Whether it follows zapper's events (`on_event`).
+    fn wants_events(&self) -> bool {
+        false
+    }
+
+    /// Each of zapper's events (`/v1/events`), as the stream carries it,
+    /// for a facility that `wants_events`.
     fn on_event(&self, _ctx: &Ctx, _event: &Value) {}
 }
 
 /// Names the gateway's own routes have, which no facility may take.
-const TAKEN: [&str; 6] = [
+const TAKEN: [&str; 7] = [
     "status",
     "profiles",
     "sessions",
     "events",
     "approvals",
     "facilities",
+    "config",
 ];
 
 /// The workbench's facilities.
@@ -118,10 +129,27 @@ impl Facilities {
     }
 }
 
-/// Registers the facilities' services in zapper.
+/// Registers in zapper the facilities' services it lacks: at start, and
+/// again whenever zapper has lost them (it restarted).
 pub async fn register(ctx: &Ctx) -> Result<()> {
+    let have = ctx
+        .zapper
+        .call(Method::GET, "/v1/services", None)
+        .await?
+        .ok()
+        .map_err(|(s, why)| anyhow::anyhow!("services: {s} {why}"))?;
     for f in ctx.facilities.iter() {
         for spec in f.services() {
+            let present = have.as_array().into_iter().flatten().any(|s| {
+                s["name"] == spec["name"]
+                    && s["port"] == spec["port"]
+                    && spec["to"]["socket"]
+                        .as_str()
+                        .is_some_and(|sock| s["to"].as_str().is_some_and(|to| to.contains(sock)))
+            });
+            if present {
+                continue;
+            }
             ctx.zapper
                 .call(Method::POST, "/v1/services", Some(&spec))
                 .await?
@@ -132,6 +160,24 @@ pub async fn register(ctx: &Ctx) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Keeps the facilities' services registered for as long as the workbench
+/// runs, checking every few seconds; zapper being away is said once, not
+/// fatal.
+pub async fn keep_registered(ctx: Ctx) {
+    let mut said = false;
+    loop {
+        match register(&ctx).await {
+            Ok(()) => said = false,
+            Err(e) if !said => {
+                tracing::warn!("facilities' services: {e:#}");
+                said = true;
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
 
 /// Follows zapper's events for the facilities, for as long as the
@@ -166,4 +212,103 @@ pub async fn follow(ctx: Ctx) {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Reads the caller line zapper sends first on a socket service's
+/// connection, a byte at a time so what follows stays in the stream.
+async fn caller(
+    stream: &mut tokio::net::UnixStream,
+) -> Option<zapper_proto::facility::ServiceCaller> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while line.len() < 4096 {
+        match stream.read(&mut b).await {
+            Ok(1) if b[0] == b'\n' => return serde_json::from_slice(&line).ok(),
+            Ok(1) => line.push(b[0]),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Serves a facility's socket service: binds `socket` in zapper's
+/// `state/services/` (once zapper says where), and answers each connection's
+/// HTTP/1.1 with `handler`, given the caller zapper named in the first line
+/// (from the VM, never from the guest).
+pub fn serve_socket<H, F>(ctx: &Ctx, socket: &'static str, handler: H)
+where
+    H: Fn(zapper_proto::facility::ServiceCaller, hyper::Request<hyper::body::Incoming>) -> F
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    F: std::future::Future<Output = axum::response::Response> + Send + 'static,
+{
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let dir = loop {
+            if let Ok(a) = ctx.zapper.call(Method::GET, "/v1/status", None).await {
+                if let Some(d) = a.body["socket_dir"].as_str() {
+                    break std::path::PathBuf::from(d);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        let path = dir.join(socket);
+        let _ = std::fs::remove_file(&path);
+        let listener = match tokio::net::UnixListener::bind(&path) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("socket {}: {e}", path.display());
+                return;
+            }
+        };
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let handler = handler.clone();
+            tokio::spawn(async move {
+                let Some(who) = caller(&mut stream).await else {
+                    return;
+                };
+                let svc = hyper::service::service_fn(move |req| {
+                    let (handler, who) = (handler.clone(), who.clone());
+                    async move { Ok::<_, std::convert::Infallible>(handler(who, req).await) }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
+                    .await;
+            });
+        }
+    });
+}
+
+/// Adds `rules` to zapper's global layer, those not there by id: a
+/// facility's usual rules, for a name only the workbench's sessions
+/// resolve, so they reach no other. In the running config, unsaved.
+pub async fn add_global_rules(
+    ctx: &Ctx,
+    rules: &[Value],
+) -> std::result::Result<Vec<Value>, crate::gateway::Error> {
+    let have = ctx
+        .zapper
+        .call(Method::GET, "/v1/rules?scope=global", None)
+        .await?
+        .ok()?;
+    let mut added = vec![];
+    for rule in rules {
+        if !have
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["id"] == rule["id"])
+        {
+            let body = json!({ "scope": "global", "rule": rule });
+            ctx.zapper
+                .call(Method::POST, "/v1/rules", Some(&body))
+                .await?
+                .ok()?;
+            added.push(rule["id"].clone());
+        }
+    }
+    Ok(added)
 }

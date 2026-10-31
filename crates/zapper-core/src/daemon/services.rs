@@ -54,17 +54,8 @@ pub enum Target {
 /// The directory under `state` holding the sockets socket services name.
 pub(crate) const SOCKETS_DIR: &str = "services";
 
-/// The first line on a connection to a socket service: who is calling,
-/// from the VM the connection came from. The guest's own bytes follow it,
-/// so nothing the guest sends can pose as it.
-#[derive(Debug, Serialize, serde::Deserialize, PartialEq)]
-struct Caller {
-    pub session: String,
-    pub labels: BTreeMap<String, String>,
-    /// The name the guest asked for, and the port.
-    pub name: String,
-    pub port: u16,
-}
+/// The first line on a connection to a socket service, naming the caller.
+pub(crate) use zapper_policy::facility::ServiceCaller as Caller;
 
 /// `name` as a socket's file name in `state/services/`: letters, digits,
 /// `.`, `-` and `_`, not starting with `.`, so it can't name anything

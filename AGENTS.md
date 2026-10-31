@@ -110,6 +110,7 @@ crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their peopl
 crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
 crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
 crates/zapper-ssh/       the SSH gateway: SSH spoken on one stream (`zapper ssh proxy`, a key's forced command), its channels carried to a sandbox's terminals through the API
+crates/zapper-git/       git over HTTP for guests: `git http-backend` run as a CGI per request, and the pre-receive hook that keeps branches apart from main; the office's git server and the workbench's repository use it
 crates/zapper-workbench/ `zapper-workbench`: a layer for single users (proposal 12, part 2), a client of zapper's API on its socket; its gateway's tokens and grants, the session views it proxies, its facilities and its UI (src/ui.html)
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
 crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests

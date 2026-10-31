@@ -2939,6 +2939,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-git"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "tokio",
+]
+
+[[package]]
 name = "zapper-github"
 version = "0.1.0"
 dependencies = [
@@ -3007,6 +3017,7 @@ dependencies = [
  "tower",
  "tracing",
  "zapper-core",
+ "zapper-git",
  "zapper-github",
  "zapper-policy",
  "zapper-runs",
@@ -3066,14 +3077,20 @@ dependencies = [
  "hyper-util",
  "libc",
  "ring",
+ "russh",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "zapper-api",
  "zapper-core",
+ "zapper-git",
+ "zapper-proto",
+ "zapper-ssh",
 ]
 
 [[package]]

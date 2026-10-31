@@ -31,21 +31,27 @@ pub enum Right {
     Answer,
     /// Add and remove rules in its sessions' own layers.
     Rules,
+    /// Manage the secrets (their entries in zapper's config and their
+    /// values, never shown back), and add rules that use them.
+    Secrets,
 }
 
 impl Right {
-    pub const ALL: [Right; 6] = [
+    pub const ALL: [Right; 7] = [
         Right::Read,
         Right::Create,
         Right::Control,
         Right::Terminal,
         Right::Answer,
         Right::Rules,
+        Right::Secrets,
     ];
 
     pub fn parse(s: &str) -> Result<Right> {
         serde_json::from_value(Value::String(s.to_string())).map_err(|_| {
-            anyhow::anyhow!("{s:?} isn't a right: read, create, control, terminal, answer, rules")
+            anyhow::anyhow!(
+                "{s:?} isn't a right: read, create, control, terminal, answer, rules, secrets"
+            )
         })
     }
 }
