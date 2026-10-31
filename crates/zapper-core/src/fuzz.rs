@@ -159,11 +159,13 @@ fn header_lines(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// over plain HTTP only with `plaintext`.
 ///
 /// The first byte picks the host, plain HTTP, which secrets the rule adds
-/// and whether a `set_headers` template is used; the rest is headers.
+/// and whether a `set_headers` template is used; the second, which secret
+/// the template names; the rest is headers.
 pub fn headers(data: &[u8]) {
-    let Some((&flags, rest)) = data.split_first() else {
+    let [flags, choice, rest @ ..] = data else {
         return;
     };
+    let (flags, choice) = (*flags, *choice);
     let host = HOSTS[(flags & 3) as usize];
     let plaintext = flags & 4 != 0;
     let names = ["a", "ab", "c"];
@@ -177,7 +179,7 @@ pub fn headers(data: &[u8]) {
         set_headers: if flags & 64 != 0 {
             vec![(
                 "x-key".into(),
-                format!("k={{{{secret:{}}}}}", names[(flags >> 7) as usize % 3]),
+                format!("k={{{{secret:{}}}}}", names[choice as usize % 3]),
             )]
         } else {
             vec![]
