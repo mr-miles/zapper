@@ -132,9 +132,11 @@ pub struct Session {
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
     pub(crate) rules: Rules,
-    /// Secrets only this session's rules can use (a firm worker's GitHub
-    /// token). Not in the config, so `config save` never writes them and no
-    /// other session can name them. Not saved.
+    /// Secrets only this session's rules can use: a credential scoped to
+    /// one agent, which a client puts with `put_secret` (no client does
+    /// today; it is a requirement, so keep it). Not in the config, so
+    /// `config save` never writes them and no other session can name them.
+    /// Not saved: a persistent session's are put again after a restart.
     pub(crate) secrets: RwLock<BTreeMap<String, zapper_policy::Secret>>,
     /// The live VM, its control channel and lifecycle status while it runs.
     pub(crate) runtime: GuestRuntime,
