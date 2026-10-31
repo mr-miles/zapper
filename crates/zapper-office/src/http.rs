@@ -205,9 +205,8 @@ fn start_terms(firm: &crate::firm::Firm, config: &zapper_policy::Config) -> Valu
 /// Checks a run's record against the keeper's chains and signatures.
 async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     let dir = super::run_dir(&d, &f, &run)?;
-    let rel = zapper_core::record::rel(&dir).ok_or_else(|| bad("not in the record"))?;
     Ok(Json(
-        tokio::task::spawn_blocking(move || zapper_core::record::verify_dir(&rel))
+        tokio::task::spawn_blocking(move || zapper_core::record::verify_state_dir(&dir))
             .await
             .map_err(|e| bad(e.to_string()))??,
     ))

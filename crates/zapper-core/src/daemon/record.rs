@@ -163,9 +163,17 @@ pub fn status() -> Value {
     }
 }
 
+/// Verifies the files under `dir`, a directory of the daemon's state (a
+/// session's, a run's), against the keeper's chains: an error if it isn't in
+/// the record, or there is no keeper.
+pub fn verify_state_dir(dir: &Path) -> Result<Value> {
+    let rel = rel(dir).ok_or_else(|| anyhow!("{} isn't in the record", dir.display()))?;
+    verify_dir(&rel)
+}
+
 /// Verifies files of the record against the keeper's chains: every file
 /// under `rel` (a directory of the state, like a run's) that has a chain.
-pub fn verify_dir(rel: &Path) -> Result<Value> {
+fn verify_dir(rel: &Path) -> Result<Value> {
     let r = records().ok_or_else(|| anyhow!("no record"))?;
     let Some(k) = r.keeper.as_ref() else {
         bail!("the record isn't kept by a keeper here, so it has no chains to verify")
@@ -206,7 +214,7 @@ pub fn verify_dir(rel: &Path) -> Result<Value> {
 }
 
 /// A state path's place in the record, for verifying.
-pub fn rel(path: &Path) -> Option<PathBuf> {
+fn rel(path: &Path) -> Option<PathBuf> {
     path.strip_prefix(&records()?.state)
         .ok()
         .map(Path::to_path_buf)
