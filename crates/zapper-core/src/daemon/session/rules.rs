@@ -81,12 +81,11 @@ impl Rules {
     /// start), then global.
     pub fn layers(
         &self,
-        id: &str,
         profile: &str,
         resolved: &ResolvedProfile,
         config: &Config,
     ) -> Vec<(Scope, Policy)> {
-        let mut v = vec![(Scope::Session(id.to_string()), self.own())];
+        let mut v = vec![(Scope::Session(self.session.clone()), self.own())];
         for (scope, policy) in &self.shared {
             v.push((scope.clone(), policy.read().unwrap().clone()));
         }
@@ -166,7 +165,7 @@ mod tests {
         let resolved = c1.resolve("web").unwrap();
         // A running config that no longer has `web`.
         let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
-        let layers = Rules::new("sid", vec![]).layers("sid", "web", &resolved, &c2);
+        let layers = Rules::new("sid", vec![]).layers("web", &resolved, &c2);
         let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
         assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
         assert_eq!(scopes.last(), Some(&Scope::Global));

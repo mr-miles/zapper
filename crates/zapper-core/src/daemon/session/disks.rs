@@ -284,7 +284,7 @@ pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
 /// as unverified, and used.
 pub(super) async fn check_image(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let name = session.resolved.engine.image.clone();
-    let path = daemon.paths.images.join(format!("{name}.ext4"));
+    let path = crate::images::disk(&daemon.paths.images, &name);
     let hash = tokio::task::spawn_blocking(move || crate::util::sha256_file(&path)).await??;
     let built = crate::images::built_hash(&daemon.paths.images, &name);
     let (changed, detail) = match &built {

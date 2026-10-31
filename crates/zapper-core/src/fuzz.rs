@@ -9,11 +9,15 @@ use zapper_policy::proto::{Frame, GuestMsg, MAX_FRAME, MAX_LINE, MAX_MCP_LINE};
 
 use crate::daemon::{dns, gateway, httplog, proxy, session, tls};
 
+/// Runs `f` to completion on this thread's runtime, built once: the targets
+/// read input in loops, a runtime per item would be most of their time.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(f)
+    thread_local! {
+        static RT: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+    }
+    RT.with(|rt| rt.block_on(f))
 }
 
 /// A DNS query from the guest: parsed, and answered as the resolver would.

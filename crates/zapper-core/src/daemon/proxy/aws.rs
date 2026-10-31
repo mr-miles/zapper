@@ -662,13 +662,10 @@ pub(super) async fn resign(
         host,
         !plaintext,
     )?;
-    let creds = match crate::mint::secret_value(&secret.source).await {
-        Ok(v) => match Creds::parse(&v) {
-            Ok(c) => c,
-            Err(e) => return Err(format!("secret {name}: {e}")),
-        },
-        Err(e) => return Err(format!("secret {name}: {e:#}")),
-    };
+    let value = crate::mint::secret_value(&secret.source)
+        .await
+        .map_err(|e| format!("secret {name}: {e:#}"))?;
+    let creds = Creds::parse(&value).map_err(|e| format!("secret {name}: {e}"))?;
     let claimed = parts
         .headers
         .get("x-amz-content-sha256")
@@ -713,7 +710,7 @@ pub(super) async fn resign(
         HeaderValue::from_static("identity"),
     );
     let now = time::OffsetDateTime::now_utc();
-    let (out_path, seed, signer) = match sign(
+    let (out_path, seed, signer) = sign(
         parts.method.as_str(),
         path,
         &mut parts.headers,
@@ -721,10 +718,7 @@ pub(super) async fn resign(
         &creds,
         &payload,
         now,
-    ) {
-        Ok(x) => x,
-        Err(e) => return Err(e),
-    };
+    )?;
     let body = match chunked {
         Some(trailer) => Chunks::wrap(body, signer, seed, trailer),
         None => body,

@@ -146,7 +146,7 @@ pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &
     if !session.runtime.begin_stop(reason) {
         return;
     }
-    session.send(HostMsg::Shutdown);
+    session.runtime.send(HostMsg::Shutdown);
     teardown(daemon, session, Some(reason)).await;
 }
 

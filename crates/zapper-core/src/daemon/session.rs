@@ -15,7 +15,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use zapper_policy::proto::{Forward, Frame, GuestFile, HostMsg, ShellRequest, SHELL_PORT};
+use zapper_policy::proto::{Forward, Frame, GuestFile, ShellRequest, SHELL_PORT};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, Daemon, Event, EventBody};
@@ -298,8 +298,7 @@ impl Session {
     /// changes apply to running sessions at once; a profile removed from the
     /// running config falls back to its layers at session start.
     pub(crate) fn layers(&self, config: &Config) -> Vec<(Scope, Policy)> {
-        self.rules
-            .layers(&self.id, &self.profile, &self.resolved, config)
+        self.rules.layers(&self.profile, &self.resolved, config)
     }
 
     /// A clone of the session's own policy layer.
@@ -307,24 +306,19 @@ impl Session {
         self.rules.own()
     }
 
-    /// The same layers by reference, in evaluation order, as the policy
-    /// evaluators (`evaluate_net`, `evaluate_exec`, `needs_inspection`,
-    /// `resolvable`) take them. Paired with [`Session::layers`], which owns
-    /// them — the policies are cloned out from behind their locks, so the
-    /// borrowed view is a separate step.
-    pub(crate) fn layers_of(layers: &[(Scope, Policy)]) -> Vec<(Scope, &Policy)> {
-        layers.iter().map(|(s, p)| (s.clone(), p)).collect()
-    }
-
-    /// `f` over the session's layers as the running config has them now:
-    /// the config read, the layers cloned out, then `f`, with no lock held.
+    /// `f` over the session's layers as the running config has them now, by
+    /// reference in evaluation order, as the policy evaluators
+    /// (`evaluate_net`, `evaluate_exec`, `needs_inspection`, `resolvable`)
+    /// take them: the config read, the layers cloned out from behind their
+    /// locks, then `f`, with no lock held.
     pub(crate) fn with_layers<T>(
         &self,
         daemon: &Daemon,
         f: impl FnOnce(&[(Scope, &Policy)]) -> T,
     ) -> T {
         let layers = self.layers(&daemon.config.read().unwrap());
-        f(&Session::layers_of(&layers))
+        let layers: Vec<(Scope, &Policy)> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
+        f(&layers)
     }
 
     /// `req` as this session asks it: with its ID and labels, for
@@ -445,10 +439,6 @@ impl Session {
         }
     }
 
-    fn send(&self, msg: HostMsg) {
-        self.runtime.send(msg);
-    }
-
     /// Opens a terminal in the guest.
     pub async fn open_shell(&self, mut req: ShellRequest) -> Result<ShellOpened> {
         if !self.is_running() {
@@ -490,9 +480,7 @@ impl Session {
             request: req,
         })
     }
-}
 
-impl Session {
     /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
     /// and a client attached to it is closed. Its exit code, if it said one
     /// in time.
