@@ -152,6 +152,7 @@ pub fn recipe(
     run: Vec<String>,
     args: &[String],
 ) -> Result<Recipe> {
+    check_name(name)?;
     if let Some(from) = from {
         if !args.is_empty() {
             bail!("--arg is for an image's recipe; with --from there is none");
@@ -273,21 +274,24 @@ pub struct Build<'a> {
     pub dir: &'a Path,
 }
 
-pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
-    // A file name in `dir`, never hidden (the build's own files are) or a
-    // path out of it.
-    let starts_well = b.name.starts_with(|c: char| c.is_ascii_alphanumeric());
+/// An image's name: a file name in the images directory, never hidden (a
+/// build's own files are) or a path out of it.
+pub fn check_name(name: &str) -> Result<()> {
+    let starts_well = name.starts_with(|c: char| c.is_ascii_alphanumeric());
     if !starts_well
-        || !b
-            .name
+        || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
     {
         bail!(
-            "image name {:?}: use letters, digits, '-', '_' and '.', starting with a letter or digit",
-            b.name
+            "image name {name:?}: use letters, digits, '-', '_' and '.', starting with a letter or digit"
         );
     }
+    Ok(())
+}
+
+pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
+    check_name(b.name)?;
     std::fs::create_dir_all(b.dir)?;
     let _lock = lock(b.dir, b.name)?;
     let oci = engine();
@@ -473,6 +477,41 @@ mod tests {
         let d = std::env::temp_dir().join(format!("zapper-images-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// What a build is asked for is checked before anything runs: a name
+    /// out of the directory, `--run` without `--from`, `--arg` with it, an
+    /// argument the recipe doesn't take, one it needs left out.
+    #[test]
+    fn a_recipe_is_checked_before_a_build() {
+        let config: zapper_policy::Config = serde_yaml::from_str(
+            "images:\n  web:\n    from: docker.io/library/ubuntu:26.04\n    args:\n      src: { description: the sources }\n    copy:\n      - { from: src, to: /src }\n",
+        )
+        .unwrap();
+        let err = |name: &str, from: Option<&str>, run: &[&str], args: &[&str]| {
+            recipe(
+                &config,
+                name,
+                from.map(str::to_string),
+                run.iter().map(|s| s.to_string()).collect(),
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+        };
+        assert!(err("../web", None, &[], &[]).contains("image name"));
+        assert!(err("web", None, &["true"], &[]).contains("--run goes with --from"));
+        assert!(
+            err("x", Some("docker.io/library/ubuntu:26.04"), &[], &["a=b"])
+                .contains("--arg is for")
+        );
+        assert!(err("web", None, &[], &["other=/tmp"]).contains("takes no argument \"other\""));
+        assert!(err("web", None, &[], &["src"]).contains("NAME=PATH"));
+        assert!(err("web", None, &[], &[]).contains("needs --arg src=PATH"));
+        assert!(err("nope", None, &[], &[]).contains("no recipe"));
+        let src = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(err("web", None, &[], &[&format!("src={src}")]), "");
     }
 
     #[test]
