@@ -134,7 +134,7 @@ fn args_glob(pattern: &str) -> Result<GlobMatcher> {
 }
 
 /// Checks that every glob in a layer compiles.
-pub fn check_globs(policy: &Policy) -> Result<()> {
+pub(crate) fn check_globs(policy: &Policy) -> Result<()> {
     for r in &policy.net {
         host_glob(&r.host).with_context(|| format!("host {:?}", r.host))?;
         if let Some(p) = &r.path {
@@ -156,7 +156,7 @@ pub fn check_globs(policy: &Policy) -> Result<()> {
 
 impl NetRule {
     /// Matches host and port only.
-    pub fn matches_endpoint(&self, host: &str, port: u16) -> bool {
+    fn matches_endpoint(&self, host: &str, port: u16) -> bool {
         (self.ports.is_empty() || self.ports.contains(&port)) && host_matches(&self.host, host)
     }
 
@@ -313,7 +313,7 @@ pub fn needs_inspection(layers: &Layers<'_>, host: &str, port: u16) -> bool {
 
 /// What a session can do with a name, over every port and request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
+enum Reach {
     /// Some request to it would be allowed outright.
     Allow,
     /// Requests to it can only be asked about.
@@ -327,7 +327,7 @@ pub enum Reach {
 /// the layers, then the default). A matching rule without `ports`, `methods`
 /// or `path` decides every request still undecided; a narrower one decides
 /// only some, so the search goes on past it.
-pub fn reach(layers: &Layers<'_>, name: &str) -> Reach {
+fn reach(layers: &Layers<'_>, name: &str) -> Reach {
     let unconditional =
         |r: &NetRule| r.ports.is_empty() && r.methods.is_empty() && r.path.is_none();
     let finals = layers

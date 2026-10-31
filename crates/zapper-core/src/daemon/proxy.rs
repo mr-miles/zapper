@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
-    Kind, NetEffects, NetProtocol, NetRequest, NetRule,
+    Kind, NetEffects, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
@@ -527,7 +527,7 @@ async fn stream<S>(
     };
     let is_tls = tls::starts_handshake(&first);
     match verdict {
-        Some(v) if v.effects.protocol != NetProtocol::Tcp => {
+        Some(v) if v.effects.protocol.is_db() => {
             relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
         }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
