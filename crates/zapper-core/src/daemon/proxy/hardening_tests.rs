@@ -754,3 +754,35 @@ async fn an_inspected_connect_to_a_name_nothing_allows_is_not_looked_up() {
     let allowed = connect("ok.example").await;
     assert!(!allowed.contains("no rule allows"), "{allowed}");
 }
+
+/// A CONNECT tunnel holds a connection permit of its own for as long as it
+/// runs: with none left, it is refused, not opened past the cap.
+#[tokio::test]
+async fn a_tunnel_needs_a_connection_permit() {
+    let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80] }\n");
+    let connect = || {
+        let (d, s) = (t.core.daemon().clone(), s.clone());
+        async move {
+            let (mut guest, host_side) = tokio::net::UnixStream::pair().unwrap();
+            tokio::spawn(super::serve(d, s, host_side));
+            guest
+                .write_all(b"CONNECT api.example:80 HTTP/1.1\r\nHost: api.example:80\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = vec![0u8; 512];
+            let n = tokio::io::AsyncReadExt::read(&mut guest, &mut reply)
+                .await
+                .unwrap();
+            (guest, String::from_utf8_lossy(&reply[..n]).into_owned())
+        }
+    };
+    let conns = s.runtime.conns();
+    let all = conns.available_permits() as u32;
+    let held = conns.clone().try_acquire_many_owned(all).unwrap();
+    let (_, refused) = connect().await;
+    assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+    drop(held);
+    let (_tunnel, opened) = connect().await;
+    assert!(opened.starts_with("HTTP/1.1 200"), "{opened}");
+    assert_eq!(conns.available_permits() as u32, all - 1, "the tunnel's");
+}

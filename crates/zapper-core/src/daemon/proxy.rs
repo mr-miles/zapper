@@ -483,11 +483,20 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
         Ok(ready) => ready,
         Err(denial) => return text(StatusCode::FORBIDDEN, denial),
     };
+    // The tunnel outlives the connection it was asked on, whose permit goes
+    // when the upgrade takes it over: it holds one of its own.
+    let Ok(permit) = s.runtime.conns().try_acquire_owned() else {
+        return text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many connections from this session",
+        );
+    };
     tokio::spawn(async move {
         let Ok(up) = hyper::upgrade::on(req).await else {
             return;
         };
         stream(d, s, TokioIo::new(up), endpoint, addr, verdict).await;
+        drop(permit);
     });
     Response::builder()
         .status(StatusCode::OK)
