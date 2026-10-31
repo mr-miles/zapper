@@ -18,6 +18,10 @@ use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
 
+/// How long the guest has to finish its TLS handshake, as for an inspected
+/// connection.
+const GUEST_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Terminates the guest's TLS with the session CA for `host`, over `io` (which
 /// replays any bytes already read from the guest), returning the plaintext
 /// stream. Used by each protocol's in-band STARTTLS.
@@ -30,9 +34,9 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-    TlsAcceptor::from(config)
-        .accept(io)
+    tokio::time::timeout(GUEST_TLS_TIMEOUT, TlsAcceptor::from(config).accept(io))
         .await
+        .map_err(|_| "TLS from guest: no handshake within 15s".to_string())?
         .map_err(|e| format!("TLS from guest: {e}"))
 }
 
@@ -727,4 +731,30 @@ fn scram_nonce() -> String {
         .take(24)
         .map(char::from)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::TestCore;
+    use crate::NewSession;
+
+    /// A guest that starts TLS and sends nothing more is given up on.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_guest_tls_handshake_times_out() {
+        let t = TestCore::new("profiles:\n  web: {}\n");
+        let s = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        let (guest, ours) = tokio::io::duplex(1024);
+        let e = super::accept_guest_tls(&s, "db.example", ours)
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("no handshake"), "{e}");
+        drop(guest);
+    }
 }
