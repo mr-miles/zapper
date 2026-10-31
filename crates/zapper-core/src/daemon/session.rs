@@ -39,8 +39,8 @@ mod tests;
 
 pub(crate) use dir::SessionDir;
 pub(crate) use rules::Rules;
-pub(crate) use runtime::GuestRuntime;
 pub use runtime::Status;
+pub(crate) use runtime::{GuestRuntime, MAX_GUEST_CONNECTIONS};
 pub(crate) use store::SessionStore;
 
 pub(crate) use adopt::restore;
@@ -337,8 +337,9 @@ impl Session {
         }
     }
 
-    /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
-    /// session rule ids never clash with config ones.
+    /// Adds a rule to the session layer under a fresh `s-<session>-<kind>-<n>`
+    /// id, so session rule ids clash neither with config ones nor with
+    /// another session's.
     pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
         let rule = self.rules.add(rule, position);
         self.rules_changed();
@@ -525,7 +526,8 @@ pub struct NewSession {
     pub policy: Policy,
     /// The session's labels (`Session::labels`).
     pub labels: BTreeMap<String, String>,
-    /// Policy layers shared with other sessions (`Session::shared_layers`).
+    /// Policy layers shared with other sessions (a firm role's), between the
+    /// session's own layer and its profile's (`Rules`).
     pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
     /// Files written in the guest besides the profile's.
     pub files: Vec<GuestFile>,
@@ -571,7 +573,7 @@ pub(crate) struct Saved {
     pub workdir: PathBuf,
     pub resolved: ResolvedProfile,
     pub labels: BTreeMap<String, String>,
-    /// Its own layer's rules, as of its last stop.
+    /// Its own layer's rules, as of their last change (saved on each).
     pub rules: Policy,
     pub files: Vec<GuestFile>,
     pub forwards: Vec<Forward>,

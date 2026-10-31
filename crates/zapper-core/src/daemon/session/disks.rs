@@ -104,7 +104,7 @@ pub(crate) fn last_stop(events: &[Value]) -> LastStop {
 }
 
 /// What `zapper record session` finds in a session's record about its
-/// disks, oldest first: each `{seq, ts, finding}`. A disk changed while
+/// disks, oldest first: each `{epoch, seq, ts, finding}`. A disk changed while
 /// stopped shows here even when the start said `checked` (a daemon that
 /// didn't check), as the stop's hashes were recorded before.
 pub(crate) fn findings(events: &[Value]) -> Vec<Value> {

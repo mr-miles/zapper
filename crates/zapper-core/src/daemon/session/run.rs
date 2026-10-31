@@ -133,8 +133,9 @@ pub(crate) async fn start(
 /// keeps them and records their hashes; the audit log, console log and
 /// recordings stay.
 ///
-/// Status invariant: `Failed` is terminal and never overwritten with
-/// `Stopped`; an already-`Stopped` session returns early. `teardown` is
+/// Status invariant: a stop keeps a `Failed` as it is (never overwritten
+/// with `Stopped`; a later start may claim it), and an already-`Stopped`
+/// session returns early. `teardown` is
 /// idempotent and also reached from the launch-failure path (which sets
 /// `Failed` directly, without sending `Shutdown`, since the guest never came
 /// up).

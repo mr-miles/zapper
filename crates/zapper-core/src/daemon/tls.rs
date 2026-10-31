@@ -1,8 +1,10 @@
 //! TLS for inspected connections.
 //!
-//! Every session has its own CA, generated in memory when the session starts
-//! and never written to disk; the guest trusts only that CA. Leaf
-//! certificates are minted per host on first use.
+//! Every session has its own CA, made when the session is; the guest trusts
+//! only that CA. A plain session's lives in memory alone; a persistent
+//! session's key is kept in its `ca.json` (0600), so the guest goes on
+//! trusting it after a restart (`SessionCa::kept`). Leaf certificates are
+//! minted per host on first use.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};

@@ -382,7 +382,6 @@ impl Daemon {
         Ok(())
     }
 
-    /// Replaces the running config with the startup file.
     /// Replaces the running config with the startup file, validated and
     /// applied atomically. Without a file there is nothing to reload: an
     /// error, not an empty config.

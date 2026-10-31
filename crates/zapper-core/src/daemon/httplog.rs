@@ -99,7 +99,6 @@ pub fn headers(h: &hyper::HeaderMap) -> Vec<(String, String)> {
 }
 
 impl RequestLog {
-    #[allow(clippy::too_many_arguments)]
     /// A connection's record (a tunnel, a relay, a refusal): `CONNECT`, no
     /// path, no headers.
     pub fn start_connect(&mut self, scheme: &'static str, host: &str, port: u16) -> Shared {
