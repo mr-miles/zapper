@@ -443,6 +443,9 @@ async fn copy_capped(
             let _ = out.write_all(&buf[..n]).await;
         }
     }
+    // A tokio file finishes its writes in the background: without this, its
+    // last one can be lost when it is dropped.
+    let _ = out.flush().await;
 }
 
 #[cfg(test)]
