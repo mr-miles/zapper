@@ -16,7 +16,6 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use zapper_policy::{AnyRule, Config, Policy, Scope};
 
@@ -33,7 +32,7 @@ pub use crate::daemon::services::{
     Target as ServiceTarget,
 };
 pub use crate::daemon::session::{
-    NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
+    NewSession, Session, SessionInfo, ShellOpened, Status, TermChunk, TerminalInfo,
 };
 pub use crate::daemon::{Catchup, Cursor, Event, EventBody, Pending, Remember};
 
@@ -264,17 +263,8 @@ pub trait SessionApi {
     /// Pumps an attached client's frames to and from a terminal opened with
     /// `Session::open_shell`, recording it; `persist` for a terminal opened
     /// persistent (one attached again is known by its id).
-    #[allow(clippy::too_many_arguments)]
-    async fn pump_shell<C>(
-        &self,
-        s: Arc<Session>,
-        client: C,
-        guest: UnixStream,
-        id: u64,
-        argv: Vec<String>,
-        tty: Option<(u16, u16)>,
-        persist: bool,
-    ) where
+    async fn pump_shell<C>(&self, s: Arc<Session>, client: C, opened: ShellOpened)
+    where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
 }
 
@@ -338,20 +328,11 @@ impl SessionApi for Core {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn pump_shell<C>(
-        &self,
-        s: Arc<Session>,
-        client: C,
-        guest: UnixStream,
-        id: u64,
-        argv: Vec<String>,
-        tty: Option<(u16, u16)>,
-        persist: bool,
-    ) where
+    async fn pump_shell<C>(&self, s: Arc<Session>, client: C, opened: ShellOpened)
+    where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty, persist).await
+        session::pump_shell(self.d.clone(), s, client, opened).await
     }
 }
 

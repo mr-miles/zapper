@@ -138,7 +138,7 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let (stream, _) = s.open_shell(ShellRequest::system(argv)).await?;
+    let stream = s.open_shell(ShellRequest::system(argv)).await?.stream;
     let (mut r, mut w) = stream.into_split();
     let feeder = tokio::spawn(async move {
         if let Some(mut input) = input {

@@ -759,17 +759,12 @@ async fn attach(
         attach: q.terminal,
         ..Default::default()
     };
-    let (guest, shell_id) = s.open_shell(shell.clone()).await?;
-    let argv = if shell.argv.is_empty() {
-        s.resolved.agent.command.clone()
-    } else {
-        shell.argv
-    };
+    let opened = s.open_shell(shell).await?;
+    let shell_id = opened.request.id;
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
         if let Ok(up) = on_upgrade.await {
-            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty, q.persist)
-                .await;
+            d.pump_shell(s, TokioIo::new(up), opened).await;
         }
     });
     Ok(Response::builder()

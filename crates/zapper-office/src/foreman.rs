@@ -70,7 +70,7 @@ async fn start(
 ) -> Result<Proc> {
     let conv = driver_of(s)?.conversation(resume);
     let req = ShellRequest::exec(conv.argv());
-    let (stream, _) = s.open_shell(req).await?;
+    let stream = s.open_shell(req).await?.stream;
     let watch = Watch {
         run: run.clone(),
         w: w.clone(),

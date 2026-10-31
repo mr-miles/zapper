@@ -31,7 +31,7 @@ pub use interface::{
     Cursor, Decider, Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer,
     NewSession, Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi,
     ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi,
-    SessionInfo, Status, TermChunk, TerminalInfo,
+    SessionInfo, ShellOpened, Status, TermChunk, TerminalInfo,
 };
 /// The subordinate-id range a session's Firecracker can take, for `check`
 /// (see [`subids::host_range`]).

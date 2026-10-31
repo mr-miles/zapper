@@ -89,6 +89,14 @@ async fn connect_vsock(path: PathBuf, port: u32, refused: &str) -> Result<UnixSt
     Ok(stream)
 }
 
+/// A terminal channel opened to the guest (`Session::open_shell`): the
+/// stream, and the request as it was sent, its terminal id given and its
+/// command filled in.
+pub struct ShellOpened {
+    pub stream: UnixStream,
+    pub request: ShellRequest,
+}
+
 #[derive(Default, Serialize)]
 pub struct Counters {
     pub net_allowed: AtomicU64,
@@ -439,7 +447,7 @@ impl Session {
     }
 
     /// Opens a terminal in the guest.
-    pub async fn open_shell(&self, mut req: ShellRequest) -> Result<(UnixStream, u64)> {
+    pub async fn open_shell(&self, mut req: ShellRequest) -> Result<ShellOpened> {
         if !self.is_running() {
             bail!("session {} is not running", self.id);
         }
@@ -474,7 +482,10 @@ impl Session {
         json.push(b'\n');
         stream.write_all(&json).await?;
         self.counters.shells.fetch_add(1, Ordering::Relaxed);
-        Ok((stream, id))
+        Ok(ShellOpened {
+            stream,
+            request: req,
+        })
     }
 }
 
@@ -484,7 +495,7 @@ impl Session {
     /// in time.
     pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
         let req = ShellRequest::attach(n);
-        let (mut stream, _) = self.open_shell(req).await?;
+        let mut stream = self.open_shell(req).await?.stream;
         let mut buf = Vec::new();
         Frame::Hangup.write_to(&mut buf)?;
         stream.write_all(&buf).await?;

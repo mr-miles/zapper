@@ -490,7 +490,7 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         let s = s.clone();
         Box::pin(async move {
             let req = zapper_policy::proto::ShellRequest::exec(argv);
-            let (stream, _) = s.open_shell(req).await?;
+            let stream = s.open_shell(req).await?.stream;
             Ok(stream)
         })
     });

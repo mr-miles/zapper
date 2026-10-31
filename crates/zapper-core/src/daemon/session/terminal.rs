@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use zapper_policy::proto::{Frame, MAX_FRAME};
 
 use super::Session;
@@ -21,19 +20,19 @@ use crate::daemon::{now, record, Daemon, EventBody};
 /// watchers and its recording, which takes only what it didn't have of the
 /// output the guest sends again; when its client goes, it is detached, not
 /// closed.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_shell<C>(
     daemon: Arc<Daemon>,
     session: Arc<Session>,
     client: C,
-    guest: UnixStream,
-    id: u64,
-    argv: Vec<String>,
-    tty: Option<(u16, u16)>,
-    persist: bool,
+    opened: super::ShellOpened,
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let super::ShellOpened {
+        stream: guest,
+        request,
+    } = opened;
+    let (id, argv, tty, persist) = (request.id, request.argv, request.tty, request.persist);
     let existing = session.terminals.lock().unwrap().get(&id).cloned();
     let (term, reattached) = match existing.filter(|t| t.persistent) {
         Some(t) => (t, true),
@@ -395,6 +394,7 @@ mod persistent_tests {
     use super::*;
     use crate::daemon::session::NewSession;
     use crate::testing::TestCore;
+    use tokio::net::UnixStream;
 
     /// One attachment of terminal 1: the guest's side sends `frames`, then
     /// goes; the pump runs to its end.
@@ -407,17 +407,17 @@ mod persistent_tests {
         }
         fake.write_all(&buf).await.unwrap();
         drop(fake);
-        pump_shell(
-            t.core.daemon().clone(),
-            s.clone(),
-            client,
-            guest,
-            1,
-            vec!["sh".into()],
-            Some((24, 80)),
-            true,
-        )
-        .await;
+        let opened = super::super::ShellOpened {
+            stream: guest,
+            request: zapper_policy::proto::ShellRequest {
+                id: 1,
+                argv: vec!["sh".into()],
+                tty: Some((24, 80)),
+                persist: true,
+                ..Default::default()
+            },
+        };
+        pump_shell(t.core.daemon().clone(), s.clone(), client, opened).await;
     }
 
     /// The output events of `shell-1.cast`, and its markers.
