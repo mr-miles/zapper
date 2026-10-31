@@ -365,6 +365,37 @@ async fn a_session_secret_cannot_take_a_config_secrets_name_or_be_a_guest_secret
 /// override headers it saw, and every request header, in its body and in an
 /// `x-seen-authorization` response header: what an echo API leaks.
 struct HttpEcho;
+
+/// `body` in the coding a path names (`/gzip`, `/deflate`, `/br`, `/zstd`),
+/// else as it is.
+fn compressed(path: &str, body: Vec<u8>) -> (&'static str, Vec<u8>) {
+    use std::io::Write;
+    let coding = ["gzip", "deflate", "br", "zstd"]
+        .into_iter()
+        .find(|c| path.starts_with(&format!("/{c}")));
+    match coding {
+        Some("gzip") => {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(&body).unwrap();
+            ("gzip", e.finish().unwrap())
+        }
+        Some("deflate") => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(&body).unwrap();
+            ("deflate", e.finish().unwrap())
+        }
+        Some("br") => {
+            let mut out = Vec::new();
+            {
+                let mut e = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+                e.write_all(&body).unwrap();
+            }
+            ("br", out)
+        }
+        Some(_) => ("zstd", body),
+        None => ("identity", body),
+    }
+}
 impl crate::ServiceHandler for HttpEcho {
     fn serve(&self, _s: Arc<Session>, io: Box<dyn crate::ServiceIo>) {
         tokio::spawn(async move {
@@ -382,12 +413,9 @@ impl crate::ServiceHandler for HttpEcho {
                         .get("authorization")
                         .cloned()
                         .unwrap_or(hyper::header::HeaderValue::from_static(""));
-                    // An upstream that compresses whatever it was asked for.
-                    let encoding = if req.uri().path().starts_with("/gzip") {
-                        "gzip"
-                    } else {
-                        "identity"
-                    };
+                    // An upstream that compresses whatever it was asked for
+                    // (`/zstd` only says so: a coding the proxy can't decode).
+                    let (encoding, body) = compressed(req.uri().path(), body.into_bytes());
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .header("x-seen-authorization", auth)
@@ -547,20 +575,105 @@ async fn an_injected_secret_is_masked_in_the_response() {
     assert_eq!(seen.len(), "Bearer the-secret-value-123".len());
 }
 
-/// A response that can't be masked (compressed, though the proxy asked for
-/// it uncompressed) doesn't reach the guest when a secret was added; it
-/// does when none was.
+/// A response compressed though the proxy asked for it uncompressed, to a
+/// request it added a secret to, is decoded, masked and sent on
+/// uncompressed; one in a coding it can't decode is refused. Without a
+/// secret added, it goes through as it came.
 #[tokio::test]
-async fn a_compressed_response_to_a_request_with_a_secret_is_refused() {
+async fn a_compressed_response_to_a_request_with_a_secret_is_decoded_and_masked() {
     let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], secrets: [s] }\n");
     let auth = format!("Bearer {}", zapper_policy::placeholder("s"));
-    let (status, _, body) = request(&t, &s, Method::GET, "/gzip", &[("authorization", auth)]).await;
+    for coding in ["gzip", "deflate", "br"] {
+        let path = format!("/{coding}");
+        let (status, headers, body) = request(
+            &t,
+            &s,
+            Method::GET,
+            &path,
+            &[("authorization", auth.clone())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{coding}: {body}");
+        assert!(
+            !headers.contains_key("content-encoding"),
+            "{coding}: {headers:?}"
+        );
+        assert!(
+            body.contains(&format!("path={path}")),
+            "{coding}: decoded: {body}"
+        );
+        assert!(!body.contains("the-secret-value-123"), "{coding}: {body}");
+        assert!(
+            body.contains("authorization: Bearer ********************"),
+            "{coding}: {body}"
+        );
+    }
+    let (status, _, body) = request(&t, &s, Method::GET, "/zstd", &[("authorization", auth)]).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(!body.contains("the-secret-value-123"), "{body}");
-    assert!(body.contains("gzip-encoded"), "{body}");
+    assert!(body.contains("zstd-encoded"), "{body}");
 
-    let (status, _, _) = request(&t, &s, Method::GET, "/gzip", &[]).await;
+    let (status, headers, _) = request(&t, &s, Method::GET, "/gzip", &[]).await;
     assert_eq!(status, StatusCode::OK, "no secret added, nothing to mask");
+    assert_eq!(headers["content-encoding"], "gzip", "passed on as it came");
+}
+
+/// A body that decodes to far more than it is comes out in pieces, each
+/// bounded, and whole.
+#[tokio::test]
+async fn a_decoded_body_comes_out_in_bounded_pieces() {
+    use http_body_util::BodyExt;
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(&vec![b'a'; 8 << 20]).unwrap();
+    let gz = e.finish().unwrap();
+    assert!(gz.len() < 64 << 10, "{}", gz.len());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (io, _) = listener.accept().await.unwrap();
+        let svc = hyper::service::service_fn(move |_req: Request<hyper::body::Incoming>| {
+            let gz = gz.clone();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    hyper::Response::builder()
+                        .header("content-encoding", "gzip")
+                        .body(http_body_util::Full::new(Bytes::from(gz)))
+                        .unwrap(),
+                )
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(io), svc)
+            .await;
+    });
+    let io = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let resp = sender
+        .send_request(
+            Request::builder()
+                .uri("/")
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = super::sanitize::decode_response(resp, "gzip")
+        .unwrap()
+        .into_body();
+    let (mut total, mut largest) = (0usize, 0usize);
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.unwrap().into_data() {
+            assert!(data.iter().all(|b| *b == b'a'));
+            total += data.len();
+            largest = largest.max(data.len());
+        }
+    }
+    assert_eq!(total, 8 << 20, "whole");
+    assert!(largest <= 2 << 20, "a piece of {largest} bytes");
 }
 
 /// A plain-HTTP echo at `api.example:80` and an `aws` secret, `aws`, whose

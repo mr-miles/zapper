@@ -10,7 +10,8 @@
 //!   line (`X-HTTP-Method-Override: DELETE` on a GET, `?_method=DELETE`) is
 //!   refused, since rules judge the request line;
 //! - a secret the proxy added never comes back in the response: its value is
-//!   masked, byte for byte, in the response's headers and body.
+//!   masked, byte for byte, in the response's headers and body; a body the
+//!   upstream compressed though asked not to is decoded first.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -210,7 +211,7 @@ pub fn mask_values(values: &[String]) -> Arc<Vec<Vec<u8>>> {
 
 /// The response's content coding, when it has one other than `identity`
 /// and some of `values` would be masked in it: a body that can't be
-/// searched for them.
+/// searched for them until it is decoded ([`decode_response`]).
 pub fn unmaskable(headers: &HeaderMap, values: &[String]) -> Option<String> {
     if !values.iter().any(|v| v.len() >= MASK_MIN) {
         return None;
@@ -226,6 +227,151 @@ pub fn unmaskable(headers: &HeaderMap, values: &[String]) -> Option<String> {
         .filter(|e| !e.is_empty() && e != "identity")
         .collect::<Vec<_>>();
     (!enc.is_empty()).then(|| enc.join(", "))
+}
+
+/// Input fed to a decoder at a time, so what one frame expands to comes
+/// out in pieces: a small, highly compressed frame can't fill memory.
+const DECODE_STEP: usize = 1024;
+
+/// A push decoder for one content coding, its output collected as it
+/// comes.
+enum Decoder {
+    Gzip(flate2::write::MultiGzDecoder<Vec<u8>>),
+    Deflate(flate2::write::ZlibDecoder<Vec<u8>>),
+    Br(Box<brotli::DecompressorWriter<Vec<u8>>>),
+}
+
+impl Decoder {
+    fn new(coding: &str) -> Option<Self> {
+        Some(match coding {
+            "gzip" | "x-gzip" => Decoder::Gzip(flate2::write::MultiGzDecoder::new(Vec::new())),
+            "deflate" => Decoder::Deflate(flate2::write::ZlibDecoder::new(Vec::new())),
+            "br" => Decoder::Br(Box::new(brotli::DecompressorWriter::new(Vec::new(), 4096))),
+            _ => return None,
+        })
+    }
+
+    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        match self {
+            Decoder::Gzip(d) => d.write_all(data),
+            Decoder::Deflate(d) => d.write_all(data),
+            Decoder::Br(d) => d.write_all(data),
+        }
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        match self {
+            Decoder::Gzip(d) => d.try_finish(),
+            Decoder::Deflate(d) => d.try_finish(),
+            Decoder::Br(d) => d.close().map_err(std::io::Error::other),
+        }
+    }
+
+    /// What has been decoded since last asked.
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(match self {
+            Decoder::Gzip(d) => d.get_mut(),
+            Decoder::Deflate(d) => d.get_mut(),
+            Decoder::Br(d) => d.get_mut(),
+        })
+    }
+}
+
+/// The response decoded from its content coding `coding` (what
+/// [`unmaskable`] found), so the values in it can be masked: sent on
+/// uncompressed, without `Content-Encoding` or `Content-Length`. An error
+/// for a coding that can't be decoded here (several, or one unknown).
+/// Malformed compressed data ends the body where it stops decoding.
+pub fn decode_response(
+    resp: hyper::Response<hyper::body::Incoming>,
+    coding: &str,
+) -> Result<hyper::Response<Body>, String> {
+    use http_body_util::BodyExt as _;
+    let decoder = Decoder::new(coding)
+        .ok_or_else(|| format!("a {coding}-encoded response, which can't be decoded here"))?;
+    let (mut parts, body) = resp.into_parts();
+    parts.headers.remove(hyper::header::CONTENT_ENCODING);
+    parts.headers.remove(hyper::header::CONTENT_LENGTH);
+    let body = Decoded {
+        inner: body.boxed(),
+        decoder,
+        input: Bytes::new(),
+        trailers: None,
+        ended: false,
+        done: false,
+    }
+    .boxed();
+    Ok(hyper::Response::from_parts(parts, body))
+}
+
+/// A body decoded as it streams ([`decode_response`]).
+struct Decoded {
+    inner: Body,
+    decoder: Decoder,
+    /// Compressed bytes not yet fed to the decoder.
+    input: Bytes,
+    /// A trailers frame, sent once the decoded bytes have gone.
+    trailers: Option<Frame<Bytes>>,
+    /// The upstream's body has ended (or a trailers frame came).
+    ended: bool,
+    /// Everything decoded has been sent.
+    done: bool,
+}
+
+impl HttpBody for Decoded {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let this = self.get_mut();
+        loop {
+            if this.done {
+                return Poll::Ready(this.trailers.take().map(Ok));
+            }
+            if !this.input.is_empty() {
+                let step = this.input.split_to(this.input.len().min(DECODE_STEP));
+                if this.decoder.write(&step).is_err() {
+                    // Not what it says it is: what decoded has gone.
+                    this.done = true;
+                    continue;
+                }
+                let out = this.decoder.take();
+                if !out.is_empty() {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(out)))));
+                }
+                continue;
+            }
+            if this.ended {
+                this.done = true;
+                let _ = this.decoder.finish();
+                let out = this.decoder.take();
+                if !out.is_empty() {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(out)))));
+                }
+                continue;
+            }
+            match Pin::new(&mut this.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(data) => this.input = data,
+                    Err(trailers) => {
+                        this.trailers = Some(trailers);
+                        this.ended = true;
+                    }
+                },
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => this.ended = true,
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done && self.trailers.is_none()
+    }
 }
 
 /// Overwrites each occurrence of a value in `buf` with `*`, keeping its

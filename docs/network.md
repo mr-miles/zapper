@@ -107,7 +107,7 @@ Before an inspected request is decided:
 
 An AWS request the guest signed with an `aws` secret's fake key is signed again with the real keys after it is allowed ([policy: AWS](policy.md#aws)).
 
-A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched; one the upstream compresses anyway is refused (502), not passed on unmasked.
+A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched. One the upstream compresses anyway (gzip, deflate or br) is decoded as it streams, masked, and sent on uncompressed, without `Content-Encoding`; one in a coding the proxy can't decode (zstd, or several stacked) is refused (502) rather than passed on unmasked. A response to a request without a secret added goes through as it came, compressed or not.
 
 ### vsock mode
 

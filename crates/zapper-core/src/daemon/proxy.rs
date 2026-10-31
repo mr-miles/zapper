@@ -253,7 +253,7 @@ fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<S
 fn note_response(
     s: &Session,
     rec: &httplog::Shared,
-    resp: Response<Incoming>,
+    resp: Response<Body>,
     used: Vec<String>,
     values: Vec<String>,
 ) -> Response<Body> {
@@ -270,7 +270,7 @@ fn note_response(
         r.redact = values;
     }
     let (rec, log) = (rec.clone(), s.requests.clone());
-    let body = sanitize::Masked::wrap(body.boxed(), masked);
+    let body = sanitize::Masked::wrap(body, masked);
     Response::from_parts(
         parts,
         httplog::Tee::wrap(body, rec, log, httplog::Side::Response),
