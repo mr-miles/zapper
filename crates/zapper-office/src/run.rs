@@ -526,7 +526,7 @@ fn create_run(
         );
     }
     facility::register(d, &run)?;
-    security::register(d, &run);
+    security::register(d, &run)?;
     ops::register(d, &run)?;
     d.office()
         .runs
