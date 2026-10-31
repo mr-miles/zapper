@@ -351,6 +351,37 @@ fn removing_a_sessions_rule_leaves_another_sessions_alone() {
     assert_eq!((a.rules().len(), b.rules().len()), (2, 1));
 }
 
+/// A subscriber of one session's events, resuming, is sent that session's
+/// alone: another's that came meanwhile are no part of it.
+#[test]
+fn a_resumed_sessions_events_are_its_own() {
+    let t = TestCore::new(RULES);
+    let a = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let b = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let rule = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, action: allow, host: api.example.com }").unwrap()
+    };
+    let (_, start) = t.core.catch_up(None, None, true);
+    let after = crate::Cursor {
+        epoch: t.core.epoch(),
+        seq: start.unwrap_or(0),
+    };
+    for _ in 0..3 {
+        t.core.add_session_rule(&a, rule(), None);
+        t.core.add_session_rule(&b, rule(), None);
+    }
+    let (items, _) = t.core.catch_up(Some(&a.id), Some(&after), false);
+    let sessions: Vec<Option<String>> = items
+        .iter()
+        .filter_map(|i| match i {
+            crate::Catchup::Event(e) => Some(e.session.clone()),
+            crate::Catchup::Gap(_) => None,
+        })
+        .collect();
+    assert_eq!(sessions.len(), 3, "{sessions:?}");
+    assert!(sessions.iter().all(|s| s.as_deref() == Some(a.id.as_str())));
+}
+
 #[test]
 fn rules_added_to_a_session_are_its_own_and_an_event() {
     let t = TestCore::new(RULES);
