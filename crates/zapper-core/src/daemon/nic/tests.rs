@@ -195,3 +195,39 @@ async fn an_allowed_name_in_a_zone_that_nothing_serves_is_nxdomain() {
         .unwrap();
     assert_eq!(ask(&t, &s, "nothere.acme.internal").await, Err(NXDOMAIN));
 }
+
+/// A service's name answers from the daemon each time, not a cache: once
+/// a service outside any zone goes, its name is the host's to answer (and
+/// an internal name doesn't exist there), at once rather than after the
+/// cache's minute. (Inside a zone, the zone's NXDOMAIN replaced the cached
+/// answer already.)
+#[tokio::test]
+async fn a_removed_service_stops_answering_at_once() {
+    let t = TestCore::new(
+        "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.zapper-test.invalid }\n",
+    );
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    let id = t
+        .core
+        .add_service(crate::ServiceSpec {
+            name: "db.zapper-test.invalid".into(),
+            port: 5432,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Session {
+                id: "abcdef".into(),
+                port: 5432,
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    assert!(ask(&t, &s, "db.zapper-test.invalid").await.is_ok());
+    t.core.remove_service(id).unwrap();
+    // `.invalid` never resolves (RFC 6761): the host says so, or fails.
+    assert!(ask(&t, &s, "db.zapper-test.invalid").await.is_err());
+}

@@ -117,13 +117,15 @@ async fn resolve_name(
     if !reachable {
         return (dns::REFUSED, None, Some("no rule allows this name".into()));
     }
-    // Services and their zones are answered here, never looked up on the host.
-    if let Some(exists) = d.services.resolves(s, &q.name) {
-        s.dns.names().remember(&q.name, exists);
-    }
-    // Allowed: say whether the name exists, from a real lookup on the host.
-    // Read the cache into a local first so its lock isn't held across `look_up`.
-    let cached = s.dns.names().cached(&q.name);
+    // Services and their zones are answered here, never looked up on the
+    // host, and not cached: the daemon's answer is current each time, so a
+    // service removed stops answering at once. Other names: whether they
+    // exist, from a real lookup on the host, cached. Read into a local first
+    // so the cache's lock isn't held across `look_up`.
+    let cached = d
+        .services
+        .resolves(s, &q.name)
+        .or_else(|| s.dns.names().cached(&q.name));
     let exists = match cached {
         Some(e) => e,
         None => match look_up(s, &q.name).await {
