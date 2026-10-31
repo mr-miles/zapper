@@ -146,16 +146,15 @@ fn find_agent(configured: &str) -> Result<PathBuf> {
 /// Loads the startup config (empty when the file is absent), warning if the
 /// file is world-readable and might hold inline secrets.
 fn load_startup_config(path: &Path) -> Result<Config> {
-    let config = if path.exists() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Config::from_yaml(&text).with_context(|| format!("loading {}", path.display()))?
-    } else {
-        tracing::warn!(
-            "{} does not exist; starting with an empty config",
-            path.display()
-        );
-        Config::default()
+    let config = match read_startup(path)? {
+        Some(c) => c,
+        None => {
+            tracing::warn!(
+                "{} does not exist; starting with an empty config",
+                path.display()
+            );
+            Config::default()
+        }
     };
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.permissions().mode() & 0o077 != 0 && config.has_inline_secrets() {
@@ -166,6 +165,19 @@ fn load_startup_config(path: &Path) -> Result<Config> {
         }
     }
     Ok(config)
+}
+
+/// The startup file's config: `None` if there is no file; an error for one
+/// that can't be read (not taken as empty) or doesn't load.
+fn read_startup(path: &Path) -> Result<Option<Config>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    };
+    Config::from_yaml(&text)
+        .with_context(|| format!("loading {}", path.display()))
+        .map(Some)
 }
 
 /// Resolves and prepares the state directory: creates it (0700) with its
@@ -317,28 +329,15 @@ impl Daemon {
         })
     }
 
-    /// Replaces the whole running config, validated and applied atomically.
-    fn set_config(&self, what: &str, config: Config) -> Result<()> {
-        self.change(what, |c| {
-            *c = config;
-            Ok(())
-        })
-    }
-
-    fn startup_yaml(&self) -> String {
-        std::fs::read_to_string(&self.startup_path).unwrap_or_default()
-    }
-
     fn running_yaml(&self) -> String {
         self.config.read().unwrap().to_yaml()
     }
 
     /// The startup config, normalised and redacted.
     pub fn startup_config(&self) -> Result<Config> {
-        if !self.startup_path.exists() {
-            return Ok(Config::default());
-        }
-        Ok(redact(Config::from_yaml(&self.startup_yaml())?))
+        Ok(redact(
+            read_startup(&self.startup_path)?.unwrap_or_default(),
+        ))
     }
 
     /// Unified diff from the startup file to the running config, redacted.
@@ -378,9 +377,17 @@ impl Daemon {
     }
 
     /// Replaces the running config with the startup file.
+    /// Replaces the running config with the startup file, validated and
+    /// applied atomically. Without a file there is nothing to reload: an
+    /// error, not an empty config.
     pub fn reload(&self) -> Result<()> {
-        let config = Config::from_yaml(&self.startup_yaml())?;
-        self.set_config("reloaded from startup", config)
+        let path = &self.startup_path;
+        let config =
+            read_startup(path)?.ok_or_else(|| anyhow!("no startup file at {}", path.display()))?;
+        self.change("reloaded from startup", |c| {
+            *c = config;
+            Ok(())
+        })
     }
 
     /// Waits for an operator's answer to an `ask`; denies on timeout.
@@ -517,6 +524,34 @@ mod limits_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A startup file that can't be read is an error, not an empty config;
+    /// without one, reloading is an error too, rather than emptying the
+    /// running config.
+    #[test]
+    fn a_startup_file_that_cant_be_read_isnt_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = crate::testing::TestCore::new("profiles:\n  web: {}\n");
+        let d = t.core.daemon();
+        std::fs::write(&d.startup_path, "profiles:\n  web: {}\n").unwrap();
+        std::fs::set_permissions(&d.startup_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&d.startup_path).is_err() {
+            assert!(d.startup_config().is_err());
+            assert!(d.reload().is_err());
+            assert!(
+                d.config.read().unwrap().profiles.contains_key("web"),
+                "kept"
+            );
+        }
+        std::fs::remove_file(&d.startup_path).unwrap();
+        let e = d.reload().unwrap_err().to_string();
+        assert!(e.contains("no startup file"), "{e}");
+        assert!(
+            d.config.read().unwrap().profiles.contains_key("web"),
+            "kept"
+        );
+        assert!(d.startup_config().unwrap().profiles.is_empty());
+    }
 
     /// A line is taken up to its `\n` and no further; one longer than the
     /// limit isn't; the stream ending before the line does is an error.
