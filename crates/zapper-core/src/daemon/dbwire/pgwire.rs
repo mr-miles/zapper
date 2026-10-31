@@ -432,16 +432,13 @@ async fn read_one<S: AsyncRead + Unpin>(
     .await
 }
 
-/// Reads a complete `StartupMessage` from `stream`, starting from `prefix`
-/// (bytes already read). Any `SSLRequest`/`GSSENCRequest` preamble must have
+/// Reads a complete `StartupMessage` from `stream`. Any
+/// `SSLRequest`/`GSSENCRequest` preamble must have
 /// been consumed by the caller (the relay handles it, since terminating guest
 /// TLS needs the session CA). Errors on a close before a complete startup, or
 /// one implausibly large.
-pub async fn read_startup<S: AsyncRead + Unpin>(
-    stream: &mut S,
-    prefix: Vec<u8>,
-) -> Result<Startup, String> {
-    let mut buf = prefix;
+pub async fn read_startup<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Startup, String> {
+    let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
         if let Some(startup) = parse_startup(&buf) {

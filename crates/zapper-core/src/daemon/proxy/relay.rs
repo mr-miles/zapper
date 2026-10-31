@@ -275,7 +275,7 @@ where
                 buf.drain(..8);
                 let tls = accept_guest_tls(s, host, Prefixed::new(buf, guest)).await?;
                 let mut tls: Box<dyn services::Io> = Box::new(tls);
-                let startup = pgwire::read_startup(&mut tls, Vec::new()).await?;
+                let startup = pgwire::read_startup(&mut tls).await?;
                 return Ok((tls, true, startup));
             }
             // Not a preamble: a plaintext StartupMessage (sslmode=disable).
@@ -291,7 +291,7 @@ where
         buf.extend_from_slice(&chunk[..n]);
     }
     let mut guest: Box<dyn services::Io> = Box::new(Prefixed::new(buf, guest));
-    let startup = pgwire::read_startup(&mut guest, Vec::new()).await?;
+    let startup = pgwire::read_startup(&mut guest).await?;
     Ok((guest, false, startup))
 }
 
