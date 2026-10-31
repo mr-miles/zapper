@@ -341,32 +341,20 @@ async fn run(
         let started = Instant::now();
         let deadline = started + turn_timeout;
         let p = proc.as_mut().unwrap();
-        let outcome = match p.send(&prompt).await {
-            Ok(()) => loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break Out::Late,
-                    o = p.events.recv() => match o {
-                        Some(o) => break o,
-                        None => break Out::Exit(None),
-                    },
-                    // Prompts during the turn, for harnesses that take them
-                    // while the agent works.
-                    _ = driver.wake.notified(), if p.steers => {
-                        let more = driver.take_queue();
-                        if !more.is_empty() {
-                            report.event("steered", json!({ "prompts": more.len() }));
-                            let line = p.conv.lock().unwrap().steer(&more.join("\n\n"));
-                            if let Some(line) = line {
-                                if p.write(line).await.is_err() {
-                                    break Out::Exit(None);
-                                }
-                            }
-                        }
-                    }
-                    _ = driver.stopping.notified() => return,
-                }
-            },
-            Err(_) => Out::Exit(None),
+        // Prompts during the turn, for harnesses that take them while the
+        // agent works.
+        let more = || {
+            let more = driver.take_queue();
+            (!more.is_empty()).then(|| {
+                report.event("steered", json!({ "prompts": more.len() }));
+                more.join("\n\n")
+            })
+        };
+        let Some(outcome) = p
+            .turn(&prompt, deadline, &driver.wake, &driver.stopping, more)
+            .await
+        else {
+            return;
         };
         let ms = started.elapsed().as_millis() as u64;
         match outcome {

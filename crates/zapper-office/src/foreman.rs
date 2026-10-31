@@ -289,30 +289,14 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
         let started = Instant::now();
         let deadline = tokio::time::Instant::now() + turn_timeout;
         let p = proc.as_mut().unwrap();
-        let outcome = match p.send(&prompt).await {
-            Ok(()) => loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break Out::Late,
-                    o = p.events.recv() => match o {
-                        Some(o) => break o,
-                        None => break Out::Exit(None),
-                    },
-                    // Mail during the turn, for harnesses that take it
-                    // while the agent works.
-                    _ = w.wake.notified(), if p.steers => {
-                        if let Some(text) = hand_over(&run, &w, "steered") {
-                            let line = p.conv.lock().unwrap().steer(&text);
-                            if let Some(line) = line {
-                                if p.write(line).await.is_err() {
-                                    break Out::Exit(None);
-                                }
-                            }
-                        }
-                    }
-                    _ = run.stopping.notified() => return,
-                }
-            },
-            Err(_) => Out::Exit(None),
+        // Mail during the turn, for harnesses that take it while the agent
+        // works.
+        let more = || hand_over(&run, &w, "steered");
+        let Some(outcome) = p
+            .turn(&prompt, deadline, &w.wake, &run.stopping, more)
+            .await
+        else {
+            return;
         };
         let ms = started.elapsed().as_millis() as u64;
         match outcome {
