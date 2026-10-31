@@ -1,4 +1,6 @@
-//! The zapper daemon: sessions, policy, egress proxy, API.
+//! The zapper daemon: sessions, policy, the egress proxy, DNS, services, the
+//! MCP gateway, approvals, the driver and the record (its API and UI are
+//! zapper-api's, over `Core`).
 //!
 //! Configuration works like a router's: changes through the API apply to the
 //! running config at once; `POST /v1/config/save` writes it to the startup

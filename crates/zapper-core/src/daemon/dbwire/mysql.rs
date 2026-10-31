@@ -1,4 +1,4 @@
-//! Minimal MySQL/MariaDB protocol bits for the MySQL auth-relay (proposal 07).
+//! Minimal MySQL/MariaDB protocol bits for the MySQL auth-relay.
 //!
 //! MySQL's server speaks first, so the proxy plays both roles: it sends the
 //! guest an Initial Handshake (advertising `mysql_native_password`, no TLS),

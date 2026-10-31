@@ -1,4 +1,4 @@
-//! Minimal Kafka protocol bits for the Kafka auth-relay (proposal 07): the
+//! Minimal Kafka protocol bits for the Kafka auth-relay: the
 //! proxy authenticates the server leg with SASL — `SCRAM-SHA-256` (reusing
 //! [`super::pgwire::scram`]), `PLAIN`, or `OAUTHBEARER` (a bearer token) —
 //! carried over `SaslHandshake`/`SaslAuthenticate` (KIP-152), then the relay

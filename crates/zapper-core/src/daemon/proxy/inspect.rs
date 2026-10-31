@@ -284,8 +284,6 @@ pub(super) async fn mitm<S>(
     }
 }
 
-/// Replaces secret placeholders in headers and applies `set_headers`, for
-/// the secrets this host may receive. Returns the secrets used.
 /// Secrets added to a request: their names, and their values, which the
 /// request log replaces with `***` wherever they show up.
 pub(crate) struct Injected {

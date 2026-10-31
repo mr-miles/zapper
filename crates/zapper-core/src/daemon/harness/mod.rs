@@ -1,8 +1,9 @@
 //! Agent harnesses: the coding agent a session runs. A harness says where
-//! and how the agent reads its configuration, and, for office workers, how
-//! to hold a conversation with it headless. The rest of zapper only sees
-//! these interfaces: another harness (pi, opencode) is one more
-//! implementation and a name in `agent.kind` (zapper_policy::AGENT_KINDS).
+//! and how the agent reads its configuration, and, for a driven session or
+//! an office worker, how to hold a conversation with it headless. The rest
+//! of zapper only sees these interfaces: another harness (opencode, say) is
+//! one more implementation and a name in `agent.kind`
+//! (zapper_policy::AGENT_KINDS).
 //!
 //! - `claude-code`: Claude Code (`claude -p`, stream-json in and out) — `claude`.
 //! - `pi`: pi (`pi --mode rpc`, JSON commands in, session events out) — `pi`.
@@ -75,11 +76,12 @@ pub trait Harness: Send + Sync {
         }
         v
     }
-    /// How to hold a conversation with it as an office worker, if it can.
+    /// How to hold a conversation with it headless (a driven session, an
+    /// office worker), if it can.
     fn driver(&self) -> Option<&dyn Driver>;
 }
 
-/// Starts conversations: one long one per office worker.
+/// Starts conversations: one long one per driven session or office worker.
 pub trait Driver: Send + Sync {
     /// A conversation, continuing `resume` (an id from `Event::Session`).
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation>;
@@ -91,7 +93,8 @@ pub trait Driver: Send + Sync {
 pub trait Conversation: Send {
     /// The command line.
     fn argv(&self) -> Vec<String>;
-    /// The line that gives the agent a prompt (a wake), with its newline.
+    /// The line that gives the agent a prompt (a task, or an office
+    /// worker's wake), with its newline.
     fn prompt(&mut self, text: &str) -> Vec<u8>;
     /// What an output line means.
     fn read(&mut self, line: &Value) -> Vec<Event>;
@@ -112,7 +115,8 @@ pub trait Conversation: Send {
     }
 }
 
-/// Something the foreman needs from the agent's output.
+/// Something the driver (or the office's foreman) needs from the agent's
+/// output.
 #[derive(Debug, PartialEq)]
 pub enum Event {
     /// The conversation's id, for resuming it after the process restarts.

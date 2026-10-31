@@ -365,7 +365,7 @@ pub fn http2_uri(data: &[u8]) {
 }
 
 /// The Postgres wire pieces used by database credential injection
-/// (`daemon::pgwire`): the SSLRequest/startup parsers and the message framer
+/// (`daemon::dbwire::pgwire`): the SSLRequest/startup parsers and the message framer
 /// must never panic or read out of bounds on arbitrary bytes.
 pub fn pg_startup(data: &[u8]) {
     use crate::daemon::dbwire::pgwire;
@@ -434,7 +434,7 @@ pub fn tds_packet(data: &[u8]) {
     }
 }
 
-/// MongoDB reply parsing (`daemon::mongodb`): the little-endian BSON walker and
+/// MongoDB reply parsing (`daemon::dbwire::mongodb`): the little-endian BSON walker and
 /// the OP_MSG reply framer, run over arbitrary bytes.
 pub fn mongodb_reply(data: &[u8]) {
     use crate::daemon::dbwire::mongodb;
@@ -444,7 +444,7 @@ pub fn mongodb_reply(data: &[u8]) {
     while block_on(mongodb::read_reply(&mut src, &mut buf)).is_ok() {}
 }
 
-/// Kafka response parsing (`daemon::kafka`): the SaslAuthenticate body parser
+/// Kafka response parsing (`daemon::dbwire::kafka`): the SaslAuthenticate body parser
 /// and the response framer, run over arbitrary bytes.
 pub fn kafka_response(data: &[u8]) {
     use crate::daemon::dbwire::kafka;

@@ -1,4 +1,4 @@
-//! The database auth-terminating relay (proposal 07): a child of the egress
+//! The database auth-terminating relay: a child of the egress
 //! proxy that handles a database `protocol:` rule. The guest connects with no
 //! password; the proxy presents it as authenticated, authenticates to the real
 //! server with the host-held `dbauth` secret, then splices. Each protocol's
@@ -79,7 +79,7 @@ async fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
     })
 }
 
-/// The database auth-terminating relay (proposal 07): the guest connects with
+/// The database auth-terminating relay: the guest connects with
 /// no password; the proxy presents it as authenticated, authenticates to the
 /// real server with the host-held `dbauth` secret, then splices the session.
 /// Only the startup/auth handshake is parsed — never the query stream. The
@@ -471,10 +471,11 @@ where
 }
 
 /// MS SQL Server (TDS), SQL authentication only: answer the guest's PRELOGIN
-/// with ENCRYPT_NOT_SUP (plaintext login leg), read and ignore its LOGIN7, log
-/// in to the real server with the host-held credential — tunnelling TLS in
-/// PRELOGIN packets when the server wants encryption — then forward the
-/// server's login response to the guest and splice.
+/// as it asked (its TLS, in PRELOGIN packets, terminated with the session CA
+/// when it wants encryption), read and ignore its LOGIN7, log in to the real
+/// server with the host-held credential (tunnelling TLS in PRELOGIN packets
+/// when the server wants encryption), then forward the server's login
+/// response to the guest and splice.
 async fn tds_exchange<S>(
     s: &Arc<Session>,
     guest: S,

@@ -726,8 +726,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
 }
 
-/// The upstream side of an inspected connection: a reusable client speaking
-/// whichever protocol the real server negotiated by ALPN.
 #[cfg(test)]
 mod approval_tests;
 

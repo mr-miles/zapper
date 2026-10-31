@@ -95,7 +95,8 @@ pub struct DaemonConfig {
     pub kernels: String,
     /// Directory of per-session state: sockets, disks, audit logs.
     pub state: String,
-    /// Address of the read-only web UI; empty disables it.
+    /// Address of the web UI (answering approvals, and the board's firm
+    /// actions); empty disables it.
     pub ui: String,
     /// How long an `ask` decision waits for an approval before denying.
     pub ask_timeout_secs: u64,
@@ -241,7 +242,7 @@ impl SecretMode {
 /// The wire protocol a net rule governs. `tcp` (the default) is today's
 /// behaviour — HTTP inspection or a plain tunnel. Every other value routes an
 /// allowed connection to that database's auth-relay, which injects the rule's
-/// `dbauth` secret instead of taking the HTTP path (proposal 07).
+/// `dbauth` secret instead of taking the HTTP path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetProtocol {
@@ -370,7 +371,6 @@ pub fn parse_size(s: &str) -> Result<u64> {
     Ok(n * mult)
 }
 
-/// Expands a leading `~/` to `$HOME`.
 /// Where relative paths in the config are resolved: the config file's
 /// directory, set once when the config is found.
 static CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -482,9 +482,10 @@ pub struct NetRule {
     /// URL path glob (no query string). Setting it makes the proxy inspect TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// The wire protocol. `postgres` routes an allowed connection to the
-    /// database auth-relay and injects the named `dbauth` secret, instead of
-    /// the HTTP path. Default `tcp`.
+    /// The wire protocol. A database's (`postgres`, `redis`, `mysql`, …)
+    /// routes an allowed connection to the database auth-relay, which
+    /// injects the named `dbauth` secret, instead of the HTTP path. Default
+    /// `tcp`.
     #[serde(default, skip_serializing_if = "NetProtocol::is_tcp")]
     pub protocol: NetProtocol,
     /// Secrets whose placeholders are replaced with their values in the
@@ -503,7 +504,7 @@ pub struct NetRule {
 
 impl NetRule {
     /// Whether matching or applying this rule needs the decrypted HTTP request.
-    /// A `postgres` rule is never HTTP-inspected — it goes to the auth-relay
+    /// A database rule is never HTTP-inspected — it goes to the auth-relay
     /// ([`db_relay`](Self::db_relay)) instead, even though it names a secret.
     pub fn needs_inspection(&self) -> bool {
         self.protocol == NetProtocol::Tcp

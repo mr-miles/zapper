@@ -20,8 +20,10 @@ pub enum Status {
 
 /// A session's live machinery: its lifecycle status, the Firecracker
 /// process, the control channel to the guest agent, and the counters that
-/// gate shells and exec decisions. All of it is created when the VM boots
-/// and dropped when it stops; the owner of "the session while it runs".
+/// gate shells and exec decisions. Made once with the session and kept
+/// across its runs: each boot sets the VM, the channel and the listeners,
+/// and teardown takes them; the status, the shell counter and the bounds
+/// stay. The owner of "the session while it runs".
 pub(crate) struct GuestRuntime {
     status: watch::Sender<Status>,
     vm: tokio::sync::Mutex<Option<crate::daemon::vm::VmProc>>,

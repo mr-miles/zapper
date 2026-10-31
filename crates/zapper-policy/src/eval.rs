@@ -44,8 +44,8 @@ pub struct Decision {
 pub struct NetEffects {
     pub secrets: Vec<String>,
     pub set_headers: Vec<(String, String)>,
-    /// The matched rule's protocol: `postgres` routes the connection to the
-    /// database auth-relay instead of the HTTP/tunnel path.
+    /// The matched rule's protocol: a database's routes the connection to
+    /// the database auth-relay instead of the HTTP/tunnel path.
     pub protocol: crate::config::NetProtocol,
 }
 

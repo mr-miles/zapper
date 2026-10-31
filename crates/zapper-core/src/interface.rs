@@ -3,7 +3,7 @@
 //! Clients hold a `Core` and call it; the daemon's state stays behind it.
 //!
 //! The surface is split into per-concern traits — [`ConfigApi`], [`SessionApi`],
-//! [`RuleApi`], [`ApprovalApi`], [`ServiceApi`], [`EventApi`] — all implemented
+//! [`RuleApi`], [`ApprovalApi`], [`ServiceApi`], [`EventApi`], [`ImageApi`] — all implemented
 //! by `Core`, so a function can depend on just the slice it uses (`&impl
 //! SessionApi`) rather than the whole handle. `use zapper_core::prelude::*;`
 //! brings them all into scope. Construction and app-wide plumbing (start,
@@ -672,6 +672,7 @@ pub trait ImageApi {
     /// [`ImageBuild::follow`]. A recipe that doesn't resolve is refused here,
     /// before anything runs.
     fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>>;
+    /// A build by id, running or among the latest kept.
     fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>>;
     /// The build running and the latest that ended.
     fn image_builds(&self) -> Vec<BuildInfo>;

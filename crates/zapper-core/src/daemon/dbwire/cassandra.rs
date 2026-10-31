@@ -1,4 +1,4 @@
-//! Minimal CQL native-protocol bits for the Cassandra auth-relay (proposal 07).
+//! Minimal CQL native-protocol bits for the Cassandra auth-relay.
 //!
 //! The guest connects with no credentials. The proxy relays the guest's
 //! `OPTIONS`/`STARTUP` to the server and, when the server demands auth

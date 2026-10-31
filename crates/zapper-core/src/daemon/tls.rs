@@ -170,9 +170,6 @@ impl SessionTls {
         self.ca.key.public_key_der()
     }
 
-    /// The server config for terminating an inspected connection to `host`:
-    /// a leaf minted from the CA and assembled on first use, then cached,
-    /// and minted again before it expires (a session can run for weeks).
     /// Terminates the guest's TLS for `host`: the session CA's leaf for it,
     /// offering `alpn`; the handshake within 15 seconds; and a server name,
     /// if the guest sends one, that is `host`, so a connection decided for
@@ -207,6 +204,9 @@ impl SessionTls {
         Ok(tls)
     }
 
+    /// The server config for terminating a connection to `host`: a leaf
+    /// minted from the CA and assembled on first use, then cached, and
+    /// minted again before it expires (a session can run for weeks).
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let host = host.to_ascii_lowercase();
         if let Some((c, at)) = self.configs.lock().unwrap().get(&host) {

@@ -1,6 +1,6 @@
-//! Postgres v3 wire pieces for database credential injection (proposal 07):
+//! Postgres v3 wire pieces for database credential injection:
 //! enough of the frontend/backend framing to drive the auth-terminating relay
-//! in `proxy::pg_relay` — detect the `SSLRequest`, read the guest's
+//! in `proxy::relay` — detect the `SSLRequest`, read the guest's
 //! `StartupMessage`, frame typed messages, send the `AuthenticationOk` the
 //! proxy fabricates for the guest, and run the server-side SCRAM-SHA-256
 //! exchange ([`scram`], [`authenticate_server`]) with the host-held password.
@@ -8,8 +8,7 @@
 //!
 //! The parsers and the SCRAM exchange are tested (SCRAM against the RFC 7677
 //! vector and a full handshake over an in-memory server) and the startup
-//! parser is fuzzed. A real-Postgres e2e is the remaining step — see
-//! `docs/proposals/07-db-credential-injection.md`.
+//! parser is fuzzed. A real-Postgres e2e is the remaining step.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -98,7 +97,6 @@ pub fn parse_startup(buf: &[u8]) -> Option<Startup> {
 /// `SSLRequest`/`CancelRequest`): `Byte1` type, `Int32` length (counting the
 /// length field, not the type byte), then `length - 4` bytes of body. Returns
 /// `(type, body, consumed)`, or `None` if a whole message is not yet present.
-/// Used by the relay to watch for `ReadyForQuery` (`b'Z'`).
 pub fn message(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
     let typ = *buf.first()?;
     let len = u32::from_be_bytes(buf.get(1..5)?.try_into().ok()?) as usize;

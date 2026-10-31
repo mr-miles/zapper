@@ -6,7 +6,8 @@
 //!
 //! - a name some request could reach, allowed outright or after an `ask`, is
 //!   looked up on the host; a name that doesn't exist gets NXDOMAIN, one
-//!   that does gets a synthetic address from 198.18.0.0/15 standing for it,
+//!   that does gets a synthetic address standing for it, from 198.18.0.0/15
+//!   (A) or 2001:2::/48 (AAAA),
 //!   so connections are still decided by name;
 //! - any other name gets REFUSED.
 //!

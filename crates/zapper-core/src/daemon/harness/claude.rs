@@ -163,8 +163,8 @@ fn claude_tokens(result: &Value) -> u64 {
     )
 }
 
-/// A turn that failed before Claude could work: the API refused it (bad
-/// token, overload).
+/// A turn that failed before Claude could work: the API refused it (a bad
+/// token, say; an overload is a rate limit, found before this).
 fn claude_api_failure(result: &Value) -> Option<String> {
     if result["is_error"] != json!(true) {
         return None;
