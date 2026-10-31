@@ -330,7 +330,7 @@ pub fn reach(layers: &Layers<'_>, name: &str) -> Reach {
         .iter()
         .flat_map(|(_, p)| p.net.iter().filter(|r| !r.final_));
     let (mut allow, mut ask) = (false, false);
-    let mut settled = None;
+    let mut settled = false;
     for r in finals.chain(others).filter(|r| host_matches(&r.host, name)) {
         match r.action {
             Action::Allow => allow = true,
@@ -338,11 +338,11 @@ pub fn reach(layers: &Layers<'_>, name: &str) -> Reach {
             Action::Deny => {}
         }
         if unconditional(r) {
-            settled = Some(r.action);
+            settled = true;
             break;
         }
     }
-    if settled.is_none() {
+    if !settled {
         match layers.iter().find_map(|(_, p)| p.defaults.net) {
             Some(Action::Allow) => allow = true,
             Some(Action::Ask) => ask = true,
