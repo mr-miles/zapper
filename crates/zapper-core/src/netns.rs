@@ -23,12 +23,12 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-pub const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 1);
-pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
-/// The point-to-point IPv6 link (ULA), the counterpart of GATEWAY/GUEST. Used
-/// only when the host and guest kernels have IPv6; otherwise the datapath
-/// stays IPv4-only.
-pub const GATEWAY6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+/// The link's addresses, the guest agent's too (`zapper_proto::proto`).
+/// IPv6 only when the host and guest kernels have it; otherwise the
+/// datapath stays IPv4-only.
+const GATEWAY: Ipv4Addr = zapper_policy::proto::NIC_GATEWAY;
+const GUEST: Ipv4Addr = zapper_policy::proto::NIC_GUEST;
+const GATEWAY6: Ipv6Addr = zapper_policy::proto::NIC_GATEWAY6;
 pub const GUEST_MAC: &str = "06:00:0a:00:02:02";
 pub const TAP: &str = "tap0";
 const TCP_PORT: u16 = 15001;

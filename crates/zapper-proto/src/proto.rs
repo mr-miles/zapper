@@ -31,8 +31,14 @@ pub const SHELL_PORT: u32 = 1024;
 /// session. A connection names a server on its first line, then carries MCP
 /// as on stdio: one JSON-RPC message per line, each way.
 pub const MCP_PORT: u32 = 1100;
-/// The guest's address on its NIC (`crate::netns` on the host sets it).
-pub const GUEST_NIC_ADDR: &str = "10.0.2.2";
+/// The NIC's point-to-point link, for the host (its namespace's end of the
+/// tap, `zapper_core::netns`) and the guest agent alike: the gateway, which
+/// is also the guest's DNS server, and the guest. IPv6 (a ULA) only where
+/// the host and guest kernels have it.
+pub const NIC_GATEWAY: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 1);
+pub const NIC_GUEST: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 2);
+pub const NIC_GATEWAY6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+pub const NIC_GUEST6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 2);
 /// Longest MCP message from the guest.
 pub const MAX_MCP_LINE: usize = 128 * 1024;
 
@@ -337,6 +343,16 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The NIC's addresses as the guest writes them (resolv.conf, `ip`) and
+    /// the host configures them: one link.
+    #[test]
+    fn the_nic_link_addresses() {
+        assert_eq!(NIC_GATEWAY.to_string(), "10.0.2.1");
+        assert_eq!(NIC_GUEST.to_string(), "10.0.2.2");
+        assert_eq!(NIC_GATEWAY6.to_string(), "fd00:2::1");
+        assert_eq!(NIC_GUEST6.to_string(), "fd00:2::2");
+    }
 
     #[test]
     fn a_tool_is_named_without_its_server() {

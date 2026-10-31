@@ -32,9 +32,9 @@ pub fn inbound(forwards: &[zapper_proto::proto::Forward]) -> io::Result<()> {
         let listener = sys::VsockListener::bind(f.vsock_port)?;
         let tcp = f.tcp_port;
         let host = if f.nic {
-            zapper_proto::proto::GUEST_NIC_ADDR
+            std::net::IpAddr::V4(zapper_proto::proto::NIC_GUEST)
         } else {
-            "127.0.0.1"
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         };
         thread::spawn(move || loop {
             let Ok((conn, cid)) = listener.accept() else {
