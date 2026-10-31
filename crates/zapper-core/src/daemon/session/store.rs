@@ -65,19 +65,7 @@ impl SessionStore {
         }
         if let Some(s) = sessions.remove(id) {
             if s.persistent {
-                // What it kept to be started again, or adopted: gone, so no
-                // daemon lists it again. Its record stays.
-                let _ = std::fs::remove_dir_all(s.dir.vm());
-                for kept in [
-                    s.dir.saved(),
-                    s.dir.ca(),
-                    s.dir.dns(),
-                    s.dir.resume_token(),
-                    s.dir.vmm(),
-                    s.dir.conversation(),
-                ] {
-                    let _ = std::fs::remove_file(kept);
-                }
+                super::persist::forget(&s.dir);
             }
         }
         Ok(())

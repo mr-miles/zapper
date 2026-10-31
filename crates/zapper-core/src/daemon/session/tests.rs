@@ -2,6 +2,7 @@
 //! again, listed again after a restart, adopted.
 
 use super::adopt::*;
+use super::persist::kept_files;
 use super::run::*;
 use super::*;
 use crate::prelude::*;
@@ -246,15 +247,24 @@ async fn what_a_persistent_session_keeps_is_kept_and_removed_with_it() {
     crate::util::write_private(&back.dir.vmm(), b"{}").unwrap();
     crate::util::write_private(&back.dir.conversation(), b"{}").unwrap();
     t.core.forget_session(&back.id).unwrap();
-    for f in [
-        back.dir.saved(),
-        back.dir.ca(),
-        back.dir.dns(),
-        back.dir.resume_token(),
-        back.dir.vmm(),
-        back.dir.conversation(),
-    ] {
+    for f in kept_files(&back.dir) {
         assert!(!f.exists(), "{}", f.display());
+    }
+    // Only its record stays: anything else a persistent session wrote
+    // beside it is kept state that `kept_files` doesn't list.
+    let record = [
+        "audit.jsonl",
+        "console.log",
+        "driver.jsonl",
+        "vm.json",
+        "metrics.json",
+    ];
+    for e in std::fs::read_dir(back.dir.root()).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        assert!(
+            record.contains(&name.as_str()) || name.ends_with(".cast"),
+            "{name} left after the session was removed"
+        );
     }
     assert!(back.dir.audit().exists(), "the record stays");
     restore(t.core.daemon());
