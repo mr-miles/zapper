@@ -430,25 +430,21 @@ where
             .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
             .await
             .map_err(|e| format!("sending SSLRequest: {e}"))?;
-        let mut b: Box<dyn services::Io> = Box::new(tls::connect(server, host).await?);
-        b.write_all(&mysql::packet(
-            2,
-            &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
+        Box::new(tls::connect(server, host).await?)
+    } else {
+        plaintext_leg_ok(cred.plaintext, host)?;
+        Box::new(server)
+    };
+    // The handshake response: after the SSLRequest (seq 1) over TLS, else
+    // first.
+    let seq = if guest_tls { 2 } else { 1 };
+    server
+        .write_all(&mysql::packet(
+            seq,
+            &mysql::handshake_response(guest_tls, &cred.user, &auth, db, &hs.plugin),
         ))
         .await
         .map_err(|e| format!("sending the handshake response: {e}"))?;
-        b
-    } else {
-        plaintext_leg_ok(cred.plaintext, host)?;
-        server
-            .write_all(&mysql::packet(
-                1,
-                &mysql::handshake_response(false, &cred.user, &auth, db, &hs.plugin),
-            ))
-            .await
-            .map_err(|e| format!("sending the handshake response: {e}"))?;
-        Box::new(server)
-    };
     mysql::complete_auth(&mut server, &mut sbuf, &cred.password, guest_tls).await?;
 
     // Tell the guest it is logged in (OK follows its handshake response).
