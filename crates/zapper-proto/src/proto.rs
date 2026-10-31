@@ -195,7 +195,7 @@ pub enum GuestEvent {
 }
 
 /// First line on a shell connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShellRequest {
     pub id: u64,
     /// Command; empty means the profile's command.
@@ -219,6 +219,35 @@ pub struct ShellRequest {
     /// closed: the new one takes over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach: Option<u64>,
+}
+
+impl ShellRequest {
+    /// `argv` run without a terminal, under exec supervision (empty: the
+    /// profile's command).
+    pub fn exec(argv: Vec<String>) -> Self {
+        Self {
+            argv,
+            ..Default::default()
+        }
+    }
+
+    /// `argv` run as root without exec supervision, for the host's own
+    /// maintenance.
+    pub fn system(argv: Vec<String>) -> Self {
+        Self {
+            argv,
+            system: true,
+            ..Default::default()
+        }
+    }
+
+    /// Attaching to the persistent terminal `id`.
+    pub fn attach(id: u64) -> Self {
+        Self {
+            attach: Some(id),
+            ..Default::default()
+        }
+    }
 }
 
 /// Most terminals a guest keeps persistent at once.

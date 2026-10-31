@@ -476,15 +476,7 @@ impl Session {
     /// and a client attached to it is closed. Its exit code, if it said one
     /// in time.
     pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
-        let req = ShellRequest {
-            id: 0,
-            argv: vec![],
-            tty: None,
-            env: Default::default(),
-            system: false,
-            persist: false,
-            attach: Some(n),
-        };
+        let req = ShellRequest::attach(n);
         let (mut stream, _) = self.open_shell(req).await?;
         let mut buf = Vec::new();
         Frame::Hangup.write_to(&mut buf)?;

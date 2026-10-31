@@ -509,15 +509,7 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
     let spawn: Spawn = Box::new(move |argv| {
         let s = s.clone();
         Box::pin(async move {
-            let req = zapper_policy::proto::ShellRequest {
-                id: 0,
-                argv,
-                tty: None,
-                env: Default::default(),
-                system: false,
-                persist: false,
-                attach: None,
-            };
+            let req = zapper_policy::proto::ShellRequest::exec(argv);
             let (stream, _) = s.open_shell(req).await?;
             Ok(stream)
         })

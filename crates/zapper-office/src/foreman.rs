@@ -69,15 +69,7 @@ async fn start(
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
     let conv = driver_of(s)?.conversation(resume);
-    let req = ShellRequest {
-        id: 0,
-        argv: conv.argv(),
-        tty: None,
-        env: Default::default(),
-        system: false,
-        persist: false,
-        attach: None,
-    };
+    let req = ShellRequest::exec(conv.argv());
     let (stream, _) = s.open_shell(req).await?;
     let watch = Watch {
         run: run.clone(),

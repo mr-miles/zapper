@@ -762,13 +762,12 @@ async fn attach(
         None => vec![],
     };
     let shell = ShellRequest {
-        id: 0,
         argv,
         tty,
-        env: Default::default(),
         system: q.system,
         persist: q.persist,
         attach: q.terminal,
+        ..Default::default()
     };
     let (guest, shell_id) = s.open_shell(shell.clone()).await?;
     let argv = if shell.argv.is_empty() {
