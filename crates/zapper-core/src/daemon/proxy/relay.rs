@@ -125,12 +125,8 @@ pub(super) async fn relay_database<S>(
             d,
             s,
             NetLog {
-                req: endpoint,
-                verdict: Some(&v),
-                inspected: false,
-                status: None,
-                secrets: vec![],
                 error: Some(error.clone()),
+                ..NetLog::new(endpoint, Some(&v), false)
             },
         );
         note_failure(s, &rec, status, Some(error));

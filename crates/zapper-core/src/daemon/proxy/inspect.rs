@@ -150,18 +150,7 @@ fn deny(
     v: &Verdict,
     denial: String,
 ) -> Response<Body> {
-    log(
-        d,
-        s,
-        NetLog {
-            req: net,
-            verdict: Some(v),
-            inspected: true,
-            status: None,
-            secrets: vec![],
-            error: None,
-        },
-    );
+    log(d, s, NetLog::new(net, Some(v), true));
     note_failure(s, rec, 403, None);
     text(StatusCode::FORBIDDEN, denial)
 }
@@ -262,12 +251,8 @@ pub(super) async fn mitm<S>(
                 &d,
                 &s,
                 NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
                     error: Some(error),
+                    ..NetLog::new(&endpoint, None, true)
                 },
             );
             return;
@@ -575,12 +560,8 @@ where
             d,
             s,
             NetLog {
-                req: &net,
-                verdict: None,
-                inspected: true,
-                status: None,
-                secrets: vec![],
                 error: Some(why.clone()),
+                ..NetLog::new(&net, None, true)
             },
         );
         note_failure(s, &rec, status.as_u16(), Some(why.clone()));
