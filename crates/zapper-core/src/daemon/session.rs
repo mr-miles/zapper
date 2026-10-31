@@ -402,16 +402,6 @@ impl Session {
         true
     }
 
-    /// The source of a session secret: where its value comes from, not the
-    /// value.
-    pub fn secret_source(&self, name: &str) -> Option<zapper_policy::SecretSource> {
-        self.secrets
-            .read()
-            .unwrap()
-            .get(name)
-            .map(|s| s.source.clone())
-    }
-
     /// The names of the session's own secrets (never their values).
     pub fn secret_names(&self) -> Vec<String> {
         self.secrets.read().unwrap().keys().cloned().collect()
