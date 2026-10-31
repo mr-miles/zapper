@@ -62,7 +62,7 @@ async fn a_persistent_sessions_disks_stay_and_are_checked_at_its_start() {
     assert!(e.contains("--accept-changed-disks"), "{e}");
     let events = disk_events(&t, &s);
     assert_eq!(events.last().unwrap().0, "changed", "{events:?}");
-    assert!(matches!(*s.runtime.status().borrow(), Status::Stopped(_)));
+    assert!(matches!(s.runtime.current(), Status::Stopped(_)));
 
     // Accepted: recorded too, then it boots, which, without a VM here,
     // fails past the check and stops it again, its disks hashed again.
@@ -108,7 +108,7 @@ async fn a_start_is_admitted_like_a_new_session() {
         .memory_overcommit = Some(1e-6);
     let e = start(t.core.daemon(), &s, false).await.unwrap_err();
     assert!(e.to_string().contains("memory_overcommit"), "{e}");
-    assert!(matches!(*s.runtime.status().borrow(), Status::Stopped(_)));
+    assert!(matches!(s.runtime.current(), Status::Stopped(_)));
 }
 
 #[tokio::test]
@@ -187,7 +187,7 @@ async fn a_persistent_session_is_listed_again_after_a_restart() {
     assert_eq!(back.labels["project"], "x");
     assert_eq!(back.own_policy().net.len(), 1, "its own rules");
     assert_eq!(
-        *back.runtime.status().borrow(),
+        back.runtime.current(),
         Status::Stopped("kept while the daemon restarted".into())
     );
     assert!(back.dir.root_disk().exists(), "its disks");
@@ -291,7 +291,7 @@ async fn a_running_vm_left_by_an_earlier_daemon_is_adopted() {
     std::fs::write(s.dir.vmm(), serde_json::to_vec(&record).unwrap()).unwrap();
 
     let back = restart(&t, &s);
-    assert_eq!(*back.runtime.status().borrow(), Status::Running);
+    assert_eq!(back.runtime.current(), Status::Running);
     let adopted = t
         .core
         .recent_events(Some(&back.id))
@@ -318,10 +318,7 @@ async fn a_running_vm_left_by_an_earlier_daemon_is_adopted() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(matches!(
-        *back.runtime.status().borrow(),
-        Status::Stopped(_)
-    ));
+    assert!(matches!(back.runtime.current(), Status::Stopped(_)));
     assert!(back.dir.root_disk().exists());
 }
 
@@ -474,7 +471,7 @@ async fn a_session_running_when_the_daemon_ended_is_unverified() {
 
     let back = restart(&t, &s);
     assert_eq!(
-        *back.runtime.status().borrow(),
+        back.runtime.current(),
         Status::Stopped("the daemon ended while it ran; its disks weren't hashed".into())
     );
     let e = start(t.core.daemon(), &back, false).await.unwrap_err();
@@ -507,10 +504,7 @@ async fn a_ttl_stops_its_own_run_only() {
     let run = s.boots.load(Ordering::Relaxed);
     arm_ttl(t.core.daemon(), &s, run, crate::daemon::now() + 30.0);
     tokio::time::sleep(Duration::from_secs(31)).await;
-    assert_eq!(
-        *s.runtime.status().borrow(),
-        Status::Stopped("ttl expired".into())
-    );
+    assert_eq!(s.runtime.current(), Status::Stopped("ttl expired".into()));
 }
 
 /// Sessions made at once are admitted one after another: no more than

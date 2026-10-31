@@ -58,7 +58,7 @@ pub(super) async fn guest_control(
 /// connection. Until the session stops.
 pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let path = session.dir.vsock_port(CONTROL_PORT);
-    let mut status = session.runtime.status().subscribe();
+    let mut status = session.runtime.subscribe();
     loop {
         if !matches!(*status.borrow(), Status::Starting | Status::Running) {
             return Ok(());
@@ -419,9 +419,7 @@ mod resume_tests {
         assert!(s.terminals.lock().unwrap().contains_key(&3));
         assert!(s.runtime.next_shell() > 3);
 
-        s.runtime
-            .status()
-            .send_replace(Status::Stopped("stopped".into()));
+        s.runtime.force(Status::Stopped("stopped".into()));
         drop(reader);
         tokio::time::timeout(Duration::from_secs(5), task)
             .await

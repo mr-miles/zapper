@@ -50,14 +50,14 @@ pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result
         teardown(&daemon, &session, None).await;
         return Err(anyhow!(msg));
     }
-    let mut status = session.runtime.status().subscribe();
+    let mut status = session.runtime.subscribe();
     let ready = tokio::time::timeout(
         Duration::from_secs(120),
         status.wait_for(|s| !matches!(s, Status::Starting)),
     )
     .await
     .is_ok();
-    let state = session.runtime.status().borrow().clone();
+    let state = session.runtime.current();
     match (ready, state) {
         (true, Status::Running) => {
             let ms = started.elapsed().as_millis();
@@ -104,7 +104,7 @@ pub(crate) async fn start(
     // Not while a stop is on its disks, and one start at a time: claimed
     // before the disks are checked, so a second start sees it starting.
     let lifecycle = session.lifecycle.lock().await;
-    let was = session.runtime.status().borrow().clone();
+    let was = session.runtime.current();
     let (memory_warning, admitted) =
         admit(daemon, &session.profile, session.resolved.engine.memory_mib)?;
     if !session.runtime.claim_start() {
@@ -112,7 +112,7 @@ pub(crate) async fn start(
     }
     drop(admitted);
     let undo = |e: anyhow::Error| {
-        session.runtime.status().send_replace(was.clone());
+        session.runtime.undo_start(was.clone());
         *session.audit.lock().unwrap() = None;
         e
     };

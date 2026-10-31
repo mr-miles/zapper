@@ -114,7 +114,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     *session.runtime.vm().lock().await = Some(vm::VmProc::Child(child));
     // Stopped while this VM was made: its teardown found none to stop, so
     // this one is the caller's to end (`teardown` takes it from here).
-    if !matches!(*session.runtime.status().borrow(), Status::Starting) {
+    if !matches!(session.runtime.current(), Status::Starting) {
         bail!("stopped while it started");
     }
 

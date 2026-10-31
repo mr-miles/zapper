@@ -178,7 +178,7 @@ impl Session {
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
-            status: self.runtime.status().borrow().clone(),
+            status: self.runtime.current(),
             created: self.created,
             expires: *self.expires.lock().unwrap(),
             persistent: self.persistent,
@@ -228,13 +228,13 @@ impl Session {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(*self.runtime.status().borrow(), Status::Running)
+        matches!(self.runtime.current(), Status::Running)
     }
 
     /// Whether the session has ended, stopped or failed.
     pub fn ended(&self) -> bool {
         matches!(
-            *self.runtime.status().borrow(),
+            self.runtime.current(),
             Status::Stopped(_) | Status::Failed(_)
         )
     }

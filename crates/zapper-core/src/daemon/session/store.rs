@@ -48,12 +48,9 @@ impl SessionStore {
     }
 
     fn live(&self) -> impl Iterator<Item = Arc<Session>> {
-        self.all().into_iter().filter(|s| {
-            matches!(
-                *s.runtime.status().borrow(),
-                Status::Starting | Status::Running
-            )
-        })
+        self.all()
+            .into_iter()
+            .filter(|s| matches!(s.runtime.current(), Status::Starting | Status::Running))
     }
 
     /// Take a stopped session off the list; a starting or running one stays,
@@ -63,10 +60,7 @@ impl SessionStore {
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {
-            if matches!(
-                *s.runtime.status().borrow(),
-                Status::Starting | Status::Running
-            ) {
+            if matches!(s.runtime.current(), Status::Starting | Status::Running) {
                 bail!("session {id} is still running; stop it first");
             }
         }

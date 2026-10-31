@@ -50,10 +50,52 @@ impl GuestRuntime {
         }
     }
 
-    /// The lifecycle-status channel: subscribe to it, borrow it, or send a
-    /// transition through it.
-    pub fn status(&self) -> &watch::Sender<Status> {
-        &self.status
+    /// The status now.
+    pub fn current(&self) -> Status {
+        self.status.borrow().clone()
+    }
+
+    /// The status as it changes. It changes only by the transitions below,
+    /// each from the states named.
+    pub fn subscribe(&self) -> watch::Receiver<Status> {
+        self.status.subscribe()
+    }
+
+    /// Starting → Stopped(`why`): a session listed again after a restart,
+    /// as it was assembled.
+    pub fn restored(&self, why: &str) -> bool {
+        self.leave_starting(Status::Stopped(why.into()))
+    }
+
+    /// Starting → Running: a session whose VM an earlier daemon left
+    /// running, adopted as it was assembled.
+    pub fn adopted(&self) -> bool {
+        self.leave_starting(Status::Running)
+    }
+
+    /// Starting → `was` (Stopped or Failed): a start claimed with
+    /// `claim_start` that failed before its VM was made.
+    pub fn undo_start(&self, was: Status) -> bool {
+        if !matches!(was, Status::Stopped(_) | Status::Failed(_)) {
+            return false;
+        }
+        self.leave_starting(was)
+    }
+
+    fn leave_starting(&self, to: Status) -> bool {
+        self.status.send_if_modified(|s| {
+            let starting = matches!(s, Status::Starting);
+            if starting {
+                *s = to;
+            }
+            starting
+        })
+    }
+
+    /// Any status, for tests of what sits above sessions.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn force(&self, status: Status) {
+        self.status.send_replace(status);
     }
 
     /// Starting → Running: the guest is ready. From no other state: a stop
@@ -185,7 +227,67 @@ mod status_tests {
     use super::{GuestRuntime, Status};
 
     fn at(r: &GuestRuntime, s: Status) {
-        r.status().send_replace(s);
+        r.force(s);
+    }
+
+    /// Each transition from each state: where it leaves the status, and
+    /// whether it applied. Any change of status is one of these.
+    #[test]
+    fn every_transition_from_every_state() {
+        let states = || {
+            [
+                Status::Starting,
+                Status::Running,
+                Status::Failed("f".into()),
+                Status::Stopped("s".into()),
+            ]
+        };
+        type Step = fn(&GuestRuntime) -> bool;
+        let steps: [(&str, Step); 8] = [
+            ("mark_ready", |r| r.mark_ready()),
+            ("fail_if_starting", |r| r.fail_if_starting("x".into())),
+            ("fail", |r| r.fail("x".into())),
+            ("claim_start", |r| r.claim_start()),
+            ("begin_stop", |r| r.begin_stop("x")),
+            ("restored", |r| r.restored("x")),
+            ("adopted", |r| r.adopted()),
+            ("undo_start", |r| {
+                r.undo_start(Status::Stopped("was".into()))
+            }),
+        ];
+        use Status::*;
+        let want = |step: &str, from: &Status| -> (Status, bool) {
+            let x = || "x".to_string();
+            match (step, from) {
+                ("mark_ready", Starting) => (Running, true),
+                ("fail_if_starting", Starting) => (Failed(x()), true),
+                ("fail", Starting | Running) => (Failed(x()), true),
+                ("claim_start", Stopped(_) | Failed(_)) => (Starting, true),
+                ("begin_stop", Starting | Running) => (Stopped(x()), true),
+                // A failed session's stop is this caller's, its failure kept.
+                ("begin_stop", Failed(_)) => (from.clone(), true),
+                ("restored", Starting) => (Stopped(x()), true),
+                ("adopted", Starting) => (Running, true),
+                ("undo_start", Starting) => (Stopped("was".into()), true),
+                _ => (from.clone(), false),
+            }
+        };
+        for (name, step) in steps {
+            for from in states() {
+                let r = GuestRuntime::new();
+                at(&r, from.clone());
+                let applied = step(&r);
+                assert_eq!(
+                    (r.current(), applied),
+                    want(name, &from),
+                    "{name} from {from:?}"
+                );
+            }
+        }
+        // `undo_start` goes back only to a status a start comes from.
+        let r = GuestRuntime::new();
+        assert!(!r.undo_start(Status::Running));
+        assert_eq!(r.current(), Status::Starting);
     }
 
     /// A session stopped while it started stays stopped: its guest's late
@@ -197,23 +299,20 @@ mod status_tests {
         assert!(!r.mark_ready());
         assert!(!r.fail("guest setup: x".into()));
         assert!(!r.fail_if_starting("vm exited".into()));
-        assert_eq!(
-            *r.status().borrow(),
-            Status::Stopped("stopped by operator".into())
-        );
+        assert_eq!(r.current(), Status::Stopped("stopped by operator".into()));
         assert!(!r.begin_stop("again"), "stopped once");
     }
 
     #[test]
-    fn ready_only_from_starting() {
+    fn ready_only_leave_starting() {
         let r = GuestRuntime::new();
         assert!(r.mark_ready());
-        assert_eq!(*r.status().borrow(), Status::Running);
+        assert_eq!(r.current(), Status::Running);
         at(&r, Status::Failed("x".into()));
         assert!(!r.mark_ready());
         // A failure is kept by a stop, which still goes ahead.
         assert!(r.begin_stop("stopped"));
-        assert_eq!(*r.status().borrow(), Status::Failed("x".into()));
+        assert_eq!(r.current(), Status::Failed("x".into()));
     }
 
     /// A start is claimed once: not while one is starting or running, and by
@@ -241,6 +340,6 @@ mod status_tests {
             t.join().unwrap();
         }
         assert_eq!(won.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(*r.status().borrow(), Status::Starting);
+        assert_eq!(r.current(), Status::Starting);
     }
 }

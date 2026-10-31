@@ -89,7 +89,7 @@ impl Core {
     pub fn test_session(&self, new: NewSession, running: bool) -> Result<Arc<Session>> {
         let s = session::register(&self.d, &new)?;
         if running {
-            s.runtime.status().send_replace(session::Status::Running);
+            s.runtime.force(session::Status::Running);
         }
         Ok(s)
     }

@@ -309,14 +309,10 @@ fn only_a_stopped_session_is_forgotten() {
     }
     running
         .runtime
-        .status()
-        .send_replace(Status::Stopped("stopped by test".into()));
+        .force(Status::Stopped("stopped by test".into()));
     t.core.forget_session(&running.id).unwrap();
     assert!(t.core.session(&running.id).is_err());
-    starting
-        .runtime
-        .status()
-        .send_replace(Status::Failed("no VM".into()));
+    starting.runtime.force(Status::Failed("no VM".into()));
     t.core.forget_session(&starting.id).unwrap();
     assert!(t.core.sessions().is_empty());
 }

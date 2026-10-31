@@ -11,7 +11,7 @@ use super::control::resume_control;
 use super::create::assemble;
 use super::launch::{serve_guest, watch_vm};
 use super::run::{arm_ttl, stop};
-use super::{disks, Saved, Session, SessionDir, Status};
+use super::{disks, Saved, Session, SessionDir};
 use crate::daemon::{driver, now, record, vm, Daemon, EventBody};
 
 /// At the daemon's start: lists the persistent sessions an earlier daemon
@@ -76,10 +76,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
         } else {
             "kept while the daemon restarted"
         };
-        session
-            .runtime
-            .status()
-            .send_replace(Status::Stopped(why.into()));
+        session.runtime.restored(why);
         daemon.sessions.insert(session);
     }
 }
@@ -136,7 +133,7 @@ pub(super) fn adopt(
         .unwrap_or_else(now);
     let expires = (ttl > 0).then_some(started + ttl as f64);
     *session.expires.lock().unwrap() = expires;
-    session.runtime.status().send_replace(Status::Running);
+    session.runtime.adopted();
     daemon.sessions.insert(session.clone());
     daemon.emit(
         Some(&session),
