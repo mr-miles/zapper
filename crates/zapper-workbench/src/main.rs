@@ -21,7 +21,9 @@ struct Cli {
     cmd: Cmd,
 }
 
-const DEFAULT_LISTEN: &str = "127.0.0.1:7880";
+fn default_listen() -> SocketAddr {
+    "127.0.0.1:7880".parse().unwrap()
+}
 
 #[derive(Subcommand)]
 enum Cmd {
@@ -29,13 +31,15 @@ enum Cmd {
     Serve {
         /// Where to listen. Beyond loopback it is plain HTTP: for a trusted
         /// network, or behind a TLS proxy.
-        #[arg(long, default_value = DEFAULT_LISTEN)]
-        listen: SocketAddr,
+        /// Default: workbench.yaml's `listen`, else 127.0.0.1:7880.
+        #[arg(long)]
+        listen: Option<SocketAddr>,
     },
     /// Print the UI's address (sign in there with a token).
     Url {
-        #[arg(long, default_value = DEFAULT_LISTEN)]
-        listen: SocketAddr,
+        /// Default: workbench.yaml's `listen`, else 127.0.0.1:7880.
+        #[arg(long)]
+        listen: Option<SocketAddr>,
     },
     /// The workbench's tokens.
     Token {
@@ -96,8 +100,13 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let tokens = Tokens::open(zapper_workbench::config_dir())?;
+    let settings = zapper_workbench::settings::Settings::load(
+        &zapper_workbench::config_dir().join("workbench.yaml"),
+    )?;
     match cli.cmd {
         Cmd::Serve { listen } => {
+            let listen = listen.or(settings.listen).unwrap_or(default_listen());
+            let live = zapper_workbench::gateway::Live::default();
             let work = zapper_workbench::data_dir().join("work");
             std::fs::create_dir_all(&work)?;
             let ctx = Ctx {
@@ -112,6 +121,11 @@ async fn main() -> Result<()> {
                     )?),
                     Arc::new(zapper_workbench::git::Git::new(
                         zapper_workbench::data_dir().join("git"),
+                        zapper_workbench::git::ApplySettings {
+                            secrets: zapper_workbench::config_dir().join("secrets"),
+                            daemon: settings.daemon.clone(),
+                            live: live.clone(),
+                        },
                     )?),
                     Arc::new(zapper_workbench::ssh::Ssh::new(
                         zapper_workbench::ssh_keys(&std::env::current_exe()?)?,
@@ -123,6 +137,7 @@ async fn main() -> Result<()> {
                 work,
                 port: listen.port(),
                 remote: !listen.ip().is_loopback(),
+                live,
             };
             for f in ctx.facilities.iter() {
                 f.start(&ctx);
@@ -150,7 +165,12 @@ async fn main() -> Result<()> {
             }
             axum::serve(listener, gateway::app(ctx)).await?;
         }
-        Cmd::Url { listen } => println!("{}", url(listen)),
+        Cmd::Url { listen } => {
+            println!(
+                "{}",
+                url(listen.or(settings.listen).unwrap_or(default_listen()))
+            )
+        }
         Cmd::SshProxy { target, key } => {
             let keys = zapper_workbench::ssh_keys(&std::env::current_exe()?)?;
             zapper_workbench::ssh::proxy(

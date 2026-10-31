@@ -72,7 +72,17 @@ async fn a_session_proposes_a_branch_and_main_stays_the_users() {
     let api = zapper_api::api(t.core.clone(), &zapper_api::Mount::default());
     tokio::spawn(async move { axum::serve(listener, api).await });
     let git_root = t.dir.join("git");
-    let facility = Arc::new(Git::new(git_root.clone()).unwrap());
+    let facility = Arc::new(
+        Git::new(
+            git_root.clone(),
+            zapper_workbench::git::ApplySettings {
+                secrets: t.dir.join("secrets"),
+                daemon: None,
+                live: Default::default(),
+            },
+        )
+        .unwrap(),
+    );
     let repo = facility.repo();
     let ctx = Ctx {
         zapper: Zapper::new(socket),
@@ -81,6 +91,7 @@ async fn a_session_proposes_a_branch_and_main_stays_the_users() {
         work: t.dir.join("work"),
         port: 0,
         remote: false,
+        live: Default::default(),
     };
     for f in ctx.facilities.iter() {
         f.start(&ctx);

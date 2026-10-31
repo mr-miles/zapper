@@ -1,0 +1,9 @@
+# A software engineer: builds and tests in its sandbox. Its agent
+# definition becomes its CLAUDE.md, and its skills join the repository's.
+# Also installs packages from npm.
+extends: claude
+agent:
+  definition: software-engineer
+policy:
+  net:
+    - { action: allow, host: registry.npmjs.org, ports: [443], comment: npm packages }

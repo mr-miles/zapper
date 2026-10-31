@@ -4,11 +4,14 @@
 //! authenticates and authorizes its clients, and hosts facilities behind
 //! one interface.
 
+pub mod apply;
 pub mod drive;
 pub mod facility;
 pub mod gateway;
 pub mod git;
+pub mod render;
 pub mod secrets;
+pub mod settings;
 pub mod sse;
 pub mod ssh;
 pub mod tokens;

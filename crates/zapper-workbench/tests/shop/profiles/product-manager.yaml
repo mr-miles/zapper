@@ -1,0 +1,6 @@
+# The product manager: writes the brief, and checks what's built against
+# it. Its agent definition becomes its CLAUDE.md, and its skills join the
+# repository's.
+extends: claude
+agent:
+  definition: product-manager

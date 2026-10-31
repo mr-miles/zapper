@@ -91,6 +91,7 @@ async fn bench_on(t: TestCore, api: Router) -> Bench {
         work,
         port: addr.port(),
         remote: false,
+        live: Default::default(),
     };
     tokio::spawn(async move { axum::serve(tcp, gateway::app(ctx)).await });
     let owner = tokens.owner().unwrap();
@@ -795,6 +796,7 @@ async fn with_zapper_gone_a_client_is_still_signed_in() {
         work: t.dir.join("work"),
         port: addr.port(),
         remote: false,
+        live: Default::default(),
     };
     tokio::spawn(async move { axum::serve(tcp, gateway::app(ctx)).await });
     let owner = tokens.owner().unwrap();
