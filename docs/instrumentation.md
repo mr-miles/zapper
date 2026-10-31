@@ -18,9 +18,11 @@ Each event has `seq`, `epoch` (the daemon run it was emitted in: `seq` counts fr
 | `guest` / `exit` | `pid`, `ppid`, `uid`, `comm`, `exit_code`, `signal`, `elapsed_ms`, `user_ms`, `sys_ms`, `mem_kib`, `io_bytes` | Guest kernel process accounting |
 | `guest` / `setup` | `step`, `ok`, `output` (last 8 KiB) | Profile setup commands |
 | `ask` / `answer` | `id`, `kind`, `subject` / `allow`, `remember` | Approvals |
-| `shell` | `id`, `state` (`open`, `closed`; for a persistent terminal also `detached`, when its client goes and its program keeps running, and `attached`, when one attaches again), `argv`, `exit_code` | Terminals |
+| `shell` | `id`, `state` (`open`, `closed`; for a persistent terminal also `detached`, when its client goes and its program keeps running, and `attached`, when one attaches again), `argv`, `exit_code`, `client` (who opened or attached it, e.g. an SSH key's name) | Terminals |
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
-| `config` | `change` | Running config changes |
+| `config` | `change` | Running config changes, in words |
+| `rule` | `state` (`added`, `removed`), `id`, `scope` (`global`, `profile:NAME`, `session:ID`, or a client's layer such as `role:NAME`), `kind` | Every rule added to or removed from a layer, by whoever: a client, the operator, an approval remembered, a config change (a rule changed under its id is removed, then added). A session's own are its events; rules it is created with come with it, not as these |
+| `ssh` | `state` (`enabled`, `disabled`, `refused`), `client`, `reason` | A session's SSH turned on or off, or a terminal the SSH gateway asked for while it was off ([SSH](ssh.md)) |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
 | `disks` | `state` (`image`, `stopped`, `checked`, `changed`, `unverified`, `accepted`), `disks` (each disk's SHA-256, by file name; for `image`, the image's), `detail` (what changed, or how the image compares with its build) | A persistent session's disks, hashed when it stops and checked when it starts ([security: persistent sessions](security.md#persistent-sessions)) |
 | `image` | `name`, `build`, `state` (`started`, `built`, `failed`), `detail` (the image's file, or why it failed) | An image build the daemon runs ([images](images.md)) |

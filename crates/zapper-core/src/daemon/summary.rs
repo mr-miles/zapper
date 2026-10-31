@@ -140,6 +140,12 @@ impl EventBody {
                 format!("{state}{}", opt(detail, |d| format!(": {d}")))
             }
             EventBody::Config { change } => change.clone(),
+            EventBody::Rule {
+                state, id, scope, ..
+            } => format!(
+                "rule {id} {state} {} {scope}",
+                if state == "removed" { "from" } else { "to" }
+            ),
             EventBody::Ssh {
                 state,
                 client,

@@ -31,9 +31,11 @@
   form.new { display: grid; gap: 6px; margin-top: 8px; }
   select, input[type=text] { font: inherit; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
   .err { color: var(--deny); }
+  #down { background: color-mix(in srgb, var(--deny) 14%, var(--card)); border-bottom: 1px solid var(--line); padding: 8px 16px; }
 </style>
 </head>
 <body>
+<div id="down" hidden></div>
 <header><h1>Workbench</h1><span class="who" id="who"></span><button id="signout" style="margin-left:auto">Sign out</button></header>
 <main>
   <div>
@@ -65,9 +67,28 @@ let me = null, picked = null, feed = null, term = null;
 function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
 async function api(method, path, body) {
   const r = await fetch("/w/v1" + path, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
+  // Signed out (the token removed, the cookie gone): to sign in again.
+  if (r.status === 401) { location.replace("/login"); throw new Error("not signed in"); }
   const v = r.headers.get("content-type")?.includes("json") ? await r.json() : await r.text();
   if (!r.ok) throw new Error(v.error || r.statusText);
   return v;
+}
+
+// zapper itself unreachable (stopped, restarting): said, and checked again
+// until it is back; the browser stays signed in.
+function showDown(why) {
+  const d = document.getElementById("down");
+  d.hidden = !why;
+  d.textContent = why ? "zapper isn't reachable (" + why + "); retrying…" : "";
+}
+async function checkZapper() {
+  try {
+    const s = await api("GET", "/status");
+    const back = !s.zapper.error && me && me.zapper.error;
+    me = s;
+    showDown(s.zapper.error || "");
+    if (back) { loadSessions().catch(() => {}); loadApprovals().catch(() => {}); if (picked) pick(picked); }
+  } catch (e) { showDown(e.message); }
 }
 const may = r => me && me.token.rights.includes(r);
 
@@ -201,14 +222,15 @@ document.getElementById("signout").onclick = async () => {
 };
 
 async function start() {
-  try { me = await api("GET", "/status"); } catch (e) { location.replace("/login"); return; }
+  try { me = await api("GET", "/status"); } catch (e) { showDown(e.message); setTimeout(start, 3000); return; }
+  showDown(me.zapper.error || "");
   const labels = Object.entries(me.token.labels).map(([k, v]) => k + "=" + v).join(" ");
-  document.getElementById("who").textContent = "token " + me.token.name + (labels ? " · sessions with " + labels : "") + " · zapper " + me.zapper.version;
+  document.getElementById("who").textContent = "token " + me.token.name + (labels ? " · sessions with " + labels : "") + (me.zapper.version ? " · zapper " + me.zapper.version : "");
   if (may("create")) {
     const form = document.getElementById("new");
     form.hidden = false;
     const sel = document.getElementById("profile");
-    for (const p of await api("GET", "/profiles")) sel.append(el("option", p));
+    for (const p of await api("GET", "/profiles").catch(() => [])) sel.append(el("option", p));
     form.onsubmit = async e => {
       e.preventDefault();
       const err = document.getElementById("newerr");
@@ -220,8 +242,8 @@ async function start() {
       } catch (x) { err.textContent = x.message; }
     };
   }
-  await Promise.all([loadSessions(), loadApprovals(), loadPanels()]);
-  setInterval(() => { loadSessions(); loadApprovals(); }, 10000);
+  await Promise.all([loadSessions(), loadApprovals(), loadPanels()].map(p => p.catch(() => {})));
+  setInterval(() => { checkZapper(); loadSessions().catch(() => {}); loadApprovals().catch(() => {}); }, 5000);
 }
 start();
 </script>

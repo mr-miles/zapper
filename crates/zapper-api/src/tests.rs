@@ -1,6 +1,8 @@
 //! The REST API and the UI against a core without VMs
 //! (`zapper_core::testing::TestCore`), request by request.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
@@ -460,7 +462,11 @@ async fn rules_added_to_a_session_are_its_own_and_an_event() {
     let id = r.json()["id"].as_str().unwrap().to_string();
     assert!(id.starts_with("s-"), "{id}");
     let last = serde_json::to_value(t.core.recent_events(Some(&s)).last().unwrap()).unwrap();
-    assert_eq!(last["type"], "config", "{last}");
+    assert_eq!(last["type"], "rule", "{last}");
+    assert_eq!(
+        (last["state"].as_str(), last["id"].as_str()),
+        (Some("added"), Some(id.as_str()))
+    );
     let gone = send(&app, Method::DELETE, &format!("/v1/rules/{id}"), &[], "").await;
     assert_eq!(gone.json()["scope"], format!("session:{s}"));
 }
@@ -484,6 +490,108 @@ async fn new_sessions_labels_are_checked() {
     // Good labels pass; with no VM to boot, the session fails later.
     let r = post(&app, "/v1/sessions", &body(r#"{"team":"a.1"}"#)).await;
     assert!(!r.body.contains("label"), "{}", r.body);
+}
+
+#[tokio::test]
+async fn a_new_session_takes_files_mounts_an_agent_overlay_and_forwards() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let made = |extra: Value| {
+        let mut body = json!({ "profile": "web", "workdir": t.workdir() });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let app = app.clone();
+        async move { post(&app, "/v1/sessions", &body.to_string()).await }
+    };
+    // With no VM to boot, the session fails after it is made, and stays
+    // listed with what it was made with.
+    let r = made(json!({
+        "files": [{ "path": "/etc/motd", "content": "hi", "mode": 420, "user_owned": false }],
+        "mounts": [{ "host": "{workdir}", "guest": "/data", "mode": "ro" }],
+        "agent_overlay": { "command": ["/bin/true"] },
+        "forwards": [{ "vsock_port": 7000, "tcp_port": 8080 }],
+    }))
+    .await;
+    assert!(
+        !r.body.contains("forward") && !r.body.contains("file"),
+        "{}",
+        r.body
+    );
+    let s = t.core.sessions().pop().expect("the session, listed");
+    let m = s.made_with();
+    assert_eq!(m["files"][0]["path"], "/etc/motd");
+    assert_eq!(m["forwards"][0]["vsock_port"], 7000);
+    assert!(m["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["guest"] == "/data"));
+    assert_eq!(m["agent"]["command"], json!(["/bin/true"]));
+
+    for (extra, why) in [
+        (
+            json!({ "files": [{ "path": "etc/motd", "content": "", "mode": 420, "user_owned": false }] }),
+            "an absolute guest path",
+        ),
+        (
+            json!({ "files": [{ "path": "/a/../b", "content": "", "mode": 420, "user_owned": false }] }),
+            "without ..",
+        ),
+        (
+            json!({ "files": [{ "path": "/big", "content": "x".repeat(200 * 1024), "mode": 420, "user_owned": false }] }),
+            "KiB in all",
+        ),
+        (
+            json!({ "mounts": [{ "host": "/srv", "guest": "/" }] }),
+            "mount",
+        ),
+        (
+            json!({ "forwards": [{ "vsock_port": 1024, "tcp_port": 22 }] }),
+            "the agent's own ports",
+        ),
+        (json!({ "agent_overlay": { "kind": 3 } }), "agent overlay"),
+    ] {
+        let r = made(extra).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{why}: {}", r.body);
+        assert!(r.body.contains(why), "{why}: {}", r.body);
+    }
+}
+
+#[tokio::test]
+async fn socket_mcp_servers_added_listed_and_removed_by_their_owner() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let r = post(
+        &app,
+        "/v1/mcp",
+        r#"{"name":"tools","sessions":{"team":"a"},"socket":"tools.sock","instructions":"Hi."}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let id = r.json()["id"].as_u64().unwrap();
+    assert_eq!(r.json()["owner"], "operator");
+    let bad = post(&app, "/v1/mcp", r#"{"name":"x","socket":"../api.sock"}"#).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    // A client's is the client's to remove.
+    let theirs = t
+        .core
+        .add_mcp_socket(
+            "office",
+            BTreeMap::new(),
+            "office-acme.sock",
+            None,
+            "office",
+        )
+        .unwrap();
+    let listed = get(&app, "/v1/mcp").await.json();
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{theirs}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = send(&app, Method::DELETE, &format!("/v1/mcp/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -780,6 +888,8 @@ async fn the_ui_has_no_writes_beyond_its_list() {
         (Method::POST, "/sessions"),
         (Method::POST, "/services"),
         (Method::DELETE, "/services/x"),
+        (Method::POST, "/mcp"),
+        (Method::DELETE, "/mcp/1"),
         (Method::DELETE, "/sessions/abc234"),
         (Method::POST, "/sessions/abc234/stop"),
         (Method::POST, "/sessions/abc234/start"),

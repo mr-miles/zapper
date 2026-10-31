@@ -119,6 +119,18 @@ pub enum EventBody {
     Config {
         change: String,
     },
+    /// A rule added to or removed from a layer, by whoever: a client, the
+    /// operator, an approval remembered, a config change (one whose rule
+    /// changed under its id is removed, then added). Rules a session is
+    /// created with come with it, not as these.
+    Rule {
+        /// `added` or `removed`.
+        state: String,
+        id: String,
+        /// `global`, `profile:NAME`, `session:ID`, or a client's layer.
+        scope: String,
+        kind: String,
+    },
     /// The session's SSH: `enabled`, `disabled`, or `refused` (a terminal
     /// the gateway asked for while it was off), with who asked.
     Ssh {

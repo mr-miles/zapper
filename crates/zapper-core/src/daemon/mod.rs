@@ -266,6 +266,7 @@ impl Daemon {
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
         let _changing = self.changing.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = self.config.read().unwrap().clone();
+        let before = config_rules(&next);
         let old_networks = next.daemon.private_networks.clone();
         let out = f(&mut next)?;
         next.normalize();
@@ -278,6 +279,7 @@ impl Daemon {
         if next.daemon.private_networks != old_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
+        let after = config_rules(&next);
         *self.config.write().unwrap() = next;
         self.emit(
             None,
@@ -285,6 +287,21 @@ impl Daemon {
                 change: what.to_string(),
             },
         );
+        for (state, gone, kept) in [("removed", &before, &after), ("added", &after, &before)] {
+            for ((scope, id), (kind, rule)) in gone {
+                if kept.get(&(scope.clone(), id.clone())).map(|(_, r)| r) != Some(rule) {
+                    self.emit(
+                        None,
+                        EventBody::Rule {
+                            state: state.into(),
+                            id: id.clone(),
+                            scope: scope.clone(),
+                            kind: kind.clone(),
+                        },
+                    );
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -512,6 +529,20 @@ pub fn redact(mut c: Config) -> Config {
 
 #[cfg(test)]
 mod limits_tests;
+
+/// The config's rules, by layer and id: each one's kind, and the rule as it
+/// is written, to tell one changed under its id.
+fn config_rules(c: &Config) -> std::collections::BTreeMap<(String, String), (String, String)> {
+    c.layers()
+        .flat_map(|(scope, p)| {
+            p.rules().into_iter().map(move |r| {
+                let id = r.id().unwrap_or("?").to_string();
+                let written = serde_json::to_string(&r).unwrap_or_default();
+                ((scope.to_string(), id), (r.kind().to_string(), written))
+            })
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

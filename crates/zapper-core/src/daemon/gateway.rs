@@ -39,11 +39,13 @@ pub trait McpServer: Send + Sync {
     ) -> BoxFuture<'a, Result<Value>>;
 }
 
-/// A server by its name.
+/// A server by its name; for one a facility serves on a socket, the socket
+/// and who registered it.
 #[derive(Clone)]
 struct Named {
     name: String,
     server: Arc<dyn McpServer>,
+    socket: Option<(String, String)>,
 }
 
 #[derive(Default)]
@@ -54,12 +56,43 @@ const MAX_CONNECTIONS: usize = 8;
 
 impl Gateway {
     pub fn add(&self, name: &str, sessions: Selector, server: Arc<dyn McpServer>) -> Result<u64> {
+        self.add_named(name, sessions, server, None)
+    }
+
+    /// Serves the MCP server a facility serves on socket `socket` in
+    /// `state/services/` (at `path`), as `name`.
+    pub fn add_socket(
+        &self,
+        name: &str,
+        sessions: Selector,
+        socket: &str,
+        path: std::path::PathBuf,
+        instructions: Option<String>,
+        owner: &str,
+    ) -> Result<u64> {
+        let server = Arc::new(socket::SocketServer::new(name, path, instructions));
+        self.add_named(
+            name,
+            sessions,
+            server,
+            Some((socket.to_string(), owner.to_string())),
+        )
+    }
+
+    fn add_named(
+        &self,
+        name: &str,
+        sessions: Selector,
+        server: Arc<dyn McpServer>,
+        socket: Option<(String, String)>,
+    ) -> Result<u64> {
         if !zapper_policy::valid_worker_name(name) {
             bail!("{name:?} is not an MCP server name");
         }
         let named = Named {
             name: name.to_string(),
             server,
+            socket,
         };
         self.0
             .add_unless(sessions.clone(), named, |e| {
@@ -71,6 +104,26 @@ impl Gateway {
     /// Stops serving server `id`; whether it was served.
     pub fn remove(&self, id: u64) -> bool {
         self.0.remove(id).is_some()
+    }
+
+    /// The servers served: each one's id, name, sessions and, for one a
+    /// facility serves, its socket and owner (none: a client's in-process).
+    pub fn list(&self) -> Vec<Value> {
+        self.0.with(|entries| {
+            entries
+                .iter()
+                .map(|(id, e)| {
+                    let (socket, owner) = e.item.socket.clone().unzip();
+                    json!({
+                        "id": id,
+                        "name": e.item.name,
+                        "sessions": e.sessions,
+                        "socket": socket,
+                        "owner": owner,
+                    })
+                })
+                .collect()
+        })
     }
 
     /// The server `name` for `s`: the earliest registered that picks it.
@@ -259,5 +312,6 @@ async fn answer(server: &dyn McpServer, name: &str, s: &Arc<Session>, msg: Value
     })
 }
 
+mod socket;
 #[cfg(test)]
 mod tests;

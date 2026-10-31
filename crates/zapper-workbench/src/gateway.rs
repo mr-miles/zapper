@@ -121,16 +121,20 @@ async fn passed_on(ctx: &Ctx, path: &str, headers: &HeaderMap) -> R<Response> {
 
 // Status and profiles.
 
-async fn status(State(ctx): State<Ctx>, Extension(g): Extension<Grant>) -> R<Json<Value>> {
-    let s = ctx
-        .zapper
-        .call(Method::GET, "/v1/status", None)
-        .await?
-        .ok()?;
-    Ok(Json(json!({
-        "zapper": { "version": s["version"], "epoch": s["epoch"] },
+/// The token's grant, and zapper's state: `zapper.error` when zapper
+/// can't be reached, which is no reason to sign anyone out.
+async fn status(State(ctx): State<Ctx>, Extension(g): Extension<Grant>) -> Json<Value> {
+    let zapper = match ctx.zapper.call(Method::GET, "/v1/status", None).await {
+        Ok(a) => match a.ok() {
+            Ok(s) => json!({ "version": s["version"], "epoch": s["epoch"] }),
+            Err((_, why)) => json!({ "error": why }),
+        },
+        Err(e) => json!({ "error": format!("{e:#}") }),
+    };
+    Json(json!({
+        "zapper": zapper,
         "token": { "name": g.name, "labels": g.labels, "rights": g.rights },
-    })))
+    }))
 }
 
 async fn profiles(State(ctx): State<Ctx>, Extension(g): Extension<Grant>) -> R<Json<Value>> {

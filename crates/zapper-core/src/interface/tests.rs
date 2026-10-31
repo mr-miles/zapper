@@ -389,9 +389,117 @@ fn rules_added_to_a_session_are_its_own_and_an_event() {
     let added = t.core.add_session_rule(&s, rule, None);
     let id = added.id().unwrap().to_string();
     assert!(id.starts_with("s-"), "{id}");
-    assert_eq!(event_type(&events.try_recv().unwrap()), "config");
+    assert_eq!(event_type(&events.try_recv().unwrap()), "rule");
     match t.core.remove_rule(&id).unwrap() {
         RuleRemoval::Removed(scope, _) => assert_eq!(scope, Scope::Session(s.id.clone())),
         RuleRemoval::Revoked => panic!("not a firm's"),
     }
+}
+
+/// The `rule` events since `events` subscribed: each `(state, id, scope)`.
+fn rule_events(
+    events: &mut tokio::sync::broadcast::Receiver<crate::Event>,
+) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    while let Ok(e) = events.try_recv() {
+        if let crate::EventBody::Rule {
+            state, id, scope, ..
+        } = e.body
+        {
+            out.push((state, id, scope));
+        }
+    }
+    out
+}
+
+fn ev(state: &str, id: &str, scope: &str) -> (String, String, String) {
+    (state.into(), id.into(), scope.into())
+}
+
+#[test]
+fn every_way_a_rule_changes_is_a_rule_event() {
+    let t = TestCore::new(RULES);
+    let s = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let mut events = t.core.subscribe();
+    let rule = |yaml: &str| -> AnyRule { serde_yaml::from_str(yaml).unwrap() };
+    let session = format!("session:{}", s.id);
+
+    // A session's own layer: added, put by a client, removed.
+    let added = t.core.add_session_rule(
+        &s,
+        rule("{ kind: net, action: allow, host: a.example }"),
+        None,
+    );
+    let a = added.id().unwrap().to_string();
+    s.put_rule(rule(
+        "{ id: grant-1, kind: net, action: allow, host: b.example }",
+    ));
+    t.core.remove_rule(&a).unwrap();
+    assert_eq!(
+        rule_events(&mut events),
+        [
+            ev("added", &a, &session),
+            ev("added", "grant-1", &session),
+            ev("removed", &a, &session),
+        ]
+    );
+
+    // The config's layers: one added, one removed, one changed under its id.
+    let mut c = t.core.config();
+    c.policy.remove("global-deny");
+    c.policy.insert(
+        rule("{ id: g-new, kind: net, action: allow, host: n.example }"),
+        None,
+    );
+    let web = c.profiles.get_mut("web").unwrap();
+    web.policy.remove("web-allow");
+    web.policy.insert(
+        rule("{ id: web-allow, kind: net, action: deny, host: example.com }"),
+        None,
+    );
+    t.core.replace_config(c).unwrap();
+    let mut got = rule_events(&mut events);
+    got.sort();
+    let mut want = vec![
+        ev("removed", "global-deny", "global"),
+        ev("added", "g-new", "global"),
+        ev("removed", "web-allow", "profile:web"),
+        ev("added", "web-allow", "profile:web"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // A change that leaves the rules as they were says nothing of them.
+    t.core.replace_config(t.core.config()).unwrap();
+    assert_eq!(rule_events(&mut events), []);
+}
+
+#[test]
+fn a_rule_a_client_keeps_is_an_event_when_removed_through_it() {
+    struct Keeper(std::sync::Mutex<Policy>);
+    impl crate::RuleKeeper for Keeper {
+        fn layers(&self) -> Vec<(Scope, Policy)> {
+            vec![(Scope::Role("eng".into()), self.0.lock().unwrap().clone())]
+        }
+        fn remove(&self, id: &str) -> Option<anyhow::Result<()>> {
+            self.0.lock().unwrap().remove(id).map(|_| Ok(()))
+        }
+    }
+    let t = TestCore::new(RULES);
+    let mut layer = Policy::default();
+    layer.insert(
+        serde_yaml::from_str("{ id: role-1, kind: net, action: allow, host: r.example }").unwrap(),
+        None,
+    );
+    t.core
+        .add_rule_keeper(Arc::new(Keeper(std::sync::Mutex::new(layer))));
+    let mut events = t.core.subscribe();
+    assert!(matches!(
+        t.core.remove_rule("role-1").unwrap(),
+        RuleRemoval::Revoked
+    ));
+    assert_eq!(
+        rule_events(&mut events),
+        [ev("removed", "role-1", "role:eng")]
+    );
 }

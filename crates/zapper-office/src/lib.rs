@@ -235,8 +235,9 @@ pub(crate) struct FirmRun {
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
-    /// The office's tools' registration in the gateway.
-    pub tools: Mutex<Option<u64>>,
+    /// The office's tools: their registration in the gateway, and the socket
+    /// that serves them.
+    pub tools: Mutex<Option<ops::Served>>,
     /// Staged plans a worker authored with `plan`, released stage by stage.
     pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,

@@ -1243,6 +1243,19 @@ mod tests {
         ) -> anyhow::Result<u64> {
             Ok(0)
         }
+        fn add_mcp_socket(
+            &self,
+            _name: &str,
+            _sessions: std::collections::BTreeMap<String, String>,
+            _socket: &str,
+            _instructions: Option<String>,
+            _owner: &str,
+        ) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        fn mcp_servers(&self) -> Vec<serde_json::Value> {
+            vec![]
+        }
         fn remove_mcp_server(&self, _id: u64) -> bool {
             false
         }

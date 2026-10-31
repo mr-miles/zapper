@@ -355,7 +355,23 @@ impl Session {
     pub(crate) fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
         let rule = self.rules.add(rule, position);
         self.rules_changed();
+        self.rule_event("added", &rule);
         rule
+    }
+
+    /// A `rule` event of the session's, for a rule of its own layer.
+    fn rule_event(&self, state: &str, rule: &AnyRule) {
+        if let Some(d) = self.daemon.upgrade() {
+            d.emit(
+                Some(self),
+                EventBody::Rule {
+                    state: state.into(),
+                    id: rule.id().unwrap_or("?").to_string(),
+                    scope: Scope::Session(self.id.clone()).to_string(),
+                    kind: rule.kind().to_string(),
+                },
+            );
+        }
     }
 
     /// A persistent session's rules are kept, for a daemon that adopts it.
@@ -376,12 +392,9 @@ impl Session {
     /// it has, replacing a rule with that id (an officer's approval, the
     /// network a credential grant needs). It is in the session's events.
     pub fn put_rule(&self, rule: AnyRule) {
-        let id = self.rules.put(rule);
+        self.rules.put(rule.clone());
         self.rules_changed();
-        self.config_event(format!(
-            "rule {id} added to {}",
-            Scope::Session(self.id.clone())
-        ));
+        self.rule_event("added", &rule);
     }
 
     /// Removes a rule from the session's own layer: it, if it was there,
@@ -389,10 +402,7 @@ impl Session {
     pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
         let rule = self.rules.remove(id)?;
         self.rules_changed();
-        self.config_event(format!(
-            "rule {id} removed from {}",
-            Scope::Session(self.id.clone())
-        ));
+        self.rule_event("removed", &rule);
         Some(rule)
     }
 
@@ -498,6 +508,18 @@ impl Session {
             request: req,
             client: None,
             ssh: false,
+        })
+    }
+
+    /// What the session was made with besides its profile, for tests: its
+    /// extra files and forwards, and its mounts and agent as resolved.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn made_with(&self) -> serde_json::Value {
+        serde_json::json!({
+            "files": self.extra_files,
+            "forwards": self.forwards,
+            "mounts": self.resolved.mounts,
+            "agent": self.resolved.agent,
         })
     }
 

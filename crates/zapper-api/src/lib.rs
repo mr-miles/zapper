@@ -23,7 +23,9 @@ use zapper_core::{
     ApiError, BuildMessage, BuildRequest, Catchup, Core, Cursor, NewSession, Remember, RuleRemoval,
     ServiceSpec, ServiceTarget, SessionInfo, TermChunk, TerminalInfo,
 };
-use zapper_policy::proto::ShellRequest;
+use zapper_policy::proto::{
+    Forward, GuestFile, ShellRequest, CONTROL_PORT, MCP_PORT, PROXY_PORT, SHELL_PORT,
+};
 use zapper_policy::{
     evaluate_exec, evaluate_net, needs_inspection, AnyRule, Config, ExecRequest, Kind, NetRequest,
     Policy, Profile, Scope,
@@ -77,6 +79,7 @@ fn read_routes() -> Router<Core> {
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
         .route("/services", get(list_services))
+        .route("/mcp", get(list_mcp))
         .route("/images", get(list_images))
         .route("/images/builds/{id}", get(follow_build))
 }
@@ -108,6 +111,8 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions", post(create_session))
         .route("/services", post(add_service))
         .route("/services/{id}", axum::routing::delete(remove_service))
+        .route("/mcp", post(add_mcp))
+        .route("/mcp/{id}", axum::routing::delete(remove_mcp))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
         .route("/sessions/{id}/start", post(start_session))
@@ -630,6 +635,76 @@ struct CreateSession {
     /// Let the SSH gateway open terminals in it from the start.
     #[serde(default)]
     ssh: bool,
+    /// Files written in the guest besides the profile's.
+    #[serde(default)]
+    files: Vec<GuestFile>,
+    /// Disks besides the profile's mounts.
+    #[serde(default)]
+    mounts: Vec<zapper_policy::Mount>,
+    /// Merged over the profile's `agent`.
+    agent_overlay: Option<Value>,
+    /// Host vsock ports forwarded to guest TCP ports, besides the profile's
+    /// `engine.ports`.
+    #[serde(default)]
+    forwards: Vec<Forward>,
+}
+
+/// Files a client may have written in the guest: they go in the guest's
+/// first message, whose line is bounded, so a few and small.
+const MAX_FILES: usize = 64;
+const MAX_FILES_BYTES: usize = 128 * 1024;
+
+/// What a client asks of a session's guest besides its profile, checked so
+/// that it can boot: absolute guest paths, files within the first
+/// message's bound, and no forward on a port the agent itself listens on.
+fn check_extras(
+    files: &[GuestFile],
+    mounts: &[zapper_policy::Mount],
+    forwards: &[Forward],
+) -> R<()> {
+    let bad = |why: String| Err(ApiError(StatusCode::BAD_REQUEST, why));
+    let plain = |p: &str| {
+        p.starts_with('/') && p != "/" && !p.contains('\0') && !p.split('/').any(|c| c == "..")
+    };
+    if files.len() > MAX_FILES {
+        return bad(format!("files: at most {MAX_FILES}"));
+    }
+    if files.iter().map(|f| f.content.len()).sum::<usize>() > MAX_FILES_BYTES {
+        return bad(format!(
+            "files: at most {} KiB in all",
+            MAX_FILES_BYTES >> 10
+        ));
+    }
+    for f in files {
+        if !plain(&f.path) {
+            return bad(format!(
+                "file {:?}: an absolute guest path, without ..",
+                f.path
+            ));
+        }
+        if f.mode > 0o7777 {
+            return bad(format!("file {}: mode {:o}", f.path, f.mode));
+        }
+    }
+    for m in mounts {
+        if !plain(&m.guest) || m.host.is_empty() {
+            return bad(format!(
+                "mount {:?} → {:?}: a host directory, and an absolute guest path without ..",
+                m.host, m.guest
+            ));
+        }
+    }
+    for f in forwards {
+        if [CONTROL_PORT, SHELL_PORT, MCP_PORT, PROXY_PORT].contains(&f.vsock_port)
+            || f.tcp_port == 0
+        {
+            return bad(format!(
+                "forward vsock {} → tcp {}: not one of the agent's own ports, and a TCP port",
+                f.vsock_port, f.tcp_port
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Labels the operator may give a session: short words, and none of the
@@ -667,6 +742,7 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
         ));
     }
     check_labels(&req.labels)?;
+    check_extras(&req.files, &req.mounts, &req.forwards)?;
     let mut policy = Policy::default();
     for r in req.rules {
         policy.insert(r, None);
@@ -676,6 +752,10 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     new.persistent = req.persistent;
     new.accept_changed_image = req.accept_changed_image;
     new.ssh = req.ssh;
+    new.files = req.files;
+    new.mounts = req.mounts;
+    new.agent_overlay = req.agent_overlay;
+    new.forwards = req.forwards;
     let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }
@@ -1090,6 +1170,52 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
 const OPERATOR: &str = "operator";
 
 /// Removes a service the operator added; others are their owners'.
+async fn list_mcp(State(d): D) -> Json<Value> {
+    Json(Value::Array(d.mcp_servers()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewMcp {
+    name: String,
+    /// Labels picking the sessions it serves; every session when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+    /// A file name in the daemon's `state/services/` directory.
+    socket: String,
+    instructions: Option<String>,
+}
+
+/// Serves an MCP server a facility serves on a socket, as the operator's.
+async fn add_mcp(State(d): D, body: String) -> R<Json<Value>> {
+    let m: NewMcp = parse_body(&body)?;
+    let id = d.add_mcp_socket(&m.name, m.sessions, &m.socket, m.instructions, OPERATOR)?;
+    let listed = d.mcp_servers().into_iter().find(|s| s["id"] == id);
+    Ok(Json(listed.unwrap_or_else(|| json!({ "id": id }))))
+}
+
+/// Stops serving an MCP server the operator registered; a client's is the
+/// client's to remove.
+async fn remove_mcp(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
+    let Some(m) = d.mcp_servers().into_iter().find(|s| s["id"] == id) else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no MCP server {id}"),
+        ));
+    };
+    if m["owner"] != OPERATOR {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "MCP server {id} is {}'s",
+                m["owner"].as_str().unwrap_or("a client")
+            ),
+        ));
+    }
+    d.remove_mcp_server(id);
+    Ok(Json(m))
+}
+
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
     let Some(s) = d.service(id) else {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("no service {id}")));

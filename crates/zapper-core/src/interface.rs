@@ -109,6 +109,15 @@ impl Core {
         &self.d.paths.state
     }
 
+    /// Where the sockets of socket services and socket MCP servers are:
+    /// `state/services/`, which a socket's name is a file in.
+    pub fn socket_dir(&self) -> std::path::PathBuf {
+        self.d
+            .paths
+            .state
+            .join(crate::daemon::services::SOCKETS_DIR)
+    }
+
     /// Runs the clients' shutdown hooks (the office stops its firms), then
     /// stops sessions: the daemon is going away. A persistent session that
     /// runs is left running, for the next daemon.
@@ -364,18 +373,7 @@ impl RuleApi for Core {
         rule: AnyRule,
         position: Option<usize>,
     ) -> AnyRule {
-        let rule = s.add_rule(rule, position);
-        self.d.emit(
-            Some(s),
-            EventBody::Config {
-                change: format!(
-                    "rule {} added to {}",
-                    rule.id().unwrap_or("?"),
-                    Scope::Session(s.id.clone())
-                ),
-            },
-        );
-        rule
+        s.add_rule(rule, position)
     }
 
     fn rule_layers(&self) -> Vec<(Scope, Policy)> {
@@ -400,8 +398,25 @@ impl RuleApi for Core {
         // through it, so its records agree.
         let keepers = self.d.clients.rule_keepers.read().unwrap().clone();
         for k in keepers {
+            let held = k.layers().into_iter().find_map(|(scope, p)| {
+                p.rules()
+                    .into_iter()
+                    .find(|r| r.id() == Some(id))
+                    .map(|r| (scope, r))
+            });
             if let Some(r) = k.remove(id) {
                 r?;
+                if let Some((scope, rule)) = held {
+                    self.d.emit(
+                        None,
+                        EventBody::Rule {
+                            state: "removed".into(),
+                            id: id.to_string(),
+                            scope: scope.to_string(),
+                            kind: rule.kind().to_string(),
+                        },
+                    );
+                }
                 return Ok(RuleRemoval::Revoked);
             }
         }
@@ -526,6 +541,21 @@ pub trait ServiceApi {
         sessions: BTreeMap<String, String>,
         server: Arc<dyn McpServer>,
     ) -> Result<u64>;
+    /// Serves the MCP server a facility serves on socket `socket`, a file
+    /// in the daemon's `state/services/` directory, as `name`, to the
+    /// sessions `sessions` picks: the gateway asks it for each tool list and
+    /// call, naming the caller. Its id, for removing it.
+    fn add_mcp_socket(
+        &self,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        socket: &str,
+        instructions: Option<String>,
+        owner: &str,
+    ) -> Result<u64>;
+    /// The MCP servers served: id, name, sessions, and a facility's socket
+    /// and owner.
+    fn mcp_servers(&self) -> Vec<serde_json::Value>;
     /// Stops serving a registered MCP server.
     fn remove_mcp_server(&self, id: u64) -> bool;
 }
@@ -569,6 +599,30 @@ impl ServiceApi for Core {
         server: Arc<dyn McpServer>,
     ) -> Result<u64> {
         self.d.gateway.add(name, sessions, server)
+    }
+
+    fn add_mcp_socket(
+        &self,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        socket: &str,
+        instructions: Option<String>,
+        owner: &str,
+    ) -> Result<u64> {
+        crate::daemon::services::check_socket(socket)?;
+        let path = self
+            .d
+            .paths
+            .state
+            .join(crate::daemon::services::SOCKETS_DIR)
+            .join(socket);
+        self.d
+            .gateway
+            .add_socket(name, sessions, socket, path, instructions, owner)
+    }
+
+    fn mcp_servers(&self) -> Vec<serde_json::Value> {
+        self.d.gateway.list()
     }
 
     fn remove_mcp_server(&self, id: u64) -> bool {

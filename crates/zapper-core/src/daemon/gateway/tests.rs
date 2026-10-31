@@ -458,3 +458,150 @@ async fn initialize_without_a_version_gets_the_default() {
         env!("CARGO_PKG_VERSION")
     );
 }
+
+// MCP servers a facility serves on a socket.
+
+/// A facility on socket `name` in `state/services/`: its tool `echo` answers
+/// with the arguments and the caller the daemon named; `long` with more
+/// than a line may hold; `mute` closes without answering; `slow` takes a
+/// second. The requests it was sent go to the receiver.
+fn facility(
+    t: &TestCore,
+    name: &str,
+) -> tokio::sync::mpsc::UnboundedReceiver<zapper_policy::facility::McpCall> {
+    use zapper_policy::facility::{McpCall, McpMethod, McpReply};
+    let listener = tokio::net::UnixListener::bind(t.core.socket_dir().join(name)).unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(r).read_line(&mut line).await.unwrap();
+                let call: McpCall = serde_json::from_str(&line).unwrap();
+                let _ = tx.send(call.clone());
+                let reply = match (call.method, call.tool.as_deref()) {
+                    (McpMethod::ToolsList, _) => McpReply {
+                        result: Some(json!([{ "name": "echo" }])),
+                        error: None,
+                    },
+                    (_, Some("echo")) => McpReply {
+                        result: Some(json!({ "args": call.arguments, "caller": call.session })),
+                        error: None,
+                    },
+                    (_, Some("long")) => McpReply {
+                        result: Some(json!("x".repeat(zapper_policy::proto::MAX_MCP_LINE + 10))),
+                        error: None,
+                    },
+                    (_, Some("mute")) => return,
+                    (_, Some("slow")) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        McpReply::default()
+                    }
+                    (_, tool) => McpReply {
+                        result: None,
+                        error: Some(format!("no tool {tool:?}")),
+                    },
+                };
+                let mut b = serde_json::to_vec(&reply).unwrap();
+                b.push(b'\n');
+                let _ = w.write_all(&b).await;
+            });
+        }
+    });
+    rx
+}
+
+#[tokio::test]
+async fn a_socket_server_is_told_the_caller_by_the_daemon_never_by_the_guest() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[("team", "a")]);
+    let mut asked = facility(&t, "tools.sock");
+    t.core
+        .add_mcp_socket(
+            "tools",
+            labels(&[("team", "a")]),
+            "tools.sock",
+            Some("Over a socket.".into()),
+            "operator",
+        )
+        .unwrap();
+    let listed = t.core.mcp_servers();
+    assert_eq!(listed[0]["socket"], "tools.sock");
+    assert_eq!(listed[0]["owner"], "operator");
+
+    let mut c = Conn::open(&t, &s);
+    c.send("tools").await;
+    let init = c.ask(1, "initialize", json!({})).await;
+    assert_eq!(init["result"]["instructions"], "Over a socket.");
+    let tools = c.ask(2, "tools/list", json!({})).await;
+    assert_eq!(tools["result"]["tools"], json!([{ "name": "echo" }]));
+    let r = c
+        .ask(
+            3,
+            "tools/call",
+            json!({ "name": "echo", "arguments": { "session": "forged", "x": 1 } }),
+        )
+        .await;
+    let text: Value =
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        text["caller"],
+        s.id.as_str(),
+        "the daemon's word, not the guest's"
+    );
+    assert_eq!(text["args"]["session"], "forged", "the arguments as sent");
+
+    let list = asked.recv().await.unwrap();
+    assert_eq!(
+        (list.session.as_str(), list.server.as_str()),
+        (s.id.as_str(), "tools")
+    );
+    assert_eq!(list.labels, labels(&[("team", "a")]));
+    let call = asked.recv().await.unwrap();
+    assert_eq!(call.tool.as_deref(), Some("echo"));
+    assert_eq!(calls(&t, &s), [json!(["tools", "echo", true, null])]);
+
+    // A tool the facility refuses is an error result, and an event.
+    let r = c.ask(4, "tools/call", json!({ "name": "nope" })).await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    assert_eq!(calls(&t, &s).len(), 2);
+}
+
+#[tokio::test]
+async fn a_socket_server_that_answers_too_much_too_late_or_not_at_all_fails_the_call() {
+    let t = TestCore::new(CONFIG);
+    let s = session(&t, &[]);
+    let _f = facility(&t, "flaky.sock");
+    let server =
+        super::socket::SocketServer::new("flaky", t.core.socket_dir().join("flaky.sock"), None)
+            .with_timeouts(
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(200),
+            );
+    for (tool, why) in [
+        ("long", "longer than"),
+        ("mute", "without answering"),
+        ("slow", "didn't answer within"),
+    ] {
+        let e = server.call(&s, tool, json!({})).await.err().unwrap();
+        assert!(format!("{e:#}").contains(why), "{tool}: {e:#}");
+    }
+    let gone =
+        super::socket::SocketServer::new("gone", t.core.socket_dir().join("gone.sock"), None);
+    assert!(gone.tools(&s).await.is_err(), "no facility there");
+}
+
+#[test]
+fn a_socket_server_names_a_file_in_the_services_directory() {
+    let t = TestCore::new(CONFIG);
+    for bad in ["../api.sock", "/tmp/x.sock", ".hidden", "a/b", ""] {
+        assert!(
+            t.core
+                .add_mcp_socket("tools", labels(&[]), bad, None, "operator")
+                .is_err(),
+            "{bad:?}"
+        );
+    }
+}
