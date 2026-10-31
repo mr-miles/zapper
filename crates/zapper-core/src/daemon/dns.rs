@@ -95,6 +95,25 @@ const BASE: u32 = u32::from_be_bytes([198, 18, 0, 0]);
 /// The synthetic IPv6 pool, 2001:2::/48 (benchmarking, non-routable).
 const BASE6: u128 = Ipv6Addr::new(0x2001, 0x2, 0, 0, 0, 0, 0, 0).to_bits();
 const SIZE: u32 = 1 << 17;
+
+/// The address `n` into the v4 or v6 pool.
+fn at(v6: bool, n: u128) -> IpAddr {
+    if v6 {
+        IpAddr::V6(Ipv6Addr::from(BASE6 + n))
+    } else {
+        IpAddr::V4(Ipv4Addr::from(BASE + n as u32))
+    }
+}
+
+/// Where `ip` is in its family's pool, if it is: whether v6, and how far
+/// in (the pool's base address is none).
+fn offset(ip: IpAddr) -> Option<(bool, u128)> {
+    let (v6, n) = match ip {
+        IpAddr::V4(a) => (false, u32::from(a).wrapping_sub(BASE) as u128),
+        IpAddr::V6(a) => (true, a.to_bits().wrapping_sub(BASE6)),
+    };
+    (n != 0 && n < SIZE as u128).then_some((v6, n))
+}
 /// How long a lookup's outcome is reused.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -111,8 +130,9 @@ const CLASS_IN: u16 = 1;
 
 #[derive(Default)]
 pub struct FakeDns {
-    v4: HashMap<String, Ipv4Addr>,
-    v6: HashMap<String, Ipv6Addr>,
+    /// The names given an address of each pool, and theirs.
+    v4: HashMap<String, IpAddr>,
+    v6: HashMap<String, IpAddr>,
     by_ip: HashMap<IpAddr, String>,
     /// Whether looked-up names exist, and when that was found out.
     exists: HashMap<String, (bool, Instant)>,
@@ -130,58 +150,59 @@ impl FakeDns {
         }
     }
 
-    /// `name` at `ip` again, as kept: if `ip` is in the pool and neither it
+    /// `name` at `ip` again, as kept: if `ip` is in its pool and neither it
     /// nor the name has another.
     fn restore(&mut self, name: &str, ip: IpAddr) {
         if name.is_empty() || self.by_ip.contains_key(&ip) {
             return;
         }
-        match ip {
-            IpAddr::V4(v4) => {
-                let n = u32::from(v4).wrapping_sub(BASE);
-                if n == 0 || n >= SIZE || self.v4.contains_key(name) {
-                    return;
-                }
-                self.v4.insert(name.to_string(), v4);
-            }
-            IpAddr::V6(v6) => {
-                let n = v6.to_bits().wrapping_sub(BASE6);
-                if n == 0 || n >= SIZE as u128 || self.v6.contains_key(name) {
-                    return;
-                }
-                self.v6.insert(name.to_string(), v6);
-            }
+        let Some((v6, _)) = offset(ip) else { return };
+        if self.pool(v6).contains_key(name) {
+            return;
         }
+        self.pool(v6).insert(name.to_string(), ip);
         self.by_ip.insert(ip, name.to_string());
     }
-    /// A synthetic IPv4 address for `name`, from the pool, stable per name.
-    pub fn address(&mut self, name: &str) -> Option<Ipv4Addr> {
-        if let Some(ip) = self.v4.get(name) {
+
+    fn pool(&mut self, v6: bool) -> &mut HashMap<String, IpAddr> {
+        if v6 {
+            &mut self.v6
+        } else {
+            &mut self.v4
+        }
+    }
+
+    /// A synthetic address for `name` from the v4 or v6 pool, stable per
+    /// name: the next free, past those given and any a kept session's
+    /// restore placed further on.
+    fn give(&mut self, v6: bool, name: &str) -> Option<IpAddr> {
+        if let Some(ip) = self.pool(v6).get(name) {
             return Some(*ip);
         }
-        // The next free: past those given, skipping any a kept session's
-        // restore placed further on.
-        let ip = (self.v4.len() as u32 + 1..SIZE)
-            .map(|n| Ipv4Addr::from(BASE + n))
-            .find(|ip| !self.by_ip.contains_key(&IpAddr::V4(*ip)))?;
-        self.v4.insert(name.to_string(), ip);
-        self.by_ip.insert(IpAddr::V4(ip), name.to_string());
-        self.note(name, IpAddr::V4(ip));
+        let first = self.pool(v6).len() as u128 + 1;
+        let ip = (first..SIZE as u128)
+            .map(|n| at(v6, n))
+            .find(|ip| !self.by_ip.contains_key(ip))?;
+        self.pool(v6).insert(name.to_string(), ip);
+        self.by_ip.insert(ip, name.to_string());
+        self.note(name, ip);
         Some(ip)
+    }
+
+    /// A synthetic IPv4 address for `name`, from the pool, stable per name.
+    pub fn address(&mut self, name: &str) -> Option<Ipv4Addr> {
+        match self.give(false, name)? {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        }
     }
 
     /// A synthetic IPv6 address for `name`, from the pool, stable per name.
     pub fn address6(&mut self, name: &str) -> Option<Ipv6Addr> {
-        if let Some(ip) = self.v6.get(name) {
-            return Some(*ip);
+        match self.give(true, name)? {
+            IpAddr::V6(ip) => Some(ip),
+            IpAddr::V4(_) => None,
         }
-        let ip = (self.v6.len() as u128 + 1..SIZE as u128)
-            .map(|n| Ipv6Addr::from(BASE6 + n))
-            .find(|ip| !self.by_ip.contains_key(&IpAddr::V6(*ip)))?;
-        self.v6.insert(name.to_string(), ip);
-        self.by_ip.insert(IpAddr::V6(ip), name.to_string());
-        self.note(name, IpAddr::V6(ip));
-        Some(ip)
     }
 
     pub fn name(&self, ip: IpAddr) -> Option<&str> {
