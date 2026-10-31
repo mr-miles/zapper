@@ -824,10 +824,19 @@ async fn a_dbauth_secret_goes_only_to_its_hosts() {
         "{refused}"
     );
 
+    // Within the secret's hosts: not refused for that. The relay goes on to
+    // dial 10.0.0.9, which here may fail at once or hang, so what follows
+    // isn't waited for: a refusal would be logged before any dial.
     let mut io = crate::testing::dial_addr(&t, &s, "10.0.0.9".parse().unwrap(), 6379);
     let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
-    let past = net_event(&t, &s, 1).await["error"].to_string();
-    assert!(!past.contains("isn't for"), "{past}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = crate::testing::net_events(&t, &s);
+    assert!(
+        events[1..]
+            .iter()
+            .all(|e| !e["error"].to_string().contains("isn't for")),
+        "{events:?}"
+    );
 }
 
 /// A CONNECT to a name no rule could allow is refused before the name is
