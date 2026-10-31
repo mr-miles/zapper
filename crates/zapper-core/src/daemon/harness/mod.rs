@@ -78,11 +78,11 @@ pub trait Harness: Send + Sync {
     }
     /// How to hold a conversation with it headless (a driven session, an
     /// office worker), if it can.
-    fn driver(&self) -> Option<&dyn Driver>;
+    fn headless(&self) -> Option<&dyn Headless>;
 }
 
 /// Starts conversations: one long one per driven session or office worker.
-pub trait Driver: Send + Sync {
+pub trait Headless: Send + Sync {
     /// A conversation, continuing `resume` (an id from `Event::Session`).
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation>;
 }
@@ -256,7 +256,7 @@ impl Harness for Generic {
     fn mounts(&self, _: &AgentSpec, _: &str) -> Vec<Mount> {
         Vec::new()
     }
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         None
     }
 }
@@ -291,17 +291,17 @@ mod tests {
             assert_eq!(get(k).unwrap().kind(), *k);
         }
         assert!(get("opencode").is_none());
-        assert!(get("claude-code").unwrap().driver().is_some());
-        assert!(get("pi").unwrap().driver().is_some());
+        assert!(get("claude-code").unwrap().headless().is_some());
+        assert!(get("pi").unwrap().headless().is_some());
         assert!(
-            get("generic").unwrap().driver().is_none(),
+            get("generic").unwrap().headless().is_none(),
             "a generic command can't be driven as a worker"
         );
         // The config's list of what can be driven is these harnesses'.
         let drivable: Vec<&str> = zapper_policy::AGENT_KINDS
             .iter()
             .copied()
-            .filter(|k| get(k).unwrap().driver().is_some())
+            .filter(|k| get(k).unwrap().headless().is_some())
             .collect();
         assert_eq!(drivable, zapper_policy::DRIVABLE_KINDS);
     }

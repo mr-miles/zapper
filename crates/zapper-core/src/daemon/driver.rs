@@ -476,7 +476,7 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         return;
     };
     let kind = session.resolved.agent.kind.clone();
-    let Some(harness) = super::harness::get(&kind).and_then(|h| h.driver()) else {
+    let Some(harness) = super::harness::get(&kind).and_then(|h| h.headless()) else {
         // Validation allows only kinds with a driver; said here all the same.
         driver.set(
             Status::Error,

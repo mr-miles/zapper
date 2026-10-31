@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{merge, AgentSpec, ResolvedProfile};
 
-use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
+use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// Claude Code's managed settings file on Linux.
 /// https://code.claude.com/docs/en/managed-settings
@@ -40,12 +40,12 @@ impl Harness for ClaudeCode {
         files.extend(claude_files(profile, home, env.get("ANTHROPIC_API_KEY")));
     }
 
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         Some(self)
     }
 }
 
-impl Driver for ClaudeCode {
+impl Headless for ClaudeCode {
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation> {
         Box::new(ClaudeConversation {
             resume: resume.map(str::to_string),
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn claude_output() {
-        let mut d = ClaudeCode.driver().unwrap().conversation(Some("s-0"));
+        let mut d = ClaudeCode.headless().unwrap().conversation(Some("s-0"));
         assert_eq!(d.argv().last().unwrap(), "s-0");
         let e = json!({ "type": "assistant", "session_id": "s-1", "message": { "content": [{ "type": "tool_use", "name": "Edit", "input": { "file_path": "/work/pricing.md" } }] } });
         assert_eq!(

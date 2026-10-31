@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{merge, ResolvedProfile};
 
-use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
+use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// pi: configuration in `~/.pi/agent`, driven over `pi --mode rpc`.
 pub struct Pi;
@@ -40,12 +40,12 @@ impl Harness for Pi {
         files.extend(pi_files(profile, &self.config_dir(home)));
     }
 
-    fn driver(&self) -> Option<&dyn Driver> {
+    fn headless(&self) -> Option<&dyn Headless> {
         Some(self)
     }
 }
 
-impl Driver for Pi {
+impl Headless for Pi {
     fn conversation(&self, resume: Option<&str>) -> Box<dyn Conversation> {
         // pi opens a session by an id the host picks, or creates it: one id
         // per worker, reported once so a restart resumes it.
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn pi_output() {
         // Events as pi 1.3 printed them against an OpenAI-compatible endpoint.
-        let mut d = Pi.driver().unwrap().conversation(None);
+        let mut d = Pi.headless().unwrap().conversation(None);
         let argv = d.argv();
         assert_eq!(&argv[..4], ["pi", "--mode", "rpc", "--session-id"]);
         let id = argv[4].clone();
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(f["type"], "follow_up");
         assert_ne!(p["id"], f["id"]);
         // Resumed: the same session, not reported again.
-        let mut r = Pi.driver().unwrap().conversation(Some(&id));
+        let mut r = Pi.headless().unwrap().conversation(Some(&id));
         assert_eq!(r.argv()[4], id);
         assert!(r.read(&json!({ "type": "agent_start" })).is_empty());
     }

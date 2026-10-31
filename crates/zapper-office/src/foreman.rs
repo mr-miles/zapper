@@ -17,7 +17,7 @@ use zapper_policy::proto::ShellRequest;
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
 use zapper_core::driver::{self, Observer, Out, Proc};
-use zapper_core::harness::{self, Driver, Outcome};
+use zapper_core::harness::{self, Headless, Outcome};
 use zapper_core::Core;
 use zapper_core::Session;
 
@@ -81,10 +81,10 @@ async fn start(
 }
 
 /// The worker's harness driver, from its profile's `agent.kind`.
-fn driver_of(s: &Session) -> Result<&'static dyn Driver> {
+fn driver_of(s: &Session) -> Result<&'static dyn Headless> {
     let kind = &s.resolved.agent.kind;
     let h = harness::get(kind).ok_or_else(|| anyhow::anyhow!("no harness {kind}"))?;
-    h.driver()
+    h.headless()
         .ok_or_else(|| anyhow::anyhow!("agent kind {} can't run an office worker", h.kind()))
 }
 

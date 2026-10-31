@@ -155,7 +155,7 @@ fn rig(turn_timeout: Duration, exit_at_once: bool) -> Rig {
     let conversations: super::Conversations = Box::new(|resume| {
         harness::get("claude-code")
             .unwrap()
-            .driver()
+            .headless()
             .unwrap()
             .conversation(resume)
     });
