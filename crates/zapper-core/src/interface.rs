@@ -232,8 +232,6 @@ pub trait SessionApi {
     fn session(&self, id: &str) -> Result<Arc<Session>>;
     /// Every session.
     fn sessions(&self) -> Vec<Arc<Session>>;
-    /// The sessions with a label set to a value, e.g. `firm` = `acme`.
-    fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>>;
     /// Starts a session; returns once its guest is ready.
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>>;
     /// Stops a session; it stays listed, with its audit log, and a
@@ -282,13 +280,6 @@ impl SessionApi for Core {
 
     fn sessions(&self) -> Vec<Arc<Session>> {
         self.d.sessions.all()
-    }
-
-    fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>> {
-        self.sessions()
-            .into_iter()
-            .filter(|s| s.label(key) == Some(value))
-            .collect()
     }
 
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>> {

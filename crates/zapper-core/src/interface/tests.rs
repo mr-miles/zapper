@@ -259,8 +259,9 @@ fn labels_are_in_the_info_and_find_sessions() {
 
     let ids = |k: &str, v: &str| -> Vec<String> {
         t.core
-            .sessions_labelled(k, v)
+            .sessions()
             .iter()
+            .filter(|s| s.label(k) == Some(v))
             .map(|s| s.id.clone())
             .collect()
     };
