@@ -52,13 +52,13 @@ pub enum Target {
 }
 
 /// The directory under `state` holding the sockets socket services name.
-pub const SOCKETS_DIR: &str = "services";
+pub(super) const SOCKETS_DIR: &str = "services";
 
 /// The first line on a connection to a socket service: who is calling,
 /// from the VM the connection came from. The guest's own bytes follow it,
 /// so nothing the guest sends can pose as it.
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq)]
-pub struct Caller {
+struct Caller {
     pub session: String,
     pub labels: BTreeMap<String, String>,
     /// The name the guest asked for, and the port.
@@ -308,7 +308,7 @@ fn info(id: u64, e: &Entry<Item>) -> Info {
 /// Opens a connection from `s` to a service's target. `host` and `port` are
 /// what it asked for: a TLS-terminating target presents a certificate for
 /// `host`, and a socket service is told both.
-pub async fn connect(
+pub(super) async fn connect(
     d: &super::Daemon,
     s: &Arc<Session>,
     host: &str,
@@ -364,7 +364,7 @@ pub async fn connect(
 /// or a socket with `tls`): what it is given once TLS is off. For the
 /// inspecting proxy, which terminates the guest's TLS itself and decides
 /// each request before passing it on. `None` for other targets.
-pub async fn connect_plain(
+pub(super) async fn connect_plain(
     d: &super::Daemon,
     s: &Arc<Session>,
     host: &str,

@@ -79,7 +79,7 @@ impl Gateway {
 }
 
 /// Accepts the session's connections to the gateway.
-pub async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListener) {
+pub(super) async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListener) {
     let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     super::accept_loop(listener, limit, move |stream| {
         let (d, s) = (d.clone(), s.clone());

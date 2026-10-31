@@ -99,13 +99,13 @@ const SIZE: u32 = 1 << 17;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 pub const NOERROR: u8 = 0;
-pub const FORMERR: u8 = 1;
-pub const SERVFAIL: u8 = 2;
-pub const NXDOMAIN: u8 = 3;
-pub const NOTIMP: u8 = 4;
+pub(super) const FORMERR: u8 = 1;
+pub(super) const SERVFAIL: u8 = 2;
+pub(super) const NXDOMAIN: u8 = 3;
+pub(super) const NOTIMP: u8 = 4;
 pub const REFUSED: u8 = 5;
 
-pub const TYPE_A: u16 = 1;
+pub(super) const TYPE_A: u16 = 1;
 pub const TYPE_AAAA: u16 = 28;
 const CLASS_IN: u16 = 1;
 

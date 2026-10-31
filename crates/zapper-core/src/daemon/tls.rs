@@ -250,7 +250,7 @@ fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
 /// TLS to an upstream `host` over `stream`, its certificate checked against
 /// the Mozilla roots and its name: the proxy's side of an inspected
 /// connection, and a database relay's server leg.
-pub(crate) async fn connect<S>(
+pub(super) async fn connect<S>(
     stream: S,
     host: &str,
 ) -> std::result::Result<tokio_rustls::client::TlsStream<S>, String>
@@ -267,13 +267,13 @@ where
 
 /// Whether `buf` starts a TLS handshake record (`0x16`): a ClientHello, as
 /// the first byte a TLS client sends.
-pub(crate) fn starts_handshake(buf: &[u8]) -> bool {
+pub(super) fn starts_handshake(buf: &[u8]) -> bool {
     buf.first() == Some(&0x16)
 }
 
 /// Client config for upstream connections, verifying against the Mozilla
 /// roots.
-pub fn client_config() -> Arc<ClientConfig> {
+pub(super) fn client_config() -> Arc<ClientConfig> {
     static C: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     C.get_or_init(|| {
         let roots = RootCertStore {
