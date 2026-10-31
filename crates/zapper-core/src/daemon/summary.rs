@@ -34,7 +34,7 @@ fn joined(prefix: &str, items: &[String], suffix: &str) -> String {
 }
 
 impl EventBody {
-    pub fn verdict(&self) -> Option<&'static str> {
+    fn verdict(&self) -> Option<&'static str> {
         let yes = |b: bool| Some(if b { "allow" } else { "deny" });
         match self {
             EventBody::Net { action, .. } | EventBody::Exec { action, .. } => Some(match action {
@@ -56,7 +56,7 @@ impl EventBody {
         }
     }
 
-    pub fn summary(&self) -> String {
+    fn summary(&self) -> String {
         match self {
             EventBody::Net {
                 host,

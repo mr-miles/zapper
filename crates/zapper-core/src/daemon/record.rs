@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use zapper_keeper::Client;
 
-pub struct Keeper {
+pub(crate) struct Keeper {
     client: Client,
     socket: PathBuf,
     dir: PathBuf,
@@ -96,8 +96,10 @@ pub fn healthy() -> bool {
     HEALTHY.load(Ordering::Relaxed)
 }
 
-/// An append-only file of the record.
-pub enum Writer {
+/// An append-only file of the record: written here, or through the keeper.
+pub struct Writer(Sink);
+
+enum Sink {
     Local(File),
     Kept(&'static Keeper, String),
 }
@@ -105,7 +107,7 @@ pub enum Writer {
 impl Writer {
     pub fn open(path: &Path) -> Result<Writer> {
         if let Some((k, s)) = stream(path) {
-            return Ok(Writer::Kept(k, s));
+            return Ok(Writer(Sink::Kept(k, s)));
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -115,7 +117,7 @@ impl Writer {
             .append(true)
             .open(path)
             .with_context(|| format!("creating {}", path.display()))?;
-        Ok(Writer::Local(f))
+        Ok(Writer(Sink::Local(f)))
     }
 
     /// Appends one line (without its newline).
@@ -123,14 +125,14 @@ impl Writer {
         if line.contains(&b'\n') {
             bail!("a record line can't contain a newline");
         }
-        let r = match self {
-            Writer::Local(f) => {
+        let r = match &mut self.0 {
+            Sink::Local(f) => {
                 let mut buf = Vec::with_capacity(line.len() + 1);
                 buf.extend_from_slice(line);
                 buf.push(b'\n');
                 f.write_all(&buf).map_err(|e| anyhow!(e))
             }
-            Writer::Kept(k, s) => k.client.append(s, line).map(|_| ()),
+            Sink::Kept(k, s) => k.client.append(s, line).map(|_| ()),
         };
         match &r {
             Ok(()) => HEALTHY.store(true, Ordering::Relaxed),
@@ -147,7 +149,7 @@ impl Writer {
 }
 
 /// The record's status, for `zapper check`, the API and the UI.
-pub fn status() -> Value {
+pub(crate) fn status() -> Value {
     match records().and_then(|r| r.keeper.as_ref()) {
         None => {
             json!({ "keeper": false, "healthy": healthy(), "dir": records().map(|r| r.state.display().to_string()) })
