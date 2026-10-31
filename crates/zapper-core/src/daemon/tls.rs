@@ -243,7 +243,7 @@ fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
         .with_single_cert(leaf.chain, leaf.key)?;
     // Offer HTTP/2 and HTTP/1.1; the guest's client picks. h2 lets us inspect
     // gRPC and other HTTP/2 traffic rather than forcing a downgrade.
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = h2_then_http11();
     Ok(Arc::new(config))
 }
 
@@ -263,6 +263,17 @@ where
         .connect(name, stream)
         .await
         .map_err(|e| format!("TLS to {host}: {e}"))
+}
+
+/// The ALPN protocols an inspected connection offers, on either side: HTTP/2
+/// first, then HTTP/1.1.
+fn h2_then_http11() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+}
+
+/// Whether a TLS connection negotiated HTTP/2 by ALPN.
+pub(super) fn is_h2(conn: &rustls::CommonState) -> bool {
+    conn.alpn_protocol() == Some(b"h2")
 }
 
 /// Whether `buf` starts a TLS handshake record (`0x16`): a ClientHello, as
@@ -286,7 +297,7 @@ pub(super) fn client_config() -> Arc<ClientConfig> {
             .with_no_client_auth();
         // Offer HTTP/2 and HTTP/1.1 upstream; we speak to the real server in
         // whatever it negotiates, independently of the guest-facing protocol.
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config.alpn_protocols = h2_then_http11();
         Arc::new(config)
     })
     .clone()
@@ -300,8 +311,7 @@ pub(crate) fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
     if !starts_handshake(buf) {
         return Ok(None);
     }
-    let rec_len = u16::from_be_bytes([*buf.get(3).ok_or(())?, *buf.get(4).ok_or(())?]) as usize;
-    let rec = buf.get(5..5 + rec_len).ok_or(())?;
+    let rec = buf.get(5..tls_record_len(buf).ok_or(())?).ok_or(())?;
     let mut p = Parser(rec);
     if p.u8()? != 1 {
         return Err(());

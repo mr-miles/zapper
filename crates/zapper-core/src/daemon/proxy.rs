@@ -527,17 +527,7 @@ async fn stream<S>(
             relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
         }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
-        None if is_tls => {
-            inspect::mitm(
-                d,
-                s,
-                Prefixed::new(first, io),
-                endpoint.host,
-                endpoint.port,
-                addr,
-            )
-            .await
-        }
+        None if is_tls => inspect::mitm(d, s, Prefixed::new(first, io), endpoint, addr).await,
         None => {
             inspect::plain_inspected(
                 d,

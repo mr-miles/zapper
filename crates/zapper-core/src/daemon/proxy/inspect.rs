@@ -24,7 +24,7 @@ where
 }
 
 enum Sender {
-    H1(hyper::client::conn::http1::SendRequest<Body>),
+    H1(SendRequestH1),
     H2(hyper::client::conn::http2::SendRequest<Body>),
 }
 
@@ -231,19 +231,12 @@ pub(super) async fn mitm<S>(
     d: Arc<Daemon>,
     s: Arc<Session>,
     io: S,
-    host: String,
-    port: u16,
+    endpoint: NetRequest,
     addr: Target,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let endpoint = NetRequest {
-        host: host.clone(),
-        port,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
     let tls = match s.tls.accept(io, &host, tls::Alpn::Any).await {
         Ok(t) => t,
         Err(error) => {
@@ -258,7 +251,7 @@ pub(super) async fn mitm<S>(
             return;
         }
     };
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
+    let h2 = tls::is_h2(tls.get_ref().1);
     let upstream: Upstream = Default::default();
     let svc = service_fn(move |req| {
         let (d, s, host, upstream, addr) = (
@@ -697,7 +690,7 @@ async fn open_upstream(
         .map_err(|e| format!("connecting to {host}: {e}"))?;
     let tls = tls::connect(tcp, host).await?;
     // Speak whatever the server negotiated by ALPN.
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
+    let h2 = tls::is_h2(tls.get_ref().1);
     if h2 {
         let (sender, conn) =
             hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
