@@ -34,7 +34,7 @@ daemon:
   # !!! only on a network you trust, or behind a TLS proxy. zapper isn't
   # !!! built for production. The VMs can't reach it either way: the
   # !!! host's own addresses are closed to them.
-  ui: 127.0.0.1:7878
+  ui: 0.0.0.0:7878
   ask_timeout_secs: 60
   max_sessions: 16
   # Private networks sessions may reach, when a rule allows the host.

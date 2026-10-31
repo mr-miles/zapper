@@ -705,6 +705,45 @@ async fn a_config_is_checked_whole_without_being_applied() {
 }
 
 #[tokio::test]
+async fn a_sessions_config_is_what_it_was_made_with_and_its_layers_now() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let id = session(&t, "web", &[("team", "a")], true);
+    let rule = format!(
+        r#"{{"scope":"session:{id}","rule":{{"kind":"net","action":"allow","host":"own.example"}}}}"#
+    );
+    post(&app, "/v1/rules", &rule).await;
+    let c = get(&app, &format!("/v1/sessions/{id}/config")).await.json();
+    assert_eq!(c["profile"], "web");
+    assert_eq!(c["labels"]["team"], "a");
+    assert!(c["resolved"]["engine"]["image"].is_string(), "{c}");
+    assert!(
+        c["resolved"].get("layers").is_none(),
+        "the layers are now's, below"
+    );
+    let scopes: Vec<&str> = c["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["scope"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        scopes.first().copied(),
+        Some(format!("session:{id}").as_str()),
+        "most specific first: {scopes:?}"
+    );
+    assert_eq!(scopes.last().copied(), Some("global"));
+    assert!(
+        c["layers"][0]["policy"].to_string().contains("own.example"),
+        "{c}"
+    );
+    assert_eq!(
+        get(&app, "/v1/sessions/nosuch/config").await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn services_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());

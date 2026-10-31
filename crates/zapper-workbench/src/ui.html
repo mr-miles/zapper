@@ -5,181 +5,283 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Workbench</title>
 <style>
-  :root { --bg: #fafafa; --fg: #1d1d1f; --muted: #6e6e73; --line: #e2e2e6; --card: #fff; --accent: #2457c5; --deny: #b3261e; --allow: #1e7a3c; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #ececf0; --muted: #9a9aa2; --line: #2c2c31; --card: #1e1e21; --accent: #7ea2ff; --deny: #ff8a80; --allow: #6fd28f; } }
+  :root { --bg: #f6f6f7; --fg: #1d1d1f; --muted: #6e6e73; --line: #e2e2e6; --card: #fff; --accent: #2457c5; --deny: #b3261e; --allow: #1e7a3c; --warn: #9a6200; --chip: #eef0f4; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #141416; --fg: #ececf0; --muted: #9a9aa2; --line: #2c2c31; --card: #1d1d20; --accent: #7ea2ff; --deny: #ff8a80; --allow: #6fd28f; --warn: #f2b84b; --chip: #2a2a30; } }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
-  header { display: flex; gap: 12px; align-items: baseline; padding: 12px 16px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 16px; margin: 0; }
-  header .who { color: var(--muted); font-size: 13px; }
-  main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 16px; padding: 16px; }
-  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  header { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--card); position: sticky; top: 0; z-index: 1; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  nav { display: flex; gap: 2px; flex-wrap: wrap; }
+  nav a { padding: 6px 12px; border-radius: 6px; color: var(--fg); text-decoration: none; }
+  nav a.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+  nav .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--deny); color: #fff; font-size: 11px; text-align: center; }
+  header .who { color: var(--muted); font-size: 12px; margin-left: auto; }
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  section.card, .panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 16px; min-width: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
-  ul.list { list-style: none; margin: 0; padding: 0; }
-  ul.list li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
-  ul.list li:hover, ul.list li.on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .muted { color: var(--muted); }
-  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  h3 { font-size: 14px; margin: 14px 0 6px; }
+  .muted { color: var(--muted); } .err { color: var(--deny); } .mono { font-family: ui-monospace, monospace; font-size: 12px; }
   button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.allow { color: var(--allow); } button.deny { color: var(--deny); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
-  .events { max-height: 340px; overflow: auto; border-top: 1px solid var(--line); margin-top: 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .scard { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; cursor: pointer; display: grid; gap: 6px; }
+  .scard:hover { border-color: var(--accent); }
+  .scard .top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .badge.blue { color: var(--accent); } .badge.warn { color: var(--warn); }
+  .state { font-size: 12px; font-weight: 600; }
+  .state.running { color: var(--allow); } .state.starting { color: var(--warn); } .state.failed { color: var(--deny); } .state.stopped { color: var(--muted); }
+  table.kv { border-collapse: collapse; width: 100%; }
+  table.kv td { padding: 3px 8px 3px 0; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 1%; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow: auto; max-height: 360px; white-space: pre-wrap; margin: 4px 0; }
+  pre.term { background: #000; color: #ddd; }
+  .events { max-height: 320px; overflow: auto; }
   .events div { padding: 2px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
   .deny-v { color: var(--deny); } .allow-v { color: var(--allow); }
-  pre.term { background: #000; color: #ddd; padding: 8px; max-height: 300px; overflow: auto; white-space: pre-wrap; }
-  form.new { display: grid; gap: 6px; margin-top: 8px; }
+  .layer { margin: 6px 0; } .layer .rule { padding-left: 12px; }
+  form.new { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
   select, input[type=text] { font: inherit; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
-  .err { color: var(--deny); }
   #down { background: color-mix(in srgb, var(--deny) 14%, var(--card)); border-bottom: 1px solid var(--line); padding: 8px 16px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  a.back { color: var(--accent); text-decoration: none; cursor: pointer; }
 </style>
 </head>
 <body>
 <div id="down" hidden></div>
-<header><h1>Workbench</h1><span class="who" id="who"></span><button id="signout" style="margin-left:auto">Sign out</button></header>
-<main>
-  <div>
-    <section>
-      <h2>Sessions</h2>
-      <ul class="list" id="sessions"></ul>
-      <form class="new" id="new" hidden>
-        <h2>New session</h2>
-        <select id="profile"></select>
-        <label><input type="checkbox" id="persistent"> keep its disks (persistent)</label>
-        <label><input type="checkbox" id="ssh"> SSH on</label>
-        <button type="submit">Create</button>
-        <span class="err" id="newerr"></span>
-      </form>
-    </section>
-    <section style="margin-top:16px">
-      <h2>Approvals</h2>
-      <div id="approvals" class="muted">None waiting.</div>
-    </section>
-    <div id="panels"></div>
-  </div>
-  <section id="detail"><span class="muted">Pick a session.</span></section>
-</main>
+<header>
+  <h1>Workbench</h1>
+  <nav id="tabs"></nav>
+  <span class="who" id="who"></span>
+  <button id="signout">Sign out</button>
+</header>
+<main id="main"></main>
 <script>
 "use strict";
 const H = { "X-Workbench-UI": "1", "Content-Type": "application/json" };
-let me = null, picked = null, feed = null, term = null;
+let me = null, feed = null, term = null, panels = [];
+// What the list of sessions redraws every few seconds, while it is shown.
+let refreshCards = null;
+const views = {};
 
-function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined && text !== null) e.textContent = text; if (cls) e.className = cls; return e; }
 async function api(method, path, body) {
   const r = await fetch("/w/v1" + path, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
-  // Signed out (the token removed, the cookie gone): to sign in again.
   if (r.status === 401) { location.replace("/login"); throw new Error("not signed in"); }
   const v = r.headers.get("content-type")?.includes("json") ? await r.json() : await r.text();
   if (!r.ok) throw new Error(v.error || r.statusText);
   return v;
 }
-
-// zapper itself unreachable (stopped, restarting): said, and checked again
-// until it is back; the browser stays signed in.
-function showDown(why) {
-  const d = document.getElementById("down");
-  d.hidden = !why;
-  d.textContent = why ? "zapper isn't reachable (" + why + "); retrying…" : "";
-}
-async function checkZapper() {
-  try {
-    const s = await api("GET", "/status");
-    const back = !s.zapper.error && me && me.zapper.error;
-    me = s;
-    showDown(s.zapper.error || "");
-    if (back) { loadSessions().catch(() => {}); loadApprovals().catch(() => {}); if (picked) pick(picked); }
-  } catch (e) { showDown(e.message); }
-}
 const may = r => me && me.token.rights.includes(r);
+const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 172800 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; };
+function stop() { if (feed) feed.close(); if (term) term.close(); feed = term = null; }
 
-async function loadSessions() {
-  const list = document.getElementById("sessions");
-  const ss = await api("GET", "/sessions");
-  list.replaceChildren();
-  if (!ss.length) list.append(el("li", "None yet.", "muted"));
-  for (const s of ss) {
-    const li = el("li");
-    li.append(el("span", s.id + " · " + s.profile, "mono"), el("span", s.state + (s.ssh ? " · ssh" : ""), "muted"));
-    if (s.id === picked) li.classList.add("on");
-    li.onclick = () => pick(s.id);
-    list.append(li);
+// zapper away: said, and checked again; still signed in.
+function showDown(why) { const d = document.getElementById("down"); d.hidden = !why; d.textContent = why ? "zapper isn't reachable (" + why + "); retrying…" : ""; }
+
+// Tabs: the address says which, so back and reload work.
+const TABS = [["sessions", "Sessions"], ["approvals", "Approvals"], ["secrets", "Secrets"], ["drive", "Drive"], ["repository", "Repository"]];
+const FACILITY_TAB = { secrets: "secrets", ssh: "secrets", drive: "drive", git: "repository" };
+let waiting = 0;
+const here = () => (location.hash.slice(1) || "sessions").split("/");
+function drawTabs() {
+  const nav = document.getElementById("tabs");
+  nav.replaceChildren();
+  const extra = panels.filter(p => !FACILITY_TAB[p.name]).map(p => [p.name, p.title || p.name]);
+  for (const [id, label] of TABS.concat(extra)) {
+    const a = el("a", label); a.href = "#" + id;
+    if (id === here()[0]) a.className = "on";
+    if (id === "approvals" && waiting) a.append(el("span", String(waiting), "count"));
+    nav.append(a);
   }
 }
+async function route() {
+  stop();
+  refreshCards = null;
+  const [tab, arg] = here();
+  drawTabs();
+  const main = document.getElementById("main");
+  main.replaceChildren();
+  const view = views[tab] || facilityTab(tab);
+  try { await view(main, arg); } catch (e) { main.append(el("div", e.message, "err")); }
+}
+window.addEventListener("hashchange", route);
 
-async function loadApprovals() {
-  const box = document.getElementById("approvals");
-  const as = await api("GET", "/approvals");
-  box.replaceChildren();
-  if (!as.length) { box.textContent = "None waiting."; box.className = "muted"; return; }
-  box.className = "";
-  for (const a of as) {
-    const row = el("div", null, "row");
-    row.append(el("span", a.session + ": " + a.subject, "mono"));
-    if (may("answer")) {
-      for (const [label, allow, remember] of [["Allow", true, null], ["Allow for the session", true, "session"], ["Deny", false, null]]) {
-        const b = el("button", label, allow ? "allow" : "deny");
-        b.onclick = async () => { try { await api("POST", "/approvals/" + encodeURIComponent(a.id), { allow, remember }); } catch (e) { alert(e.message); } loadApprovals(); };
-        row.append(b);
-      }
+// Sessions: cards, launching new ones, and each one's page.
+const HIDDEN_LABELS = ["workbench", "workbench-config"];
+function badgesOf(s, behind) {
+  const b = el("div", null, "badges");
+  const add = (text, cls) => b.append(el("span", text, "badge" + (cls ? " " + cls : "")));
+  if (s.persistent) add("persistent", "blue");
+  if (s.ssh) add("ssh", "blue");
+  if (s.driver && typeof s.driver === "object") add("driven · " + s.driver.status);
+  if (behind) add("out of date", "warn");
+  for (const [k, v] of Object.entries(s.labels || {})) if (!HIDDEN_LABELS.includes(k)) add(k + "=" + v);
+  return b;
+}
+async function behindIds() {
+  if (!panels.some(p => p.name === "git")) return new Set();
+  try { const g = await api("GET", "/git"); return new Set((g.config?.out_of_date || []).map(s => s.id)); } catch { return new Set(); }
+}
+views.sessions = async (main, id) => {
+  if (id) return sessionPage(main, id);
+  if (may("create")) main.append(newSessionForm());
+  const sec = el("section", null, "card");
+  sec.append(el("h2", "Sessions"));
+  const grid = el("div", null, "grid");
+  sec.append(grid);
+  main.append(sec);
+  const cards = async () => {
+    const [ss, behind] = await Promise.all([api("GET", "/sessions"), behindIds()]);
+    grid.replaceChildren();
+    if (!ss.length) grid.append(el("div", "None yet." + (may("create") ? " Start one above." : ""), "muted"));
+    ss.sort((a, b) => (b.created || 0) - (a.created || 0));
+    for (const s of ss) {
+      const c = el("div", null, "scard");
+      const top = el("div", null, "top");
+      top.append(el("strong", s.id, "mono"), el("span", s.state, "state " + s.state));
+      c.append(top, el("div", s.profile + " · " + s.image));
+      c.append(badgesOf(s, behind.has(s.id)));
+      c.append(el("div", "made " + ago(s.created), "muted"));
+      c.onclick = () => { location.hash = "sessions/" + s.id; };
+      grid.append(c);
     }
-    box.append(row);
-  }
+  };
+  await cards();
+  refreshCards = () => cards().catch(() => {});
+};
+function newSessionForm() {
+  const sec = el("section", null, "card");
+  sec.append(el("h2", "New session"));
+  const form = el("form", null, "new");
+  const sel = document.createElement("select");
+  const persistent = Object.assign(document.createElement("input"), { type: "checkbox" });
+  const ssh = Object.assign(document.createElement("input"), { type: "checkbox" });
+  const lab = (text, input) => { const l = el("label"); l.style.display = "flex"; l.style.gap = "6px"; l.style.alignItems = "center"; l.append(input, el("span", text)); return l; };
+  const prof = el("label"); prof.style.display = "grid"; prof.append(el("span", "Profile", "muted"), sel);
+  const go = el("button", "Start", "primary"); go.type = "submit";
+  const note = el("div", "", "muted");
+  form.append(prof, lab("keep its disks (persistent)", persistent), lab("SSH on", ssh), go);
+  sec.append(form, note);
+  api("GET", "/profiles").then(ps => { for (const p of ps) sel.append(el("option", p)); }).catch(e => { note.className = "err"; note.textContent = e.message; });
+  form.onsubmit = async e => {
+    e.preventDefault();
+    go.disabled = true; note.className = "muted"; note.textContent = "Starting…";
+    try {
+      const s = await api("POST", "/sessions", { profile: sel.value, persistent: persistent.checked, ssh: ssh.checked });
+      location.hash = "sessions/" + s.id;
+    } catch (x) { note.className = "err"; note.textContent = x.message; }
+    go.disabled = false;
+  };
+  return sec;
 }
 
-async function pick(id) {
-  picked = id;
-  if (feed) feed.close();
-  if (term) term.close();
-  loadSessions();
-  const d = document.getElementById("detail");
-  d.replaceChildren();
-  let s;
-  try { s = await api("GET", "/sessions/" + id); } catch (e) { d.append(el("span", e.message, "err")); return; }
-  d.append(el("h2", "Session " + s.id));
-  const facts = el("div", null, "mono");
-  facts.textContent = [s.profile, s.state, s.image, s.persistent ? "persistent" : "", s.ssh ? "ssh on" : "",
-    Object.entries(s.labels || {}).map(([k, v]) => k + "=" + v).join(" ")].filter(Boolean).join(" · ");
-  d.append(facts);
+// A rule, as one line.
+function ruleText(kind, r) {
+  const bits = [r.action || r.access || "", kind];
+  if (r.host) bits.push(r.host + (r.ports ? ":" + r.ports.join(",") : ""));
+  if (r.protocol) bits.push(r.protocol);
+  if (r.methods) bits.push(r.methods.join(","));
+  if (r.path) bits.push(r.path);
+  if (r.secrets && r.secrets.length) bits.push("with " + r.secrets.join(", "));
+  if (r.final) bits.push("(final)");
+  return bits.filter(Boolean).join(" ") + (r.id ? "   [" + r.id + "]" : "") + (r.comment ? "  — " + r.comment : "");
+}
+function layersView(layers) {
+  const box = el("div");
+  for (const l of layers) {
+    const d = el("div", null, "layer");
+    d.append(el("strong", l.scope, "mono"));
+    const p = l.policy || {};
+    let n = 0;
+    for (const kind of ["net", "exec", "fs"]) for (const r of p[kind] || []) { d.append(el("div", ruleText(kind, r), "rule mono")); n++; }
+    if (p.defaults && Object.keys(p.defaults).length) d.append(el("div", "defaults: " + Object.entries(p.defaults).map(([k, v]) => k + " " + v).join(", "), "rule muted"));
+    else if (!n) d.append(el("div", "no rules", "rule muted"));
+    box.append(d);
+  }
+  return box;
+}
+function kv(rows) {
+  const t = el("table", null, "kv");
+  for (const [k, v] of rows) {
+    if (v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    const tr = el("tr"); tr.append(el("td", k), el("td", Array.isArray(v) ? v.join(" ") : String(v), "mono")); t.append(tr);
+  }
+  return t;
+}
+async function sessionPage(main, id) {
+  const back = el("a", "← Sessions", "back"); back.onclick = () => { location.hash = "sessions"; };
+  main.append(back);
+  const [s, cfg, behind] = await Promise.all([api("GET", "/sessions/" + id), api("GET", "/sessions/" + id + "/config").catch(() => null), behindIds()]);
+  const head = el("section", null, "card");
+  const top = el("div", null, "row");
+  top.append(el("strong", s.id, "mono"), el("span", s.state, "state " + s.state), el("span", s.profile));
+  head.append(top, badgesOf(s, behind.has(s.id)));
+  head.append(kv([["image", s.image], ["vcpus · memory", s.vcpus + " · " + s.memory_mib + " MiB"], ["network", s.network], ["made", new Date(s.created * 1000).toLocaleString()], ["expires", s.expires ? new Date(s.expires * 1000).toLocaleString() : null], ["kept disks", s.disk_bytes ? Math.round(s.disk_bytes / (1 << 20)) + " MiB" : null], ["detail", s.detail]]));
   if (may("control")) {
     const row = el("div", null, "row");
-    for (const [label, method, path] of [["Stop", "POST", "/stop"], ["Start", "POST", "/start"], ["Remove", "DELETE", ""]]) {
-      const b = el("button", label);
-      b.onclick = async () => { b.disabled = true; try { await api(method, "/sessions/" + id + path, method === "POST" ? {} : undefined); } catch (e) { alert(e.message); } b.disabled = false; label === "Remove" ? (picked = null, document.getElementById("detail").replaceChildren(), loadSessions()) : pick(id); };
+    for (const [label, method, path, cls] of [["Stop", "POST", "/stop"], ["Start", "POST", "/start"], ["Remove", "DELETE", "", "deny"]]) {
+      const b = el("button", label, cls);
+      b.onclick = async () => {
+        if (label === "Remove" && !confirm("Remove session " + id + "? Its disks go too.")) return;
+        b.disabled = true;
+        try { await api(method, "/sessions/" + id + path, method === "POST" ? {} : undefined); } catch (e) { alert(e.message); }
+        if (label === "Remove") location.hash = "sessions"; else route();
+      };
       row.append(b);
     }
-    d.append(row);
+    head.append(row);
   }
+  main.append(head);
+
+  if (cfg) {
+    const r = cfg.resolved || {}, e = r.engine || {}, a = r.agent || {};
+    const sec = el("section", null, "card");
+    sec.append(el("h2", "Config"));
+    sec.append(el("h3", "Machine"), kv([["image", e.image], ["kernel", e.kernel], ["vcpus", e.vcpus], ["memory", e.memory_mib ? e.memory_mib + " MiB" : null], ["disk", e.disk], ["network", e.network], ["ttl", e.ttl_secs ? e.ttl_secs + " s" : null], ["ports", (e.ports || []).join(" ")]]));
+    sec.append(el("h3", "Agent"), kv([["kind", a.kind], ["command", a.command], ["user", a.user ? a.user + (a.root ? " (root)" : "") : null], ["workdir", a.workdir], ["model", a.model], ["permission mode", a.permission_mode], ["skills", a.skills], ["driven", a.driven ? "yes" : null]]));
+    if (a.env && Object.keys(a.env).length) sec.append(el("h3", "Environment"), kv(Object.entries(a.env)));
+    if (a.instructions) {
+      const d = el("details"); d.append(el("summary", "CLAUDE.md (read-only in the sandbox)"), el("pre", a.instructions, "mono"));
+      sec.append(el("h3", "Instructions"), d);
+    }
+    if ((r.mounts || []).length) sec.append(el("h3", "Mounts"), kv(r.mounts.map(m => [m.guest, m.host + " (" + (m.mode || "ro") + ")"])));
+    if ((r.setup || []).length) { sec.append(el("h3", "Setup")); for (const st of r.setup) sec.append(el("pre", st, "mono")); }
+    if (cfg.labels && Object.keys(cfg.labels).length) sec.append(el("h3", "Labels"), kv(Object.entries(cfg.labels)));
+    sec.append(el("h3", "Rules, most specific first"), layersView(cfg.layers || []));
+    const raw = el("details"); raw.append(el("summary", "As JSON"), el("pre", JSON.stringify(cfg, null, 2), "mono"));
+    sec.append(raw);
+    main.append(sec);
+  }
+
   // Terminals, read-only: their output as text.
   try {
     const ts = await api("GET", "/sessions/" + id + "/terminals");
     if (ts.length) {
-      d.append(el("h2", "Terminals"));
+      const sec = el("section", null, "card");
+      sec.append(el("h2", "Terminals"));
       const row = el("div", null, "row");
       const out = el("pre", "", "term mono");
-      for (const t of ts) {
-        const b = el("button", t.id + ": " + (t.argv || []).join(" ") + (t.open ? "" : " (ended)"));
-        b.onclick = () => watch(id, t.id, out);
-        row.append(b);
-      }
-      d.append(row, out);
+      for (const t of ts) { const b = el("button", t.id + ": " + (t.argv || []).join(" ") + (t.open ? "" : " (ended)")); b.onclick = () => watch(id, t.id, out); row.append(b); }
+      sec.append(row, out);
+      main.append(sec);
     }
-  } catch (e) {}
-  d.append(el("h2", "Events"));
+  } catch {}
   const ev = el("div", null, "events mono");
-  d.append(ev);
+  const evs = el("section", null, "card"); evs.append(el("h2", "Events"), ev);
+  main.append(evs);
   feed = new EventSource("/w/v1/events?history=true&session=" + encodeURIComponent(id));
   feed.onmessage = m => {
     let e; try { e = JSON.parse(m.data); } catch { return; }
     const line = el("div", new Date((e.ts || 0) * 1000).toLocaleTimeString() + "  " + (e.type || "") + "  " + (e.summary || ""));
     if (e.verdict === "deny") line.className = "deny-v";
     if (e.verdict === "allow") line.className = "allow-v";
-    ev.append(line);
-    ev.scrollTop = ev.scrollHeight;
-    if (e.type === "ask" || e.type === "answer") loadApprovals();
-    if (e.type === "session") loadSessions();
+    ev.append(line); ev.scrollTop = ev.scrollHeight;
   };
 }
-
 // ANSI escapes out, so the output reads as text.
 const strip = s => s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)|\x1b[@-_]/g, "");
 function watch(id, n, out) {
@@ -189,61 +291,76 @@ function watch(id, n, out) {
   const dec = new TextDecoder();
   term.onmessage = m => {
     let c; try { c = JSON.parse(m.data); } catch { return; }
-    if (c.o) {
-      const bytes = Uint8Array.from(atob(c.o), ch => ch.charCodeAt(0));
-      out.textContent = (out.textContent + strip(dec.decode(bytes, { stream: true }))).slice(-100000);
-      out.scrollTop = out.scrollHeight;
-    }
+    if (c.o) { const bytes = Uint8Array.from(atob(c.o), ch => ch.charCodeAt(0)); out.textContent = (out.textContent + strip(dec.decode(bytes, { stream: true }))).slice(-100000); out.scrollTop = out.scrollHeight; }
     if ("end" in c) { out.textContent += "\n[ended " + c.end + "]"; term.close(); }
   };
 }
 
-async function loadPanels() {
-  const fs = await api("GET", "/facilities");
-  const box = document.getElementById("panels");
-  for (const f of fs) {
-    if (!f.panel) continue;
-    const sec = el("section"); sec.style.marginTop = "16px";
-    sec.append(el("h2", f.title || f.name));
-    // The facility's script fills it, building its elements as this page does.
-    const body = el("div");
-    body.dataset.facility = f.name;
-    sec.append(body);
-    box.append(sec);
-    const s = document.createElement("script");
-    s.src = f.panel;
-    sec.append(s);
+// Approvals: what sessions are waiting on.
+views.approvals = async main => {
+  const sec = el("section", null, "card");
+  sec.append(el("h2", "Waiting for you"));
+  main.append(sec);
+  const as = await api("GET", "/approvals");
+  if (!as.length) { sec.append(el("div", "Nothing waiting.", "muted")); return; }
+  const grid = el("div", null, "grid"); sec.append(grid);
+  for (const a of as) {
+    const c = el("div", null, "scard"); c.style.cursor = "default";
+    const top = el("div", null, "top");
+    const link = el("a", a.session, "mono back"); link.onclick = () => { location.hash = "sessions/" + a.session; };
+    top.append(link, el("span", a.kind || "", "badge"));
+    c.append(top, el("div", a.subject, "mono"), el("div", a.created ? ago(a.created) : "", "muted"));
+    if (may("answer")) {
+      const row = el("div", null, "row");
+      for (const [label, allow, remember, cls] of [["Allow", true, null, "allow"], ["Allow for the session", true, "session", "allow"], ["Deny", false, null, "deny"]]) {
+        const b = el("button", label, cls);
+        b.onclick = async () => { try { await api("POST", "/approvals/" + encodeURIComponent(a.id), { allow, remember }); } catch (e) { alert(e.message); } await refreshCount(); route(); };
+        row.append(b);
+      }
+      c.append(row);
+    }
+    grid.append(c);
   }
+};
+async function refreshCount() {
+  try { const n = (await api("GET", "/approvals")).length; if (n !== waiting) { waiting = n; drawTabs(); } } catch {}
 }
 
-document.getElementById("signout").onclick = async () => {
-  await fetch("/logout", { method: "POST", headers: H }).catch(() => {});
-  location.replace("/login");
-};
+// A tab of facilities' panels: each the facility's own script, which builds
+// its elements in [data-facility=NAME].
+function facilityTab(tab) {
+  return async main => {
+    const on = panels.filter(p => (FACILITY_TAB[p.name] || p.name) === tab);
+    if (!on.length) { main.append(el("div", "Nothing here: this workbench has no such facility.", "muted")); return; }
+    for (const f of on) {
+      const sec = el("section", null, "panel");
+      sec.append(el("h2", f.title || f.name));
+      const body = el("div"); body.dataset.facility = f.name;
+      sec.append(body);
+      main.append(sec);
+      // Run again each time the tab is drawn.
+      const s = document.createElement("script"); s.src = f.panel + "?t=" + Date.now(); sec.append(s);
+    }
+  };
+}
+
+document.getElementById("signout").onclick = async () => { await fetch("/logout", { method: "POST", headers: H }).catch(() => {}); location.replace("/login"); };
 
 async function start() {
   try { me = await api("GET", "/status"); } catch (e) { showDown(e.message); setTimeout(start, 3000); return; }
   showDown(me.zapper.error || "");
   const labels = Object.entries(me.token.labels).map(([k, v]) => k + "=" + v).join(" ");
   document.getElementById("who").textContent = "token " + me.token.name + (labels ? " · sessions with " + labels : "") + (me.zapper.version ? " · zapper " + me.zapper.version : "");
-  if (may("create")) {
-    const form = document.getElementById("new");
-    form.hidden = false;
-    const sel = document.getElementById("profile");
-    for (const p of await api("GET", "/profiles").catch(() => [])) sel.append(el("option", p));
-    form.onsubmit = async e => {
-      e.preventDefault();
-      const err = document.getElementById("newerr");
-      err.textContent = "Starting…";
-      try {
-        const s = await api("POST", "/sessions", { profile: sel.value, persistent: document.getElementById("persistent").checked, ssh: document.getElementById("ssh").checked });
-        err.textContent = "";
-        pick(s.id);
-      } catch (x) { err.textContent = x.message; }
-    };
-  }
-  await Promise.all([loadSessions(), loadApprovals(), loadPanels()].map(p => p.catch(() => {})));
-  setInterval(() => { checkZapper(); loadSessions().catch(() => {}); loadApprovals().catch(() => {}); }, 5000);
+  try { panels = (await api("GET", "/facilities")).filter(f => f.panel); } catch {}
+  await refreshCount();
+  route();
+  setInterval(async () => {
+    try { const s = await api("GET", "/status"); showDown(s.zapper.error || ""); } catch (e) { showDown(e.message); }
+    refreshCount();
+    // The cards stay current (not the form beside them); a session's page
+    // has its own feed.
+    if (refreshCards) refreshCards();
+  }, 5000);
 }
 start();
 </script>

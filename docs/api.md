@@ -80,6 +80,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `DELETE /v1/sessions/{id}` | | Stop and forget; a persistent session's disks go too |
 | `GET /v1/sessions/{id}/verify` | ✓ | `{ok, chain, findings}`: the session's files against the keeper's chains (`chain.ok` null, with a `note`, without a keeper), and what its record shows of its disks, each finding with the event's `epoch` and `seq` ([security: persistent sessions](security.md#persistent-sessions)) |
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
+| `GET /v1/sessions/{id}/config` | ✓ | What the session runs with: `{id, profile, labels, resolved, layers}`, `resolved` its profile as resolved when it was made (engine, agent, mounts, setup; secrets as placeholders, never values), `layers` the policy layers that decide its requests now, most specific first (`[{scope, policy}]`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |
 | `GET /v1/sessions/{id}/requests/{n}` | ✓ | One request with `request_headers`, `response_headers`, `request_body` and `response_body` (`text` or `base64`, `total`, `kept`, `truncated`, `encoding`); added secret values appear as `***` |
 | `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open`, `persistent`, `attached` |

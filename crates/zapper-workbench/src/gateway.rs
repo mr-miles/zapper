@@ -378,14 +378,14 @@ async fn remove_session(
 }
 
 /// A session's read-only views, as zapper has them: `audit`, `verify`,
-/// `requests`, `terminals`.
+/// `requests`, `terminals`, `config`.
 async fn session_view(
     State(ctx): State<Ctx>,
     Extension(g): Extension<Grant>,
     Path((id, view)): Path<(String, String)>,
 ) -> R<Response> {
     need(&g, Right::Read)?;
-    if !["audit", "verify", "requests", "terminals"].contains(&view.as_str()) {
+    if !["audit", "verify", "requests", "terminals", "config"].contains(&view.as_str()) {
         return Err(Error(StatusCode::NOT_FOUND, format!("no view {view}")));
     }
     reached(&ctx, &g, &id).await?;

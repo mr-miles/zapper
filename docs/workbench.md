@@ -62,7 +62,7 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /sessions`, `GET /sessions/{id}` | [read] |
 | `POST /sessions` | `{profile, workdir?, labels?, persistent?, ssh?, rules?}` [create] |
 | `POST /sessions/{id}/stop`, `POST /sessions/{id}/start`, `DELETE /sessions/{id}` | [control] |
-| `GET /sessions/{id}/audit\|verify\|requests\|terminals`, `GET /sessions/{id}/requests/{n}`, `GET /sessions/{id}/terminals/{n}` (its output, server-sent events) | [read] |
+| `GET /sessions/{id}/audit\|verify\|requests\|terminals\|config`, `GET /sessions/{id}/requests/{n}`, `GET /sessions/{id}/terminals/{n}` (its output, server-sent events) | [read] |
 | `GET /sessions/{id}/rules`; `POST /sessions/{id}/rules` `{rule, position?}`, `DELETE /sessions/{id}/rules/{rule}` | [read]; [rules] |
 | `GET /sessions/{id}/attach?tty=RxC&argv=JSON&persist=bool&terminal=N` | upgrade to a terminal, frames as zapper's [terminal] |
 | `GET /approvals`; `POST /approvals/{id}` `{allow, remember?}` | [read]; [answer] |

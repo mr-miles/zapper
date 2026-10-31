@@ -70,6 +70,7 @@ fn read_routes() -> Router<Core> {
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/audit", get(get_audit))
+        .route("/sessions/{id}/config", get(session_config))
         .route("/sessions/{id}/verify", get(verify_session))
         .route("/sessions/{id}/terminals", get(list_terminals))
         .route("/sessions/{id}/requests", get(list_requests))
@@ -455,6 +456,31 @@ async fn delete_rule(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
         RuleRemoval::Revoked => json!({ "id": id, "revoked": true }),
         RuleRemoval::Removed(scope, rule) => rule_json(&scope, &rule),
     }))
+}
+
+/// What a session runs with: its profile as resolved when it was made
+/// (engine, agent, mounts, setup; secrets as their placeholders, never
+/// values), its labels, and the policy layers that decide its requests now,
+/// most specific first.
+async fn session_config(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
+    let s = d.session(&id)?;
+    let mut resolved = serde_json::to_value(&s.resolved).unwrap_or_default();
+    if let Some(m) = resolved.as_object_mut() {
+        // The layers as they are now, below, not as they were at creation.
+        m.remove("layers");
+    }
+    let layers: Vec<Value> = d
+        .layers_for(Some(&id), None)?
+        .into_iter()
+        .map(|(scope, policy)| json!({ "scope": scope.to_string(), "policy": policy }))
+        .collect();
+    Ok(Json(json!({
+        "id": s.id,
+        "profile": s.resolved.name,
+        "labels": s.labels,
+        "resolved": resolved,
+        "layers": layers,
+    })))
 }
 
 async fn list_profiles(State(d): D) -> Json<Value> {
