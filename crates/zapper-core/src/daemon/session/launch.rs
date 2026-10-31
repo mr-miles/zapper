@@ -24,7 +24,7 @@ pub(super) fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec
             v.push(Forward {
                 vsock_port: *p as u32,
                 tcp_port: *p,
-                nic: engine.network == zapper_policy::NetworkMode::Nic,
+                nic: engine.nic(),
             });
         }
     }
@@ -94,7 +94,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     let control_path = dir.vsock_port(CONTROL_PORT);
     let control = UnixListener::bind(&control_path)?;
     serve_guest(daemon, session)?;
-    let nic_on = engine.network == zapper_policy::NetworkMode::Nic;
+    let nic_on = engine.nic();
 
     let subids = daemon.config.read().unwrap().daemon.vmm_subids;
     let child = vm::start(vm::VmSpec {
@@ -148,7 +148,7 @@ pub(super) fn serve_guest(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resul
     let mcp = bind(dir.vsock_port(MCP_PORT))?;
     let task = tokio::spawn(gateway::serve(daemon.clone(), session.clone(), mcp));
     rt.hold_listener(task.abort_handle());
-    if session.resolved.engine.network == zapper_policy::NetworkMode::Nic {
+    if session.resolved.engine.nic() {
         let listener = bind(dir.nic_socket())?;
         let task = tokio::spawn(nic::serve(daemon.clone(), session.clone(), listener));
         rt.hold_listener(task.abort_handle());

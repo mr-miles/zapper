@@ -628,6 +628,13 @@ pub struct Engine {
     pub ports: Vec<u16>,
 }
 
+impl Engine {
+    /// Whether the guest has a NIC (else vsock is its only channel).
+    pub fn nic(&self) -> bool {
+        self.network == NetworkMode::Nic
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {

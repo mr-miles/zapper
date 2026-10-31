@@ -1559,7 +1559,7 @@ async fn check(config_path: &Path) -> Result<i32> {
         .profiles
         .keys()
         .filter_map(|n| config.resolve(n).ok())
-        .any(|p| p.engine.network == zapper_policy::NetworkMode::Nic);
+        .any(|p| p.engine.nic());
     if uses_nic && ok {
         let (ok, why) = probe(true)?;
         let what = if ok {
