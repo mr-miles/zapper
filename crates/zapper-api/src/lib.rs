@@ -723,6 +723,29 @@ struct AttachQuery {
     /// Attach to this persistent terminal, which is running, instead of
     /// starting a program; it takes over from a client attached already.
     terminal: Option<u64>,
+    /// JSON object: environment variables for the program.
+    env: Option<String>,
+    /// Who is attaching, for the terminal's events (an SSH key's name).
+    client: Option<String>,
+}
+
+/// A client's name for the record: short, and plain enough to read as it is.
+fn client_name(c: &Option<String>) -> R<Option<String>> {
+    match c {
+        Some(c)
+            if c.is_empty()
+                || c.len() > 64
+                || !c
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "-_.@:=".contains(ch)) =>
+        {
+            Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "client: 1 to 64 letters, digits or -_.@:=".into(),
+            ))
+        }
+        c => Ok(c.clone()),
+    }
 }
 
 /// Upgrades the connection to a terminal in the guest; frames as in
@@ -751,15 +774,23 @@ async fn attach(
             .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("argv: {e}")))?,
         None => vec![],
     };
+    let env: BTreeMap<String, String> = match &q.env {
+        Some(e) => serde_json::from_str(e)
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("env: {e}")))?,
+        None => BTreeMap::new(),
+    };
+    let client = client_name(&q.client)?;
     let shell = ShellRequest {
         argv,
         tty,
+        env,
         system: q.system,
         persist: q.persist,
         attach: q.terminal,
         ..Default::default()
     };
-    let opened = s.open_shell(shell).await?;
+    let mut opened = s.open_shell(shell).await?;
+    opened.client = client;
     let shell_id = opened.request.id;
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {

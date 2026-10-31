@@ -128,8 +128,10 @@ impl EventBody {
                 state,
                 argv,
                 exit_code,
+                client,
             } => format!(
-                "shell {id} {state}{}{}",
+                "shell {id} {state}{}{}{}",
+                opt(client, |c| format!(" by {c}")),
                 opt(&argv.as_ref().map(|a| a.join(" ")), |a| format!(": {a}")),
                 opt(exit_code, |c| format!(" exit {c}")),
             ),

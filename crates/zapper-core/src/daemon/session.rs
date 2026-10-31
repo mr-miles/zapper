@@ -91,10 +91,13 @@ async fn connect_vsock(path: PathBuf, port: u32, refused: &str) -> Result<UnixSt
 
 /// A terminal channel opened to the guest (`Session::open_shell`): the
 /// stream, and the request as it was sent, its terminal id given and its
-/// command filled in.
+/// command filled in; and who opened it, for its events.
 pub struct ShellOpened {
     pub stream: UnixStream,
     pub request: ShellRequest,
+    /// The client that opened it, as it named itself (`Session::open_shell`
+    /// leaves it unset).
+    pub client: Option<String>,
 }
 
 #[derive(Default, Serialize)]
@@ -478,6 +481,7 @@ impl Session {
         Ok(ShellOpened {
             stream,
             request: req,
+            client: None,
         })
     }
 

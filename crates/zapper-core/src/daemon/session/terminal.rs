@@ -31,6 +31,7 @@ pub(crate) async fn pump_shell<C>(
     let super::ShellOpened {
         stream: guest,
         request,
+        client: who,
     } = opened;
     let (id, argv, tty, persist) = (request.id, request.argv, request.tty, request.persist);
     let existing = session.terminals.lock().unwrap().get(&id).cloned();
@@ -57,6 +58,7 @@ pub(crate) async fn pump_shell<C>(
             state: if reattached { "attached" } else { "open" }.into(),
             argv: Some(term.argv.clone()),
             exit_code: None,
+            client: who.clone(),
         },
     );
     let cast = term.cast.clone();
@@ -147,6 +149,7 @@ pub(crate) async fn pump_shell<C>(
             state: if detached { "detached" } else { "closed" }.into(),
             argv: None,
             exit_code,
+            client: who,
         },
     );
 }
@@ -406,6 +409,7 @@ mod persistent_tests {
                 persist: true,
                 ..Default::default()
             },
+            client: None,
         };
         pump_shell(t.core.daemon().clone(), s.clone(), client, opened).await;
     }

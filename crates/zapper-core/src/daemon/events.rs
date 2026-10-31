@@ -111,6 +111,10 @@ pub enum EventBody {
         argv: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Who opened or attached it, as the client named itself (an SSH
+        /// key's name, through the gateway).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
     },
     Config {
         change: String,
