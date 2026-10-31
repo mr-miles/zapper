@@ -780,3 +780,38 @@ async fn a_facility_has_its_routes_behind_the_gateway_and_its_panel() {
     }
     assert!(Facilities::new(vec![Arc::new(Named("x")), Arc::new(Named("x"))]).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_zapper_gone_a_client_is_still_signed_in() {
+    let t = TestCore::new(CONFIG);
+    // A socket nothing listens on: zapper stopped.
+    let tokens = Tokens::open(t.dir.join("wb")).unwrap();
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = tcp.local_addr().unwrap();
+    let ctx = Ctx {
+        zapper: Zapper::new(t.dir.join("gone.sock")),
+        tokens: tokens.clone(),
+        facilities: Arc::new(Facilities::default()),
+        work: t.dir.join("work"),
+        port: addr.port(),
+        remote: false,
+    };
+    tokio::spawn(async move { axum::serve(tcp, gateway::app(ctx)).await });
+    let owner = tokens.owner().unwrap();
+    let b = Bench {
+        t,
+        addr,
+        tokens,
+        owner,
+    };
+    let s = as_token(&b, &b.owner, Method::GET, "/w/v1/status", None).await;
+    assert_eq!(s.status, StatusCode::OK, "{:?}", s.body);
+    assert_eq!(s.body["token"]["name"], "owner");
+    assert!(s.body["zapper"]["error"].is_string(), "{:?}", s.body);
+    let l = as_token(&b, &b.owner, Method::GET, "/w/v1/sessions", None).await;
+    assert_eq!(
+        l.status,
+        StatusCode::BAD_GATEWAY,
+        "zapper unreachable, not signed out"
+    );
+}
