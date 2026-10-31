@@ -421,6 +421,45 @@ mod tests {
         assert!(!either.matches(&get("/outbox/x", Some("s1"), &[])));
     }
 
+    /// Every printable character alone, and every pair of the characters a
+    /// glob gives meaning to, matches itself and no other such value, as
+    /// the fuzz target `placeholder` checks for any value.
+    #[test]
+    fn a_short_value_matches_itself_and_no_other() {
+        let team = rule_with_path("/t/{label:team}/**");
+        // `?` ends a path (the query starts), so no segment holds it.
+        let special: Vec<char> = "*[]{}\\,!-^".chars().collect();
+        let mut values: Vec<String> = (0x21u8..0x7f)
+            .map(char::from)
+            .filter(|c| !"/?#".contains(*c))
+            .map(String::from)
+            .collect();
+        for a in &special {
+            for b in &special {
+                values.push(format!("{a}{b}"));
+            }
+        }
+        let req = |path: String, v: &str| get(&path, Some("s1"), &[("team", v)]);
+        for v in &values {
+            assert!(team.matches(&req(format!("/t/{v}/x"), v)), "{v:?}");
+        }
+        let specials: Vec<String> = values
+            .iter()
+            .filter(|v| v.chars().all(|c| special.contains(&c)))
+            .cloned()
+            .collect();
+        for v in specials.iter().filter(|v| v.len() == 1) {
+            for w in &specials {
+                if w != v {
+                    assert!(
+                        !team.matches(&req(format!("/t/{w}/x"), v)),
+                        "{v:?} matched {w:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// A deny whose placeholder the request can't fill (a session without
     /// the label, a request without its session) fails closed: it applies
     /// to any value there. An allow fails open to nothing, as before.
