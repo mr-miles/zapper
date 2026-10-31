@@ -557,3 +557,21 @@ fn sessions_made_at_once_keep_to_the_limit() {
     assert_eq!(made.iter().filter(|m| **m).count(), 4, "{made:?}");
     assert_eq!(t.core.daemon().sessions.running(), 4);
 }
+
+/// A run's lifetime counts from when its VM started, and is the `expires`
+/// the session shows; a session listed again stopped has none.
+#[tokio::test]
+async fn a_runs_lifetime_is_what_it_shows() {
+    let t = TestCore::new("profiles:\n  web: { engine: { ttl_secs: 600 } }\n");
+    let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    new.persistent = true;
+    let s = t.core.test_session(new, true).unwrap();
+    assert_eq!(s.info().expires, None, "no run yet");
+    let (run, expires) = begin_run(&s, 1000.0);
+    assert_eq!((run, expires), (1, Some(1600.0)));
+    assert_eq!(s.info().expires, Some(1600.0));
+    std::fs::create_dir_all(s.dir.vm()).unwrap();
+    stop(t.core.daemon(), &s, "stopped").await;
+    let back = restart(&t, &s);
+    assert_eq!(back.info().expires, None, "stopped: no lifetime running");
+}

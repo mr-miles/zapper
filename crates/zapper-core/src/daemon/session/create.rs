@@ -172,7 +172,6 @@ pub(super) fn assemble(
     restored: bool,
 ) -> Result<Arc<Session>> {
     let dir = daemon.paths.session_dir(&saved.id);
-    let ttl = saved.resolved.engine.ttl_secs;
     // A persistent session's CA and synthetic names are kept, to be the same
     // after a daemon restart.
     let (tls, dns) = if persistent {
@@ -193,7 +192,8 @@ pub(super) fn assemble(
         id: saved.id,
         profile: saved.profile,
         created: saved.created,
-        expires: Mutex::new((ttl > 0).then_some(now() + ttl as f64)),
+        // Set when a run begins (`run::begin_run`).
+        expires: Mutex::new(None),
         persistent,
         boots: AtomicU64::new(0),
         saving: Mutex::new(()),

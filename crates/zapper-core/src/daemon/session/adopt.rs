@@ -1,7 +1,6 @@
 //! What an earlier daemon left: persistent sessions listed again, and the
 //! VMs it left running adopted (or stopped, when they can't be).
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use anyhow::Result;
 use super::control::resume_control;
 use super::create::assemble;
 use super::launch::{serve_guest, watch_vm};
-use super::run::{arm_ttl, stop};
+use super::run::{arm_ttl, begin_run, stop};
 use super::session_event;
 use super::{disks, Saved, Session, SessionDir};
 use crate::daemon::{driver, now, record, vm, Daemon};
@@ -120,8 +119,6 @@ pub(super) fn adopt(
     if let Some(n) = vmm.subid {
         crate::subids::claim(&session.id, n)?;
     }
-    let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
-    let ttl = session.resolved.engine.ttl_secs;
     // `vmm.json` was written when the VM started.
     let started = std::fs::metadata(dir.vmm())
         .and_then(|m| m.modified())
@@ -129,8 +126,7 @@ pub(super) fn adopt(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64())
         .unwrap_or_else(now);
-    let expires = (ttl > 0).then_some(started + ttl as f64);
-    *session.expires.lock().unwrap() = expires;
+    let (run, expires) = begin_run(&session, started);
     session.runtime.adopted();
     daemon.sessions.insert(session.clone());
     session_event(

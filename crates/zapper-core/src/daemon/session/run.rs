@@ -28,14 +28,24 @@ pub(super) fn arm_ttl(daemon: &Arc<Daemon>, session: &Arc<Session>, run: u64, at
     });
 }
 
+/// Begins a run of the session, its VM started at `started` (unix
+/// seconds): the run's number, and when its lifetime (`ttl_secs`) ends,
+/// which the session shows as `expires` and `arm_ttl` keeps to.
+pub(super) fn begin_run(session: &Session, started: f64) -> (u64, Option<f64>) {
+    let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
+    let ttl = session.resolved.engine.ttl_secs;
+    let expires = (ttl > 0).then_some(started + ttl as f64);
+    *session.expires.lock().unwrap() = expires;
+    (run, expires)
+}
+
 /// Boots a registered (or stopped, persistent) session's VM and waits for its
 /// guest: running, with its driver and its `ttl_secs` for this run.
 pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let daemon = daemon.clone();
     let session = session.clone();
     let id = session.id.clone();
-    let ttl = session.resolved.engine.ttl_secs;
-    let run = session.boots.fetch_add(1, Ordering::Relaxed) + 1;
+    let (run, expires) = begin_run(&session, now());
 
     let started = Instant::now();
     if let Err(e) = launch(&daemon, &session).await {
@@ -71,8 +81,8 @@ pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result
             ));
         }
     }
-    if ttl > 0 {
-        arm_ttl(&daemon, &session, run, now() + ttl as f64);
+    if let Some(at) = expires {
+        arm_ttl(&daemon, &session, run, at);
     }
     Ok(())
 }
@@ -111,8 +121,6 @@ pub(crate) async fn start(
         .await
         .map_err(undo)?;
     drop(lifecycle);
-    let ttl = session.resolved.engine.ttl_secs;
-    *session.expires.lock().unwrap() = (ttl > 0).then(|| now() + ttl as f64);
     let detail = with_warning("started again, from its kept disks".into(), &memory_warning);
     session_event(daemon, session, "starting", detail);
     if let Some(driver) = &session.driver {
