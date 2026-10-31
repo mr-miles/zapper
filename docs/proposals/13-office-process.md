@@ -1,6 +1,6 @@
 # The office as a process of its own
 
-Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §4 (a decider socket), §6 (the driver as a crate), §7 (its own listener and its own config file), and §8 (kept-until-removed, resuming by cursor) are decided; §5 is the last decision open.
+Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Part 2 is now all decided — §4 a decider socket, §5 named layers in the core attached by labels, §6 the driver as a crate, §7 its own listener and config file, §8 kept-until-removed resuming by cursor — so what remains is the build (see Steps).
 
 The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is: it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
 
@@ -83,11 +83,20 @@ Today `Decider::ask` is called in-process when a rule asks: the request is refus
 
 ### 5. Role policy: shared layers, or rules per session
 
-Today each role's policy is a layer the office holds in memory and shares with every worker of that role (`Scope::Role`): an officer's approval for the role applies to all its workers at once, and `zapper rules` lists it as `role:engineer` through `RuleKeeper`.
+*Decided: (a), named shared layers in the core, attached by a session's labels.*
 
-- **(a) Named shared layers in the core.** `PUT /v1/layers/{name}` (rules, validated as a config change), sessions created with `layers: [name]`, rules added to and removed from a layer through the existing rule routes with `scope: "layer:NAME"`. The core owns them, so listing, removal and `rule` events (§2) cover them, and `RuleKeeper` goes. Closest to today; a new scope in evaluation and in the config's views.
-- **(b) Rules per session.** The office writes a role's rules into each worker's own layer, and again into every worker of the role when they change. Nothing new in the core; but a role change is N writes that aren't atomic together, and `zapper rules` shows N copies.
-- **(c) A profile per role.** Role rules in the config's profiles, changed by config changes. Atomic and visible, but every officer's approval becomes a config change, with its diff and its save.
+Today each role's policy is a layer the office holds in memory and shares with every worker of that role (`Scope::Role("firm/role")`): an officer's approval for the role applies to all its workers at once, and `zapper rules` lists it as `role:FIRM/ROLE` through `RuleKeeper`. The office wires it in at creation (`run.rs:585`) alongside the worker's labels — so the role is said twice, once as the layer's name and once (as `firm`, `member`, …) in the labels.
+
+The scope machinery already exists: `Scope::Role` is understood by the evaluator (`rules.rs:82`), by the scope parser and by the config views. What is in the office, not the core, is the layer's **storage** (an `Arc<RwLock<Policy>>` the office mutates) and its **attachment** (the office hands the `Arc` to each worker at creation). So (a) is an ownership move, not a new concept.
+
+- **(a, chosen) Named shared layers in the core, attached by labels.** `PUT /v1/layers/{name}` (rules, validated as a config change) stores a layer in the core; rules go in and out through the existing rule routes, so listing, removal and `rule` events (§2) cover them and `RuleKeeper` goes. A session does **not** carry an explicit list: a layer attaches to the sessions whose labels place it, which is how deciders, services, MCP servers and the workbench's tokens already select sessions. The office stops passing an `Arc`; it names the layer and labels the worker, nothing more.
+
+  **Attachment and precedence** reproduce today's order — a fixed list of label keys, most specific first: the session's own layer, then `firm-role`, then `firm`, then the profile's layers, then global. Each key names its layer by value: a session with `firm-role=acme/engineer` gets the `acme/engineer` layer at the role slot, one with `firm=acme` gets the `acme` layer at the firm slot. The layer's name is the label's value, so attachment is a single-key lookup per slot, not an arbitrary selector, and the walk is the same as `rules.rs:82`'s.
+
+  **One label is added:** workers carry `firm`, `run`, `member`, `office` today (`lib.rs:248`) but no role — the role lives only in the `Scope::Role` name. A `firm-role` label valued `<firm>/<role>` is added so the role slot attaches by one key; `firm` already serves the firm slot. (A firm-wide layer, all roles, now falls out for free: a layer named `<firm>`.)
+
+- **(b) Rules per session.** The office writes a role's rules into each worker's own layer, and again into every worker of the role when they change. Nothing new in the core; but a role change is N writes that aren't atomic together, and `zapper rules` shows N copies. *Set aside: not atomic, and loses the one-approval-covers-the-role property.*
+- **(c) A profile per role.** Role rules in the config's profiles, changed by config changes. Atomic and visible, but every officer's approval becomes a config change, with its diff and its save. *Set aside: too heavy for a standing approval.*
 
 ### 6. Driving workers
 
@@ -127,21 +136,18 @@ Many of the office's tests run it in-process over a `TestCore` (`test_session`, 
 ## Steps
 
 1. Part 1, in any order: socket MCP servers, rule events, session creation. Each its own branch, the office moved onto it at once.
-2. Decide §5 (§4 and §6–§8 are decided). Each decision gets its own step, building what it needs in the core, with the office moved onto it in-process.
+2. §4–§8, each its own step, building what it needs in the core, with the office moved onto it in-process: a decider socket (§4), named layers attached by labels (§5), the driver crate (§6), the record check through `/v1/record` (§9).
 3. The office's tests onto the API (§10), module by module.
-4. `zapper-office` as its own executable: its listener and pages (§7), its config, its lifecycle (§8), the record check (§9); `zapper` stops linking it, and `OFFICE` only decides what `make install` installs.
+4. `zapper-office` as its own executable: its listener and pages (§7), its config, its lifecycle (§8); `zapper` stops linking it, and `OFFICE` only decides what `make install` installs.
 
 Every step needs a KVM host for `make test-e2e-office`.
 
-## Open questions
+## Decisions
 
-One is open:
-
-- §5: named shared layers in the core (a), rules per session (b), or profiles per role (c)?
-
-Decided, left here for the record:
+All of part 2 is decided; the record:
 
 - §4: a decider socket (b) — the core asks the office's socket synchronously for the referral, so the office keeps the `r-N` id and its merge/officer-pick, reached over one more `state/services/*.sock`.
+- §5: named layers in the core (a), stored through `PUT /v1/layers/{name}` and attached to sessions by their labels in a fixed key order (session, `firm-role`, `firm`, profile, global), the layer's name being the label's value. A `firm-role` label is added; `RuleKeeper` goes.
 - §6: the driver as a crate the office uses (a) — who holds a worker's terminal prompts it, and the API grows no prompt capability.
 - §7: the office's own listener (extracted from the workbench's gateway), and the `firms:` config in the office's own `office.yaml`.
 - §8: kept-until-removed, not leases, with the office resuming by cursor (the `serve` shutdown made this the cheap path). The lone remainder is whether an away office's workers are left idling or grace-stopped — leaning left running.
