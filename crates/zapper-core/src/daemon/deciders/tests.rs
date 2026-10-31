@@ -186,3 +186,119 @@ async fn with_no_decider_the_operator_decides() {
     let _io = dial(&t, &a, "api.example", 443);
     assert_eq!(pending(&t).await, 1);
 }
+
+// A decider served on a socket (`add_decider_socket`), as the office will be
+// once it is a process of its own.
+
+/// A decider on socket `name` in `state/services/`: it refers every `ask` to
+/// "the bot" as `b-N` (or refuses, when `refuse`), notes nothing for an
+/// `allowed`, and sends every call it gets to the receiver.
+fn decider_socket(
+    t: &TestCore,
+    name: &str,
+    refuse: bool,
+) -> tokio::sync::mpsc::UnboundedReceiver<zapper_policy::facility::AskCall> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use zapper_policy::facility::{AskCall, AskMethod, AskReply, Referral};
+    let listener = tokio::net::UnixListener::bind(t.core.socket_dir().join(name)).unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (tx, seen) = (tx.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(r).read_line(&mut line).await.is_err() {
+                    return;
+                }
+                let Ok(call) = serde_json::from_str::<AskCall>(&line) else {
+                    return;
+                };
+                let _ = tx.send(call.clone());
+                if matches!(call.method, AskMethod::Allowed) {
+                    return; // a note, not answered
+                }
+                let reply = if refuse {
+                    AskReply {
+                        referral: None,
+                        error: Some("the bot is away".into()),
+                    }
+                } else {
+                    let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    AskReply {
+                        referral: Some(Referral {
+                            id: format!("b-{n}"),
+                            to: "the bot".into(),
+                            then: "retry when it says so".into(),
+                        }),
+                        error: None,
+                    }
+                };
+                let mut b = serde_json::to_vec(&reply).unwrap();
+                b.push(b'\n');
+                let _ = w.write_all(&b).await;
+            });
+        }
+    });
+    rx
+}
+
+#[tokio::test]
+async fn a_socket_decider_refers_an_ask_and_hears_what_a_rule_allowed() {
+    let t = TestCore::new(CONFIG);
+    let a = session(&t, "a");
+    let mut calls = decider_socket(&t, "decider.sock", false);
+    t.core.add_decider_socket(team("a"), "decider.sock").unwrap();
+
+    // An ask is referred over the socket; the operator is not asked.
+    let _io = dial(&t, &a, "api.example", 443);
+    assert_eq!(net_event(&t, &a, 0).await["action"], "deny");
+    let log = a.requests.lock().unwrap().list();
+    assert_eq!(log[0]["error"], "access requested from the bot (b-1)");
+    assert!(t.core.approvals().is_empty(), "not the operator's");
+    let ask = calls.recv().await.unwrap();
+    assert_eq!(
+        (ask.session.as_str(), ask.host.as_str(), ask.port),
+        (a.id.as_str(), "api.example", 443)
+    );
+    assert!(matches!(ask.method, zapper_policy::facility::AskMethod::Ask));
+
+    // An allowed request: the decider is told which rule allowed it.
+    let _io = dial(&t, &a, "ok.example", 443);
+    net_event(&t, &a, 1).await;
+    let note = calls.recv().await.unwrap();
+    assert!(matches!(
+        note.method,
+        zapper_policy::facility::AskMethod::Allowed
+    ));
+    assert_eq!(note.rule.as_deref(), Some("ok"));
+}
+
+#[tokio::test]
+async fn a_socket_decider_tells_the_guest_where_its_request_went() {
+    let t = TestCore::new(CONFIG);
+    let a = session(&t, "a");
+    let _calls = decider_socket(&t, "decider.sock", false);
+    t.core.add_decider_socket(team("a"), "decider.sock").unwrap();
+    let reply = connect(&t, &a, "api.example:443").await;
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    assert!(
+        reply.contains(
+            "access to api.example:443 requested from the bot (request b-1); retry when it says so"
+        ),
+        "{reply}"
+    );
+}
+
+#[tokio::test]
+async fn a_socket_decider_that_is_away_refuses_as_a_denial() {
+    let t = TestCore::new(CONFIG);
+    let a = session(&t, "a");
+    let _calls = decider_socket(&t, "d2.sock", true);
+    t.core.add_decider_socket(team("a"), "d2.sock").unwrap();
+    let reply = connect(&t, &a, "api.example:443").await;
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    assert!(reply.contains("api.example:443 denied by "), "{reply}");
+    assert!(t.core.approvals().is_empty());
+}

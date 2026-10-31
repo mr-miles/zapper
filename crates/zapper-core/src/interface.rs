@@ -503,6 +503,11 @@ pub trait ApprovalApi {
     /// are refused at once and referred to it. The earliest registered for
     /// a session decides. Its id, for removing it.
     fn add_decider(&self, sessions: BTreeMap<String, String>, decider: Arc<dyn Decider>) -> u64;
+    /// Makes the decider a client serves on socket `socket` (a file in the
+    /// daemon's `state/services/` directory) decide the `ask`s of the
+    /// sessions `sessions` picks: each is refused at once and the core asks
+    /// the socket to refer it, naming the caller from the VM. Its id.
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64>;
     /// Hands a decider's sessions' `ask`s back to the operator.
     fn remove_decider(&self, id: u64) -> bool;
 }
@@ -518,6 +523,18 @@ impl ApprovalApi for Core {
 
     fn add_decider(&self, sessions: BTreeMap<String, String>, decider: Arc<dyn Decider>) -> u64 {
         self.d.deciders.add(sessions, decider)
+    }
+
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64> {
+        crate::daemon::services::check_socket(socket)?;
+        let path = self
+            .d
+            .paths
+            .state
+            .join(crate::daemon::services::SOCKETS_DIR)
+            .join(socket);
+        let decider = Arc::new(crate::daemon::deciders::SocketDecider::new(path));
+        Ok(self.d.deciders.add(sessions, decider))
     }
 
     fn remove_decider(&self, id: u64) -> bool {

@@ -1515,6 +1515,15 @@ firms:
             self.added.lock().unwrap().push(id);
             id
         }
+        fn add_decider_socket(
+            &self,
+            _sessions: BTreeMap<String, String>,
+            _socket: &str,
+        ) -> anyhow::Result<u64> {
+            let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+            self.added.lock().unwrap().push(id);
+            Ok(id)
+        }
         fn remove_decider(&self, id: u64) -> bool {
             self.removed.lock().unwrap().push(id);
             true

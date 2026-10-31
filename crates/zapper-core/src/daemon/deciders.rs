@@ -43,5 +43,8 @@ pub trait Decider: Send + Sync {
 /// that picks a session decides, and none is the operator.
 pub type Deciders = Registry<Arc<dyn Decider>>;
 
+mod socket;
+pub(crate) use socket::SocketDecider;
+
 #[cfg(test)]
 mod tests;
