@@ -4,6 +4,27 @@ Working notes from the unattended build of [proposal 13](proposals/13-office-pro
 on `feat/office-process`. Each is a choice made where the proposal or the code left
 something open; review and correct as needed. Delete this file before the PR merges.
 
+## Status
+
+Done, in-process, each its own commit(s), `make test` green (647) and `make lint` clean:
+
+- **§4** decider socket — trait async, core socket mechanism, office moved onto it.
+- **§5** named layers in the core, attached by a `firm-role` label; office off `shared_layers`.
+- **§6** `zapper-driver` crate (harnesses' conversation code + process driver).
+- **§9** firm turns gated on the record through `Core::record_writable()`.
+
+Not done (need a KVM host for `make test-e2e-office`, and better reviewed attended):
+
+- **§10** migrate the office's in-process `TestCore` tests to the API-over-socket pattern
+  (unit-level, no VMs, but large and mechanical — ~24k lines of tests).
+- **Step 4** `zapper-office` as its own executable: its listener/pages (§7), config
+  (`office.yaml`), lifecycle (§8, kept-until-removed + resume-by-cursor), and `zapper` no
+  longer linking it. This is the actual process split; validate with `make test-e2e-office`.
+
+Note: `make test-e2e-office` was **not run** here (no KVM); even the done steps should pass
+it before merge. The `target/` dir had filled the disk mid-session — cleared stale
+`target/debug/incremental` (15G); nothing in the repo was touched.
+
 ## §4 — decider socket
 
 - **Timeout 10s**, on no answer or an error the request is refused as a denial (per the
