@@ -501,6 +501,18 @@ impl Session {
         })
     }
 
+    /// What the session was made with besides its profile, for tests: its
+    /// extra files and forwards, and its mounts and agent as resolved.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn made_with(&self) -> serde_json::Value {
+        serde_json::json!({
+            "files": self.extra_files,
+            "forwards": self.forwards,
+            "mounts": self.resolved.mounts,
+            "agent": self.resolved.agent,
+        })
+    }
+
     /// Whether the SSH gateway may open terminals in the session.
     pub fn ssh_enabled(&self) -> bool {
         *self.ssh.borrow()

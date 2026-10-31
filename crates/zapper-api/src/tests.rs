@@ -487,6 +487,72 @@ async fn new_sessions_labels_are_checked() {
 }
 
 #[tokio::test]
+async fn a_new_session_takes_files_mounts_an_agent_overlay_and_forwards() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let made = |extra: Value| {
+        let mut body = json!({ "profile": "web", "workdir": t.workdir() });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let app = app.clone();
+        async move { post(&app, "/v1/sessions", &body.to_string()).await }
+    };
+    // With no VM to boot, the session fails after it is made, and stays
+    // listed with what it was made with.
+    let r = made(json!({
+        "files": [{ "path": "/etc/motd", "content": "hi", "mode": 420, "user_owned": false }],
+        "mounts": [{ "host": "{workdir}", "guest": "/data", "mode": "ro" }],
+        "agent_overlay": { "command": ["/bin/true"] },
+        "forwards": [{ "vsock_port": 7000, "tcp_port": 8080 }],
+    }))
+    .await;
+    assert!(
+        !r.body.contains("forward") && !r.body.contains("file"),
+        "{}",
+        r.body
+    );
+    let s = t.core.sessions().pop().expect("the session, listed");
+    let m = s.made_with();
+    assert_eq!(m["files"][0]["path"], "/etc/motd");
+    assert_eq!(m["forwards"][0]["vsock_port"], 7000);
+    assert!(m["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["guest"] == "/data"));
+    assert_eq!(m["agent"]["command"], json!(["/bin/true"]));
+
+    for (extra, why) in [
+        (
+            json!({ "files": [{ "path": "etc/motd", "content": "", "mode": 420, "user_owned": false }] }),
+            "an absolute guest path",
+        ),
+        (
+            json!({ "files": [{ "path": "/a/../b", "content": "", "mode": 420, "user_owned": false }] }),
+            "without ..",
+        ),
+        (
+            json!({ "files": [{ "path": "/big", "content": "x".repeat(200 * 1024), "mode": 420, "user_owned": false }] }),
+            "KiB in all",
+        ),
+        (
+            json!({ "mounts": [{ "host": "/srv", "guest": "/" }] }),
+            "mount",
+        ),
+        (
+            json!({ "forwards": [{ "vsock_port": 1024, "tcp_port": 22 }] }),
+            "the agent's own ports",
+        ),
+        (json!({ "agent_overlay": { "kind": 3 } }), "agent overlay"),
+    ] {
+        let r = made(extra).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{why}: {}", r.body);
+        assert!(r.body.contains(why), "{why}: {}", r.body);
+    }
+}
+
+#[tokio::test]
 async fn services_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());
