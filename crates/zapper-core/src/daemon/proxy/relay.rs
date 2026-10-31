@@ -144,21 +144,18 @@ pub(super) async fn relay_database<S>(
     // The credential goes only to its secret's hosts, as an injected one
     // does: a rule wider than them doesn't widen where the secret goes.
     if let Some(n) = &name {
-        let for_host = d
-            .config
-            .read()
-            .unwrap()
-            .secrets
-            .get(n)
-            .is_some_and(|sec| sec.allows_host(&endpoint.host));
-        if !for_host {
-            return fail(
-                403,
-                format!(
-                    "secret {n} isn't for {}: it isn't among the secret's hosts",
-                    endpoint.host
-                ),
-            );
+        let checked = match d.config.read().unwrap().secrets.get(n) {
+            Some(sec) => crate::daemon::secrets::check(
+                n,
+                sec,
+                crate::daemon::secrets::Use::Database,
+                &endpoint.host,
+                false,
+            ),
+            None => Err(format!("unknown secret {n}")),
+        };
+        if let Err(e) = checked {
+            return fail(403, e);
         }
     }
     let cred = match db_cred(d, name.as_deref()).await {

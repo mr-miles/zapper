@@ -6,6 +6,7 @@
 //! helpers directly; `stream()` and `handle()` enter it via mitm/plain/
 //! plain_inspected.
 
+use crate::daemon::secrets::{self, Use};
 use std::collections::{BTreeMap, HashMap};
 
 use super::*;
@@ -370,10 +371,9 @@ pub(super) async fn inject_for(
         used(effects, headers)
             .into_iter()
             .filter_map(|name| {
-                let secret = config.secrets.get(&name).or_else(|| own.get(&name))?;
-                let sendable = secret.allows_host(host) && (!plaintext || secret.plaintext);
-                let aws = secret.mode == zapper_policy::SecretMode::Aws;
-                let spec = secret.source.mint_spec().filter(|_| sendable && !aws)?;
+                let secret = secrets::find(&config, &own, &name)?;
+                let sendable = secrets::check(&name, secret, Use::Header, host, !plaintext).is_ok();
+                let spec = secret.source.mint_spec().filter(|_| sendable)?;
                 Some((name, spec))
             })
             .collect()
@@ -432,17 +432,9 @@ pub(crate) fn inject_with(
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
-        let secret = config
-            .secrets
-            .get(name)
-            .or_else(|| own.get(name))
-            .ok_or_else(|| format!("unknown secret {name}"))?;
-        if !secret.allows_host(host) {
-            return Err(format!("secret {name} may not be sent to {host}"));
-        }
-        if plaintext && !secret.plaintext {
-            return Err(format!("secret {name} may not be sent over plain HTTP (set plaintext: true on it to allow)"));
-        }
+        let secret =
+            secrets::find(config, own, name).ok_or_else(|| format!("unknown secret {name}"))?;
+        secrets::check(name, secret, Use::Header, host, !plaintext)?;
         match secret.source.mint_spec() {
             Some(_) => match minted.get(name) {
                 Some(v) => v
@@ -459,7 +451,7 @@ pub(crate) fn inject_with(
     for name in &effects.secrets {
         // An `aws` secret signs the request (`aws::resign`); its value never
         // goes into a header.
-        let aws = config.secrets.get(name).or_else(|| own.get(name));
+        let aws = secrets::find(config, own, name);
         if aws.is_some_and(|s| s.mode == zapper_policy::SecretMode::Aws) {
             continue;
         }

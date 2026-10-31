@@ -22,6 +22,7 @@ pub(crate) mod nic;
 pub(crate) mod proxy;
 pub mod record;
 pub(crate) mod registry;
+pub(crate) mod secrets;
 pub(crate) mod services;
 pub(crate) mod session;
 mod summary;

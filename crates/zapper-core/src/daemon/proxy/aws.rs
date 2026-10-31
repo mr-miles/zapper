@@ -669,7 +669,7 @@ pub(super) async fn resign(
     let found = {
         let config = d.config.read().unwrap();
         listed.iter().find_map(|name| {
-            let secret = config.secrets.get(name).or_else(|| own.get(name))?;
+            let secret = crate::daemon::secrets::find(&config, &own, name)?;
             (secret.mode == zapper_policy::SecretMode::Aws
                 && zapper_policy::aws_key_id(name) == signed.key_id)
                 .then(|| (name.clone(), secret.clone()))
@@ -681,14 +681,13 @@ pub(super) async fn resign(
             signed.key_id
         ));
     };
-    if !secret.allows_host(host) {
-        return Err(format!("secret {name} may not sign for {host}"));
-    }
-    if plaintext && !secret.plaintext {
-        return Err(format!(
-            "secret {name} may not sign over plain HTTP (set plaintext: true on it to allow)"
-        ));
-    }
+    crate::daemon::secrets::check(
+        &name,
+        &secret,
+        crate::daemon::secrets::Use::Sign,
+        host,
+        !plaintext,
+    )?;
     let creds = match crate::mint::secret_value(&secret.source).await {
         Ok(v) => match Creds::parse(&v) {
             Ok(c) => c,
