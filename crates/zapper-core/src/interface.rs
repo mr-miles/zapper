@@ -702,11 +702,7 @@ impl ImageApi for Core {
                 crate::images::build(
                     crate::images::Build {
                         name: &image,
-                        from: &recipe.from,
-                        run: &recipe.run,
-                        inputs: &recipe.inputs,
-                        copies: &recipe.copies,
-                        after: &recipe.after,
+                        recipe: &recipe,
                         size: size.as_deref(),
                         dir: &dir,
                     },

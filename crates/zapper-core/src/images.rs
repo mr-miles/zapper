@@ -54,20 +54,29 @@ fn mkfs_image(oci: &str, log: Log) -> Result<String> {
         return Ok(tag.into());
     }
     let work = tempdir()?;
-    std::fs::write(
-        work.join("Containerfile"),
-        "FROM docker.io/library/ubuntu:26.04\nRUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs tar && rm -rf /var/lib/apt/lists/*\n",
-    )?;
     log(&format!("building {tag}"));
-    let built = run_logged(
+    oci_build(
+        oci,
+        tag,
+        "FROM docker.io/library/ubuntu:26.04\nRUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs tar && rm -rf /var/lib/apt/lists/*\n",
+        &work,
+        log,
+    )?;
+    Ok(tag.into())
+}
+
+/// Builds `containerfile`, with `work` as its context, as image `tag`.
+fn oci_build(oci: &str, tag: &str, containerfile: &str, work: &Path, log: Log) -> Result<()> {
+    let file = work.join("Containerfile");
+    std::fs::write(&file, containerfile)?;
+    run_logged(
         Command::new(oci)
             .args(["build", "-t", tag, "-f"])
-            .arg(work.join("Containerfile"))
-            .arg(&*work),
+            .arg(&file)
+            .arg(work),
         log,
-    );
-    built.with_context(|| format!("{oci} build of {tag}"))?;
-    Ok(tag.into())
+    )
+    .with_context(|| format!("{oci} build of {tag}"))
 }
 
 /// Runs `cmd`, each line of its output (stdout and stderr) to `log` as it
@@ -258,18 +267,11 @@ fn copy_into(src: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+/// An image to build: `name`, by `recipe`, into `dir`; `size` overrides
+/// the content-based size.
 pub struct Build<'a> {
     pub name: &'a str,
-    pub from: &'a str,
-    /// Shell commands run in the image at build time, as `RUN` steps.
-    pub run: &'a [String],
-    /// Host files and directories the copies take from.
-    pub inputs: &'a [PathBuf],
-    /// After `run`, in order, as `COPY` steps (so a changed input rebuilds
-    /// only from there): which input, and where in the image.
-    pub copies: &'a [(usize, String)],
-    /// Shell commands run once the copies are in.
-    pub after: &'a [String],
+    pub recipe: &'a Recipe,
     pub size: Option<&'a str>,
     pub dir: &'a Path,
 }
@@ -291,43 +293,36 @@ pub fn check_name(name: &str) -> Result<()> {
 }
 
 pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
+    let rec = b.recipe;
     check_name(b.name)?;
     std::fs::create_dir_all(b.dir)?;
     let _lock = lock(b.dir, b.name)?;
     let oci = engine();
     let work = tempdir()?;
-    let reference = if b.run.is_empty() && b.copies.is_empty() && b.after.is_empty() {
-        log(&format!("pulling {}", b.from));
-        run(Command::new(&oci).args(["pull", "-q", b.from]))?;
-        b.from.to_string()
+    let reference = if rec.run.is_empty() && rec.copies.is_empty() && rec.after.is_empty() {
+        log(&format!("pulling {}", rec.from));
+        run(Command::new(&oci).args(["pull", "-q", &rec.from]))?;
+        rec.from.to_string()
     } else {
-        let mut file = format!("FROM {}\n", b.from);
-        for r in b.run {
+        let mut file = format!("FROM {}\n", rec.from);
+        for r in &rec.run {
             file.push_str(&format!("RUN {r}\n"));
         }
         // Each input into the build's context under a name of its own, then
         // into the image where the copies say, modes kept (a directory's
         // contents go into the directory named).
-        for (i, src) in b.inputs.iter().enumerate() {
+        for (i, src) in rec.inputs.iter().enumerate() {
             copy_into(src, &work.join(format!("input-{i}")))?;
         }
-        for (i, to) in b.copies {
+        for (i, to) in &rec.copies {
             file.push_str(&format!("COPY input-{i} {to}\n"));
         }
-        for r in b.after {
+        for r in &rec.after {
             file.push_str(&format!("RUN {r}\n"));
         }
-        std::fs::write(work.join("Containerfile"), file)?;
         let tag = format!("localhost/zapper-image-{}", b.name);
-        log(&format!("building {tag} from {}", b.from));
-        run_logged(
-            Command::new(&oci)
-                .args(["build", "-t", &tag, "-f"])
-                .arg(work.join("Containerfile"))
-                .arg(&*work),
-            log,
-        )
-        .with_context(|| format!("{oci} build"))?;
+        log(&format!("building {tag} from {}", rec.from));
+        oci_build(&oci, &tag, &file, &work, log)?;
         tag
     };
     let cid = run(Command::new(&oci).args(["create", &reference, "/bin/true"]))?;
@@ -384,7 +379,7 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
     // with the new hash, which is refused, not trusted.
     let sha256 = crate::util::sha256_file(&tmp)?;
     log(&format!("sha256 {sha256}"));
-    let meta = json!({ "name": b.name, "sha256": sha256, "from": b.from, "run": b.run, "copy": b.copies.iter().map(|(i, to)| json!({ "from": b.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": b.after, "size": size, "built": crate::util::now() as u64 });
+    let meta = json!({ "name": b.name, "sha256": sha256, "from": rec.from, "run": rec.run, "copy": rec.copies.iter().map(|(i, to)| json!({ "from": rec.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": rec.after, "size": size, "built": crate::util::now() as u64 });
     let json = b.dir.join(format!("{}.json", b.name));
     let json_tmp = b.dir.join(format!(".{}.json.tmp", b.name));
     std::fs::write(&json_tmp, serde_json::to_vec_pretty(&meta)?)?;
@@ -540,15 +535,18 @@ mod tests {
     #[test]
     fn an_image_name_cant_leave_its_directory() {
         let d = dir("names");
+        let recipe = Recipe {
+            from: "docker.io/library/ubuntu:26.04".into(),
+            run: vec![],
+            inputs: vec![],
+            copies: vec![],
+            after: vec![],
+        };
         for name in ["../x", "a/b", "", "..", ".hidden", "x y"] {
             let e = build(
                 Build {
                     name,
-                    from: "docker.io/library/ubuntu:26.04",
-                    run: &[],
-                    inputs: &[],
-                    copies: &[],
-                    after: &[],
+                    recipe: &recipe,
                     size: None,
                     dir: &d,
                 },

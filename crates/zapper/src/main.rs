@@ -1034,11 +1034,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     let out = images::build(
                         images::Build {
                             name: &name,
-                            from: &r.from,
-                            run: &r.run,
-                            inputs: &r.inputs,
-                            copies: &r.copies,
-                            after: &r.after,
+                            recipe: &r,
                             size: size.as_deref(),
                             dir: &dir,
                         },
