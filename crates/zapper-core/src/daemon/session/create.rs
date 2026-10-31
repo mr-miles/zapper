@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use super::persist::save;
 use super::run::boot;
 use super::{session_event, with_warning};
-use super::{Counters, GuestRuntime, NewSession, Rules, Saved, Session, SessionDir};
+use super::{Counters, GuestRuntime, NewSession, Rules, Saved, Session};
 use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon};
 
 /// Creates a session without booting it: its profile resolved, its
@@ -34,7 +34,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
     }
     let (memory_warning, admitted) = admit(daemon, &new.profile, resolved.engine.memory_mib)?;
     let id = random_id(6);
-    let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&id));
+    let dir = daemon.paths.session_dir(&id);
     std::fs::create_dir_all(dir.root())?;
     let audit = record::Writer::open(&dir.audit())?;
     // A firm's workers are driven by the office's foreman.
@@ -171,7 +171,7 @@ pub(super) fn assemble(
     audit: Option<record::Writer>,
     restored: bool,
 ) -> Result<Arc<Session>> {
-    let dir = SessionDir::new(daemon.paths.state.join("sessions").join(&saved.id));
+    let dir = daemon.paths.session_dir(&saved.id);
     let ttl = saved.resolved.engine.ttl_secs;
     // A persistent session's CA and synthetic names are kept, to be the same
     // after a daemon restart.

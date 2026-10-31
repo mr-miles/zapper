@@ -312,6 +312,17 @@ impl Session {
         layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
+    /// `f` over the session's layers as the running config has them now:
+    /// the config read, the layers cloned out, then `f`, with no lock held.
+    pub(crate) fn with_layers<T>(
+        &self,
+        daemon: &Daemon,
+        f: impl FnOnce(&[(Scope, &Policy)]) -> T,
+    ) -> T {
+        let layers = self.layers(&daemon.config.read().unwrap());
+        f(&Session::layers_of(&layers))
+    }
+
     /// `req` as this session asks it: with its ID and labels, for
     /// `{session}` and `{label:KEY}` in rules' paths.
     pub fn caller_of(&self, req: &zapper_policy::NetRequest) -> zapper_policy::NetRequest {

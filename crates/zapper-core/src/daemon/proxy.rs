@@ -152,11 +152,7 @@ impl Verdict {
 }
 
 async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
-    let (decision, effects) = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        evaluate_net(&Session::layers_of(&layers), &s.caller_of(req))
-    };
+    let (decision, effects) = s.with_layers(d, |layers| evaluate_net(layers, &s.caller_of(req)));
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
     let allowed = match decision.action {
@@ -404,15 +400,12 @@ async fn prepare(
     // looked up on the host, as the DNS resolver refuses it: else a rule
     // with a path, which makes every connection to its host inspected,
     // would let a guest have any name looked up.
-    let (inspect, reachable) = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        let layers = Session::layers_of(&layers);
+    let (inspect, reachable) = s.with_layers(d, |layers| {
         (
-            needs_inspection(&layers, &endpoint.host, port),
-            resolvable(&layers, &endpoint.host),
+            needs_inspection(layers, &endpoint.host, port),
+            resolvable(layers, &endpoint.host),
         )
-    };
+    });
     if inspect && !reachable && d.services.route(s, &endpoint.host, port).is_none() {
         let why = format!("refused {} (no rule allows this name)", endpoint.host);
         log(

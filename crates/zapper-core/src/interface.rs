@@ -315,9 +315,9 @@ impl SessionApi for Core {
             )
         })?;
         let findings = session::disks::findings(&session::disks::events(&text));
-        let dir = self.d.paths.state.join("sessions").join(id);
+        let dir = self.d.paths.session_dir(id);
         // Without a keeper, nothing to check the files against: said so.
-        let chain = daemon::record::verify_state_dir(&dir)
+        let chain = daemon::record::verify_state_dir(dir.root())
             .unwrap_or_else(|e| json!({ "ok": null, "note": format!("{e:#}") }));
         let ok = findings.is_empty() && chain["ok"] != json!(false);
         Ok(json!({ "session": id, "ok": ok, "chain": chain, "findings": findings }))
@@ -332,15 +332,7 @@ impl SessionApi for Core {
                 if !daemon::is_session_id(id) {
                     return Err(anyhow!("{id:?} is not a session id"));
                 }
-                Ok(daemon::record::view(
-                    &self
-                        .d
-                        .paths
-                        .state
-                        .join("sessions")
-                        .join(id)
-                        .join("audit.jsonl"),
-                ))
+                Ok(daemon::record::view(&self.d.paths.session_dir(id).audit()))
             }
         }
     }

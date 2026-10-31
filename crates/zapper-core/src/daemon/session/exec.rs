@@ -18,11 +18,7 @@ pub(super) async fn decide_exec(
     req: ExecRequest,
 ) -> bool {
     let started = Instant::now();
-    let decision = {
-        let c = daemon.config.read().unwrap();
-        let layers = session.layers(&c);
-        evaluate_exec(&Session::layers_of(&layers), &req)
-    };
+    let decision = session.with_layers(daemon, |layers| evaluate_exec(layers, &req));
     let allow = match decision.action {
         Action::Allow => true,
         Action::Deny => false,

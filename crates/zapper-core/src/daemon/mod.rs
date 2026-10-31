@@ -59,6 +59,13 @@ pub struct Paths {
     pub(crate) initrd: PathBuf,
 }
 
+impl Paths {
+    /// Session `id`'s directory in the state.
+    pub(crate) fn session_dir(&self, id: &str) -> session::SessionDir {
+        session::SessionDir::new(self.state.join("sessions").join(id))
+    }
+}
+
 // `Daemon` is never re-exported — `Core` (interface.rs) is the only public
 // handle — so its fields are `pub(crate)`, not `pub`.
 pub struct Daemon {

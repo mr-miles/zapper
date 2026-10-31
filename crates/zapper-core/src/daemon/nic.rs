@@ -113,11 +113,7 @@ async fn resolve_name(
 ) -> (u8, Option<IpAddr>, Option<String>) {
     // `ask` decides access, not resolution: a name some request could reach,
     // with or without an approval, is looked up.
-    let reachable = {
-        let c = d.config.read().unwrap();
-        let layers = s.layers(&c);
-        resolvable(&Session::layers_of(&layers), &q.name)
-    };
+    let reachable = s.with_layers(d, |layers| resolvable(layers, &q.name));
     if !reachable {
         return (dns::REFUSED, None, Some("no rule allows this name".into()));
     }
