@@ -375,7 +375,7 @@ mod tests {
             Outcome::Done
         );
         assert_eq!(end(json!({ "type": "result", "is_error": false, "result": "rate limit, API Error, in prose" })).outcome, Outcome::Done);
-        assert!(d.opening().is_empty() && d.steer("x").is_none());
+        assert!(d.steer("x").is_none());
         let line = d.prompt("hello");
         assert_eq!(
             serde_json::from_slice::<Value>(&line).unwrap()["message"]["content"][0]["text"],

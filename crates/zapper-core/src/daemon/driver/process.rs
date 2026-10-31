@@ -22,8 +22,6 @@ use crate::daemon::session::read_frame;
 pub enum Out {
     /// A turn ended.
     End(TurnEnd),
-    /// A line the protocol wants written back.
-    Write(Vec<u8>),
     /// The process exited.
     Exit(Option<i32>),
     /// The turn ran past the turn timeout.
@@ -74,10 +72,9 @@ impl Proc {
 
 pub async fn start(
     stream: UnixStream,
-    mut conv: Box<dyn Conversation>,
+    conv: Box<dyn Conversation>,
     observer: Arc<dyn Observer>,
 ) -> Result<Proc> {
-    let opening = conv.opening();
     let steers = conv.steers();
     let conv = Arc::new(std::sync::Mutex::new(conv));
     let reader = conv.clone();
@@ -151,9 +148,6 @@ pub async fn start(
                         Event::TurnEnd(t) => {
                             let _ = tx.send(Out::End(t)).await;
                         }
-                        Event::Send(line) => {
-                            let _ = tx.send(Out::Write(line)).await;
-                        }
                     }
                 }
             }
@@ -164,15 +158,11 @@ pub async fn start(
         }
         let _ = tx.send(Out::Exit(code)).await;
     });
-    let mut p = Proc {
+    Ok(Proc {
         stdin,
         events,
         conv,
         steers,
         reader: reader_task,
-    };
-    for line in opening {
-        p.write(line).await?;
-    }
-    Ok(p)
+    })
 }

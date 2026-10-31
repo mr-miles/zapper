@@ -294,11 +294,6 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break Out::Late,
                     o = p.events.recv() => match o {
-                        Some(Out::Write(line)) => {
-                            if p.write(line).await.is_err() {
-                                break Out::Exit(None);
-                            }
-                        }
                         Some(o) => break o,
                         None => break Out::Exit(None),
                     },
@@ -399,8 +394,6 @@ pub async fn run(_d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                     backoff_until = now() + rest;
                 }
             }
-            // Written while waiting for the turn's end.
-            Out::Write(_) => {}
             Out::Exit(code) => {
                 proc = None;
                 requeue(&w, ids);

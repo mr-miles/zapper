@@ -91,10 +91,6 @@ pub trait Driver: Send + Sync {
 pub trait Conversation: Send {
     /// The command line.
     fn argv(&self) -> Vec<String>;
-    /// Lines to send first (a protocol's handshake); none for Claude Code.
-    fn opening(&mut self) -> Vec<Vec<u8>> {
-        Vec::new()
-    }
     /// The line that gives the agent a prompt (a wake), with its newline.
     fn prompt(&mut self, text: &str) -> Vec<u8>;
     /// What an output line means.
@@ -125,10 +121,6 @@ pub enum Event {
     Activity(String),
     /// A turn ended.
     TurnEnd(TurnEnd),
-    /// A line to write back (a reply the protocol expects; Claude Code's
-    /// stream-json has none, opencode's ACP does).
-    #[allow(dead_code)]
-    Send(Vec<u8>),
 }
 
 #[derive(Debug, PartialEq)]
