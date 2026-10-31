@@ -47,10 +47,18 @@ impl SessionCa {
             made: i64,
         }
         let life = time::Duration::days(3650);
-        if let Ok(b) = std::fs::read(path) {
-            let k: Kept = serde_json::from_slice(&b).context("the session's CA")?;
-            let made = time::OffsetDateTime::from_unix_timestamp(k.made)?;
-            return Self::with_key(session, KeyPair::from_pem(&k.key)?, made, life);
+        // Made afresh only when there is none: one that can't be read is an
+        // error, not replaced, as the guest trusts that one.
+        match std::fs::read(path) {
+            Ok(b) => {
+                let k: Kept = serde_json::from_slice(&b).context("the session's CA")?;
+                let made = time::OffsetDateTime::from_unix_timestamp(k.made)?;
+                return Self::with_key(session, KeyPair::from_pem(&k.key)?, made, life);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("reading {}", path.display())))
+            }
         }
         let key = KeyPair::generate()?;
         let made = time::OffsetDateTime::now_utc();
@@ -290,6 +298,28 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// A kept CA that can't be read is an error, and stays as it was.
+    #[test]
+    fn an_unreadable_kept_ca_isnt_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zapper-ca-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ca.json");
+        let first = SessionCa::kept("abc234", &path).unwrap();
+        let kept = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // as root: nothing is unreadable
+        }
+        assert!(SessionCa::kept("abc234", &path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), kept, "left as it was");
+        let again = SessionCa::kept("abc234", &path).unwrap();
+        assert_eq!(again.key.public_key_der(), first.key.public_key_der());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
