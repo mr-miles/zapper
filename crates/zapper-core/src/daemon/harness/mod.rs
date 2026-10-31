@@ -297,5 +297,12 @@ mod tests {
             get("generic").unwrap().driver().is_none(),
             "a generic command can't be driven as a worker"
         );
+        // The config's list of what can be driven is these harnesses'.
+        let drivable: Vec<&str> = zapper_policy::AGENT_KINDS
+            .iter()
+            .copied()
+            .filter(|k| get(k).unwrap().driver().is_some())
+            .collect();
+        assert_eq!(drivable, zapper_policy::DRIVABLE_KINDS);
     }
 }

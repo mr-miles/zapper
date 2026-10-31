@@ -154,9 +154,6 @@ impl FakeDns {
         }
         self.by_ip.insert(ip, name.to_string());
     }
-}
-
-impl FakeDns {
     /// A synthetic IPv4 address for `name`, from the pool, stable per name.
     pub fn address(&mut self, name: &str) -> Option<Ipv4Addr> {
         if let Some(ip) = self.v4.get(name) {
@@ -348,6 +345,21 @@ impl RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every synthetic address, v4 and v6, is one the address policy keeps
+    /// the guest from reaching as a real destination.
+    #[test]
+    fn the_synthetic_pools_are_unreachable() {
+        let policy = super::super::addr::AddressPolicy::new(&[]).unwrap();
+        for ip in [
+            IpAddr::V4(Ipv4Addr::from(BASE)),
+            IpAddr::V4(Ipv4Addr::from(BASE + SIZE - 1)),
+            IpAddr::V6(Ipv6Addr::from(BASE6)),
+            IpAddr::V6(Ipv6Addr::from(BASE6 + SIZE as u128 - 1)),
+        ] {
+            assert!(policy.check(ip).is_err(), "{ip}");
+        }
+    }
 
     /// Kept names come back at the addresses they had, whatever lines
     /// around them can't be read; a new name gets one no kept name has.

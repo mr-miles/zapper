@@ -498,7 +498,7 @@ impl Daemon {
         if let Some(tx) = pending.tx.lock().unwrap().take() {
             let _ = tx.send(allow);
         }
-        let remember = remember.map(|r| format!("{r:?}").to_lowercase());
+        let remember = remember.map(|r| r.as_str().to_string());
         self.emit(
             Some(&session),
             EventBody::Answer {
