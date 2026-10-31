@@ -97,6 +97,19 @@ pub fn dial_addr(t: &TestCore, s: &Arc<Session>, ip: std::net::IpAddr, port: u16
     guest
 }
 
+/// A line the host side sent a VM's stand-in, read a byte at a time so what
+/// follows stays in the stream; what came, if the stream ended first.
+async fn line(c: &mut UnixStream) -> Vec<u8> {
+    let mut line = Vec::new();
+    while let Ok(b) = c.read_u8().await {
+        if b == b'\n' {
+            break;
+        }
+        line.push(b);
+    }
+    line
+}
+
 /// The session's net events, newest last.
 pub fn net_events(t: &TestCore, s: &Session) -> Vec<Value> {
     t.core
@@ -150,11 +163,7 @@ pub fn echoing_vm(s: &Session) {
     tokio::spawn(async move {
         while let Ok((mut c, _)) = listener.accept().await {
             tokio::spawn(async move {
-                let mut line = Vec::new();
-                let mut b = [0u8; 1];
-                while c.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
-                    line.push(b[0]);
-                }
+                let line = line(&mut c).await;
                 assert!(line.starts_with(b"CONNECT "), "{line:?}");
                 c.write_all(b"OK 1\n").await.unwrap();
                 let mut buf = [0u8; 256];
@@ -243,18 +252,10 @@ pub fn shell_vm(s: &Session) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((mut c, _)) = listener.accept().await {
-            let mut line = Vec::new();
-            let mut b = [0u8; 1];
-            while c.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
-                line.push(b[0]);
-            }
-            assert!(line.starts_with(b"CONNECT "), "{line:?}");
+            let connect = line(&mut c).await;
+            assert!(connect.starts_with(b"CONNECT "), "{connect:?}");
             c.write_all(b"OK 1\n").await.unwrap();
-            line.clear();
-            while c.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
-                line.push(b[0]);
-            }
-            let request = serde_json::from_slice(&line).unwrap();
+            let request = serde_json::from_slice(&line(&mut c).await).unwrap();
             let (read, write) = c.into_split();
             let shell = Shell {
                 request,
