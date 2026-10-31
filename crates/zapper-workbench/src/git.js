@@ -23,7 +23,7 @@
 
   async function load() {
     let g;
-    try { g = await call("GET", "/"); } catch (e) { root.replaceChildren(el("span", e.message, "muted")); return; }
+    try { g = await call("GET", ""); } catch (e) { root.replaceChildren(el("span", e.message, "muted")); return; }
     const body = el("div");
     body.append(el("div", "On this host: " + g.clone, "mono"), el("div", "From a session: git clone " + g.guests, "mono muted"));
 

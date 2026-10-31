@@ -27,7 +27,8 @@
     go("drive", "");
     parts.forEach((p, i) => go(p, parts.slice(0, i + 1).join("/")));
     let d;
-    try { d = await call("GET", "/files/" + enc(path)); } catch (e) { list.replaceChildren(el("span", e.message, "muted")); return; }
+    // The drive's top is /files, not /files/: the routes take no trailing slash.
+    try { d = await call("GET", path ? "/files/" + enc(path) : "/files"); } catch (e) { list.replaceChildren(el("span", e.message, "muted")); return; }
     list.replaceChildren();
     if (!d.entries.length) list.append(el("div", "Empty.", "muted"));
     for (const e of d.entries) {

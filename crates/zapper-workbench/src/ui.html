@@ -43,11 +43,16 @@
   .events div { padding: 2px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
   .deny-v { color: var(--deny); } .allow-v { color: var(--allow); }
   .layer { margin: 6px 0; } .layer .rule { padding-left: 12px; }
-  form.new { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
   select, input[type=text] { font: inherit; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
   #down { background: color-mix(in srgb, var(--deny) 14%, var(--card)); border-bottom: 1px solid var(--line); padding: 8px 16px; }
   details summary { cursor: pointer; color: var(--muted); }
   a.back { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .head h2 { margin: 0; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: var(--card); color: var(--fg); width: min(420px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  dialog form { display: grid; gap: 10px; }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -128,16 +133,22 @@ async function behindIds() {
 }
 views.sessions = async (main, id) => {
   if (id) return sessionPage(main, id);
-  if (may("create")) main.append(newSessionForm());
   const sec = el("section", null, "card");
-  sec.append(el("h2", "Sessions"));
+  const head = el("div", null, "head");
+  head.append(el("h2", "Sessions"));
+  if (may("create")) {
+    const add = el("button", "Start new", "primary");
+    add.onclick = startDialog;
+    head.append(add);
+  }
+  sec.append(head);
   const grid = el("div", null, "grid");
   sec.append(grid);
   main.append(sec);
   const cards = async () => {
     const [ss, behind] = await Promise.all([api("GET", "/sessions"), behindIds()]);
     grid.replaceChildren();
-    if (!ss.length) grid.append(el("div", "None yet." + (may("create") ? " Start one above." : ""), "muted"));
+    if (!ss.length) grid.append(el("div", "None yet." + (may("create") ? " Start one with Start new." : ""), "muted"));
     ss.sort((a, b) => (b.created || 0) - (a.created || 0));
     for (const s of ss) {
       const c = el("div", null, "scard");
@@ -153,30 +164,37 @@ views.sessions = async (main, id) => {
   await cards();
   refreshCards = () => cards().catch(() => {});
 };
-function newSessionForm() {
-  const sec = el("section", null, "card");
-  sec.append(el("h2", "New session"));
-  const form = el("form", null, "new");
+// Starting a session: its options in a modal, over the cards.
+function startDialog() {
+  const dlg = document.createElement("dialog");
+  const form = el("form");
+  form.method = "dialog";
   const sel = document.createElement("select");
   const persistent = Object.assign(document.createElement("input"), { type: "checkbox" });
   const ssh = Object.assign(document.createElement("input"), { type: "checkbox" });
-  const lab = (text, input) => { const l = el("label"); l.style.display = "flex"; l.style.gap = "6px"; l.style.alignItems = "center"; l.append(input, el("span", text)); return l; };
-  const prof = el("label"); prof.style.display = "grid"; prof.append(el("span", "Profile", "muted"), sel);
-  const go = el("button", "Start", "primary"); go.type = "submit";
+  const lab = (text, input) => { const l = el("label"); l.style.display = "flex"; l.style.gap = "8px"; l.style.alignItems = "center"; l.append(input, el("span", text)); return l; };
+  const prof = el("label"); prof.style.display = "grid"; prof.style.gap = "4px"; prof.append(el("span", "Profile", "muted"), sel);
   const note = el("div", "", "muted");
-  form.append(prof, lab("keep its disks (persistent)", persistent), lab("SSH on", ssh), go);
-  sec.append(form, note);
-  api("GET", "/profiles").then(ps => { for (const p of ps) sel.append(el("option", p)); }).catch(e => { note.className = "err"; note.textContent = e.message; });
+  const cancel = el("button", "Cancel"); cancel.type = "button"; cancel.onclick = () => dlg.close();
+  const go = el("button", "Start", "primary"); go.type = "submit";
+  const actions = el("div", null, "actions"); actions.append(cancel, go);
+  form.append(el("h2", "Start a new session"), prof, lab("Keep its disks (persistent)", persistent), lab("SSH on", ssh), note, actions);
+  dlg.append(form);
+  dlg.addEventListener("close", () => dlg.remove());
+  // A click on the backdrop, outside the box, closes it.
+  dlg.addEventListener("click", e => { if (e.target === dlg) dlg.close(); });
+  document.body.append(dlg);
+  dlg.showModal();
+  api("GET", "/profiles").then(ps => { for (const p of ps) sel.append(el("option", p)); sel.focus(); }).catch(e => { note.className = "err"; note.textContent = e.message; });
   form.onsubmit = async e => {
     e.preventDefault();
-    go.disabled = true; note.className = "muted"; note.textContent = "Starting…";
+    go.disabled = cancel.disabled = true; note.className = "muted"; note.textContent = "Starting… (it boots its VM)";
     try {
       const s = await api("POST", "/sessions", { profile: sel.value, persistent: persistent.checked, ssh: ssh.checked });
+      dlg.close();
       location.hash = "sessions/" + s.id;
-    } catch (x) { note.className = "err"; note.textContent = x.message; }
-    go.disabled = false;
+    } catch (x) { note.className = "err"; note.textContent = x.message; go.disabled = cancel.disabled = false; }
   };
-  return sec;
 }
 
 // A rule, as one line.
