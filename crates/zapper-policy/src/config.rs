@@ -962,7 +962,7 @@ impl Config {
 
     /// The config's policy layers, the global one first, then each
     /// profile's.
-    fn layers(&self) -> impl Iterator<Item = (Scope, &Policy)> {
+    pub fn layers(&self) -> impl Iterator<Item = (Scope, &Policy)> {
         let profiles = self
             .profiles
             .iter()

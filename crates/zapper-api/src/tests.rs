@@ -460,7 +460,11 @@ async fn rules_added_to_a_session_are_its_own_and_an_event() {
     let id = r.json()["id"].as_str().unwrap().to_string();
     assert!(id.starts_with("s-"), "{id}");
     let last = serde_json::to_value(t.core.recent_events(Some(&s)).last().unwrap()).unwrap();
-    assert_eq!(last["type"], "config", "{last}");
+    assert_eq!(last["type"], "rule", "{last}");
+    assert_eq!(
+        (last["state"].as_str(), last["id"].as_str()),
+        (Some("added"), Some(id.as_str()))
+    );
     let gone = send(&app, Method::DELETE, &format!("/v1/rules/{id}"), &[], "").await;
     assert_eq!(gone.json()["scope"], format!("session:{s}"));
 }

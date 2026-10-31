@@ -364,18 +364,7 @@ impl RuleApi for Core {
         rule: AnyRule,
         position: Option<usize>,
     ) -> AnyRule {
-        let rule = s.add_rule(rule, position);
-        self.d.emit(
-            Some(s),
-            EventBody::Config {
-                change: format!(
-                    "rule {} added to {}",
-                    rule.id().unwrap_or("?"),
-                    Scope::Session(s.id.clone())
-                ),
-            },
-        );
-        rule
+        s.add_rule(rule, position)
     }
 
     fn rule_layers(&self) -> Vec<(Scope, Policy)> {
@@ -400,8 +389,25 @@ impl RuleApi for Core {
         // through it, so its records agree.
         let keepers = self.d.clients.rule_keepers.read().unwrap().clone();
         for k in keepers {
+            let held = k.layers().into_iter().find_map(|(scope, p)| {
+                p.rules()
+                    .into_iter()
+                    .find(|r| r.id() == Some(id))
+                    .map(|r| (scope, r))
+            });
             if let Some(r) = k.remove(id) {
                 r?;
+                if let Some((scope, rule)) = held {
+                    self.d.emit(
+                        None,
+                        EventBody::Rule {
+                            state: "removed".into(),
+                            id: id.to_string(),
+                            scope: scope.to_string(),
+                            kind: rule.kind().to_string(),
+                        },
+                    );
+                }
                 return Ok(RuleRemoval::Revoked);
             }
         }

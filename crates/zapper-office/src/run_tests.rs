@@ -564,9 +564,9 @@ fn rule_changes(t: &TestCore, run: &FirmRun, worker: &str) -> Vec<String> {
     t.core
         .recent_events(Some(&s.id))
         .into_iter()
-        .map(|e| serde_json::to_value(e).unwrap())
-        .filter(|e| e["type"] == "config")
-        .map(|e| e["change"].as_str().unwrap().to_string())
+        .map(|e| e.view())
+        .filter(|e| e["type"] == "rule")
+        .map(|e| e["summary"].as_str().unwrap_or_default().to_string())
         .collect()
 }
 
