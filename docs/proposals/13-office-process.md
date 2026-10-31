@@ -1,6 +1,6 @@
 # The office as a process of its own
 
-Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §6 (the driver as a crate), §7 (its own listener and its own config file), and §8 (kept-until-removed, resuming by cursor) are decided; §4 and §5 are still for discussion.
+Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §4 (a decider socket), §6 (the driver as a crate), §7 (its own listener and its own config file), and §8 (kept-until-removed, resuming by cursor) are decided; §5 is the last decision open.
 
 The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is: it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
 
@@ -73,10 +73,12 @@ Tests: each field reaches the session as the in-process path gives it; one out o
 
 ### 4. Deciders: who decides a firm's `ask`
 
-Today `Decider::ask` is called in-process when a rule asks: the request is refused at once with a `Referral` (where it went, what to do meanwhile), and the officers decide later, the decision coming back as a rule on the session (`deciders.rs`). Over the socket:
+*Decided: (b), a decider socket.*
 
-- **(a) Referrals as events.** A client registers a decider for a label selector (`POST /v1/deciders {sessions, to}`); a matching `ask` is refused at once with a referral the core makes (its id, `to`, a fixed "then"), and a `referral` event goes on the stream. The client decides in its own time and answers with rules through the API. Simple, and resumable through the event cursor; but the "then" text, which the office words per request today, becomes fixed or a template.
-- **(b) A decider socket**, as for MCP servers: the core asks the client's socket synchronously, within a short timeout, for the referral; on no answer, the request is refused as a denial. Keeps the office's wording; one more socket protocol.
+Today `Decider::ask` is called in-process when a rule asks: the request is refused at once with a `Referral` (where it went, what to do meanwhile), and the officers decide later, the decision coming back as a rule on the session (`deciders.rs`, `proxy.rs:156`). The referral the agent is shown — `access to {what} requested from {to} (request {id}); {then}` — is assembled by the core (`proxy.rs:130`) from the office's `Referral`. What the office puts there matters to the choice: `to` ("security") and `then` are fixed strings, but the **`id` (`r-N`) is office state** — its counter (`security.rs:224`), reused when a worker re-asks the same host (the merge path returns the same id, `security.rs:205`), and the handle the officers' decision, the mail and the request log all carry. Over the socket:
+
+- **(b, chosen) A decider socket**, as for the §1 MCP servers: on an `ask` the core asks the office's socket synchronously, within a short timeout, for the referral; the office runs its merge, `MAX_PENDING` and officer-pick and returns `{id, to, then}`, so the real `r-N` is in the refusal and the request log at once, exactly as today. On no answer the request is denied, no referral. Chosen because the id is the office's to allocate at refusal time, and the socket pattern already exists (one more `state/services/*.sock`), so the synchronous call is short and unexotic.
+- **(a) Referrals as events.** The core refuses with a referral it makes and emits a `referral` event; the office allocates `r-N`, merges and decides off the stream. Resumable by cursor and the cleanest separation (the core never touches an office id) — but then `r-N` can't appear in the agent's immediate refusal or the core's request log; it reaches the worker only by mail, and the merge-stable id isn't echoed on retries. Set aside: it changes what the agent sees for a separation the socket doesn't actually cost us.
 - **Either way:** `final` rules stay above every decider; and when the decider's client is gone, its sessions' `ask`s are refused as denials (not sent to the operator, which would bypass the officers), until it registers again or the registration is removed.
 
 ### 5. Role policy: shared layers, or rules per session
@@ -125,7 +127,7 @@ Many of the office's tests run it in-process over a `TestCore` (`test_session`, 
 ## Steps
 
 1. Part 1, in any order: socket MCP servers, rule events, session creation. Each its own branch, the office moved onto it at once.
-2. Decide §4 and §5 (§6–§8 are decided). Each decision gets its own step, building what it needs in the core, with the office moved onto it in-process.
+2. Decide §5 (§4 and §6–§8 are decided). Each decision gets its own step, building what it needs in the core, with the office moved onto it in-process.
 3. The office's tests onto the API (§10), module by module.
 4. `zapper-office` as its own executable: its listener and pages (§7), its config, its lifecycle (§8), the record check (§9); `zapper` stops linking it, and `OFFICE` only decides what `make install` installs.
 
@@ -133,13 +135,13 @@ Every step needs a KVM host for `make test-e2e-office`.
 
 ## Open questions
 
-Two are open:
+One is open:
 
-- §4: referrals as events (a), or a decider socket (b)?
 - §5: named shared layers in the core (a), rules per session (b), or profiles per role (c)?
 
 Decided, left here for the record:
 
+- §4: a decider socket (b) — the core asks the office's socket synchronously for the referral, so the office keeps the `r-N` id and its merge/officer-pick, reached over one more `state/services/*.sock`.
 - §6: the driver as a crate the office uses (a) — who holds a worker's terminal prompts it, and the API grows no prompt capability.
 - §7: the office's own listener (extracted from the workbench's gateway), and the `firms:` config in the office's own `office.yaml`.
 - §8: kept-until-removed, not leases, with the office resuming by cursor (the `serve` shutdown made this the cheap path). The lone remainder is whether an away office's workers are left idling or grace-stopped — leaning left running.
