@@ -628,6 +628,7 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     }
     crate::subids::release(&session.id);
     session.runtime.clear_guest();
+    daemon.drop_approvals(session);
     if let Some(reason) = reason {
         daemon.emit(
             Some(session),

@@ -66,3 +66,46 @@ async fn an_ask_waits_for_the_operators_answer() {
     assert_eq!(&buf, b"hi");
     assert_eq!(net_event(&t, &s, 0).await["action"], "allow");
 }
+
+/// A session's approvals go when it stops, refused, and so does one whose
+/// asker is dropped: none stays listed with nobody waiting on it.
+#[tokio::test]
+async fn approvals_go_with_their_session_and_their_asker() {
+    let t = TestCore::new("profiles:\n  web: {}\n");
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    let ask = |subject: &str| {
+        let (d, s, subject) = (t.core.daemon().clone(), s.clone(), subject.to_string());
+        tokio::spawn(async move {
+            let rule =
+                serde_yaml::from_str("{ kind: net, action: allow, host: x.example }").unwrap();
+            d.ask(&s, zapper_policy::Kind::Net, subject, rule).await
+        })
+    };
+    let listed = || async {
+        for _ in 0..100 {
+            if !t.core.approvals().is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("never listed");
+    };
+
+    let dropped = ask("connect a.example:443");
+    listed().await;
+    dropped.abort();
+    let _ = dropped.await;
+    assert!(t.core.approvals().is_empty(), "unlisted with its asker");
+
+    let waiting = ask("connect b.example:443");
+    listed().await;
+    crate::daemon::session::stop(t.core.daemon(), &s, "stopped").await;
+    assert!(t.core.approvals().is_empty(), "unlisted with its session");
+    assert!(!waiting.await.unwrap(), "refused");
+}

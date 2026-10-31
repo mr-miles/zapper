@@ -385,6 +385,15 @@ impl Daemon {
         if !self.approvals.register(pending) {
             return false;
         }
+        // Unlisted however the wait ends, also when the request waiting on
+        // it is dropped (its connection gone).
+        struct Unlist<'a>(&'a approvals::Approvals, String);
+        impl Drop for Unlist<'_> {
+            fn drop(&mut self) {
+                self.0.take(&self.1);
+            }
+        }
+        let _unlist = Unlist(&self.approvals, id.clone());
         self.emit(
             Some(session),
             EventBody::Ask {
@@ -414,6 +423,21 @@ impl Daemon {
 
     pub fn approvals(&self) -> Vec<Pending> {
         self.approvals.list()
+    }
+
+    /// Refuses and unlists a stopped session's outstanding approvals, each
+    /// answer in its events.
+    pub(crate) fn drop_approvals(&self, session: &Session) {
+        for p in self.approvals.take_session(&session.id) {
+            self.emit(
+                Some(session),
+                EventBody::Answer {
+                    id: p.id,
+                    allow: false,
+                    remember: Some("session stopped".into()),
+                },
+            );
+        }
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
