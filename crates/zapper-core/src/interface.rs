@@ -107,6 +107,14 @@ impl Core {
         daemon::record::healthy()
     }
 
+    /// The shared policy layer named `name`: a handle a client keeps a set
+    /// of rules in (a firm role's), which sessions attach by their
+    /// `firm-role` label. Created empty if new; every session carrying the
+    /// label sees its rules.
+    pub fn named_layer(&self, name: &str) -> Arc<std::sync::RwLock<Policy>> {
+        self.d.named_layer(name)
+    }
+
     /// The token the UI's first request carries.
     pub fn ui_token(&self) -> &str {
         &self.d.ui_token

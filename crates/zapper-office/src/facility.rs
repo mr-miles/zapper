@@ -541,7 +541,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         profile: f.profile.clone(),
         workdir: run.dir.join("empty"),
         policy: Policy::default(),
-        labels: super::labels(&run.firm, &run.id, CLUSTER, false),
+        labels: super::labels(&run.firm, &run.id, CLUSTER, "", false),
         shared_layers: vec![],
         files: vec![],
         mounts: vec![],

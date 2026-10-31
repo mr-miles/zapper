@@ -446,10 +446,17 @@ fn create_run(
     }
     let journal = Journal::create(&dir.join("journal.jsonl"))?;
     let domain = firm.domain(name);
-    let roles = firm
+    // Each role's shared layer lives in the core, named `<firm>/<role>`;
+    // workers attach it by their `firm-role` label. Reset to empty for this
+    // run (the registry outlives a run, which starts with no approvals).
+    let roles: std::collections::BTreeMap<_, _> = firm
         .roles
         .keys()
-        .map(|r| (r.clone(), Arc::new(RwLock::new(Policy::default()))))
+        .map(|r| {
+            let layer = d.named_layer(&format!("{name}/{r}"));
+            *layer.write().unwrap() = Policy::default();
+            (r.clone(), layer)
+        })
         .collect();
     let workers = firm
         .workers
@@ -581,11 +588,8 @@ fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
             .and_then(|x| x.profile.clone())
             .unwrap_or_else(|| run.config.roles[&w.role].profile.clone());
         let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
-        new.labels = labels(&run.firm, &run.id, &w.name, true);
-        new.shared_layers = vec![(
-            zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
-            run.roles[&w.role].clone(),
-        )];
+        // The role's shared layer is attached by the `firm-role` label.
+        new.labels = labels(&run.firm, &run.id, &w.name, &w.role, true);
         *w.session.lock().unwrap() = Some(d.test_session(new, true).unwrap());
         access::reapply(d, &run, &w.name);
     }
@@ -811,12 +815,9 @@ pub(crate) async fn boot_worker(
         profile: profile_name,
         workdir: run.dir.join("empty"),
         policy: Policy::default(),
-        labels: labels(&run.firm, &run.id, &w.name, true),
-        // The role's layer, which every worker of the role shares.
-        shared_layers: vec![(
-            zapper_policy::Scope::Role(format!("{}/{}", run.firm, w.role)),
-            run.roles[&w.role].clone(),
-        )],
+        // The role's shared layer is attached by the `firm-role` label.
+        labels: labels(&run.firm, &run.id, &w.name, &w.role, true),
+        shared_layers: vec![],
         files,
         mounts: vec![],
         agent_overlay: Some(overlay),

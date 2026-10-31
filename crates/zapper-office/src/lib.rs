@@ -249,9 +249,10 @@ pub(crate) fn labels(
     firm: &str,
     run: &str,
     member: &str,
+    role: &str,
     worker: bool,
 ) -> BTreeMap<String, String> {
-    [
+    let mut m: BTreeMap<String, String> = [
         ("firm", firm),
         ("run", run),
         ("member", member),
@@ -259,7 +260,13 @@ pub(crate) fn labels(
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
+    .collect();
+    // A worker of a role attaches that role's shared layer by this label; its
+    // value is the layer's name (`Core::named_layer`).
+    if !role.is_empty() {
+        m.insert("firm-role".to_string(), format!("{firm}/{role}"));
+    }
+    m
 }
 
 /// The run a session belongs to, from its labels: the firm's run, if it is
@@ -781,7 +788,7 @@ mod tests {
     fn a_session_finds_no_run_its_firm_doesnt_have() {
         let t = super::test_core("profiles:\n  w: {}\n");
         let mut new = zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default());
-        new.labels = super::labels("acme", "r1", "pat", true);
+        new.labels = super::labels("acme", "r1", "pat", "", true);
         let worker = t.core.test_session(new, true).unwrap();
         let plain = t
             .core
@@ -797,19 +804,21 @@ mod tests {
 
     #[test]
     fn a_firms_sessions_are_labelled_with_the_run() {
-        let w = super::labels("acme", "20261022-101500-k3z", "pat", true);
+        let w = super::labels("acme", "20261022-101500-k3z", "pat", "eng", true);
         let v: Vec<(&str, &str)> = w.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(
             v,
             [
                 ("firm", "acme"),
+                ("firm-role", "acme/eng"),
                 ("member", "pat"),
                 ("office", "worker"),
                 ("run", "20261022-101500-k3z")
             ]
         );
-        let f = super::labels("acme", "r", "cluster", false);
+        let f = super::labels("acme", "r", "cluster", "", false);
         assert_eq!(f["office"], "facility");
+        assert!(!f.contains_key("firm-role"), "a facility has no role");
     }
 
     #[test]

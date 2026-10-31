@@ -81,7 +81,7 @@ fn a_session_finds_its_run_by_its_labels() {
 
     // A session from an earlier run of the firm: not this run's.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    old.labels = labels("acme", "an-earlier-run", "pat", true);
+    old.labels = labels("acme", "an-earlier-run", "pat", "", true);
     let old = t.core.test_session(old, true).unwrap();
     assert!(run_of(&t.core.office(), &old).is_none());
 }
@@ -270,7 +270,7 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     let (t, run) = run();
     let d = run.domain.clone();
     let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, false);
+    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
     facility::test_cluster(&t.core, &run, &cluster);
     let pat = session_of(&run, "pat");
@@ -354,7 +354,7 @@ async fn the_office_port_answers_for_the_vm_it_serves() {
 
     // A VM of an earlier run: its firm isn't running for it.
     let mut old = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    old.labels = labels("acme", "an-earlier-run", "pat", true);
+    old.labels = labels("acme", "an-earlier-run", "pat", "", true);
     let old = t.core.test_session(old, true).unwrap();
     let r = office(&t, &old, r#"{"op":"directory"}"#).await;
     assert_eq!(r["error"], "the firm isn't running");
