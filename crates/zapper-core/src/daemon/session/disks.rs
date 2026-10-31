@@ -277,13 +277,9 @@ pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
 /// event (`image`). One changed since is refused unless
 /// `accept_changed_image`; one built before images were hashed is recorded
 /// as unverified, and used.
-pub(super) async fn check_image(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    image: &std::path::Path,
-) -> Result<()> {
+pub(super) async fn check_image(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let name = session.resolved.engine.image.clone();
-    let path = image.to_path_buf();
+    let path = daemon.paths.images.join(format!("{name}.ext4"));
     let hash = tokio::task::spawn_blocking(move || crate::util::sha256_file(&path)).await??;
     let built = crate::images::built_hash(&daemon.paths.images, &name);
     let (changed, detail) = match &built {
@@ -536,13 +532,13 @@ mod image_tests {
     #[tokio::test]
     async fn a_persistent_sessions_image_is_checked_against_its_build() {
         let t = TestCore::new(CONFIG);
-        let path = image(&t, Some(b"as built"), b"as built");
+        image(&t, Some(b"as built"), b"as built");
         let s = session(&t, false);
-        check_image(t.core.daemon(), &s, &path).await.unwrap();
+        check_image(t.core.daemon(), &s).await.unwrap();
         assert_eq!(image_event(&t, &s), "image web as it was built");
 
-        let path = image(&t, Some(b"as built"), b"changed");
-        let e = check_image(t.core.daemon(), &s, &path).await.unwrap_err();
+        image(&t, Some(b"as built"), b"changed");
+        let e = check_image(t.core.daemon(), &s).await.unwrap_err();
         assert!(
             e.to_string()
                 .contains("image web changed since it was built"),
@@ -551,18 +547,16 @@ mod image_tests {
         assert_eq!(image_event(&t, &s), "image web changed since it was built");
 
         let accepting = session(&t, true);
-        check_image(t.core.daemon(), &accepting, &path)
-            .await
-            .unwrap();
+        check_image(t.core.daemon(), &accepting).await.unwrap();
         assert!(image_event(&t, &accepting).ends_with("used as it is, as asked"));
     }
 
     #[tokio::test]
     async fn an_image_built_before_hashing_is_unverified_and_used() {
         let t = TestCore::new(CONFIG);
-        let path = image(&t, None, b"old");
+        image(&t, None, b"old");
         let s = session(&t, false);
-        check_image(t.core.daemon(), &s, &path).await.unwrap();
+        check_image(t.core.daemon(), &s).await.unwrap();
         assert!(
             image_event(&t, &s).contains("unverified"),
             "{}",

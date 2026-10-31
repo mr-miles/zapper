@@ -75,7 +75,7 @@ fn with_warning(detail: String, warning: &Option<String>) -> String {
 /// Opens the session's vsock at `path` and asks the guest for `port`,
 /// returning the stream once the guest answers `OK `. A connect/write failure
 /// propagates; a refusal is reported as `refused: <the guest's line>`.
-async fn connect_vsock(path: PathBuf, port: &str, refused: &str) -> Result<UnixStream> {
+async fn connect_vsock(path: PathBuf, port: u32, refused: &str) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(&path).await?;
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
@@ -192,8 +192,6 @@ pub struct SessionInfo {
 
 impl Session {
     pub fn info(&self) -> SessionInfo {
-        let c = &self.counters;
-        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
         SessionInfo {
             id: self.id.clone(),
             profile: self.profile.clone(),
@@ -210,11 +208,7 @@ impl Session {
             user: self.resolved.agent.user.clone(),
             root: self.resolved.agent.root,
             workdir: self.workdir.display().to_string(),
-            counters: serde_json::json!({
-                "net_allowed": get(&c.net_allowed), "net_denied": get(&c.net_denied),
-                "exec_allowed": get(&c.exec_allowed), "exec_denied": get(&c.exec_denied),
-                "exits": get(&c.exits), "shells": get(&c.shells),
-            }),
+            counters: serde_json::to_value(&self.counters).unwrap_or_default(),
             usage: self.usage.lock().unwrap().clone(),
             rules: self.rules.list().len(),
             firm: self.label("firm").map(str::to_string),
@@ -235,7 +229,7 @@ impl Session {
     pub async fn connect_port(&self, port: u32) -> Result<UnixStream> {
         connect_vsock(
             self.vsock_path(),
-            &port.to_string(),
+            port,
             &format!("the VM refused port {port}"),
         )
         .await
@@ -474,12 +468,8 @@ impl Session {
             }
         };
         req.id = id;
-        let mut stream = connect_vsock(
-            self.dir.vsock(),
-            &SHELL_PORT.to_string(),
-            "guest refused terminal",
-        )
-        .await?;
+        let mut stream =
+            connect_vsock(self.vsock_path(), SHELL_PORT, "guest refused terminal").await?;
         let mut json = serde_json::to_vec(&req)?;
         json.push(b'\n');
         stream.write_all(&json).await?;

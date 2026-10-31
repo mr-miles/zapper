@@ -139,7 +139,6 @@ pub struct VmSpec<'a> {
     pub firecracker: &'a Path,
     pub kernel: PathBuf,
     pub initrd: &'a Path,
-    pub root: PathBuf,
     /// Extra disks, attached as `/dev/vdb`, `/dev/vdc`, …
     pub disks: Vec<(PathBuf, bool)>,
     pub engine: &'a Engine,
@@ -277,7 +276,7 @@ fn is_vmm_of(pid: u32, id: &str) -> bool {
 /// Starts the VMM. Its serial console goes to `console.log`, capped.
 pub async fn start(spec: VmSpec<'_>) -> Result<Child> {
     let mut drives = vec![json!({
-        "drive_id": "root", "path_on_host": spec.root, "is_root_device": false, "is_read_only": false,
+        "drive_id": "root", "path_on_host": spec.dir.root_disk(), "is_root_device": false, "is_read_only": false,
     })];
     for (i, (path, ro)) in spec.disks.iter().enumerate() {
         drives.push(json!({ "drive_id": format!("d{i}"), "path_on_host": path, "is_root_device": false, "is_read_only": ro }));

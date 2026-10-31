@@ -42,7 +42,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     if !kept(&root) {
         let image = daemon.paths.images.join(format!("{}.ext4", engine.image));
         if session.persistent {
-            check_image(daemon, session, &image).await?;
+            check_image(daemon, session).await?;
         }
         vm::root_disk(&image, &root, vm::parse_size(&engine.disk)?)
             .await
@@ -101,7 +101,6 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
         firecracker: &daemon.paths.firecracker,
         kernel: daemon.paths.kernels.join(&engine.kernel),
         initrd: &daemon.paths.initrd,
-        root,
         disks,
         engine,
         dir,
