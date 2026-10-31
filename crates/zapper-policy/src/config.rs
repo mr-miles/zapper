@@ -987,6 +987,20 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
+        self.check_rules(&mut errors);
+        self.check_secrets(&mut errors);
+        self.check_images(&mut errors);
+        self.check_profiles(&mut errors);
+        self.check_daemon(&mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("invalid config:\n  {}", errors.join("\n  "))
+        }
+    }
+
+    /// Every layer's rules: unique ids, valid globs, the secrets they name, a database rule's shape.
+    fn check_rules(&self, errors: &mut Vec<String>) {
         let mut seen = BTreeSet::new();
         let mut layers = vec![(Scope::Global, &self.policy)];
         layers.extend(
@@ -1005,14 +1019,18 @@ impl Config {
             }
             for r in &policy.net {
                 let id = r.id.as_deref().unwrap_or("?");
-                let refs = r.set_headers.values().flat_map(|v| crate::secret_refs(v));
-                for s in r.secrets.iter().cloned().chain(refs) {
-                    if !self.secrets.contains_key(&s) {
+                let refs: Vec<String> = r
+                    .set_headers
+                    .values()
+                    .flat_map(|v| crate::secret_refs(v))
+                    .collect();
+                for s in r.secrets.iter().chain(&refs) {
+                    if !self.secrets.contains_key(s) {
                         errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
                     }
                 }
-                for s in r.set_headers.values().flat_map(|v| crate::secret_refs(v)) {
-                    if matches!(self.secrets.get(&s), Some(x) if x.mode == SecretMode::Aws) {
+                for s in &refs {
+                    if matches!(self.secrets.get(s), Some(x) if x.mode == SecretMode::Aws) {
                         errors.push(format!(
                             "{scope}: rule {id}: aws secret {s} signs requests; it can't be a header's value"
                         ));
@@ -1045,6 +1063,10 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// The secrets: their sources and modes, and fake AWS key ids that don't collide.
+    fn check_secrets(&self, errors: &mut Vec<String>) {
         for (name, s) in &self.secrets {
             if let SecretSource::Command {
                 command,
@@ -1108,6 +1130,10 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// The image recipes: their names, args and copies.
+    fn check_images(&self, errors: &mut Vec<String>) {
         for (name, r) in &self.images {
             if name.is_empty()
                 || !name
@@ -1142,16 +1168,18 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Each profile resolved, with ports the guest can offer and a driven agent the driver can run.
+    fn check_profiles(&self, errors: &mut Vec<String>) {
         for name in self.profiles.keys() {
-            if let Err(e) = self.resolve(name) {
-                errors.push(format!("profile {name}: {e:#}"));
-            }
-        }
-        for (name, p) in self
-            .profiles
-            .keys()
-            .filter_map(|n| Some((n, self.resolve(n).ok()?)))
-        {
+            let p = match self.resolve(name) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(format!("profile {name}: {e:#}"));
+                    continue;
+                }
+            };
             for port in &p.engine.ports {
                 let reserved = [
                     crate::proto::CONTROL_PORT,
@@ -1180,17 +1208,16 @@ impl Config {
                 ));
             }
         }
+    }
+
+    /// The daemon's own settings.
+    fn check_daemon(&self, errors: &mut Vec<String>) {
         if let Some(r) = self.daemon.memory_overcommit {
             if !(r.is_finite() && r > 0.0) {
                 errors.push(format!(
                     "daemon.memory_overcommit is {r}; it must be a number above 0"
                 ));
             }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            bail!("invalid config:\n  {}", errors.join("\n  "))
         }
     }
 
