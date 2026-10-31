@@ -25,7 +25,7 @@ use super::Body;
 
 /// RFC 3986's unreserved characters: decoding them never changes a URL's
 /// meaning.
-fn unreserved(b: u8) -> bool {
+pub(super) fn unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
 
@@ -136,12 +136,18 @@ const OVERRIDE_PARAMS: [&str; 3] = ["_method", "_httpmethod", "$httpmethod"];
 
 /// Percent-decoded, `+` as a space: as a framework reads a query.
 fn query_decode(s: &str) -> String {
+    percent_decode(s, true)
+}
+
+/// `s` percent-decoded, a `%` not followed by two hex digits kept as it
+/// is; `+` as a space too when `plus_is_space` (a form's encoding).
+pub(super) fn percent_decode(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => out.push(b' '),
+            b'+' if plus_is_space => out.push(b' '),
             b'%' => match (
                 bytes.get(i + 1).copied().and_then(hex),
                 bytes.get(i + 2).copied().and_then(hex),
@@ -495,6 +501,16 @@ impl HttpBody for Masked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One decoding for a query (`+` a space) and for AWS's (`+` itself);
+    /// a `%` without two hex digits stays.
+    #[test]
+    fn percent_decoding_with_and_without_plus() {
+        assert_eq!(percent_decode("a%20b+c%2Fd", true), "a b c/d");
+        assert_eq!(percent_decode("a%20b+c%2Fd", false), "a b+c/d");
+        assert_eq!(percent_decode("100%", false), "100%");
+        assert_eq!(percent_decode("%zz%4", true), "%zz%4");
+    }
 
     #[test]
     fn paths_are_judged_as_the_upstream_reads_them() {
