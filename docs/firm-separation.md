@@ -180,7 +180,7 @@ New ones for the core: a service is reachable only from the sessions it is regis
 
 ## Restarts
 
-One process, as today: when the daemon stops, the office stops its firms first (the core tells registered clients), sessions end, and a run is not resumed.
+One process, as today: when the daemon stops, the office stops its firms first (the core tells registered clients), sessions end, and a run is not resumed. [Proposal 13 §8](proposals/13-office-process.md) covers the two-process case, on the `serve` shutdown that has since landed.
 
 ## Steps
 
@@ -210,6 +210,8 @@ The same features work across a process boundary with three additions: the REST 
 
 ## Open questions
 
-- Firm config: a `firms` section the office parses and validates (the core checks only that a client claimed it), or the office's own file. The first keeps one config and one `config diff`.
-- Per-role policy: rules on each worker's session (simple, and the office already knows the roles), or a general "group" layer in the core's evaluation, shared by sessions with a label (closer to today's `Scope::Role`, and visible in `zapper rules`).
-- How much of the UI is the office's: whole pages mounted by `zapper-api` (as `office.html` is now), or panels the sessions page shows for sessions with its labels.
+These were the separate-process questions; all are decided in [proposal 13](proposals/13-office-process.md) (§5, §7):
+
+- Firm config — **the office's own file** (`office.yaml`), parsed and validated by the office (§7).
+- Per-role policy — **a named "group" layer in the core's evaluation, shared by sessions with a label**, the option closer to today's `Scope::Role` and visible in `zapper rules` (§5).
+- How much of the UI is the office's — **its own listener and pages**, not mounted by `zapper-api`; the shared gateway code is extracted from the workbench (§7).
