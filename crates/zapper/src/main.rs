@@ -1689,6 +1689,7 @@ mod tests {
             (!matches!(body, zapper_core::EventBody::Service { .. })).then(|| "abc234".to_string());
         let e = zapper_core::Event {
             seq: 1,
+            epoch: "ab3cd4ef".into(),
             ts: 3661.0,
             session,
             body,

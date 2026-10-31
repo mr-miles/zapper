@@ -114,7 +114,9 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
     let mut checked = false;
     for e in events {
         let mut note = |what: String| {
-            out.push(json!({ "seq": e["seq"], "ts": e["ts"], "finding": what }));
+            out.push(
+                json!({ "epoch": e["epoch"], "seq": e["seq"], "ts": e["ts"], "finding": what }),
+            );
         };
         let (kind, state) = (str_of(e, "type"), str_of(e, "state"));
         match (kind, state) {
@@ -394,6 +396,21 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0]["seq"], 5);
         assert!(f[0]["finding"].as_str().unwrap().contains("no run since"));
+    }
+
+    /// A finding names the daemon run of the line it is about, as well as
+    /// its `seq`, which counts again in each run.
+    #[test]
+    fn a_finding_names_its_lines_run() {
+        let mut r = vec![
+            ev(1, "session", "stopped", &[]),
+            ev(2, "disks", "stopped", &[("root.ext4", "a")]),
+            ev(1, "disks", "stopped", &[("root.ext4", "x")]),
+        ];
+        r[2]["epoch"] = json!("run2");
+        let f = findings(&r);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert_eq!((&f[1]["epoch"], &f[1]["seq"]), (&json!("run2"), &json!(1)));
     }
 
     /// A start whose disks were never checked against the stop before it.
