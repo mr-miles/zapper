@@ -66,9 +66,10 @@ fn path_glob(pattern: &str) -> Result<GlobMatcher> {
 
 /// A rule's path with `{session}` and `{label:KEY}` replaced by the calling
 /// session's ID and labels, each value escaped so it matches only itself.
-/// `None` when the request has no such session or label: the rule then
-/// matches nothing. Other `{…}` stay globset's alternatives.
-fn expand(pattern: &str, req: &NetRequest) -> Option<String> {
+/// When the request has no such session or label: `None` (the rule then
+/// matches nothing), or, `wild` (a deny, which fails closed), any one
+/// segment. Other `{…}` stay globset's alternatives.
+fn expand(pattern: &str, req: &NetRequest, wild: bool) -> Option<String> {
     let mut out = String::with_capacity(pattern.len());
     let mut rest = pattern;
     while let Some(i) = rest.find('{') {
@@ -76,13 +77,20 @@ fn expand(pattern: &str, req: &NetRequest) -> Option<String> {
         let tail = &rest[i..];
         let value = if let Some(after) = tail.strip_prefix("{session}") {
             rest = after;
-            req.session.as_deref()?
+            req.session.as_deref()
         } else if let Some(key) = tail.strip_prefix("{label:").and_then(|t| t.split_once('}')) {
             rest = key.1;
-            req.labels.get(key.0)?.as_str()
+            req.labels.get(key.0).map(String::as_str)
         } else {
             out.push('{');
             rest = &tail[1..];
+            continue;
+        };
+        let Some(value) = value else {
+            if !wild {
+                return None;
+            }
+            out.push('*');
             continue;
         };
         for c in value.chars() {
@@ -164,7 +172,7 @@ impl NetRule {
         }
         if let Some(pattern) = &self.path {
             let Some(path) = &req.path else { return false };
-            let Some(pattern) = expand(pattern, req) else {
+            let Some(pattern) = expand(pattern, req, self.action == Action::Deny) else {
                 return false;
             };
             let path = path.split(['?', '#']).next().unwrap_or("");
@@ -411,6 +419,24 @@ mod tests {
         let either = rule_with_path("/{inbox,shared}/**");
         assert!(either.matches(&get("/shared/x", Some("s1"), &[])));
         assert!(!either.matches(&get("/outbox/x", Some("s1"), &[])));
+    }
+
+    /// A deny whose placeholder the request can't fill (a session without
+    /// the label, a request without its session) fails closed: it applies
+    /// to any value there. An allow fails open to nothing, as before.
+    #[test]
+    fn a_deny_with_a_placeholder_it_cant_fill_applies_to_any() {
+        let deny: NetRule = serde_yaml::from_str(
+            "{ action: deny, host: drive.internal, path: \"/teams/{label:team}/secret/**\" }",
+        )
+        .unwrap();
+        assert!(deny.matches(&get("/teams/b/secret/x", Some("s1"), &[])));
+        assert!(deny.matches(&get("/teams/b/secret/x", None, &[])));
+        assert!(!deny.matches(&get("/teams/b/open/x", Some("s1"), &[])));
+        assert!(deny.matches(&get("/teams/a/secret/x", Some("s1"), &[("team", "a")])));
+        assert!(!deny.matches(&get("/teams/b/secret/x", Some("s1"), &[("team", "a")])));
+        let allow = rule_with_path("/teams/{label:team}/**");
+        assert!(!allow.matches(&get("/teams/b/x", Some("s1"), &[])));
     }
 
     /// A substituted value matches only itself, whatever it holds.
