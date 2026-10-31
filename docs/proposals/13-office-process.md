@@ -1,6 +1,6 @@
 # The office as a process of its own
 
-Status: proposal. Part 1 is ready to build; part 2 is for discussion, and decides nothing yet.
+Status: part 1 is built (`tidy/office-api`, below); of part 2, §7 is decided (the office's own listener) and the rest is for discussion.
 
 The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is (built on `feat/workbench`): it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
 
@@ -32,6 +32,8 @@ Each is useful while the office stays in-process, and the office moves onto it s
 
 ### 1. MCP servers on a socket
 
+*As built (`6dd5d47` on `tidy/office-api`):* as below, with an owner: `Core::add_mcp_socket` takes one, the API registers as the operator's, and `DELETE /v1/mcp/{id}` removes only the operator's (`409` for a client's). The request and reply are `zapper_proto::facility::{McpCall, McpReply}`; the facility has 10 s to list its tools and 120 s for a call. The office serves its tools on `state/services/office-<firm>.sock`, still in-process, and all its tests pass through it.
+
 An MCP server registered through the API, served by a facility's own process: the office's tools, the workbench's later.
 
 - **`POST /v1/mcp`** `{name, sessions, socket}` (and `DELETE /v1/mcp/{id}`), as `POST /v1/services` takes a socket service: `socket` names a file in the daemon's `state/services/` directory, never a path; `sessions` is a label selector; only the operator, on the API's socket, registers one.
@@ -43,6 +45,8 @@ Invariant, from AGENTS.md's "the sender of every office request is the VM it cam
 
 ### 2. Rule events
 
+*As built (`fc93eb4`):* as below. The config's layers are compared before and after each change, so every path (`POST`/`DELETE /v1/rules`, `PUT /v1/config`, a profile changed, a reload) is covered; a rule changed under its id is removed, then added. A rule removed through a client's `RuleKeeper` is an event with that layer's scope. Rules a session is created with come with it, not as events. `config` events stay, in words, for the change itself.
+
 Rule changes as events of their own, so a client keeps its records by following the stream instead of being called in-process.
 
 - **A `rule` event** `{state: "added" | "removed", id, scope, kind}` (and `session` when the scope is a session's) for every rule added or removed, by whoever: a client, the operator's CLI or UI, an approval remembered, a config change. Today these are `config` events whose words a reader would have to parse (`rule {id} removed from session:…`, `daemon/session.rs:393`).
@@ -52,6 +56,8 @@ Rule changes as events of their own, so a client keeps its records by following 
 Tests: each way a rule changes emits one `rule` event, with its scope; a resumed stream gets the ones it missed.
 
 ### 3. Session creation through the API
+
+*As built (`488bfae`):* as below, except the checks: the in-process path barely checks these fields (it trusts its clients), so they are checked at the API, for what lets a session boot: guest paths absolute and without `..`, at most 64 files and 128 KiB of them (they go in the guest's first, bounded message), and no forward on the agent's own vsock ports.
 
 `POST /v1/sessions` takes what `NewSession` has and a client needs: `files` (written in the guest), `mounts`, `agent_overlay` (merged over the profile's `agent`) and `forwards`, besides what it takes now (profile, workdir, rules, labels, persistent, ssh).
 
@@ -88,6 +94,8 @@ Today the foreman opens a terminal in the worker's VM and runs the core's driver
 
 ### 7. The office's UI, CLI and config
 
+*Decided: its own listener.* The second option below, behind the workbench, is set aside. Its config and its CLI are still open.
+
 - **Its own listener.** The office serves its pages and the board's writes itself, behind its own guard: the workbench's gateway code (sign-in, cookie, `Host`, `Origin`, the UI's header), moved into a crate both use. AGENTS.md's list of the UI's writes splits into zapper's and the office's.
 - **Or behind the workbench**, as a facility the workbench proxies: one sign-in for both, but the office then needs the workbench to run.
 - **`zapper firm …`** moves to `zapper-office firm …` (or the `zapper` CLI finds the office's socket), and `zapper-inspect` stays as it is, reading runs from disk.
@@ -123,5 +131,5 @@ Every step needs a KVM host for `make test-e2e-office`.
 - §4: referrals as events (a), or a decider socket (b)?
 - §5: named shared layers in the core (a), rules per session (b), or profiles per role (c)?
 - §6: the driver as a crate the office uses (a), or the core's driver with an owner in the API (b)?
-- §7: the office's own listener, or a workbench facility? Its config in its own file, or in zapper's?
+- §7: its config in its own file, or in zapper's? (Its own listener is decided.)
 - §8: registrations as leases, or kept until removed? Are workers stopped when the office goes?
