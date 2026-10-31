@@ -58,12 +58,14 @@ impl SocketDecider {
             serde_json::from_slice::<AskReply>(&reply)
                 .map_err(|e| anyhow!("the decider's answer: {e}"))
         };
-        tokio::time::timeout(self.timeout, asked).await.map_err(|_| {
-            anyhow!(
-                "the decider didn't answer within {}s",
-                self.timeout.as_secs()
-            )
-        })?
+        tokio::time::timeout(self.timeout, asked)
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "the decider didn't answer within {}s",
+                    self.timeout.as_secs()
+                )
+            })?
     }
 }
 

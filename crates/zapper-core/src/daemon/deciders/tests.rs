@@ -41,7 +41,11 @@ impl Decider for Bot {
         })
     }
 
-    fn allowed<'a>(&'a self, _s: &'a Session, rule: &'a str) -> futures_util::future::BoxFuture<'a, ()> {
+    fn allowed<'a>(
+        &'a self,
+        _s: &'a Session,
+        rule: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, ()> {
         Box::pin(async move {
             self.allowed.lock().unwrap().push(rule.to_string());
         })
@@ -249,7 +253,9 @@ async fn a_socket_decider_refers_an_ask_and_hears_what_a_rule_allowed() {
     let t = TestCore::new(CONFIG);
     let a = session(&t, "a");
     let mut calls = decider_socket(&t, "decider.sock", false);
-    t.core.add_decider_socket(team("a"), "decider.sock").unwrap();
+    t.core
+        .add_decider_socket(team("a"), "decider.sock")
+        .unwrap();
 
     // An ask is referred over the socket; the operator is not asked.
     let _io = dial(&t, &a, "api.example", 443);
@@ -262,7 +268,10 @@ async fn a_socket_decider_refers_an_ask_and_hears_what_a_rule_allowed() {
         (ask.session.as_str(), ask.host.as_str(), ask.port),
         (a.id.as_str(), "api.example", 443)
     );
-    assert!(matches!(ask.method, zapper_policy::facility::AskMethod::Ask));
+    assert!(matches!(
+        ask.method,
+        zapper_policy::facility::AskMethod::Ask
+    ));
 
     // An allowed request: the decider is told which rule allowed it.
     let _io = dial(&t, &a, "ok.example", 443);
@@ -280,7 +289,9 @@ async fn a_socket_decider_tells_the_guest_where_its_request_went() {
     let t = TestCore::new(CONFIG);
     let a = session(&t, "a");
     let _calls = decider_socket(&t, "decider.sock", false);
-    t.core.add_decider_socket(team("a"), "decider.sock").unwrap();
+    t.core
+        .add_decider_socket(team("a"), "decider.sock")
+        .unwrap();
     let reply = connect(&t, &a, "api.example:443").await;
     assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
     assert!(

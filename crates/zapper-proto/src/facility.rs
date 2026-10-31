@@ -167,7 +167,10 @@ mod tests {
             "session": "s", "labels": {}, "method": "allowed", "rule": "r-3"
         }))
         .unwrap();
-        assert_eq!((note.method, note.rule.as_deref()), (AskMethod::Allowed, Some("r-3")));
+        assert_eq!(
+            (note.method, note.rule.as_deref()),
+            (AskMethod::Allowed, Some("r-3"))
+        );
         let reply: AskReply =
             serde_json::from_str(r#"{"referral":{"id":"r-1","to":"security","then":"wait"}}"#)
                 .unwrap();
