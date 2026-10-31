@@ -236,12 +236,13 @@ fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict
     note_failure(s, &rec, 403, why);
 }
 
-/// Ends a record that got no upstream response.
+/// Ends a record that got no upstream response. A 403 is a refusal, so
+/// the record says it was denied, whatever said so.
 fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<String>) {
     {
         let mut r = rec.lock().unwrap();
         r.status = Some(status);
-        if status == 403 && error.is_none() {
+        if status == 403 {
             r.action = Action::Deny;
         }
         r.error = error;
@@ -652,7 +653,6 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     };
     if let Err(error) = server_name_matches(&first, &endpoint.host) {
         logp(Some(error.clone()));
-        rec.lock().unwrap().action = Action::Deny;
         note_failure(s, &rec, 403, Some(error));
         return;
     }
