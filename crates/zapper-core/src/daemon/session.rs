@@ -86,18 +86,18 @@ pub struct Session {
     pub created: f64,
     /// When its `ttl_secs` ends this run: from its start, as it may be
     /// started again (`persistent`).
-    pub(crate) expires: Mutex<Option<f64>>,
+    expires: Mutex<Option<f64>>,
     /// Its disks stay when it stops, and it can be started again; they go
     /// when it is forgotten (`zapper rm`).
     pub persistent: bool,
     /// How many times it has booted: a run's timers end with it.
-    pub(crate) boots: AtomicU64,
+    boots: AtomicU64,
     /// Held across a persistent session's save, from the snapshot of its
     /// rules to the write, so an older snapshot can't be written last.
-    pub(crate) saving: Mutex<()>,
+    saving: Mutex<()>,
     /// Held by a stop through its teardown, and by a start until it has
     /// checked the disks: neither runs while the other is on the disks.
-    pub(crate) lifecycle: tokio::sync::Mutex<()>,
+    lifecycle: tokio::sync::Mutex<()>,
     /// Make a persistent session from its image even if the image changed
     /// since it was built (recorded); not kept.
     pub(crate) accept_changed_image: bool,
@@ -115,14 +115,14 @@ pub struct Session {
     /// The session's CA and the guest-facing server configs minted from it.
     pub(crate) tls: tls::SessionTls,
     pub(crate) counters: Counters,
-    pub(crate) usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
+    usage: Mutex<Option<zapper_policy::proto::GuestEvent>>,
     /// The session's resolver state: synthetic names, rate limit, lookup cap.
     pub(crate) dns: super::dns::SessionDns,
     /// The session's HTTP traffic, for inspecting it from the UI.
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
-    pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    pub(crate) audit: Mutex<Option<super::record::Writer>>,
+    terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
+    audit: Mutex<Option<super::record::Writer>>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
