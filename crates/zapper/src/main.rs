@@ -7,6 +7,7 @@ mod github;
 use zapper_core::prelude::*;
 use zapper_core::{images, util};
 mod office;
+mod ssh;
 mod term;
 
 use std::path::{Path, PathBuf};
@@ -83,6 +84,9 @@ enum Cmd {
         /// changed since it was built; recorded.
         #[arg(long, requires = "persistent")]
         accept_changed_image: bool,
+        /// Let SSH reach it (`ssh ID.zapper`); `zapper ssh off` stops that.
+        #[arg(long)]
+        ssh: bool,
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
@@ -231,6 +235,12 @@ enum Cmd {
     Service {
         #[command(subcommand)]
         cmd: ServiceCmd,
+    },
+    /// SSH into sandboxes: turned on and off per sandbox, and the gateway
+    /// the host's sshd runs for a key.
+    Ssh {
+        #[command(subcommand)]
+        cmd: ssh::SshCmd,
     },
 }
 
@@ -544,6 +554,7 @@ async fn run(cli: Cli) -> Result<i32> {
             keep,
             persistent,
             accept_changed_image,
+            ssh,
             workdir,
             labels,
             command,
@@ -555,7 +566,7 @@ async fn run(cli: Cli) -> Result<i32> {
             };
             eprintln!("zapper: starting a {profile} session…");
             let body = serde_json::to_string(
-                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent, "accept_changed_image": accept_changed_image }),
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent, "accept_changed_image": accept_changed_image, "ssh": ssh }),
             )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
@@ -683,6 +694,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                 .unwrap_or_default(),
                             format!("{}/{}", k["net_allowed"], k["net_denied"]),
                             format!("{}/{}", k["exec_allowed"], k["exec_denied"]),
+                            if x["ssh"] == true { "on" } else { "" }.to_string(),
                             s(&x["detail"]),
                         ]
                     })
@@ -696,6 +708,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         "kept disks",
                         "net ok/no",
                         "exec ok/no",
+                        "ssh",
                         "detail",
                     ],
                     rows,
@@ -960,6 +973,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::Github { cmd } => return github::github(cmd).await,
         Cmd::Mint { cmd } => return github::mint(cmd).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
+        Cmd::Ssh { cmd } => return ssh::ssh(&c, cmd, cli.json).await,
         Cmd::Record { cmd } => {
             let (path, verify) = match &cmd {
                 RecordCmd::Status => ("/v1/record".to_string(), false),

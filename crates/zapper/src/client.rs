@@ -151,7 +151,46 @@ impl Client {
         if system {
             q.push("system=true".into());
         }
+        self.upgrade(&format!("/v1/sessions/{id}/attach?{}", q.join("&")))
+            .await
+    }
+
+    /// A terminal in session `id` for the SSH gateway, as `client`: refused
+    /// while the session's SSH is off, and closed when it is turned off.
+    pub async fn ssh_terminal(
+        &self,
+        id: &str,
+        tty: Option<(u16, u16)>,
+        argv: &[String],
+        env: &std::collections::BTreeMap<String, String>,
+        client: Option<&str>,
+    ) -> Result<TokioIo<hyper::upgrade::Upgraded>> {
+        let mut q = vec!["ssh=true".to_string()];
+        if let Some((r, c)) = tty {
+            q.push(format!("tty={r}x{c}"));
+        }
+        if !argv.is_empty() {
+            q.push(format!(
+                "argv={}",
+                url_encode(&serde_json::to_string(argv)?)
+            ));
+        }
+        if !env.is_empty() {
+            q.push(format!("env={}", url_encode(&serde_json::to_string(env)?)));
+        }
+        if let Some(c) = client {
+            q.push(format!("client={}", url_encode(c)));
+        }
         let path = format!("/v1/sessions/{id}/attach?{}", q.join("&"));
+        Ok(self.upgrade(&path).await?.0)
+    }
+
+    /// Opens a terminal at `path`, upgraded to its frame stream; and its
+    /// number, if the daemon gave one.
+    async fn upgrade(
+        &self,
+        path: &str,
+    ) -> Result<(TokioIo<hyper::upgrade::Upgraded>, Option<u64>)> {
         let mut sender = self.conn().await?;
         let req = Request::builder()
             .uri(format!("http://zapper{path}"))

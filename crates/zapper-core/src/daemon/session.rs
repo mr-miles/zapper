@@ -98,6 +98,9 @@ pub struct ShellOpened {
     /// The client that opened it, as it named itself (`Session::open_shell`
     /// leaves it unset).
     pub client: Option<String>,
+    /// Opened through the SSH gateway (`Session::open_ssh_shell`): closed
+    /// if the session's SSH is turned off.
+    pub ssh: bool,
 }
 
 #[derive(Default, Serialize)]
@@ -165,6 +168,10 @@ pub struct Session {
     daemon: Weak<Daemon>,
     extra_files: Vec<GuestFile>,
     forwards: Vec<Forward>,
+    /// Whether the SSH gateway may open terminals in it: turned on and off
+    /// while it runs (`set_ssh`); its SSH terminals watch it, to close when
+    /// it goes off.
+    ssh: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Serialize)]
@@ -176,6 +183,8 @@ pub struct SessionInfo {
     pub(crate) created: f64,
     pub(crate) expires: Option<f64>,
     pub(crate) persistent: bool,
+    /// Whether the SSH gateway may open terminals in it.
+    pub(crate) ssh: bool,
     /// For a persistent session: what its disks take on the host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disk_bytes: Option<u64>,
@@ -212,6 +221,7 @@ impl Session {
             created: self.created,
             expires: *self.expires.lock().unwrap(),
             persistent: self.persistent,
+            ssh: self.ssh_enabled(),
             disk_bytes: self.persistent.then(|| self.dir.disk_bytes()),
             image: self.resolved.engine.image.clone(),
             vcpus: self.resolved.engine.vcpus,
@@ -482,7 +492,65 @@ impl Session {
             stream,
             request: req,
             client: None,
+            ssh: false,
         })
+    }
+
+    /// Whether the SSH gateway may open terminals in the session.
+    pub fn ssh_enabled(&self) -> bool {
+        *self.ssh.borrow()
+    }
+
+    /// Turns the session's SSH on or off, recorded; off also closes the
+    /// terminals the gateway has open (a persistent one is detached, and
+    /// keeps running). A persistent session keeps the setting.
+    pub fn set_ssh(&self, enabled: bool) -> Result<()> {
+        if self.ssh.send_replace(enabled) == enabled {
+            return Ok(());
+        }
+        if let Some(d) = self.daemon.upgrade() {
+            d.emit(
+                Some(self),
+                EventBody::Ssh {
+                    state: if enabled { "enabled" } else { "disabled" }.into(),
+                    client: None,
+                    reason: None,
+                },
+            );
+        }
+        if self.persistent {
+            persist::save(self)?;
+        }
+        Ok(())
+    }
+
+    /// Opens a terminal for `client` through the SSH gateway, as
+    /// `open_shell`, if the session's SSH is on; refused and recorded if not.
+    pub async fn open_ssh_shell(
+        &self,
+        req: ShellRequest,
+        client: Option<String>,
+    ) -> Result<ShellOpened> {
+        if !self.ssh_enabled() {
+            if let Some(d) = self.daemon.upgrade() {
+                d.emit(
+                    Some(self),
+                    EventBody::Ssh {
+                        state: "refused".into(),
+                        client: client.clone(),
+                        reason: Some("SSH is off for this session".into()),
+                    },
+                );
+            }
+            return Err(crate::errors::forbidden(format!(
+                "SSH is off for session {} (`zapper ssh on {}`)",
+                self.id, self.id
+            )));
+        }
+        let mut opened = self.open_shell(req).await?;
+        opened.client = client;
+        opened.ssh = true;
+        Ok(opened)
     }
 
     /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
@@ -532,6 +600,9 @@ pub struct NewSession {
     /// For a persistent session: make it from its image even if the image
     /// changed since it was built, which is recorded.
     pub accept_changed_image: bool,
+    /// Let the SSH gateway open terminals in it from the start
+    /// (`Session::set_ssh` turns it on and off later).
+    pub ssh: bool,
 }
 
 impl NewSession {
@@ -548,6 +619,7 @@ impl NewSession {
             forwards: vec![],
             persistent: false,
             accept_changed_image: false,
+            ssh: false,
         }
     }
 }
@@ -568,4 +640,7 @@ pub(crate) struct Saved {
     pub files: Vec<GuestFile>,
     pub forwards: Vec<Forward>,
     pub driven: bool,
+    /// SSH on (`Session::set_ssh`); off for one saved before there was SSH.
+    #[serde(default)]
+    pub ssh: bool,
 }

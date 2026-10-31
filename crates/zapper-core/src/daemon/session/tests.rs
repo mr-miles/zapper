@@ -575,3 +575,99 @@ async fn a_runs_lifetime_is_what_it_shows() {
     let back = restart(&t, &s);
     assert_eq!(back.info().expires, None, "stopped: no lifetime running");
 }
+
+// SSH, turned on and off per session.
+
+fn ssh_events(t: &TestCore, s: &Session) -> Vec<(String, Option<String>)> {
+    t.core
+        .recent_events(Some(&s.id))
+        .into_iter()
+        .filter_map(|e| match e.body {
+            EventBody::Ssh { state, client, .. } => Some((state, client)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn next_data(client: &mut tokio::io::DuplexStream) -> Vec<u8> {
+    match terminal::read_frame(client).await.unwrap() {
+        Some(Frame::Data(d)) => d,
+        other => panic!("not data: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ssh_is_refused_until_turned_on_and_turning_it_off_closes_its_terminals() {
+    let t = TestCore::new(CONFIG);
+    let new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    let s = t.core.test_session(new, true).unwrap();
+    let mut vm = crate::testing::shell_vm(&s);
+    let sh = || ShellRequest::exec(vec!["sh".into()]);
+
+    let e = s
+        .open_ssh_shell(sh(), Some("laptop".into()))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        crate::errors::kind_of(&e),
+        Some(crate::errors::ErrorKind::Forbidden)
+    );
+    assert!(!s.info().ssh);
+
+    s.set_ssh(true).unwrap();
+    assert!(s.info().ssh);
+    let opened = s.open_ssh_shell(sh(), Some("laptop".into())).await.unwrap();
+    let mut guest = vm.recv().await.unwrap();
+    let (mut client, ours) = tokio::io::duplex(4096);
+    let pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    guest.say("hello").await;
+    assert_eq!(next_data(&mut client).await, b"hello\n");
+
+    s.set_ssh(false).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), pump)
+        .await
+        .expect("the SSH terminal closes")
+        .unwrap();
+    assert!(terminal::read_frame(&mut client).await.unwrap().is_none());
+    assert!(
+        guest.line().await.is_none(),
+        "the guest's side is closed too"
+    );
+    assert_eq!(
+        ssh_events(&t, &s),
+        [
+            ("refused".to_string(), Some("laptop".to_string())),
+            ("enabled".to_string(), None),
+            ("disabled".to_string(), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn turning_ssh_off_leaves_other_terminals_open() {
+    let t = TestCore::new(CONFIG);
+    let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+    new.ssh = true;
+    let s = t.core.test_session(new, true).unwrap();
+    let mut vm = crate::testing::shell_vm(&s);
+    let opened = s
+        .open_shell(ShellRequest::exec(vec!["sh".into()]))
+        .await
+        .unwrap();
+    let mut guest = vm.recv().await.unwrap();
+    let (mut client, ours) = tokio::io::duplex(4096);
+    let _pump = tokio::spawn(pump_shell(t.core.daemon().clone(), s.clone(), ours, opened));
+    s.set_ssh(false).unwrap();
+    guest.say("still here").await;
+    assert_eq!(next_data(&mut client).await, b"still here\n");
+}
+
+#[tokio::test]
+async fn a_persistent_session_keeps_its_ssh_setting() {
+    let t = TestCore::new(CONFIG);
+    let s = persistent(&t);
+    s.set_ssh(true).unwrap();
+    let saved: Saved = serde_json::from_slice(&std::fs::read(s.dir.saved()).unwrap()).unwrap();
+    assert!(saved.ssh);
+}

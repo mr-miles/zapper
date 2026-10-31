@@ -119,6 +119,15 @@ pub enum EventBody {
     Config {
         change: String,
     },
+    /// The session's SSH: `enabled`, `disabled`, or `refused` (a terminal
+    /// the gateway asked for while it was off), with who asked.
+    Ssh {
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// A service or zone added or removed (`services`).
     Service {
         change: String,

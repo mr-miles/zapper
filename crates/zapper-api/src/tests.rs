@@ -784,6 +784,7 @@ async fn the_ui_has_no_writes_beyond_its_list() {
         (Method::POST, "/sessions/abc234/stop"),
         (Method::POST, "/sessions/abc234/start"),
         (Method::GET, "/sessions/abc234/attach"),
+        (Method::POST, "/sessions/abc234/ssh"),
         (Method::DELETE, "/sessions/abc234/terminals/1"),
         (Method::POST, "/evaluate"),
         (Method::POST, "/images/web/build"),

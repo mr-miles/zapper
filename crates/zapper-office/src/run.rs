@@ -823,6 +823,7 @@ pub(crate) async fn boot_worker(
         forwards: vec![],
         persistent: false,
         accept_changed_image: false,
+        ssh: false,
     };
     let s = d.create_session(new).await?;
     run.journal.append(

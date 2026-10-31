@@ -691,3 +691,132 @@ async fn check_reports_a_firms_missing_skills_until_init() {
         "{text}"
     );
 }
+
+// SSH, through `zapper ssh proxy` as the host's sshd would run it.
+
+struct SshClient;
+
+impl russh::client::Handler for SshClient {
+    type Error = russh::Error;
+    async fn check_server_key(
+        &mut self,
+        _: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+/// `zapper ssh proxy --key laptop` for `target` from the forced command's
+/// `SSH_ORIGINAL_COMMAND`, and an SSH client on its stdio.
+async fn ssh_proxy(
+    d: &Daemon,
+    target: &str,
+) -> (tokio::process::Child, russh::client::Handle<SshClient>) {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .args(["ssh", "proxy", "--key", "laptop"])
+        .env("SSH_ORIGINAL_COMMAND", target)
+        .env("HOME", d.t.startup().parent().unwrap())
+        .env("ZAPPER_SOCKET", &d.socket)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let io = tokio::io::join(child.stdout.take().unwrap(), child.stdin.take().unwrap());
+    let config = std::sync::Arc::new(russh::client::Config::default());
+    let mut h = russh::client::connect_stream(config, io, SshClient)
+        .await
+        .unwrap();
+    assert!(h.authenticate_none("user").await.unwrap().success());
+    (child, h)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ssh_reaches_a_sandbox_only_while_it_is_on() {
+    use russh::ChannelMsg;
+    let d = daemon(TestCore::new(CONFIG)).await;
+    let id = session(&d, "web");
+    let s = d.t.core.session(&id).unwrap();
+    let mut vm = zapper_core::testing::shell_vm(&s);
+
+    // Off by default: the gateway says so and goes.
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
+        .args(["ssh", "proxy", &format!("{id}.zapper")])
+        .env("HOME", d.t.startup().parent().unwrap())
+        .env("ZAPPER_SOCKET", &d.socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let o = child.wait_with_output().await.unwrap();
+    assert!(!o.status.success());
+    assert!(err(&o).contains("SSH is off"), "{}", err(&o));
+    assert!(o.stdout.is_empty(), "nothing on the SSH stream");
+
+    ok(zapper(&d, &["ssh", "on", &id]).await);
+    let ps = ok(zapper(&d, &["ps"]).await);
+    assert!(ps.lines().next().unwrap().contains("SSH"), "{ps}");
+    let at = ps.lines().next().unwrap().find("SSH").unwrap();
+    assert_eq!(&ps.lines().nth(1).unwrap()[at..at + 2], "on", "{ps}");
+
+    let (_proxy, h) = ssh_proxy(&d, &format!("{id}.zapper")).await;
+    let mut ch = h.channel_open_session().await.unwrap();
+    ch.set_env(false, "LANG", "C.UTF-8").await.unwrap();
+    ch.exec(true, "echo hi").await.unwrap();
+    let mut guest = vm.recv().await.unwrap();
+    assert_eq!(guest.request.argv, ["/bin/sh", "-c", "echo hi"]);
+    assert_eq!(guest.request.env["LANG"], "C.UTF-8");
+    assert!(!guest.request.system, "as the workload user");
+    guest.say("hi").await;
+    guest.exit(0).await;
+    let (mut out, mut status) = (Vec::new(), None);
+    while let Some(msg) = ch.wait().await {
+        match msg {
+            ChannelMsg::Data { data } => out.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    assert_eq!((out.as_slice(), status), (&b"hi\n"[..], Some(0)));
+
+    // Turned off: an open SSH terminal is closed, and a new one refused.
+    let mut ch = h.channel_open_session().await.unwrap();
+    ch.exec(true, "cat").await.unwrap();
+    let _guest = vm.recv().await.unwrap();
+    ok(zapper(&d, &["ssh", "off", &id]).await);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(msg) = ch.wait().await {
+            if matches!(msg, ChannelMsg::Close) {
+                return true;
+            }
+        }
+        true
+    })
+    .await;
+    assert_eq!(
+        closed,
+        Ok(true),
+        "the SSH terminal closes when SSH goes off"
+    );
+
+    let mut ch = h.channel_open_session().await.unwrap();
+    ch.exec(true, "true").await.unwrap();
+    let (mut said, mut status) = (Vec::new(), None);
+    while let Some(msg) = ch.wait().await {
+        match msg {
+            ChannelMsg::ExtendedData { data, .. } => said.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    assert_eq!(status, Some(255));
+    assert!(String::from_utf8_lossy(&said).contains("SSH is off"));
+
+    // The record says who: the key's name on the terminal it opened.
+    let events = ok(zapper(&d, &["--json", "audit", &id]).await);
+    assert!(events.contains("\"client\":\"laptop\""), "{events}");
+}

@@ -113,6 +113,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
+        .route("/sessions/{id}/ssh", post(set_ssh))
         .route(
             "/sessions/{id}/terminals/{n}",
             axum::routing::delete(hangup_terminal),
@@ -626,6 +627,9 @@ struct CreateSession {
     /// changed since it was built; recorded.
     #[serde(default)]
     accept_changed_image: bool,
+    /// Let the SSH gateway open terminals in it from the start.
+    #[serde(default)]
+    ssh: bool,
 }
 
 /// Labels the operator may give a session: short words, and none of the
@@ -671,6 +675,7 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     new.labels = req.labels;
     new.persistent = req.persistent;
     new.accept_changed_image = req.accept_changed_image;
+    new.ssh = req.ssh;
     let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }
@@ -727,6 +732,23 @@ struct AttachQuery {
     env: Option<String>,
     /// Who is attaching, for the terminal's events (an SSH key's name).
     client: Option<String>,
+    /// The SSH gateway's: refused while the session's SSH is off, and
+    /// closed when it is turned off.
+    #[serde(default)]
+    ssh: bool,
+}
+
+#[derive(Deserialize)]
+struct SetSsh {
+    enabled: bool,
+}
+
+/// Turns a session's SSH on or off; off also closes its SSH terminals.
+async fn set_ssh(State(d): D, Path(id): Path<String>, body: String) -> R<Json<SessionInfo>> {
+    let s = d.session(&id)?;
+    let req: SetSsh = parse_body(&body)?;
+    s.set_ssh(req.enabled)?;
+    Ok(Json(d.session_info(&s)))
 }
 
 /// A client's name for the record: short, and plain enough to read as it is.
@@ -789,8 +811,13 @@ async fn attach(
         attach: q.terminal,
         ..Default::default()
     };
-    let mut opened = s.open_shell(shell).await?;
-    opened.client = client;
+    let opened = if q.ssh {
+        s.open_ssh_shell(shell, client).await?
+    } else {
+        let mut opened = s.open_shell(shell).await?;
+        opened.client = client;
+        opened
+    };
     let shell_id = opened.request.id;
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
