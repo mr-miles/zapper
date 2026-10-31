@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workbench sign-in</title>
+<style>
+  :root { --bg: #fafafa; --fg: #1d1d1f; --muted: #6e6e73; --line: #e2e2e6; --card: #fff; --accent: #2457c5; --deny: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #ececf0; --muted: #9a9aa2; --line: #2c2c31; --card: #1e1e21; --accent: #7ea2ff; --deny: #ff8a80; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; padding: 16px; }
+  form { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 20px; width: 100%; max-width: 420px; display: grid; gap: 10px; }
+  h1 { font-size: 16px; margin: 0; }
+  p { margin: 0; color: var(--muted); }
+  code { font-family: ui-monospace, monospace; font-size: 12px; }
+  input { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); width: 100%; }
+  button { font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  .err { color: var(--deny); min-height: 1.2em; }
+</style>
+</head>
+<body>
+<form id="signin">
+  <h1>Workbench</h1>
+  <p>Sign in with a token: the owner's from <code>zapper-workbench token show</code>, or one made with <code>zapper-workbench token add</code>.</p>
+  <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Token" required autofocus>
+  <button type="submit">Sign in</button>
+  <span class="err" id="err"></span>
+</form>
+<script>
+"use strict";
+document.getElementById("signin").onsubmit = async e => {
+  e.preventDefault();
+  const err = document.getElementById("err");
+  const input = document.getElementById("token");
+  err.textContent = "";
+  try {
+    const r = await fetch("/login", {
+      method: "POST",
+      headers: { "X-Workbench-UI": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ token: input.value }),
+    });
+    if (!r.ok) { const v = await r.json().catch(() => ({})); throw new Error(v.error || r.statusText); }
+    input.value = "";
+    location.replace("/");
+  } catch (x) { err.textContent = x.message; }
+};
+</script>
+</body>
+</html>

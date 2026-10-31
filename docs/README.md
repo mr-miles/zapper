@@ -14,6 +14,7 @@ zapper, the daemon, CLI and sandbox:
 - [API](api.md): the REST API on the unix socket, and the UI's API.
 - [Commands](commands.md): `zapper` commands and `make` targets.
 - [SSH](ssh.md): `ssh ID.zapper` through the host's sshd, turned on and off per sandbox.
+- [Workbench](workbench.md): `zapper-workbench`, a gateway with tokens over zapper's API, and its UI.
 - [Testing](testing.md): unit and end-to-end tiers, the attack probe, manual scenarios, and which invariant each test covers.
 
 The Office, a company of AI workers built on zapper:

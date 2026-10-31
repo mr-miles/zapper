@@ -1,0 +1,28 @@
+[package]
+name = "zapper-workbench"
+description = "A layer for single users on zapper: a gateway with tokens over zapper's API, its facilities and their UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = "0.8"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+ring = "0.17"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+zapper-core = { path = "../zapper-core", default-features = false, features = ["test-util"] }
+zapper-api = { path = "../zapper-api" }
