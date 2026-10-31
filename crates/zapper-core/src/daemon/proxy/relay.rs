@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use zapper_policy::{NetProtocol, NetRequest};
 
 use super::{dial, log, note_failure, note_verdict, NetLog, Prefixed, Target, Verdict};
@@ -97,14 +96,11 @@ pub(super) async fn relay_database<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let proto = v.effects.protocol;
-    let rec = s.requests.lock().unwrap().start(
-        proto.scheme(),
-        "CONNECT",
-        &endpoint.host,
-        endpoint.port,
-        None,
-        vec![],
-    );
+    let rec =
+        s.requests
+            .lock()
+            .unwrap()
+            .start_connect(proto.scheme(), &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
     let fail = |status, error: String| {
         log(
@@ -437,7 +433,7 @@ where
             .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
             .await
             .map_err(|e| format!("sending SSLRequest: {e}"))?;
-        let mut b: Box<dyn services::Io> = Box::new(connect_server_tls(server, host).await?);
+        let mut b: Box<dyn services::Io> = Box::new(tls::connect(server, host).await?);
         b.write_all(&mysql::packet(
             2,
             &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
@@ -548,7 +544,7 @@ where
         // Tunnel the TLS handshake in PRELOGIN packets, then pass through.
         let handshaking = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let wrapper = tds::TdsTls::new(server, handshaking.clone());
-        let tls = connect_server_tls(wrapper, host).await?;
+        let tls = tls::connect(wrapper, host).await?;
         handshaking.store(false, Ordering::Relaxed);
         Box::new(tls)
     } else {
@@ -625,22 +621,6 @@ fn plaintext_leg_ok(plaintext: bool, host: &str) -> Result<(), String> {
     }
 }
 
-/// Connects the server leg over TLS with real certificate validation.
-async fn connect_server_tls<S>(
-    stream: S,
-    host: &str,
-) -> Result<tokio_rustls::client::TlsStream<S>, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    TlsConnector::from(tls::client_config())
-        .connect(name, stream)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))
-}
-
 /// The guest leg for a database whose TLS (if any) is a normal ClientHello:
 /// terminate it with the per-session CA when the guest uses TLS, otherwise take
 /// the plaintext bytes as they are. Either carries no secret. Returns the
@@ -676,7 +656,7 @@ async fn server_leg(
         plaintext_leg_ok(plaintext, host)?;
         return Ok(Box::new(tcp));
     }
-    Ok(Box::new(connect_server_tls(tcp, host).await?))
+    Ok(Box::new(tls::connect(tcp, host).await?))
 }
 
 /// Negotiates the proxy→server leg: sends Postgres' `SSLRequest` and, on the
@@ -703,7 +683,7 @@ async fn pg_server_leg(
         .await
         .map_err(|e| format!("reading the server's TLS reply: {e}"))?;
     match reply[0] {
-        b'S' => Ok(Box::new(connect_server_tls(tcp, host).await?)),
+        b'S' => Ok(Box::new(tls::connect(tcp, host).await?)),
         // The guest used TLS but the server offers none: only a plaintext
         // secret permits sending the credential in the clear.
         b'N' => {

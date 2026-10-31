@@ -27,7 +27,6 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
-use tokio_rustls::TlsConnector;
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
     Kind, NetEffects, NetProtocol, NetRequest, NetRule,
@@ -223,11 +222,11 @@ fn note_verdict(rec: &httplog::Shared, v: &Verdict) {
 /// Records a connection refused before anything was sent, so the request
 /// log (and a firm's security officers) see refusals too.
 fn note_refused(s: &Session, scheme: &'static str, req: &NetRequest, v: &Verdict) {
-    let rec =
-        s.requests
-            .lock()
-            .unwrap()
-            .start(scheme, "CONNECT", &req.host, req.port, None, vec![]);
+    let rec = s
+        .requests
+        .lock()
+        .unwrap()
+        .start_connect(scheme, &req.host, req.port);
     note_verdict(&rec, v);
     let why = v
         .pending
@@ -628,14 +627,11 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         "tcp"
     };
-    let rec = s.requests.lock().unwrap().start(
-        scheme,
-        "CONNECT",
-        &endpoint.host,
-        endpoint.port,
-        None,
-        vec![],
-    );
+    let rec = s
+        .requests
+        .lock()
+        .unwrap()
+        .start_connect(scheme, &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
     let logp = |error: Option<String>| {
         log(

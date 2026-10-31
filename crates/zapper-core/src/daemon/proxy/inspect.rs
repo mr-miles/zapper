@@ -11,6 +11,18 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 
+/// An HTTP/1.1 client over `io`, its connection driven in a task of its own.
+async fn h1<IO>(io: IO) -> Result<SendRequestH1, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(io))
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::spawn(conn);
+    Ok(sender)
+}
+
 enum Sender {
     H1(hyper::client::conn::http1::SendRequest<Body>),
     H2(hyper::client::conn::http2::SendRequest<Body>),
@@ -123,11 +135,7 @@ async fn dial_plain(
     target: &Target,
 ) -> Result<SendRequestH1, String> {
     let tcp = dial_target(d, s, target).await.map_err(|e| e.to_string())?;
-    let (sender, conn) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tcp))
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::spawn(conn);
-    Ok(sender)
+    h1(tcp).await
 }
 
 /// Logs a policy refusal of an inspected request, finishes its record, and
@@ -352,18 +360,20 @@ pub(super) async fn inject_for(
     )
 }
 
+/// Whether a header of the request holds `placeholder`.
+fn carries(headers: &hyper::HeaderMap, placeholder: &str) -> bool {
+    headers
+        .values()
+        .any(|v| v.to_str().is_ok_and(|s| s.contains(placeholder)))
+}
+
 /// The secrets a request would use: those of the rule's whose placeholder
 /// it carries, and those its headers are set from.
 fn used(effects: &NetEffects, headers: &hyper::HeaderMap) -> Vec<String> {
     let mut names: Vec<String> = effects
         .secrets
         .iter()
-        .filter(|name| {
-            let ph = placeholder(name);
-            headers
-                .values()
-                .any(|v| v.to_str().is_ok_and(|s| s.contains(&ph)))
-        })
+        .filter(|name| carries(headers, &placeholder(name)))
         .cloned()
         .collect();
     for (_, template) in &effects.set_headers {
@@ -412,10 +422,7 @@ pub(crate) fn inject_with(
             continue;
         }
         let ph = placeholder(name);
-        let present = headers
-            .values()
-            .any(|v| v.to_str().is_ok_and(|s| s.contains(&ph)));
-        if !present {
+        if !carries(headers, &ph) {
             continue;
         }
         let value = value_of(name)?;
@@ -699,22 +706,13 @@ async fn open_upstream(
                          paths or secrets don't apply to it"
                     )
                 })?;
-            let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(plain))
-                .await
-                .map_err(|e| e.to_string())?;
-            tokio::spawn(conn);
-            return Ok(Sender::H1(sender));
+            return Ok(Sender::H1(h1(plain).await?));
         }
     };
     let tcp = dial(*addr)
         .await
         .map_err(|e| format!("connecting to {host}: {e}"))?;
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("{host}: {e}"))?;
-    let tls = TlsConnector::from(tls::client_config())
-        .connect(name, tcp)
-        .await
-        .map_err(|e| format!("TLS to {host}: {e}"))?;
+    let tls = tls::connect(tcp, host).await?;
     // Speak whatever the server negotiated by ALPN.
     let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
     if h2 {
@@ -725,11 +723,7 @@ async fn open_upstream(
         tokio::spawn(conn);
         Ok(Sender::H2(sender))
     } else {
-        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::spawn(conn);
-        Ok(Sender::H1(sender))
+        Ok(Sender::H1(h1(tls).await?))
     }
 }
 

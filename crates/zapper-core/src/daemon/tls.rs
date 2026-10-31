@@ -245,6 +245,24 @@ pub(crate) fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
     Ok(Arc::new(config))
 }
 
+/// TLS to an upstream `host` over `stream`, its certificate checked against
+/// the Mozilla roots and its name: the proxy's side of an inspected
+/// connection, and a database relay's server leg.
+pub(crate) async fn connect<S>(
+    stream: S,
+    host: &str,
+) -> std::result::Result<tokio_rustls::client::TlsStream<S>, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host}: {e}"))?;
+    tokio_rustls::TlsConnector::from(client_config())
+        .connect(name, stream)
+        .await
+        .map_err(|e| format!("TLS to {host}: {e}"))
+}
+
 /// Client config for upstream connections, verifying against the Mozilla
 /// roots.
 pub fn client_config() -> Arc<ClientConfig> {
