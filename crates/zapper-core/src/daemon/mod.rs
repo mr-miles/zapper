@@ -85,6 +85,11 @@ pub struct Daemon {
     pub(crate) deciders: deciders::Deciders,
     pub(crate) gateway: gateway::Gateway,
     pub(crate) builds: builds::Builds,
+    /// Shared policy layers by name: a session attaches one by a label (a
+    /// firm role, say), and a client adds and removes its rules, so every
+    /// session with that label sees them. The office's role layers.
+    pub(crate) named_layers:
+        RwLock<std::collections::BTreeMap<String, Arc<RwLock<zapper_policy::Policy>>>>,
 }
 
 /// One line from `io`, read a byte at a time so nothing after it is taken
@@ -243,9 +248,22 @@ impl Daemon {
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
             builds: builds::Builds::default(),
+            named_layers: RwLock::new(std::collections::BTreeMap::new()),
         });
         session::restore(&daemon);
         Ok(daemon)
+    }
+
+    /// The shared policy layer named `name`, created empty if new. A session
+    /// attaches it by a label (see `session::create`); a client adds and
+    /// removes its rules, and every session carrying that label sees them.
+    pub(crate) fn named_layer(&self, name: &str) -> Arc<RwLock<zapper_policy::Policy>> {
+        self.named_layers
+            .write()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .clone()
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {

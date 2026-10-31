@@ -21,7 +21,13 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         zapper_policy::merge(&mut agent, overlay);
         resolved.agent = serde_json::from_value(agent).context("agent overlay")?;
     }
-    if new.persistent && !new.shared_layers.is_empty() {
+    // Shared layers: those the caller passed, and any the session's labels
+    // attach from the core's named layers — a firm role, by `firm-role`.
+    let mut shared = new.shared_layers.clone();
+    if let Some(v) = new.labels.get("firm-role") {
+        shared.push((zapper_policy::Scope::Role(v.clone()), daemon.named_layer(v)));
+    }
+    if new.persistent && !shared.is_empty() {
         bail!("a persistent session can't share policy layers with other sessions");
     }
     resolved.mounts.extend(new.mounts.iter().cloned());
@@ -59,7 +65,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
     let session = assemble(
         daemon,
         saved,
-        new.shared_layers.clone(),
+        shared,
         new.persistent,
         new.accept_changed_image,
         Some(audit),
