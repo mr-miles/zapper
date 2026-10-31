@@ -786,3 +786,29 @@ async fn a_tunnel_needs_a_connection_permit() {
     assert!(opened.starts_with("HTTP/1.1 200"), "{opened}");
     assert_eq!(conns.available_permits() as u32, all - 1, "the tunnel's");
 }
+
+/// A database rule relays only to a real address: a name the daemon
+/// serves itself is refused, its credential never sent to a service.
+#[tokio::test]
+async fn a_database_rule_doesnt_relay_to_a_service() {
+    let t = TestCore::new(
+        "secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: app }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.internal, ports: [6379], protocol: redis, secrets: [db] }\n",
+    );
+    let s = session(&t);
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "db.internal".into(),
+            port: 6379,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Handler {
+                tls: false,
+                handler: Arc::new(HttpEcho),
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    let mut io = dial(&t, &s, "db.internal", 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    let refused = net_event(&t, &s, 0).await["error"].to_string();
+    assert!(refused.contains("is a service"), "{refused}");
+}

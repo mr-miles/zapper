@@ -757,4 +757,25 @@ mod tests {
         assert!(e.contains("no handshake"), "{e}");
         drop(guest);
     }
+
+    /// A guest that didn't use TLS gets a plain server leg only for a
+    /// secret marked `plaintext`: the credential never goes in the clear
+    /// otherwise.
+    #[tokio::test]
+    async fn a_plain_server_leg_needs_a_plaintext_secret() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        let tcp = || tokio::net::TcpStream::connect(addr);
+        let e = super::server_leg(tcp().await.unwrap(), "db.example", false, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("not marked plaintext"), "{e}");
+        assert!(
+            super::server_leg(tcp().await.unwrap(), "db.example", false, true)
+                .await
+                .is_ok()
+        );
+    }
 }
