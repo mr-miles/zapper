@@ -80,19 +80,17 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
 
 /// The durable VMM of session `id` in `dir`, if it still runs (its pid that
 /// session's VMM, not one reused since).
-fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
-    let vmm: crate::daemon::vm::Vmm =
-        serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
+fn live_vmm(dir: &SessionDir, id: &str) -> Option<vm::Vmm> {
+    let vmm: vm::Vmm = serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
     vmm.runs_for(id).then_some(vmm)
 }
 
 /// Stops session `id`'s VMM `vmm` (its Firecracker dies with it); whether
 /// it was running.
-fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
-    if !vmm.runs_for(id) {
+fn kill_vmm(vmm: &vm::Vmm, id: &str) -> bool {
+    if !vmm.kill(id) {
         return false;
     }
-    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
     for _ in 0..50 {
         if !vmm.runs_for(id) {
             break;
@@ -111,7 +109,7 @@ fn adopt(
     daemon: &Arc<Daemon>,
     saved: Saved,
     dir: &SessionDir,
-    vmm: &crate::daemon::vm::Vmm,
+    vmm: &vm::Vmm,
     rt: &tokio::runtime::Handle,
 ) -> Result<()> {
     let audit = record::Writer::open(&dir.audit())?;

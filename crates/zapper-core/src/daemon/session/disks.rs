@@ -182,6 +182,25 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
     out
 }
 
+/// Records a `disks` event of `session`: what its disks were found to be
+/// (`state`), their hashes, and why.
+fn disks_event(
+    daemon: &Daemon,
+    session: &Session,
+    state: &str,
+    disks: Hashes,
+    detail: Option<String>,
+) {
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: state.into(),
+            disks,
+            detail,
+        },
+    );
+}
+
 /// Hashes a stopped session's disks and compares them with what its record
 /// says they were when it last stopped (the record, not a file beside it:
 /// with a keeper it is append-only); records what it found (`disks`).
@@ -207,14 +226,7 @@ pub(super) async fn check_disks(
             Some("no hashes from its last stop to compare with".to_string()),
         ),
     };
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: state.into(),
-            disks: now.clone(),
-            detail: detail.clone(),
-        },
-    );
+    disks_event(daemon, session, state, now.clone(), detail.clone());
     if let Some(detail) = detail {
         if !accept {
             return Err(crate::errors::conflict(format!(
@@ -223,13 +235,12 @@ pub(super) async fn check_disks(
                 ),
             ));
         }
-        daemon.emit(
-            Some(session),
-            EventBody::Disks {
-                state: "accepted".into(),
-                disks: now,
-                detail: Some(format!("started as they are: {detail}")),
-            },
+        disks_event(
+            daemon,
+            session,
+            "accepted",
+            now,
+            Some(format!("started as they are: {detail}")),
         );
     }
     Ok(())
@@ -237,7 +248,8 @@ pub(super) async fn check_disks(
 
 /// A persistent session's VM is off: its disks stay, the rest of the VMM's
 /// directory (sockets) goes, and the disks' hashes are recorded, in its
-/// record, to be checked against when it starts again.
+/// record, to be checked against when it starts again. Its `session.json`
+/// is saved as it stands too, to be listed again stopped.
 pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
     let sd = &session.dir;
     for e in std::fs::read_dir(sd.vm()).into_iter().flatten().flatten() {
@@ -262,14 +274,7 @@ pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
         Err(e) => (BTreeMap::new(), Some(format!("hashing: {e}"))),
     };
     // In the record, which the next start checks the disks against.
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: "stopped".into(),
-            disks: hashes,
-            detail,
-        },
-    );
+    disks_event(daemon, session, "stopped", hashes, detail);
 }
 
 /// Before a persistent session's disk is made from its image: the image's
@@ -291,17 +296,16 @@ pub(super) async fn check_image(daemon: &Arc<Daemon>, session: &Arc<Session>) ->
         ),
     };
     let accepted = changed && session.accept_changed_image;
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: "image".into(),
-            disks: [(format!("{name}.ext4"), hash)].into(),
-            detail: Some(if accepted {
-                format!("{detail}; used as it is, as asked")
-            } else {
-                detail.clone()
-            }),
-        },
+    disks_event(
+        daemon,
+        session,
+        "image",
+        [(format!("{name}.ext4"), hash)].into(),
+        Some(if accepted {
+            format!("{detail}; used as it is, as asked")
+        } else {
+            detail.clone()
+        }),
     );
     if changed && !accepted {
         bail!("{detail}; give accept_changed_image (--accept-changed-image) to make the session from it as it is");
