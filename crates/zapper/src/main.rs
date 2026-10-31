@@ -1427,6 +1427,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
     }
     eprintln!("zapper: API on {}", socket.display());
     let app = zapper_api::api(d.clone(), &mount);
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown = {
         let d = d.clone();
         async move {
@@ -1438,11 +1439,21 @@ async fn serve(config_path: PathBuf) -> Result<()> {
             }
             eprintln!("zapper: stopping sessions");
             d.shutdown().await;
+            let _ = stopped_tx.send(());
         }
     };
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    // Once the sessions are stopped, requests under way get a moment to
+    // finish; streams that never end by themselves (events, terminals: a UI
+    // or the workbench following them) are then let go, and their clients
+    // resume from the next daemon.
+    let drained = async {
+        let _ = stopped_rx.await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    };
+    tokio::select! {
+        r = axum::serve(listener, app).with_graceful_shutdown(shutdown) => r?,
+        _ = drained => eprintln!("zapper: stopped; open streams closed"),
+    }
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }

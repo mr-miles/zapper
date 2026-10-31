@@ -126,13 +126,17 @@ impl Core {
         for hook in hooks {
             hook(self.clone()).await;
         }
-        for s in self.sessions() {
+        // All at once: each waits for its guest to power off (up to a few
+        // seconds), so one after another would add those up.
+        let stops = self.sessions().into_iter().filter_map(|s| {
             if s.persistent && s.is_running() {
                 tracing::info!(session = %s.id, "left running for the next daemon");
-                continue;
+                return None;
             }
-            session::stop(&self.d, &s, "daemon shutdown").await;
-        }
+            let d = self.d.clone();
+            Some(async move { session::stop(&d, &s, "daemon shutdown").await })
+        });
+        futures_util::future::join_all(stops).await;
     }
 
     /// Emits a service-change event.
