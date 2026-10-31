@@ -14,6 +14,7 @@ use zapper_core::{Core, Decider, Referral, Session};
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
+use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{json, Value};
 use zapper_policy::{Action, AnyRule, NetRequest, NetRule, Scope};
@@ -1135,23 +1136,27 @@ struct Officers {
 }
 
 impl Decider for Officers {
-    fn ask(&self, s: &Session, req: &NetRequest) -> Result<Referral> {
-        let run = self
-            .run
-            .upgrade()
-            .ok_or_else(|| anyhow!("the firm isn't running"))?;
-        let member = s.label("member").unwrap_or_default();
-        Ok(Referral {
-            id: ask(&run, member, req, None, None, "")?,
-            to: "security".into(),
-            then: "you'll get mail with the decision, then retry".into(),
+    fn ask<'a>(&'a self, s: &'a Session, req: &'a NetRequest) -> BoxFuture<'a, Result<Referral>> {
+        Box::pin(async move {
+            let run = self
+                .run
+                .upgrade()
+                .ok_or_else(|| anyhow!("the firm isn't running"))?;
+            let member = s.label("member").unwrap_or_default();
+            Ok(Referral {
+                id: ask(&run, member, req, None, None, "")?,
+                to: "security".into(),
+                then: "you'll get mail with the decision, then retry".into(),
+            })
         })
     }
 
-    fn allowed(&self, _s: &Session, rule: &str) {
-        if let Some(run) = self.run.upgrade() {
-            used(&run, rule);
-        }
+    fn allowed<'a>(&'a self, _s: &'a Session, rule: &'a str) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(run) = self.run.upgrade() {
+                used(&run, rule);
+            }
+        })
     }
 }
 

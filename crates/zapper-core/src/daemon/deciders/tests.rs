@@ -22,21 +22,29 @@ struct Bot {
 }
 
 impl Decider for Bot {
-    fn ask(&self, s: &Session, req: &NetRequest) -> anyhow::Result<Referral> {
-        if self.refuse {
-            bail!("the bot is away");
-        }
-        let mut asked = self.asked.lock().unwrap();
-        asked.push((s.id.clone(), req.host.clone()));
-        Ok(Referral {
-            id: format!("b-{}", asked.len()),
-            to: "the bot".into(),
-            then: "retry when it says so".into(),
+    fn ask<'a>(
+        &'a self,
+        s: &'a Session,
+        req: &'a NetRequest,
+    ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Referral>> {
+        Box::pin(async move {
+            if self.refuse {
+                bail!("the bot is away");
+            }
+            let mut asked = self.asked.lock().unwrap();
+            asked.push((s.id.clone(), req.host.clone()));
+            Ok(Referral {
+                id: format!("b-{}", asked.len()),
+                to: "the bot".into(),
+                then: "retry when it says so".into(),
+            })
         })
     }
 
-    fn allowed(&self, _s: &Session, rule: &str) {
-        self.allowed.lock().unwrap().push(rule.to_string());
+    fn allowed<'a>(&'a self, _s: &'a Session, rule: &'a str) -> futures_util::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.allowed.lock().unwrap().push(rule.to_string());
+        })
     }
 }
 

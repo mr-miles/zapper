@@ -148,7 +148,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
     let allowed = match decision.action {
         Action::Allow => {
             if let (Some(dc), Some(rule)) = (&decider, &decision.rule) {
-                dc.allowed(s, rule);
+                dc.allowed(s, rule).await;
             }
             true
         }
@@ -156,7 +156,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
         Action::Ask => match &decider {
             // A decider's `ask` doesn't hold the request: it may take minutes.
             Some(dc) => {
-                match dc.ask(s, req) {
+                match dc.ask(s, req).await {
                     Ok(r) => pending = Some(r),
                     Err(e) => tracing::warn!(session = %s.id, "referring an ask: {e:#}"),
                 }
