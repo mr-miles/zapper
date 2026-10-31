@@ -35,7 +35,7 @@ use zapper_policy::{
 
 use super::deciders::Referral;
 use super::session::Session;
-use super::{httplog, services, tls, Daemon, EventBody};
+use super::{addr, httplog, services, tls, Daemon, EventBody};
 
 mod inspect;
 // Re-exported for the fuzz targets (crate::fuzz), which exercise these parsers.
@@ -318,7 +318,7 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
 /// daemon connects itself, by the name asked for.
 #[derive(Clone)]
 enum Target {
-    Addr(SocketAddr),
+    Addr(addr::Checked),
     Service(String, u16, services::Target),
 }
 
@@ -346,7 +346,7 @@ async fn dial_target(
 }
 
 /// Resolves on the host and returns the first address sessions may reach.
-async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<SocketAddr, String> {
+async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<addr::Checked, String> {
     let addrs: Vec<SocketAddr> = match tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::lookup_host((host, port)),
@@ -360,15 +360,17 @@ async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<SocketAddr, String
     let policy = d.addrs.read().unwrap();
     let mut why = "no addresses";
     for a in &addrs {
-        match policy.check(a.ip()) {
-            Ok(()) => return Ok(*a),
+        match policy.checked(*a) {
+            Ok(checked) => return Ok(checked),
             Err(e) => why = e,
         }
     }
     Err(format!("{host} resolves to a forbidden address: {why}"))
 }
 
-async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
+/// Connects to an address the address policy allowed.
+pub(crate) async fn dial(addr: addr::Checked) -> std::io::Result<TcpStream> {
+    let addr = addr.addr();
     match tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(addr)).await {
         Ok(r) => r,
         Err(_) => Err(std::io::Error::new(

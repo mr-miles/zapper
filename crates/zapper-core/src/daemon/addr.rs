@@ -4,7 +4,7 @@
 //! checked, so a name cannot be rebound to a forbidden address between the
 //! check and the connection.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -29,6 +29,18 @@ impl std::str::FromStr for Cidr {
             return Err(anyhow!("network {s:?}: prefix too long"));
         }
         Ok(Cidr { addr, prefix })
+    }
+}
+
+/// An address the address policy allows, made only by
+/// [`AddressPolicy::checked`]: the proxy and services connect to these, so
+/// none is reached unchecked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checked(SocketAddr);
+
+impl Checked {
+    pub fn addr(&self) -> SocketAddr {
+        self.0
     }
 }
 
@@ -99,6 +111,12 @@ impl AddressPolicy {
             host_addrs: host_addrs(),
             private_allowed,
         })
+    }
+
+    /// `addr`, checked: the only way to make a [`Checked`], which is what
+    /// the daemon connects to.
+    pub fn checked(&self, addr: SocketAddr) -> Result<Checked, &'static str> {
+        self.check(addr.ip()).map(|()| Checked(addr))
     }
 
     /// Why `ip` may not be reached, if it may not.
@@ -175,6 +193,23 @@ fn host_addrs() -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checked address is the one checked; one the policy refuses can't
+    /// be made into one.
+    #[test]
+    fn only_an_allowed_address_is_checked() {
+        let p = AddressPolicy::new(&[]).unwrap();
+        let ok: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        assert_eq!(p.checked(ok).unwrap().addr(), ok);
+        for refused in [
+            "127.0.0.1:80",
+            "[::1]:80",
+            "169.254.169.254:80",
+            "10.0.0.1:80",
+        ] {
+            assert!(p.checked(refused.parse().unwrap()).is_err(), "{refused}");
+        }
+    }
 
     #[test]
     fn checks() {

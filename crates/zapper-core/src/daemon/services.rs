@@ -336,17 +336,15 @@ pub async fn connect(
             })
         }
         Target::Addr(addr) => {
-            d.addrs
+            let checked = d
+                .addrs
                 .read()
                 .unwrap()
-                .check(addr.ip())
+                .checked(*addr)
                 .map_err(|e| anyhow!("{addr}: {e}"))?;
-            let tcp = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::TcpStream::connect(addr),
-            )
-            .await
-            .map_err(|_| anyhow!("connecting to {addr}: timed out"))??;
+            let tcp = super::proxy::dial(checked)
+                .await
+                .with_context(|| format!("connecting to {addr}"))?;
             Ok(Box::new(tcp))
         }
         Target::Session { id, port } => {
