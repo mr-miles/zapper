@@ -598,6 +598,45 @@ async fn a_socket_services_paths_are_decided_for_the_calling_session() {
     assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
 }
 
+/// A placeholder path can't be left by dot segments, plain or encoded:
+/// another session's folder, reached through one's own, is refused, and
+/// the socket sees no request.
+#[tokio::test]
+async fn a_placeholder_path_cant_be_left_by_dot_segments() {
+    let t = TestCore::new(CONFIG);
+    let a = session(&t, &[("team", "a")]);
+    let b = session(&t, &[("team", "b")]);
+    http_socket_server(&t, "drive.sock");
+    t.core
+        .add_service(spec("drive.internal", 443, &[], socket("drive.sock", true)))
+        .unwrap();
+    allow(
+        &t,
+        &a,
+        "{ kind: net, action: allow, host: drive.internal, path: \"/outbox/{session}/**\" }",
+    );
+    allow(&t, &a, "{ kind: net, action: deny, host: drive.internal }");
+    let (own, other) = (a.id.clone(), b.id.clone());
+    for path in [
+        format!("/outbox/{own}/../{other}/x"),
+        format!("/outbox/{own}/%2e%2e/{other}/x"),
+        format!("/outbox/{own}/..%2f{other}/x"),
+        format!("/outbox/{own}/x/../../{other}/x"),
+    ] {
+        let reply = https(&t, &a, "drive.internal", &get("drive.internal", &path)).await;
+        let status = reply.lines().next().unwrap_or("");
+        assert!(
+            status.starts_with("HTTP/1.1 403") || status.starts_with("HTTP/1.1 400"),
+            "{path}: {reply}"
+        );
+        assert!(!reply.ends_with(&own), "{path} reached the socket: {reply}");
+    }
+    // Its own folder, through a dot segment that stays inside it, is its own.
+    let inside = format!("/outbox/{own}/x/../report.csv");
+    let reply = https(&t, &a, "drive.internal", &get("drive.internal", &inside)).await;
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+}
+
 fn socket(name: &str, tls: bool) -> Target {
     Target::Socket {
         name: name.into(),
