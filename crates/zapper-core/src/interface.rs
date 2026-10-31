@@ -127,16 +127,21 @@ impl Core {
         }
     }
 
-    /// Emits a service-change event for a service that is still there.
-    fn service_event(&self, change: &str, id: u64) {
+    /// Emits a service-change event.
+    fn service_event(&self, change: &str, service: ServiceInfo) {
+        self.d.emit(
+            None,
+            EventBody::Service {
+                change: change.into(),
+                service,
+            },
+        );
+    }
+
+    /// Emits the event of a service just added, as it is now.
+    fn service_added(&self, id: u64) {
         if let Some(service) = self.d.services.info(id) {
-            self.d.emit(
-                None,
-                EventBody::Service {
-                    change: change.into(),
-                    service,
-                },
-            );
+            self.service_event("added", service);
         }
     }
 }
@@ -529,6 +534,8 @@ pub trait ServiceApi {
     fn remove_service(&self, id: u64) -> Option<ServiceInfo>;
     /// The services and zones.
     fn services(&self) -> Vec<ServiceInfo>;
+    /// A service or zone by id.
+    fn service(&self, id: u64) -> Option<ServiceInfo>;
     /// Serves `server` as the MCP server `name` to the sessions `sessions`
     /// picks (by label; every session when empty), through the gateway on
     /// their MCP vsock port. Its id, for removing it.
@@ -545,7 +552,7 @@ pub trait ServiceApi {
 impl ServiceApi for Core {
     fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
         let id = self.d.services.add(spec)?;
-        self.service_event("added", id);
+        self.service_added(id);
         Ok(id)
     }
 
@@ -556,24 +563,22 @@ impl ServiceApi for Core {
         owner: &str,
     ) -> Result<u64> {
         let id = self.d.services.add_zone(domain, sessions, owner)?;
-        self.service_event("added", id);
+        self.service_added(id);
         Ok(id)
     }
 
     fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
         let info = self.d.services.remove(id)?;
-        self.d.emit(
-            None,
-            EventBody::Service {
-                change: "removed".into(),
-                service: info.clone(),
-            },
-        );
+        self.service_event("removed", info.clone());
         Some(info)
     }
 
     fn services(&self) -> Vec<ServiceInfo> {
         self.d.services.list()
+    }
+
+    fn service(&self, id: u64) -> Option<ServiceInfo> {
+        self.d.services.info(id)
     }
 
     fn add_mcp_server(

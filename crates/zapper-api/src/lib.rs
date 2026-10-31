@@ -1030,7 +1030,7 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
         target,
         owner: OPERATOR.into(),
     })?;
-    Ok(Json(json!(d.services().into_iter().find(|s| s.id == id))))
+    Ok(Json(json!(d.service(id))))
 }
 
 /// Who registers services through the API.
@@ -1038,7 +1038,7 @@ const OPERATOR: &str = "operator";
 
 /// Removes a service the operator added; others are their owners'.
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
-    let Some(s) = d.services().into_iter().find(|s| s.id == id) else {
+    let Some(s) = d.service(id) else {
         return Err(ApiError(StatusCode::NOT_FOUND, format!("no service {id}")));
     };
     if s.owner != OPERATOR {

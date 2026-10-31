@@ -1231,6 +1231,9 @@ mod tests {
         fn services(&self) -> Vec<zapper_core::ServiceInfo> {
             vec![]
         }
+        fn service(&self, _: u64) -> Option<zapper_core::ServiceInfo> {
+            None
+        }
         fn add_mcp_server(
             &self,
             _name: &str,
