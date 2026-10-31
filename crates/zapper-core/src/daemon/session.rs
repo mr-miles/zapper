@@ -172,6 +172,11 @@ pub struct Session {
     /// while it runs (`set_ssh`); its SSH terminals watch it, to close when
     /// it goes off.
     ssh: tokio::sync::watch::Sender<bool>,
+    /// The persistent terminal SSH shells attach to, while its program runs:
+    /// one per session, the agent, kept through dropped connections.
+    ssh_terminal: Mutex<Option<u64>>,
+    /// Held while an SSH shell is opened, so two at once don't start two.
+    ssh_opening: tokio::sync::Mutex<()>,
 }
 
 #[derive(Serialize)]
@@ -547,10 +552,51 @@ impl Session {
                 self.id, self.id
             )));
         }
+        // A shell (a terminal running the profile's command) is the
+        // session's one SSH terminal: attached to again while its program
+        // runs, taking over from a connection attached already; started,
+        // persistent, when there is none. Anything else is a terminal of its
+        // own, ended with its connection.
+        if req.tty.is_none() || !req.argv.is_empty() {
+            let mut opened = self.open_shell(req).await?;
+            opened.client = client;
+            opened.ssh = true;
+            return Ok(opened);
+        }
+        let _one_at_a_time = self.ssh_opening.lock().await;
+        let held = self.ssh_terminal();
+        let running = held.filter(|n| {
+            self.terminals
+                .lock()
+                .unwrap()
+                .get(n)
+                .is_some_and(|t| t.persistent && t.info().open)
+        });
+        let req = match running {
+            Some(n) => ShellRequest {
+                tty: req.tty,
+                ..ShellRequest::attach(n)
+            },
+            None => ShellRequest {
+                persist: true,
+                ..req
+            },
+        };
         let mut opened = self.open_shell(req).await?;
+        if held != Some(opened.request.id) {
+            *self.ssh_terminal.lock().unwrap() = Some(opened.request.id);
+            if self.persistent {
+                persist::save(self)?;
+            }
+        }
         opened.client = client;
         opened.ssh = true;
         Ok(opened)
+    }
+
+    /// The session's SSH terminal's number, if it has had one.
+    pub(crate) fn ssh_terminal(&self) -> Option<u64> {
+        *self.ssh_terminal.lock().unwrap()
     }
 
     /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
@@ -643,4 +689,7 @@ pub(crate) struct Saved {
     /// SSH on (`Session::set_ssh`); off for one saved before there was SSH.
     #[serde(default)]
     pub ssh: bool,
+    /// The persistent terminal SSH shells attach to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_terminal: Option<u64>,
 }

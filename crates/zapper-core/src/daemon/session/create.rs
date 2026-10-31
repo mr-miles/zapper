@@ -54,6 +54,7 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
         forwards: new.forwards.clone(),
         driven,
         ssh: new.ssh,
+        ssh_terminal: None,
     };
     let session = assemble(
         daemon,
@@ -222,6 +223,8 @@ pub(super) fn assemble(
         extra_files: saved.files,
         forwards: saved.forwards,
         ssh: tokio::sync::watch::Sender::new(saved.ssh),
+        ssh_terminal: Mutex::new(saved.ssh_terminal),
+        ssh_opening: Default::default(),
     });
     session.rules.restore(saved.rules);
     Ok(session)

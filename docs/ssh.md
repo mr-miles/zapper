@@ -44,7 +44,7 @@ The switch is enforced by the daemon, not the gateway: the gateway marks its ter
 
 | You run | In the sandbox |
 |---|---|
-| `ssh ID.zapper` | A terminal running the profile's command (Claude Code for `-p claude`) at your terminal's size, resized with it |
+| `ssh ID.zapper` | The sandbox's SSH terminal: the profile's command (Claude Code for `-p claude`) at your terminal's size, resized with it. It is persistent: a dropped connection leaves the agent running, and the next `ssh ID.zapper` attaches to it again, what it kept replayed |
 | `ssh -t ID.zapper CMD` | `CMD` under `/bin/sh -c`, in a terminal |
 | `ssh ID.zapper CMD`, `rsync` | `CMD` under `/bin/sh -c` without a terminal: stdin, stdout and stderr binary-safe, its exit status back |
 
@@ -54,6 +54,6 @@ Refused: port forwarding either way (`-L`, `-R`, `-D`), agent and X11 forwarding
 
 ## Connections
 
-Each `ssh` is a gateway process of its own, so a sandbox can have several at once. The gateway sends a keepalive every 30 seconds to your SSH client, and ends the connection after three go unanswered: a client that went away (a laptop asleep, a dropped network) is gone within about 90 seconds, its terminals hung up. A connection that is idle but alive stays; `zapper ssh off ID` closes every SSH terminal in the sandbox.
+A sandbox has one SSH terminal, the agent's. Each `ssh ID.zapper` attaches to it while its program runs, and starts it again once it has exited. A new connection takes over from one attached already, which is closed: a connection left behind (a laptop asleep) is booted by connecting again. The gateway also sends a keepalive every 30 seconds and ends a connection after three go unanswered, about 90 seconds; the agent keeps running. A persistent sandbox keeps the terminal's number, so after a daemon restart `ssh` attaches to the same one.
 
-A terminal opened over SSH ends with its connection, as `zapper attach` without `--persist` does.
+`ssh ID.zapper CMD` is a terminal of its own, ended with its connection, so several can run at once. `zapper ssh off ID` closes every SSH connection to the sandbox; the agent's terminal is detached and keeps running.
