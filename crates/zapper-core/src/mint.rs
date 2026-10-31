@@ -117,11 +117,6 @@ pub fn forget(spec: &Spec) {
     GLOBAL.forget(spec)
 }
 
-/// Why the last mint of a command failed, if it did.
-pub fn last_error(spec: &Spec) -> Option<String> {
-    GLOBAL.last_error(spec)
-}
-
 impl MintCache {
     pub fn new(runner: Arc<Runner>, clock: Arc<Clock>) -> MintCache {
         MintCache {
@@ -149,6 +144,8 @@ impl MintCache {
             .map(|e| e.value.clone())
     }
 
+    /// Why the last mint of `spec` failed, if it did: a background
+    /// refresh's failure is seen nowhere else (its value is still served).
     pub fn last_error(&self, spec: &Spec) -> Option<String> {
         let key = spec.key();
         let entry = self
