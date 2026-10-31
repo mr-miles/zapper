@@ -204,23 +204,37 @@ impl ExecRule {
     }
 }
 
+/// Every rule of the layers in the order they decide, with its layer's
+/// scope: final rules from the least specific layer down, then the others
+/// from the most specific up.
+fn ordered<'a, R: 'a + RuleInfo>(
+    layers: &'a Layers<'a>,
+    rules: impl Fn(&'a Policy) -> &'a [R] + Copy,
+) -> impl Iterator<Item = (&'a Scope, &'a R)> {
+    let finals = layers.iter().rev().flat_map(move |(scope, policy)| {
+        rules(policy)
+            .iter()
+            .filter(|r| r.is_final())
+            .map(move |r| (scope, r))
+    });
+    let others = layers.iter().flat_map(move |(scope, policy)| {
+        rules(policy)
+            .iter()
+            .filter(|r| !r.is_final())
+            .map(move |r| (scope, r))
+    });
+    finals.chain(others)
+}
+
 /// Generic layered first-match evaluation.
 fn evaluate<'a, R: 'a + RuleInfo>(
     layers: &'a Layers<'a>,
-    rules: impl Fn(&'a Policy) -> &'a [R],
+    rules: impl Fn(&'a Policy) -> &'a [R] + Copy,
     matches: impl Fn(&R) -> bool,
     default: impl Fn(&Policy) -> Option<Action>,
 ) -> (Decision, Option<&'a R>) {
-    // Final rules first, from the least specific layer down.
-    for (scope, policy) in layers.iter().rev() {
-        if let Some(r) = rules(policy).iter().find(|r| r.is_final() && matches(r)) {
-            return (r.decision(scope), Some(r));
-        }
-    }
-    for (scope, policy) in layers {
-        if let Some(r) = rules(policy).iter().find(|r| !r.is_final() && matches(r)) {
-            return (r.decision(scope), Some(r));
-        }
+    if let Some((scope, r)) = ordered(layers, rules).find(|(_, r)| matches(r)) {
+        return (r.decision(scope), Some(r));
     }
     for (scope, policy) in layers {
         if let Some(action) = default(policy) {
@@ -330,16 +344,10 @@ enum Reach {
 fn reach(layers: &Layers<'_>, name: &str) -> Reach {
     let unconditional =
         |r: &NetRule| r.ports.is_empty() && r.methods.is_empty() && r.path.is_none();
-    let finals = layers
-        .iter()
-        .rev()
-        .flat_map(|(_, p)| p.net.iter().filter(|r| r.final_));
-    let others = layers
-        .iter()
-        .flat_map(|(_, p)| p.net.iter().filter(|r| !r.final_));
     let (mut allow, mut ask) = (false, false);
     let mut settled = false;
-    for r in finals.chain(others).filter(|r| host_matches(&r.host, name)) {
+    let rules = ordered(layers, |p| &p.net[..]).map(|(_, r)| r);
+    for r in rules.filter(|r| host_matches(&r.host, name)) {
         match r.action {
             Action::Allow => allow = true,
             Action::Ask => ask = true,
