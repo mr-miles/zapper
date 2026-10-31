@@ -112,6 +112,10 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/services", post(add_service))
         .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/mcp", post(add_mcp))
+        .route(
+            "/secrets/{name}",
+            axum::routing::put(put_secret).delete(delete_secret),
+        )
         .route("/mcp/{id}", axum::routing::delete(remove_mcp))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
@@ -1170,6 +1174,76 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
 const OPERATOR: &str = "operator";
 
 /// Removes a service the operator added; others are their owners'.
+/// A secret's name: as `{{secret:NAME}}` writes it, and short.
+fn secret_name(name: &str) -> R<&str> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(name)
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("{name:?} is not a secret's name: letters, digits, _ and -, at most 64"),
+        ))
+    }
+}
+
+/// A secret as the API shows it: an inline value never.
+fn secret_view(name: &str, s: &zapper_policy::Secret) -> Value {
+    let mut v = serde_json::to_value(s).unwrap_or_default();
+    if v.get("value").is_some() {
+        v["value"] = json!("***");
+    }
+    json!({ "name": name, "secret": v })
+}
+
+/// Adds or replaces secret `name` in the running config: one change,
+/// validated as a whole and applied atomically, which touches nothing else
+/// (a client needn't put back a whole config it read, and lose what changed
+/// meanwhile).
+async fn put_secret(State(d): D, Path(name): Path<String>, body: String) -> R<Json<Value>> {
+    let name = secret_name(&name)?.to_string();
+    let secret: zapper_policy::Secret = parse_body(&body)?;
+    let view = secret_view(&name, &secret);
+    d.change(&format!("secret {name} set"), |c| {
+        c.secrets.insert(name.clone(), secret);
+        Ok(())
+    })?;
+    Ok(Json(view))
+}
+
+/// Removes secret `name` from the running config; refused while a rule (a
+/// session's own among them) or a profile still uses it.
+async fn delete_secret(State(d): D, Path(name): Path<String>) -> R<Json<Value>> {
+    let name = secret_name(&name)?.to_string();
+    // The config's validation covers its own layers; a session's own rules
+    // are checked here, so none is left naming a secret that isn't there.
+    for s in d.sessions() {
+        if let Some(r) = s.rules().into_iter().find(|r| match r {
+            AnyRule::Net(n) => n.secrets.contains(&name),
+            _ => false,
+        }) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "secret {name} is used by session {}'s rule {}",
+                    s.id,
+                    r.id().unwrap_or("?")
+                ),
+            ));
+        }
+    }
+    let gone = d.change(&format!("secret {name} removed"), |c| {
+        c.secrets
+            .remove(&name)
+            .ok_or_else(|| anyhow::anyhow!("no secret {name}"))
+    })?;
+    Ok(Json(secret_view(&name, &gone)))
+}
+
 async fn list_mcp(State(d): D) -> Json<Value> {
     Json(Value::Array(d.mcp_servers()))
 }
