@@ -219,7 +219,7 @@ impl Services {
     }
 
     pub fn info(&self, id: u64) -> Option<Info> {
-        self.list().into_iter().find(|i| i.id == id)
+        self.0.with(|entries| entries.get(&id).map(|e| info(id, e)))
     }
 
     pub fn list(&self) -> Vec<Info> {

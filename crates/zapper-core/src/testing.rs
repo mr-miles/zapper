@@ -154,18 +154,28 @@ pub fn guest_tls(s: &Session) -> tokio_rustls::TlsConnector {
     tokio_rustls::TlsConnector::from(Arc::new(config))
 }
 
+/// Where a VM stand-in takes `s`'s host-initiated vsock connections.
+fn vsock_listener(s: &Session) -> UnixListener {
+    let path = s.vsock_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    UnixListener::bind(&path).unwrap()
+}
+
+/// Answers a host-initiated connection's `CONNECT` line, as the VMM does.
+async fn connected(c: &mut UnixStream) {
+    let connect = line(c).await;
+    assert!(connect.starts_with(b"CONNECT "), "{connect:?}");
+    c.write_all(b"OK 1\n").await.unwrap();
+}
+
 /// Plays a VM's side of host-initiated vsock connections on `s`'s socket:
 /// each is accepted and echoes what it is sent.
 pub fn echoing_vm(s: &Session) {
-    let path = s.vsock_path();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = vsock_listener(s);
     tokio::spawn(async move {
         while let Ok((mut c, _)) = listener.accept().await {
             tokio::spawn(async move {
-                let line = line(&mut c).await;
-                assert!(line.starts_with(b"CONNECT "), "{line:?}");
-                c.write_all(b"OK 1\n").await.unwrap();
+                connected(&mut c).await;
                 let mut buf = [0u8; 256];
                 while let Ok(n) = c.read(&mut buf).await {
                     if n == 0 || c.write_all(&buf[..n]).await.is_err() {
@@ -244,15 +254,11 @@ impl Shell {
 /// (`Session::open_shell`: an agent the foreman drives, `zapper exec`):
 /// each, as it is started.
 pub fn shell_vm(s: &Session) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
-    let path = s.vsock_path();
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = vsock_listener(s);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Ok((mut c, _)) = listener.accept().await {
-            let connect = line(&mut c).await;
-            assert!(connect.starts_with(b"CONNECT "), "{connect:?}");
-            c.write_all(b"OK 1\n").await.unwrap();
+            connected(&mut c).await;
             let request = serde_json::from_slice(&line(&mut c).await).unwrap();
             let (read, write) = c.into_split();
             let shell = Shell {

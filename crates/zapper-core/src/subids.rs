@@ -152,26 +152,10 @@ pub fn release(session: &str) {
 /// The `newuidmap` and `newgidmap` arguments for a VMM at `pid` with
 /// offset `n`: 0 the daemon user, 1 its own subordinate id.
 fn map_args(ids: &SubIds, pid: u32, n: u32) -> [Vec<String>; 2] {
-    let pid = pid.to_string();
+    let args = |own: u32, sub: u32| [pid, 0, own, 1, 1, sub, 1].map(|v| v.to_string()).to_vec();
     [
-        vec![
-            pid.clone(),
-            "0".into(),
-            ids.uid.to_string(),
-            "1".into(),
-            "1".into(),
-            (ids.uids.start + n).to_string(),
-            "1".into(),
-        ],
-        vec![
-            pid,
-            "0".into(),
-            ids.gid.to_string(),
-            "1".into(),
-            "1".into(),
-            (ids.gids.start + n).to_string(),
-            "1".into(),
-        ],
+        args(ids.uid, ids.uids.start + n),
+        args(ids.gid, ids.gids.start + n),
     ]
 }
 

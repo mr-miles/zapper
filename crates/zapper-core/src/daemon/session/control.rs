@@ -77,7 +77,7 @@ pub(super) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
         // agent sends its line as it connects, so the workload would have
         // to open dozens of connections between the two to push it out.
         let mut checking: std::collections::VecDeque<tokio::task::AbortHandle> = Default::default();
-        let refused: Arc<std::sync::Mutex<(u64, String)>> = Default::default();
+        let refused: Arc<std::sync::Mutex<Refused>> = Default::default();
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         let (stream, terminals) = loop {
             tokio::select! {
@@ -87,9 +87,7 @@ pub(super) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
                     if checking.len() >= RESUME_CHECKS {
                         if let Some(oldest) = checking.pop_front() {
                             oldest.abort();
-                            let mut r = refused.lock().unwrap();
-                            r.0 += 1;
-                            r.1 = "silent while newer connections came".into();
+                            refused.lock().unwrap().note("silent while newer connections came".into());
                         }
                     }
                     let (tx, token, refused) = (found_tx.clone(), token.clone(), refused.clone());
@@ -99,9 +97,7 @@ pub(super) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
                                 let _ = tx.send((stream, terminals)).await;
                             }
                             Err(why) => {
-                                let mut r = refused.lock().unwrap();
-                                r.0 += 1;
-                                r.1 = why;
+                                refused.lock().unwrap().note(why);
                             }
                         }
                     });
@@ -126,14 +122,27 @@ pub(super) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
 /// Connections checked for a resumption at once.
 const RESUME_CHECKS: usize = 64;
 
-/// Records the control connections refused since last time, if any: how
-/// many, and why the last was.
-fn note_refused(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    refused: &std::sync::Mutex<(u64, String)>,
-) {
-    let (n, why) = std::mem::take(&mut *refused.lock().unwrap());
+/// Control connections refused since they were last recorded: how many, and
+/// why the last was.
+#[derive(Default)]
+struct Refused {
+    count: u64,
+    last: String,
+}
+
+impl Refused {
+    fn note(&mut self, why: String) {
+        self.count += 1;
+        self.last = why;
+    }
+}
+
+/// Records the control connections refused since last time, if any.
+fn note_refused(daemon: &Arc<Daemon>, session: &Arc<Session>, refused: &std::sync::Mutex<Refused>) {
+    let Refused {
+        count: n,
+        last: why,
+    } = std::mem::take(&mut *refused.lock().unwrap());
     if n == 0 {
         return;
     }
