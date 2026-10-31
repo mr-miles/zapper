@@ -171,6 +171,55 @@ pub(super) fn rate_limited(text: &str) -> bool {
             .any(|n| n == "429" || n == "529")
 }
 
+/// `v` as one JSON line, newline included: what the agents read on stdin.
+pub(super) fn json_line(v: &Value) -> Vec<u8> {
+    let mut line = serde_json::to_vec(v).expect("JSON");
+    line.push(b'\n');
+    line
+}
+
+/// A file of the agent's configuration, in its user's home, theirs and
+/// readable.
+pub(super) fn user_file(path: String, content: String) -> GuestFile {
+    GuestFile {
+        path,
+        content,
+        mode: 0o644,
+        user_owned: true,
+    }
+}
+
+/// What the agent is doing, from a tool call's name and input: `Edit
+/// pricing.md`.
+pub(super) fn tool_activity(name: &str, input: &Value) -> String {
+    let name = zapper_policy::proto::mcp_tool_name(name);
+    let arg = [
+        "file_path",
+        "path",
+        "command",
+        "pattern",
+        "url",
+        "subject",
+        "query",
+        "description",
+    ]
+    .iter()
+    .find_map(|k| input[*k].as_str())
+    .map(|s| {
+        let s = s.lines().next().unwrap_or("");
+        // Show a path's basename, but keep a value with spaces whole — it is a
+        // command or prose, not a path.
+        let s = s
+            .rsplit('/')
+            .next()
+            .filter(|_| !s.contains(' '))
+            .unwrap_or(s);
+        s.chars().take(60).collect::<String>()
+    })
+    .unwrap_or_default();
+    format!("{name} {arg}").trim().to_string()
+}
+
 /// Pretty-prints JSON for a config file.
 pub(super) fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap()

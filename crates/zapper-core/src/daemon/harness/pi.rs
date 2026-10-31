@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{merge, ResolvedProfile};
 
-use super::claude::claude_activity;
 use super::{Conversation, Driver, Event, Harness, Outcome, TurnEnd};
 
 /// pi: configuration in `~/.pi/agent`, driven over `pi --mode rpc`.
@@ -85,12 +84,9 @@ struct PiConversation {
 impl PiConversation {
     fn command(&mut self, kind: &str, text: &str) -> Vec<u8> {
         self.next += 1;
-        let mut line = serde_json::to_vec(
+        super::json_line(
             &json!({ "id": format!("z-{}", self.next), "type": kind, "message": text }),
         )
-        .expect("JSON");
-        line.push(b'\n');
-        line
     }
 
     fn end(&mut self, aborted: bool) -> TurnEnd {
@@ -174,8 +170,8 @@ impl Conversation for PiConversation {
                 }
             }
             Some("tool_execution_start") => {
-                let call = json!({ "message": { "content": [{ "type": "tool_use", "name": v["toolName"], "input": v["args"] }] } });
-                out.extend(claude_activity(&call).map(Event::Activity));
+                let name = v["toolName"].as_str().unwrap_or("tool");
+                out.push(Event::Activity(super::tool_activity(name, &v["args"])));
             }
             Some("message_end") if v["message"]["role"] == "assistant" => {
                 let m = &v["message"];
@@ -221,19 +217,12 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
         merge(&mut settings, &json!({ "defaultModel": m }));
     }
     let pretty = super::pretty;
-    let mut files = vec![GuestFile {
-        path: format!("{dir}/settings.json"),
-        content: pretty(&settings),
-        mode: 0o644,
-        user_owned: true,
-    }];
+    let mut files = vec![super::user_file(
+        format!("{dir}/settings.json"),
+        pretty(&settings),
+    )];
     if let Some(md) = &agent.instructions {
-        files.push(GuestFile {
-            path: format!("{dir}/AGENTS.md"),
-            content: md.clone(),
-            mode: 0o644,
-            user_owned: true,
-        });
+        files.push(super::user_file(format!("{dir}/AGENTS.md"), md.clone()));
     }
     // MCP tools are declared to the model directly: pi's default reaches
     // them only from codemode scripts, which the skills don't use.
@@ -244,12 +233,10 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
                 s["exposure"] = json!("direct");
             }
         }
-        files.push(GuestFile {
-            path: format!("{dir}/mcp.json"),
-            content: pretty(&json!({ "mcpServers": servers })),
-            mode: 0o644,
-            user_owned: true,
-        });
+        files.push(super::user_file(
+            format!("{dir}/mcp.json"),
+            pretty(&json!({ "mcpServers": servers })),
+        ));
     }
     files
 }
