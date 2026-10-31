@@ -146,6 +146,11 @@ pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &
     if !session.runtime.begin_stop(reason) {
         return;
     }
+    // A live session is now `Stopping`; a failed one keeps its failure. The
+    // `stopped` event (and the `Stopped` status) wait for teardown to finish.
+    if matches!(session.runtime.current(), Status::Stopping(_)) {
+        session_event(daemon, session, "stopping", reason);
+    }
     session.runtime.send(HostMsg::Shutdown);
     teardown(daemon, session, Some(reason)).await;
 }
@@ -160,9 +165,6 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
     crate::subids::release(&session.id);
     session.runtime.clear_guest();
     daemon.drop_approvals(session);
-    if let Some(reason) = reason {
-        session_event(daemon, session, "stopped", reason);
-    }
     // The VMM's directory: disks and sockets go; its config and metrics are
     // kept next to the audit log.
     let sd = &session.dir;
@@ -174,4 +176,10 @@ async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&
         let _ = std::fs::remove_dir_all(sd.vm());
     }
     *session.audit.lock().unwrap() = None;
+    // Everything is torn down now: only here does it become `Stopped` (a kept
+    // failure stays as it is) and the `stopped` event go out.
+    if let Some(reason) = reason {
+        session.runtime.finish_stop(reason);
+        session_event(daemon, session, "stopped", reason);
+    }
 }

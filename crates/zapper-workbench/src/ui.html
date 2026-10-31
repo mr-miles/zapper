@@ -33,7 +33,9 @@
   .badge { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: var(--chip); color: var(--muted); white-space: nowrap; }
   .badge.blue { color: var(--accent); } .badge.warn { color: var(--warn); }
   .state { font-size: 12px; font-weight: 600; }
-  .state.running { color: var(--allow); } .state.starting { color: var(--warn); } .state.failed { color: var(--deny); } .state.stopped { color: var(--muted); }
+  .state.running { color: var(--allow); } .state.starting { color: var(--warn); } .state.stopping { color: var(--warn); } .state.failed { color: var(--deny); } .state.stopped { color: var(--muted); }
+  .ico { margin-right: 4px; font-size: 11px; }
+  .ico.running { color: var(--allow); } .ico.starting, .ico.stopping { color: var(--warn); } .ico.stopped, .ico.failed { color: var(--deny); }
   table.kv { border-collapse: collapse; width: 100%; }
   table.kv td { padding: 3px 8px 3px 0; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
   table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 1%; }
@@ -83,6 +85,9 @@ async function api(method, path, body) {
 const may = r => me && me.token.rights.includes(r);
 const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 172800 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; };
 function stop() { if (feed) feed.close(); if (term) term.close(); feed = term = null; }
+// A session's state as a coloured glyph (▶ running, ■ stopped) and the word.
+const STATE_GLYPH = { running: "▶", starting: "▶", stopping: "■", stopped: "■", failed: "✕" };
+function stateLabel(state) { const s = el("span", null, "state " + state); s.append(el("span", STATE_GLYPH[state] || "•", "ico " + state), document.createTextNode(state)); return s; }
 
 // zapper away: said, and checked again; still signed in.
 function showDown(why) { const d = document.getElementById("down"); d.hidden = !why; d.textContent = why ? "zapper isn't reachable (" + why + "); retrying…" : ""; }
@@ -153,7 +158,7 @@ views.sessions = async (main, id) => {
     for (const s of ss) {
       const c = el("div", null, "scard");
       const top = el("div", null, "top");
-      top.append(el("strong", s.id, "mono"), el("span", s.state, "state " + s.state));
+      top.append(el("strong", s.id, "mono"), stateLabel(s.state));
       c.append(top, el("div", s.profile + " · " + s.image));
       c.append(badgesOf(s, behind.has(s.id)));
       c.append(el("div", "made " + ago(s.created), "muted"));
@@ -236,13 +241,17 @@ async function sessionPage(main, id) {
   const [s, cfg, behind] = await Promise.all([api("GET", "/sessions/" + id), api("GET", "/sessions/" + id + "/config").catch(() => null), behindIds()]);
   const head = el("section", null, "card");
   const top = el("div", null, "row");
-  top.append(el("strong", s.id, "mono"), el("span", s.state, "state " + s.state), el("span", s.profile));
+  top.append(el("strong", s.id, "mono"), stateLabel(s.state), el("span", s.profile));
   head.append(top, badgesOf(s, behind.has(s.id)));
   head.append(kv([["image", s.image], ["vcpus · memory", s.vcpus + " · " + s.memory_mib + " MiB"], ["network", s.network], ["made", new Date(s.created * 1000).toLocaleString()], ["expires", s.expires ? new Date(s.expires * 1000).toLocaleString() : null], ["kept disks", s.disk_bytes ? Math.round(s.disk_bytes / (1 << 20)) + " MiB" : null], ["detail", s.detail]]));
   if (may("control")) {
     const row = el("div", null, "row");
-    for (const [label, method, path, cls] of [["Stop", "POST", "/stop"], ["Start", "POST", "/start"], ["Remove", "DELETE", "", "deny"]]) {
+    const busy = s.state === "running" || s.state === "starting";
+    const stopped = s.state === "stopped";
+    // Stop only while it runs; start and remove only once it is stopped.
+    for (const [label, method, path, cls, enabled] of [["Stop", "POST", "/stop", "", busy], ["Start", "POST", "/start", "", stopped], ["Remove", "DELETE", "", "deny", stopped]]) {
       const b = el("button", label, cls);
+      b.disabled = !enabled;
       b.onclick = async () => {
         if (label === "Remove" && !confirm("Remove session " + id + "? Its disks go too.")) return;
         b.disabled = true;

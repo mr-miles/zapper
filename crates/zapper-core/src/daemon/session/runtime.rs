@@ -14,6 +14,10 @@ use zapper_policy::proto::HostMsg;
 pub enum Status {
     Starting,
     Running,
+    /// Its stop is under way: the VM and disks are being torn down. Reached
+    /// once, by the caller that owns the stop; it becomes `Stopped` only when
+    /// teardown has finished everything.
+    Stopping(String),
     Failed(String),
     Stopped(String),
 }
@@ -147,23 +151,37 @@ impl GuestRuntime {
         })
     }
 
-    /// → Stopped(`reason`), a failure kept as it is: whether this caller is
-    /// the one stopping it (not if it was stopped already).
+    /// → Stopping(`reason`), a failure kept as it is: whether this caller is
+    /// the one stopping it (not if it is stopping or stopped already). The
+    /// status reaches `Stopped` only once teardown calls `finish_stop`.
     pub fn begin_stop(&self, reason: &str) -> bool {
         let mut first = false;
         self.status.send_if_modified(|s| match s {
-            Status::Stopped(_) => false,
+            Status::Stopped(_) | Status::Stopping(_) => false,
             Status::Failed(_) => {
                 first = true;
                 false
             }
             _ => {
                 first = true;
-                *s = Status::Stopped(reason.into());
+                *s = Status::Stopping(reason.into());
                 true
             }
         });
         first
+    }
+
+    /// Stopping → Stopped(`reason`): teardown is done. A `Failed` (whose stop
+    /// kept its failure) is left as it is. Called once, by the owner of the
+    /// stop, after everything is torn down.
+    pub fn finish_stop(&self, reason: &str) -> bool {
+        self.status.send_if_modified(|s| match s {
+            Status::Stopping(_) => {
+                *s = Status::Stopped(reason.into());
+                true
+            }
+            _ => false,
+        })
     }
 
     /// The Firecracker process handle: set at boot, taken at teardown.
@@ -240,17 +258,19 @@ mod status_tests {
             [
                 Status::Starting,
                 Status::Running,
+                Status::Stopping("st".into()),
                 Status::Failed("f".into()),
                 Status::Stopped("s".into()),
             ]
         };
         type Step = fn(&GuestRuntime) -> bool;
-        let steps: [(&str, Step); 8] = [
+        let steps: [(&str, Step); 9] = [
             ("mark_ready", |r| r.mark_ready()),
             ("fail_if_starting", |r| r.fail_if_starting("x".into())),
             ("fail", |r| r.fail("x".into())),
             ("claim_start", |r| r.claim_start()),
             ("begin_stop", |r| r.begin_stop("x")),
+            ("finish_stop", |r| r.finish_stop("x")),
             ("restored", |r| r.restored("x")),
             ("adopted", |r| r.adopted()),
             ("undo_start", |r| {
@@ -265,9 +285,10 @@ mod status_tests {
                 ("fail_if_starting", Starting) => (Failed(x()), true),
                 ("fail", Starting | Running) => (Failed(x()), true),
                 ("claim_start", Stopped(_) | Failed(_)) => (Starting, true),
-                ("begin_stop", Starting | Running) => (Stopped(x()), true),
+                ("begin_stop", Starting | Running) => (Stopping(x()), true),
                 // A failed session's stop is this caller's, its failure kept.
                 ("begin_stop", Failed(_)) => (from.clone(), true),
+                ("finish_stop", Stopping(_)) => (Stopped(x()), true),
                 ("restored", Starting) => (Stopped(x()), true),
                 ("adopted", Starting) => (Running, true),
                 ("undo_start", Starting) => (Stopped("was".into()), true),
@@ -301,8 +322,12 @@ mod status_tests {
         assert!(!r.mark_ready());
         assert!(!r.fail("guest setup: x".into()));
         assert!(!r.fail_if_starting("vm exited".into()));
+        assert_eq!(r.current(), Status::Stopping("stopped by operator".into()));
+        assert!(!r.begin_stop("again"), "stopping once");
+        // Only when teardown is done does it reach Stopped.
+        assert!(r.finish_stop("stopped by operator"));
         assert_eq!(r.current(), Status::Stopped("stopped by operator".into()));
-        assert!(!r.begin_stop("again"), "stopped once");
+        assert!(!r.finish_stop("again"), "stopped once");
     }
 
     #[test]
