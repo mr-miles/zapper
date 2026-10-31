@@ -937,3 +937,42 @@ async fn a_database_rule_doesnt_relay_to_a_service() {
     let refused = net_event(&t, &s, 0).await["error"].to_string();
     assert!(refused.contains("is a service"), "{refused}");
 }
+
+/// A captured plain-HTTP connection's requests all go to the target its
+/// connection was decided for, as an inspected HTTPS connection's do: not
+/// looked up again for each request. A service removed meanwhile still
+/// serves the connection made to it.
+#[tokio::test]
+async fn a_captured_plain_connection_keeps_its_target() {
+    use http_body_util::BodyExt;
+    let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], path: \"/**\" }\n");
+    let io = dial(&t, &s, "api.example", 80);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let get = |path: &str| {
+        Request::builder()
+            .uri(format!("http://api.example{path}"))
+            .header("host", "api.example")
+            .body(Empty::<Bytes>::new())
+            .unwrap()
+    };
+    let first = sender.send_request(get("/one")).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let _ = first.into_body().collect().await;
+    // The service goes: a new connection to it would find nothing.
+    let id = t
+        .core
+        .services()
+        .into_iter()
+        .find(|i| i.name == "api.example")
+        .unwrap()
+        .id;
+    t.core.remove_service(id).unwrap();
+    let second = sender.send_request(get("/two")).await.unwrap();
+    let status = second.status();
+    let body = second.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(String::from_utf8_lossy(&body).contains("path=/two"));
+}

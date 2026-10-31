@@ -748,37 +748,49 @@ pub(super) async fn plain(
     else {
         return text(StatusCode::BAD_REQUEST, "bad request target");
     };
-    forward_plain(d, s, req, host, port, pool).await
+    forward_plain(d, s, req, host, port, None, pool).await
 }
 
-/// Inspects plain HTTP on a captured connection to `host:port`.
+/// Inspects plain HTTP on a captured connection to `host:port`, whose
+/// address `addr` was resolved and checked when it was made: every request
+/// on it goes there, as an inspected HTTPS connection's do.
 pub(super) async fn plain_inspected<S>(
     d: Arc<Daemon>,
     s: Arc<Session>,
     io: S,
     host: String,
     port: u16,
+    addr: Target,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // One pool for this captured connection's requests (all to one origin).
     let pool = PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s, host, pool) = (d.clone(), s.clone(), host.clone(), pool.clone());
-        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, pool).await) }
+        let (d, s, host, pool, addr) = (
+            d.clone(),
+            s.clone(),
+            host.clone(),
+            pool.clone(),
+            addr.clone(),
+        );
+        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, Some(addr), pool).await) }
     });
     let _ = http1().serve_connection(TokioIo::new(io), svc).await;
 }
 
 /// An inspected plain-HTTP request to `host:port`, forwarded through the
-/// per-connection, origin-keyed `PlainPool`. The target is resolved here (a
-/// bad/forbidden one is a 403) since a plain proxy connection is multi-origin.
+/// per-connection, origin-keyed `PlainPool`, to `addr` when the connection's
+/// is known (a captured one). Without it (a proxy-aware client's absolute
+/// URIs, each naming its own host) the target is resolved and checked here,
+/// for this request: a bad or forbidden one is a 403.
 async fn forward_plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
     host: String,
     port: u16,
+    addr: Option<Target>,
     pool: PlainPool,
 ) -> Response<Body> {
     let (dc, sc) = (d.clone(), s.clone());
@@ -792,9 +804,12 @@ async fn forward_plain(
         80,
         true,
         move |mut parts, body, path| async move {
-            let addr = target(&dc, &sc, &host, port)
-                .await
-                .map_err(|e| (StatusCode::FORBIDDEN, e))?;
+            let addr = match addr {
+                Some(a) => a,
+                None => target(&dc, &sc, &host, port)
+                    .await
+                    .map_err(|e| (StatusCode::FORBIDDEN, e))?,
+            };
             parts.uri = path.parse().unwrap_or_default();
             pool.send(
                 &dc,

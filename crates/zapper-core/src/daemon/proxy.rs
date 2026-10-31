@@ -543,8 +543,15 @@ async fn stream<S>(
             .await
         }
         None => {
-            inspect::plain_inspected(d, s, Prefixed::new(first, io), endpoint.host, endpoint.port)
-                .await
+            inspect::plain_inspected(
+                d,
+                s,
+                Prefixed::new(first, io),
+                endpoint.host,
+                endpoint.port,
+                addr,
+            )
+            .await
         }
     }
 }
