@@ -103,7 +103,13 @@ pub fn host() -> Result<&'static SubIds, &'static str> {
 pub fn host_range() -> Result<(u32, u32), String> {
     let ids = host().map_err(str::to_string)?;
     let start = ids.uids.start;
-    Ok((start, start + ids.uids.count.min(MAX) - 1))
+    Ok((start, start + limit(ids) - 1))
+}
+
+/// How many sessions can each have an id: as many as both the uid and the
+/// gid ranges hold, at most the sessions cap.
+fn limit(ids: &SubIds) -> u32 {
+    ids.uids.count.min(ids.gids.count).min(MAX)
 }
 
 /// Each session's offset into the ranges, while its VM runs.
@@ -115,7 +121,7 @@ pub fn lease(ids: &SubIds, session: &str) -> Result<u32> {
     if let Some(n) = leases.get(session) {
         return Ok(*n);
     }
-    let limit = ids.uids.count.min(ids.gids.count).min(MAX);
+    let limit = limit(ids);
     let taken: std::collections::BTreeSet<u32> = leases.values().copied().collect();
     let Some(n) = (0..limit).find(|n| !taken.contains(n)) else {
         bail!("all {limit} subordinate ids are in use");
@@ -265,6 +271,13 @@ mod tests {
             newuidmap: "/usr/bin/newuidmap".into(),
             newgidmap: "/usr/bin/newgidmap".into(),
         }
+    }
+
+    /// What `zapper check` reports and what leases hand out agree: the
+    /// smaller of the two ranges.
+    #[test]
+    fn the_smaller_range_is_the_limit() {
+        assert_eq!(limit(&ids()), 2);
     }
 
     /// Each session holds its own offset until released; the smaller range
