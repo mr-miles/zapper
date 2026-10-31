@@ -245,9 +245,9 @@ pub(super) async fn mitm<S>(
         path: None,
         ..Default::default()
     };
-    let config = match s.tls.server_config(&host) {
-        Ok(c) => c,
-        Err(e) => {
+    let tls = match s.tls.accept(io, &host, tls::Alpn::Any).await {
+        Ok(t) => t,
+        Err(error) => {
             log(
                 &d,
                 &s,
@@ -257,54 +257,12 @@ pub(super) async fn mitm<S>(
                     inspected: true,
                     status: None,
                     secrets: vec![],
-                    error: Some(format!("{e:#}")),
+                    error: Some(error),
                 },
             );
             return;
         }
     };
-    let tls = match tokio::time::timeout(
-        Duration::from_secs(15),
-        TlsAcceptor::from(config).accept(io),
-    )
-    .await
-    {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error: Some(format!("TLS from guest: {e}")),
-                },
-            );
-            return;
-        }
-        Err(_) => return,
-    };
-    if let Some(sni) = tls.get_ref().1.server_name() {
-        if !sni.eq_ignore_ascii_case(&host) {
-            let error = Some(format!("TLS server name {sni} does not match CONNECT host"));
-            log(
-                &d,
-                &s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
-                    error,
-                },
-            );
-            return;
-        }
-    }
     let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
     let upstream: Upstream = Default::default();
     let svc = service_fn(move |req| {

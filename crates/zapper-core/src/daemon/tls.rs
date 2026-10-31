@@ -128,6 +128,15 @@ pub(crate) struct SessionTls {
     configs: Mutex<HashMap<String, (Arc<ServerConfig>, std::time::Instant)>>,
 }
 
+/// What a terminated connection offers the guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Alpn {
+    /// HTTP/2 or HTTP/1.1, as the session's config offers.
+    Any,
+    /// HTTP/1.1 alone (a service's plain side speaks only that).
+    Http1,
+}
+
 /// How long a minted leaf (valid for a week) is used before another is.
 const LEAF_USE: std::time::Duration = std::time::Duration::from_secs(6 * 24 * 3600);
 /// Most hosts' configs kept at once: the names are the guest's, so a rule
@@ -164,6 +173,40 @@ impl SessionTls {
     /// The server config for terminating an inspected connection to `host`:
     /// a leaf minted from the CA and assembled on first use, then cached,
     /// and minted again before it expires (a session can run for weeks).
+    /// Terminates the guest's TLS for `host`: the session CA's leaf for it,
+    /// offering `alpn`; the handshake within 15 seconds; and a server name,
+    /// if the guest sends one, that is `host`, so a connection decided for
+    /// one name can't be used for another. The one place the guest's TLS is
+    /// ended (an inspected connection, a service behind the daemon's TLS, a
+    /// database relay's in-band TLS).
+    pub async fn accept<IO>(
+        &self,
+        io: IO,
+        host: &str,
+        alpn: Alpn,
+    ) -> std::result::Result<tokio_rustls::server::TlsStream<IO>, String>
+    where
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut config = self.server_config(host).map_err(|e| format!("{e:#}"))?;
+        if let Alpn::Http1 = alpn {
+            let mut c = (*config).clone();
+            c.alpn_protocols = vec![b"http/1.1".to_vec()];
+            config = Arc::new(c);
+        }
+        let accept = tokio_rustls::TlsAcceptor::from(config).accept(io);
+        let tls = tokio::time::timeout(std::time::Duration::from_secs(15), accept)
+            .await
+            .map_err(|_| "TLS from guest: no handshake within 15s".to_string())?
+            .map_err(|e| format!("TLS from guest: {e}"))?;
+        if let Some(sni) = tls.get_ref().1.server_name() {
+            if !sni.eq_ignore_ascii_case(host) {
+                return Err(format!("TLS server name {sni} does not match {host}"));
+            }
+        }
+        Ok(tls)
+    }
+
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let host = host.to_ascii_lowercase();
         if let Some((c, at)) = self.configs.lock().unwrap().get(&host) {
@@ -382,5 +425,94 @@ mod tests {
         assert_eq!(client_hello_sni(&hello), Ok(Some("example.com".into())));
         assert_eq!(client_hello_sni(b"SSH-2.0-OpenSSH"), Ok(None));
         assert_eq!(client_hello_sni(&hello[..20]), Err(()));
+    }
+
+    /// A client that takes any certificate, so what is tested is the
+    /// server's side alone.
+    #[derive(Debug)]
+    struct AnyCert;
+
+    impl rustls::client::danger::ServerCertVerifier for AnyCert {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &rustls::pki_types::ServerName<'_>,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    /// The guest's TLS is ended for the host the connection is for: a
+    /// server name naming another is refused, as is a handshake that never
+    /// comes; the host's own (or none) is taken.
+    #[tokio::test(start_paused = true)]
+    async fn the_guests_tls_is_ended_only_for_its_host() {
+        let tls = SessionTls::new("abc234").unwrap();
+        let config = Arc::new(
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AnyCert))
+                .with_no_client_auth(),
+        );
+        let handshake = |sni: &'static str| {
+            let config = config.clone();
+            async move {
+                let (guest, ours) = tokio::io::duplex(64 * 1024);
+                let client = tokio::spawn(async move {
+                    let name = rustls::pki_types::ServerName::try_from(sni).unwrap();
+                    tokio_rustls::TlsConnector::from(config)
+                        .connect(name, guest)
+                        .await
+                });
+                (ours, client)
+            }
+        };
+        let (ours, _client) = handshake("other.example").await;
+        let e = tls
+            .accept(ours, "api.example", Alpn::Any)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            e.contains("other.example does not match api.example"),
+            "{e}"
+        );
+
+        let (ours, _client) = handshake("API.example").await;
+        assert!(tls.accept(ours, "api.example", Alpn::Http1).await.is_ok());
+
+        let (_guest, ours) = tokio::io::duplex(1024);
+        let e = tls
+            .accept(ours, "api.example", Alpn::Any)
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("no handshake"), "{e}");
     }
 }

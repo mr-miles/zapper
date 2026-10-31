@@ -10,17 +10,13 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsConnector;
 use zapper_policy::{NetProtocol, NetRequest};
 
 use super::{dial, log, note_failure, note_verdict, NetLog, Prefixed, Target, Verdict};
 use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds};
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
-
-/// How long the guest has to finish its TLS handshake, as for an inspected
-/// connection.
-const GUEST_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Terminates the guest's TLS with the session CA for `host`, over `io` (which
 /// replays any bytes already read from the guest), returning the plaintext
@@ -33,11 +29,7 @@ async fn accept_guest_tls<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-    tokio::time::timeout(GUEST_TLS_TIMEOUT, TlsAcceptor::from(config).accept(io))
-        .await
-        .map_err(|_| "TLS from guest: no handshake within 15s".to_string())?
-        .map_err(|e| format!("TLS from guest: {e}"))
+    s.tls.accept(io, host, tls::Alpn::Any).await
 }
 
 /// A `dbauth` credential resolved from the config: the user the proxy

@@ -27,7 +27,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsConnector;
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
     Kind, NetEffects, NetProtocol, NetRequest, NetRule,
