@@ -43,6 +43,15 @@ impl Remember {
     }
 }
 
+impl Pending {
+    /// Tells whoever waits on it the answer, once.
+    pub(super) fn fire(&self, allow: bool) {
+        if let Some(tx) = self.tx.lock().unwrap().take() {
+            let _ = tx.send(allow);
+        }
+    }
+}
+
 /// How many approvals one session may have outstanding at once.
 const MAX_PER_SESSION: usize = 32;
 
@@ -86,11 +95,7 @@ impl Approvals {
             .collect();
         ids.iter()
             .filter_map(|id| approvals.remove(id))
-            .inspect(|p| {
-                if let Some(tx) = p.tx.lock().unwrap().take() {
-                    let _ = tx.send(false);
-                }
-            })
+            .inspect(|p| p.fire(false))
             .collect()
     }
 
