@@ -37,12 +37,12 @@ struct Watch {
 }
 
 impl Observer for Watch {
-    fn transcript(&self, kind: &str, line: Value) {
-        if kind == "line" {
-            self.transcript.write(line);
-        } else {
-            self.transcript.append(kind, line);
-        }
+    fn line(&self, line: Value) {
+        self.transcript.write(line);
+    }
+
+    fn note(&self, kind: &str, detail: Value) {
+        self.transcript.append(kind, detail);
     }
 
     fn conversation(&self, id: &str) {
@@ -77,7 +77,7 @@ async fn start(
         transcript,
         session_id,
     };
-    driver::start(stream, conv, Arc::new(watch)).await
+    Ok(driver::start(stream, conv, Arc::new(watch)))
 }
 
 /// The worker's harness driver, from its profile's `agent.kind`.
