@@ -1,6 +1,6 @@
 # The office as a process of its own
 
-Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §7's own listener is decided and now has a built template to copy (below); §8 is largely settled by the `serve` shutdown that has since landed (below); §4–§6, and §7's config file, are still for discussion.
+Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §6 (the driver as a crate), §7 (its own listener and its own config file), and §8 (kept-until-removed, resuming by cursor) are decided; §4 and §5 are still for discussion.
 
 The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is: it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
 
@@ -89,18 +89,20 @@ Today each role's policy is a layer the office holds in memory and shares with e
 
 ### 6. Driving workers
 
+*Decided: (a), the driver as a crate the office uses.* Who may prompt a worker is then who holds its terminal — the office — and the API grows no prompt capability.
+
 Today the foreman opens a terminal in the worker's VM and runs the core's driver on it (`driver::start`, `foreman.rs:73-80`); it keeps when to wake an agent and the budgets. Prompts reach a worker only through it: the operator's `zapper tell` is refused for a firm's sessions.
 
-- **(a) The driver's code in a crate of its own**, depending on `zapper-proto` only (the harnesses' conversation code and the process driver), used by the core for driven sessions and by the office over `attach`, whose frames are the same as `open_shell`'s. The office keeps its foreman as it is. Who may prompt a worker is then who holds its terminal: the office.
-- **(b) The core drives, the office prompts.** Workers are created `driven`, the office prompts through `POST /v1/sessions/{id}/prompt` and reads turns from events. The core's driver needs an **owner** in the API: a session created with a driver claim, whose prompts need the claim's token, so that nothing reaches a worker around the firm's post office and budgets. Less code in the office; a capability in the API that nothing else has.
+- **(a, chosen) The driver's code in a crate of its own**, depending on `zapper-proto` only (the harnesses' conversation code and the process driver), used by the core for driven sessions and by the office over `attach`, whose frames are the same as `open_shell`'s. The office keeps its foreman as it is. Who may prompt a worker is then who holds its terminal: the office.
+- **(b) The core drives, the office prompts.** Workers are created `driven`, the office prompts through `POST /v1/sessions/{id}/prompt` and reads turns from events. The core's driver needs an **owner** in the API: a session created with a driver claim, whose prompts need the claim's token, so that nothing reaches a worker around the firm's post office and budgets. Less code in the office; a capability in the API that nothing else has. *Set aside: it adds a prompt capability to the API that only the office would use, and keeps the driver in the core.*
 
 ### 7. The office's UI, CLI and config
 
-*Decided: its own listener.* The alternative — the office behind the workbench, as a facility it proxies (one sign-in for both, but the office then needs the workbench to run) — is set aside. Its config file is still open.
+*Decided: its own listener, and its own config file.* The alternative — the office behind the workbench, as a facility it proxies (one sign-in for both, but the office then needs the workbench to run) — is set aside.
 
 - **Its own listener.** The office serves its pages and the board's writes itself, behind its own guard. This is no longer a plan to write but an extraction: the workbench's `gateway.rs` already owns remote security (token or the UI's cookie with `Host`, `Origin` and the header check), creates sessions with the token's labels and a directory of its own, scopes a rule to a session's own layer, never opens a `system` terminal, and filters lists, approvals and events to a token's sessions. The part both need — sign-in, cookie, the origin checks, the per-session filtering — moves into a crate both depend on; each keeps its own facilities and routes. AGENTS.md's list of the UI's writes splits into zapper's and the office's.
 - **`zapper firm …`** moves to `zapper-office firm …` (or the `zapper` CLI finds the office's socket), and `zapper-inspect` stays as it is, reading runs from disk.
-- **Config (open).** The `firms:` section moves to the office's own file (`~/.config/zapper/office.yaml`, or beside zapper's in a checkout), parsed and validated by the office; or stays in zapper's, which the core stores without reading and hands to the office through the API. The first is simpler and now has precedent: the workbench keeps its own `~/.config/zapper-workbench` and `~/.local/share/zapper-workbench` already. The second keeps one `config diff` and one `config save` for the operator.
+- **Config.** *Decided: the office's own file.* The `firms:` section moves to `~/.config/zapper/office.yaml` (or beside zapper's in a checkout), parsed and validated by the office — the workbench's own `~/.config/zapper-workbench` and `~/.local/share/zapper-workbench` are the precedent. The alternative (staying in zapper's config, the core storing it without reading and handing it to the office through the API) is set aside: it would keep one `config diff`/`config save`, but at the cost of the core carrying config it does not use, against the point of the split.
 
 ### 8. Two lifecycles
 
@@ -123,7 +125,7 @@ Many of the office's tests run it in-process over a `TestCore` (`test_session`, 
 ## Steps
 
 1. Part 1, in any order: socket MCP servers, rule events, session creation. Each its own branch, the office moved onto it at once.
-2. Decide §4–§8. Each decision gets its own step, building what it needs in the core, with the office moved onto it in-process.
+2. Decide §4 and §5 (§6–§8 are decided). Each decision gets its own step, building what it needs in the core, with the office moved onto it in-process.
 3. The office's tests onto the API (§10), module by module.
 4. `zapper-office` as its own executable: its listener and pages (§7), its config, its lifecycle (§8), the record check (§9); `zapper` stops linking it, and `OFFICE` only decides what `make install` installs.
 
@@ -131,13 +133,13 @@ Every step needs a KVM host for `make test-e2e-office`.
 
 ## Open questions
 
-Four are open:
+Two are open:
 
 - §4: referrals as events (a), or a decider socket (b)?
 - §5: named shared layers in the core (a), rules per session (b), or profiles per role (c)?
-- §6: the driver as a crate the office uses (a), or the core's driver with an owner in the API (b)?
-- §7: the `firms:` config in the office's own file, or in zapper's? (The office's own listener is decided.)
 
-Settled since this was written, left here for the record:
+Decided, left here for the record:
 
+- §6: the driver as a crate the office uses (a) — who holds a worker's terminal prompts it, and the API grows no prompt capability.
+- §7: the office's own listener (extracted from the workbench's gateway), and the `firms:` config in the office's own `office.yaml`.
 - §8: kept-until-removed, not leases, with the office resuming by cursor (the `serve` shutdown made this the cheap path). The lone remainder is whether an away office's workers are left idling or grace-stopped — leaning left running.
