@@ -754,6 +754,62 @@ async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     );
 }
 
+/// The UI's writes are answering approvals and prompting a driven session
+/// (AGENTS.md); every other write the API has is no route of the UI's,
+/// however the request is marked.
+#[tokio::test]
+async fn the_ui_has_no_writes_beyond_its_list() {
+    let t = TestCore::new(CONFIG);
+    let app = super::ui(t.core.clone(), PORT, false, &Mount::default());
+    let cookie = signed_in(&app, t.core.ui_token()).await;
+    let origin = format!("http://{HOST}");
+    let marked = [
+        ("host", HOST),
+        ("cookie", cookie.as_str()),
+        ("x-zapper-ui", "1"),
+        ("origin", origin.as_str()),
+    ];
+    let writes = [
+        (Method::PUT, "/config"),
+        (Method::POST, "/config/save"),
+        (Method::POST, "/config/reload"),
+        (Method::POST, "/rules"),
+        (Method::DELETE, "/rules/r1"),
+        (Method::PUT, "/profiles/web"),
+        (Method::DELETE, "/profiles/web"),
+        (Method::POST, "/sessions"),
+        (Method::POST, "/services"),
+        (Method::DELETE, "/services/x"),
+        (Method::DELETE, "/sessions/abc234"),
+        (Method::POST, "/sessions/abc234/stop"),
+        (Method::POST, "/sessions/abc234/start"),
+        (Method::GET, "/sessions/abc234/attach"),
+        (Method::DELETE, "/sessions/abc234/terminals/1"),
+        (Method::POST, "/evaluate"),
+        (Method::POST, "/images/web/build"),
+    ];
+    for (method, path) in writes {
+        let r = send(&app, method.clone(), &format!("/api{path}"), &marked, "{}").await;
+        assert!(
+            r.status == StatusCode::NOT_FOUND || r.status == StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    // The two it has get past routing.
+    for path in ["/api/approvals/nosuch", "/api/sessions/nosuch/prompt"] {
+        let r = send(&app, Method::POST, path, &marked, "{}").await;
+        assert!(
+            r.status != StatusCode::NOT_FOUND && r.status != StatusCode::METHOD_NOT_ALLOWED
+                || r.body.contains("no session"),
+            "{path}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+}
+
 /// The front page and `/sessions` of a UI with `mount`, and `GET /api/x`.
 async fn pages(t: &TestCore, mount: &Mount) -> (Reply, Reply, Reply) {
     let app = super::ui(t.core.clone(), PORT, false, mount);
