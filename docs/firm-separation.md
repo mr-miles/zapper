@@ -204,6 +204,8 @@ Every step needs a KVM host for its end-to-end tests.
 
 ## Later, if wanted: a separate process
 
+> **Superseded by [proposal 13](proposals/13-office-process.md)**, written after the workbench: the office as a process of its own, a client of zapper's socket as the workbench is.
+
 The same features work across a process boundary with three additions: the REST API of `zapper-api` as the client's interface, with tokens scoped to its sessions; session identity on gateway calls the upstream can check (a signed header, or a unix socket only the core reaches); and event resume by sequence number, so a client restart loses nothing. None of it is needed while the office is compiled in. A token is worth having only if the office runs as another user and reaches the core through a socket that requires one; as the operator's own user it can open the full socket anyway. [Proposal 12](proposals/12-single-user-layer.md#processes) puts remote clients' security in a gateway in front of the core instead, and the core's event resume is in place.
 
 ## Open questions
