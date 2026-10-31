@@ -58,9 +58,7 @@ impl Drop for Proc {
 
 impl Proc {
     async fn write(&mut self, line: Vec<u8>) -> Result<()> {
-        let mut buf = Vec::new();
-        Frame::Data(line).write_to(&mut buf)?;
-        self.stdin.write_all(&buf).await?;
+        self.stdin.write_all(&Frame::Data(line).encode()).await?;
         Ok(())
     }
 

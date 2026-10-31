@@ -499,9 +499,7 @@ impl Session {
     pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
         let req = ShellRequest::attach(n);
         let mut stream = self.open_shell(req).await?.stream;
-        let mut buf = Vec::new();
-        Frame::Hangup.write_to(&mut buf)?;
-        stream.write_all(&buf).await?;
+        stream.write_all(&Frame::Hangup.encode()).await?;
         let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(Some(frame)) = terminal::read_frame(&mut stream).await {
                 if let Frame::Exit(c) = frame {

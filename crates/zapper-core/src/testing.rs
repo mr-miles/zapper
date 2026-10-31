@@ -236,9 +236,7 @@ impl Shell {
     }
 
     async fn frame(&mut self, f: zapper_policy::proto::Frame) {
-        let mut b = Vec::new();
-        f.write_to(&mut b).unwrap();
-        let _ = self.write.write_all(&b).await;
+        let _ = self.write.write_all(&f.encode()).await;
     }
 }
 

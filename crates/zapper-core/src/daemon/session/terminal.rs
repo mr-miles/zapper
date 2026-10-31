@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zapper_policy::proto::{Frame, MAX_FRAME};
+use zapper_policy::proto::Frame;
 
 use super::Session;
 use crate::daemon::{now, record, Daemon, EventBody};
@@ -76,9 +76,7 @@ pub(crate) async fn pump_shell<C>(
                 }
                 _ => {}
             }
-            let mut buf = Vec::new();
-            frame.write_to(&mut buf).ok();
-            if gw.write_all(&buf).await.is_err() {
+            if gw.write_all(&frame.encode()).await.is_err() {
                 break;
             }
         }
@@ -130,9 +128,7 @@ pub(crate) async fn pump_shell<C>(
             Frame::Exit(c) => exit_code = Some(*c),
             _ => {}
         }
-        let mut buf = Vec::new();
-        frame.write_to(&mut buf).ok();
-        if cw.write_all(&buf).await.is_err() || exit_code.is_some() {
+        if cw.write_all(&frame.encode()).await.is_err() || exit_code.is_some() {
             break;
         }
     }
@@ -311,16 +307,10 @@ pub async fn read_frame(
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         other => other?,
     };
-    let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-    if len > MAX_FRAME {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
+    let (kind, len) = Frame::header(&header)?;
     let mut body = vec![0; len];
     r.read_exact(&mut body).await?;
-    Frame::decode(header[0], body).map(Some)
+    Frame::decode(kind, body).map(Some)
 }
 
 /// A terminal's size when none is given: rows, columns.
