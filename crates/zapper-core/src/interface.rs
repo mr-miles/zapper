@@ -100,6 +100,13 @@ impl Core {
         daemon::record::status()
     }
 
+    /// Whether the record can be written now: a client gates its work on
+    /// this (the office takes no firm turn while it is false), through the
+    /// interface rather than reaching into the core.
+    pub fn record_writable(&self) -> bool {
+        daemon::record::healthy()
+    }
+
     /// The token the UI's first request carries.
     pub fn ui_token(&self) -> &str {
         &self.d.ui_token
