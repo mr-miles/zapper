@@ -25,6 +25,10 @@ impl Harness for ClaudeCode {
         format!("{home}/.claude")
     }
 
+    fn instructions_file(&self, home: &str) -> Option<String> {
+        Some(claude_md(home))
+    }
+
     fn guest(
         &self,
         profile: &ResolvedProfile,
@@ -219,6 +223,11 @@ fn claude_managed(agent: &AgentSpec) -> Option<Value> {
     })
 }
 
+/// Claude Code's user memory: the instructions it starts with.
+fn claude_md(home: &str) -> String {
+    format!("{home}/.claude/CLAUDE.md")
+}
+
 fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&str>) -> Vec<GuestFile> {
     let agent = &profile.agent;
     let mut files = vec![
@@ -234,10 +243,7 @@ fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&str>) ->
         },
     ];
     if let Some(md) = &agent.instructions {
-        files.push(super::user_file(
-            format!("{home}/.claude/CLAUDE.md"),
-            md.clone(),
-        ));
+        files.push(super::user_file(claude_md(home), md.clone()));
     }
     if let Some(m) = claude_managed(agent) {
         files.push(GuestFile {
