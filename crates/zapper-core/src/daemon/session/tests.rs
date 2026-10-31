@@ -483,3 +483,32 @@ async fn a_session_running_when_the_daemon_ended_is_unverified() {
         "{e:#}"
     );
 }
+
+/// A run's lifetime ends it, and only that run: a session started again
+/// since isn't stopped by the earlier run's.
+#[tokio::test(start_paused = true)]
+async fn a_ttl_stops_its_own_run_only() {
+    let t = TestCore::new(CONFIG);
+    let s = t
+        .core
+        .test_session(
+            NewSession::plain("web".into(), t.workdir(), Default::default()),
+            true,
+        )
+        .unwrap();
+    let run = s.boots.fetch_add(1, Ordering::Relaxed) + 1;
+    arm_ttl(t.core.daemon(), &s, run, crate::daemon::now() + 30.0);
+    // Started again before it ends: the earlier run's lifetime is no longer
+    // this one's.
+    s.boots.fetch_add(1, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    assert!(s.is_running(), "the later run goes on");
+
+    let run = s.boots.load(Ordering::Relaxed);
+    arm_ttl(t.core.daemon(), &s, run, crate::daemon::now() + 30.0);
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    assert_eq!(
+        *s.runtime.status().borrow(),
+        Status::Stopped("ttl expired".into())
+    );
+}

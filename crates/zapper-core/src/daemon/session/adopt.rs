@@ -10,7 +10,7 @@ use anyhow::Result;
 use super::control::resume_control;
 use super::create::assemble;
 use super::launch::{serve_guest, watch_vm};
-use super::run::stop;
+use super::run::{arm_ttl, stop};
 use super::{disks, Saved, Session, SessionDir, Status};
 use crate::daemon::{driver, now, record, vm, Daemon, EventBody};
 
@@ -153,10 +153,7 @@ pub(super) fn adopt(
         }
         driver::drive(&d, &s);
         if let Some(at) = expires {
-            tokio::time::sleep(Duration::from_secs_f64((at - now()).max(0.0))).await;
-            if s.boots.load(Ordering::Relaxed) == run {
-                stop(&d, &s, "ttl expired").await;
-            }
+            arm_ttl(&d, &s, run, at);
         }
     });
     Ok(())

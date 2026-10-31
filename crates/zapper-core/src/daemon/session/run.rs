@@ -14,6 +14,19 @@ use super::launch::launch;
 use super::{Session, Status};
 use crate::daemon::{driver, now, record, Daemon, EventBody};
 
+/// Stops the session at `at` (unix seconds), its lifetime ended, if it is
+/// still in run `run`: a session stopped and started again since has a
+/// lifetime of its own.
+pub(super) fn arm_ttl(daemon: &Arc<Daemon>, session: &Arc<Session>, run: u64, at: f64) {
+    let (d, s) = (daemon.clone(), session.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs_f64((at - now()).max(0.0))).await;
+        if s.boots.load(Ordering::Relaxed) == run {
+            stop(&d, &s, "ttl expired").await;
+        }
+    });
+}
+
 /// Boots a registered (or stopped, persistent) session's VM and waits for its
 /// guest: running, with its driver and its `ttl_secs` for this run.
 pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
@@ -70,15 +83,7 @@ pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result
         }
     }
     if ttl > 0 {
-        let (d, s) = (daemon.clone(), session.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(ttl)).await;
-            // Only this run's: a session stopped and started again since
-            // has a lifetime of its own.
-            if s.boots.load(Ordering::Relaxed) == run {
-                stop(&d, &s, "ttl expired").await;
-            }
-        });
+        arm_ttl(&daemon, &session, run, now() + ttl as f64);
     }
     Ok(())
 }
