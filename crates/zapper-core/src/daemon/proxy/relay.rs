@@ -18,6 +18,10 @@ use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
 
+/// How long the guest has to finish its TLS handshake, as for an inspected
+/// connection.
+const GUEST_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Terminates the guest's TLS with the session CA for `host`, over `io` (which
 /// replays any bytes already read from the guest), returning the plaintext
 /// stream. Used by each protocol's in-band STARTTLS.
@@ -30,9 +34,9 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let config = s.tls.server_config(host).map_err(|e| format!("{e:#}"))?;
-    TlsAcceptor::from(config)
-        .accept(io)
+    tokio::time::timeout(GUEST_TLS_TIMEOUT, TlsAcceptor::from(config).accept(io))
         .await
+        .map_err(|_| "TLS from guest: no handshake within 15s".to_string())?
         .map_err(|e| format!("TLS from guest: {e}"))
 }
 
@@ -137,6 +141,26 @@ pub(super) async fn relay_database<S>(
         );
     };
     let name = v.effects.secrets.first().cloned();
+    // The credential goes only to its secret's hosts, as an injected one
+    // does: a rule wider than them doesn't widen where the secret goes.
+    if let Some(n) = &name {
+        let for_host = d
+            .config
+            .read()
+            .unwrap()
+            .secrets
+            .get(n)
+            .is_some_and(|sec| sec.allows_host(&endpoint.host));
+        if !for_host {
+            return fail(
+                403,
+                format!(
+                    "secret {n} isn't for {}: it isn't among the secret's hosts",
+                    endpoint.host
+                ),
+            );
+        }
+    }
     let cred = match db_cred(d, name.as_deref()).await {
         Ok(c) => c,
         Err(e) => return fail(500, e),
@@ -707,4 +731,51 @@ fn scram_nonce() -> String {
         .take(24)
         .map(char::from)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::TestCore;
+    use crate::NewSession;
+
+    /// A guest that starts TLS and sends nothing more is given up on.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_guest_tls_handshake_times_out() {
+        let t = TestCore::new("profiles:\n  web: {}\n");
+        let s = t
+            .core
+            .test_session(
+                NewSession::plain("web".into(), t.workdir(), Default::default()),
+                true,
+            )
+            .unwrap();
+        let (guest, ours) = tokio::io::duplex(1024);
+        let e = super::accept_guest_tls(&s, "db.example", ours)
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("no handshake"), "{e}");
+        drop(guest);
+    }
+
+    /// A guest that didn't use TLS gets a plain server leg only for a
+    /// secret marked `plaintext`: the credential never goes in the clear
+    /// otherwise.
+    #[tokio::test]
+    async fn a_plain_server_leg_needs_a_plaintext_secret() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        let tcp = || tokio::net::TcpStream::connect(addr);
+        let e = super::server_leg(tcp().await.unwrap(), "db.example", false, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(e.contains("not marked plaintext"), "{e}");
+        assert!(
+            super::server_leg(tcp().await.unwrap(), "db.example", false, true)
+                .await
+                .is_ok()
+        );
+    }
 }

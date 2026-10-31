@@ -46,6 +46,7 @@ impl EventBody {
             EventBody::Answer { allow, .. } => yes(*allow),
             EventBody::Dns { allowed, .. } => yes(*allowed),
             EventBody::Mcp { ok: false, .. } => Some("deny"),
+            EventBody::Disks { state, .. } if state == "changed" => Some("deny"),
             EventBody::Driver { event, detail }
                 if event == "error" || detail["outcome"] == "failed" =>
             {
@@ -168,6 +169,28 @@ impl EventBody {
                         .unwrap_or_default(),
                 )
             }
+            EventBody::Disks {
+                state,
+                disks,
+                detail,
+            } => format!(
+                "disks {state}: {}{}",
+                disks
+                    .iter()
+                    .map(|(name, hash)| format!("{name} {}", &hash[..hash.len().min(12)]))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                opt(detail, |d| format!("  {d}"))
+            ),
+            EventBody::Image {
+                name,
+                build,
+                state,
+                detail,
+            } => format!(
+                "{state} image {name} (build {build}){}",
+                opt(detail, |d| format!("  {d}"))
+            ),
             EventBody::Mcp {
                 server,
                 tool,

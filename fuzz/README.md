@@ -14,6 +14,7 @@ Fuzz targets for the parsers that read what a guest sends, and the code around t
 | `http2_uri` | The upstream request URI built for an inspected request: it never panics, and for HTTP/2 the authority is always the checked host, never one smuggled through the path |
 | `log_body` | The request log's view of a body and headers: decompression is bounded, and an added secret is never shown, as text or bytes |
 | `policy` | A request against rules with globs, ports, methods, paths and a final deny: the deciding rule matches, and nothing gets past the final rule |
+| `placeholder` | A label's value in a rule's `{label:team}` path: the path with it matches, and one with any other value doesn't |
 
 Run by hand; it needs nightly and cargo-fuzz (`rustup toolchain install nightly`, `cargo install cargo-fuzz`). From this directory:
 

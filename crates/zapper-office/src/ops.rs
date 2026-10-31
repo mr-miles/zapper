@@ -211,6 +211,7 @@ fn allowed_by(
             port,
             method,
             path: path.map(str::to_string),
+            ..Default::default()
         };
         let (d, _) = zapper_policy::evaluate_net(&layers, &req);
         if d.action != zapper_policy::Action::Allow {
@@ -522,8 +523,7 @@ static TOOLS: &[Tool] = &[
                 host,
                 port,
                 method: methods.as_ref().and_then(|m| m.first().cloned()),
-                path: None,
-            };
+                path: None, ..Default::default() };
             let id = security::ask(c.run, c.me, &req, methods, path, &reason)?;
             Ok(
                 json!({ "request": id, "note": "the security officers will decide; you'll get mail" }),

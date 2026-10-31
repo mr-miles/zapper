@@ -5,8 +5,7 @@
 mod client;
 mod github;
 use zapper_core::prelude::*;
-use zapper_core::util;
-mod image;
+use zapper_core::{images, util};
 mod office;
 mod term;
 
@@ -76,6 +75,14 @@ enum Cmd {
         /// Keep the session after the command exits.
         #[arg(long)]
         keep: bool,
+        /// Keep its disks when it stops, to start it again with `zapper
+        /// start` (implies --keep); `zapper rm` removes them.
+        #[arg(long)]
+        persistent: bool,
+        /// With --persistent: make it from its image even if the image
+        /// changed since it was built; recorded.
+        #[arg(long, requires = "persistent")]
+        accept_changed_image: bool,
         /// Directory `{workdir}` mounts refer to.
         #[arg(short = 'C', long)]
         workdir: Option<PathBuf>,
@@ -90,9 +97,20 @@ enum Cmd {
     /// Open a terminal in a running session.
     Attach {
         id: String,
+        /// Keep its program running when this terminal closes (your
+        /// connection drops, or you close it), to attach again with
+        /// `--terminal`; `zapper hangup` ends it.
+        #[arg(long, conflicts_with = "terminal")]
+        persist: bool,
+        /// Attach again to this persistent terminal, which is running: you
+        /// see what it kept, then live; a client attached already is closed.
+        #[arg(long)]
+        terminal: Option<u64>,
         #[arg(last = true)]
         command: Vec<String>,
     },
+    /// End a persistent terminal on purpose: its program gets `SIGHUP`.
+    Hangup { id: String, terminal: u64 },
     /// Run a command in a session without a terminal.
     Exec {
         id: String,
@@ -107,8 +125,18 @@ enum Cmd {
     Cp { from: String, to: PathBuf },
     /// List sessions.
     Ps,
-    /// Stop a session; it stays listed with its audit log.
+    /// Stop a session; it stays listed with its audit log (and a persistent
+    /// one with its disks).
     Stop { id: String },
+    /// Start a stopped persistent session again, from its kept disks, once
+    /// they're checked against the hashes recorded when it stopped.
+    Start {
+        id: String,
+        /// Boot its disks even if they changed while it was stopped; the
+        /// change and this are recorded.
+        #[arg(long)]
+        accept_changed_disks: bool,
+    },
     /// Give a driven session's agent a task (`agent.driven`); it waits for
     /// the agent's next turn. Follow it with `zapper events --session ID`.
     Tell {
@@ -210,28 +238,46 @@ enum Cmd {
 enum ServiceCmd {
     /// List services and zones.
     Ls,
-    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`
+    /// Add a service: a name and port sessions use, and where the daemon
+    /// connects them.
+    ///
+    /// `zapper service add db.internal:5432 --to-session ID:5432 --for team=a`.
+    /// Sessions still need a net rule for the name.
     Add {
         /// The name and port sessions use; `*.` in front for any name
         /// under it.
+        #[arg(value_name = "NAME:PORT")]
         name: String,
         /// An address on the host's network, `ip:port`.
         #[arg(
             long,
-            conflicts_with = "to_session",
-            required_unless_present = "to_session"
+            conflicts_with_all = ["to_session", "to_socket"],
+            required_unless_present_any = ["to_session", "to_socket"]
         )]
         to: Option<String>,
         /// A port of a session's VM, `ID:port`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "to_socket")]
         to_session: Option<String>,
+        /// A socket in the daemon's `state/services/` directory, by file
+        /// name, served by a program on the host; each connection starts
+        /// with a line naming the calling session.
+        #[arg(long)]
+        to_socket: Option<String>,
+        /// With `--to-socket`: the daemon terminates TLS with the session's
+        /// CA, and the socket gets the plain stream.
+        #[arg(long, requires = "to_socket")]
+        tls: bool,
         /// Only for sessions with this label, `key=value` (repeatable);
         /// every session without.
         #[arg(long = "for")]
         sessions: Vec<String>,
     },
-    /// Remove a service added with `add`.
-    Rm { id: u64 },
+    /// Remove a service added with `add`; a firm's services are the
+    /// office's.
+    Rm {
+        /// The service's id, from `zapper service ls`.
+        id: u64,
+    },
 }
 
 /// `key=value` pairs, as JSON.
@@ -253,6 +299,10 @@ enum RecordCmd {
     /// Checks a firm's run against the keeper's chains and signatures.
     #[cfg(feature = "office")]
     Verify { firm: String, run: String },
+    /// Checks a session's record: its files against the keeper's chains
+    /// (with a keeper), and its disks' hashes from each stop to the start
+    /// after it; exits 1 on any finding.
+    Session { id: String },
 }
 
 #[derive(Subcommand)]
@@ -342,6 +392,10 @@ enum ImageCmd {
         /// Image size, e.g. `4GiB` (default: content plus headroom).
         #[arg(long)]
         size: Option<String>,
+        /// Build here, from the config file, even when the daemon runs; by
+        /// default the daemon builds from its running config when it is up.
+        #[arg(long)]
+        local: bool,
     },
     Ls,
 }
@@ -488,23 +542,28 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::Run {
             profile,
             keep,
+            persistent,
+            accept_changed_image,
             workdir,
             labels,
             command,
         } => {
+            let keep = keep || persistent;
             let workdir = match workdir {
                 Some(w) => std::fs::canonicalize(w)?,
                 None => std::env::current_dir()?,
             };
             eprintln!("zapper: starting a {profile} session…");
             let body = serde_json::to_string(
-                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)? }),
+                &json!({ "profile": profile, "workdir": workdir, "labels": label_pairs(&labels)?, "persistent": persistent, "accept_changed_image": accept_changed_image }),
             )?;
             let info = c.json(Method::POST, "/v1/sessions", Some(body)).await?;
             let id = s(&info["id"]);
             eprintln!("zapper: session {id} is ready");
             let code = attach(&c, &id, &command, false).await;
-            if keep {
+            if persistent {
+                eprintln!("zapper: session {id} kept with its disks; `zapper attach {id}`, `zapper stop {id}`, `zapper start {id}`, `zapper rm {id}`");
+            } else if keep {
                 eprintln!("zapper: session {id} kept; `zapper attach {id}`, `zapper rm {id}`");
             } else {
                 c.json(Method::DELETE, &format!("/v1/sessions/{id}"), None)
@@ -513,7 +572,44 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             return code;
         }
-        Cmd::Attach { id, command } => return attach(&c, &id, &command, false).await,
+        Cmd::Attach {
+            id,
+            persist,
+            terminal,
+            command,
+        } => {
+            let tty = term::stdin_is_tty();
+            let size = tty.then(|| term::size().unwrap_or((24, 80)));
+            let (io, n) = c
+                .terminal(&id, size, &command, false, persist, terminal)
+                .await?;
+            if let (true, Some(n)) = (persist || terminal.is_some(), n) {
+                eprintln!(
+                    "zapper: terminal {n} keeps running if you go: `zapper attach {id} --terminal {n}`, `zapper hangup {id} {n}`"
+                );
+            }
+            return term::run(io, tty).await;
+        }
+        Cmd::Hangup { id, terminal } => {
+            let v = c
+                .json(
+                    Method::DELETE,
+                    &format!("/v1/sessions/{id}/terminals/{terminal}"),
+                    None,
+                )
+                .await?;
+            if cli.json {
+                print_json(&v);
+            } else {
+                eprintln!(
+                    "zapper: terminal {terminal} hung up{}",
+                    v["exit_code"]
+                        .as_i64()
+                        .map(|c| format!(", its program exited {c}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         Cmd::Exec {
             id,
             system,
@@ -581,6 +677,10 @@ async fn run(cli: Cli) -> Result<i32> {
                             s(&x["profile"]),
                             s(&x["state"]),
                             s(&x["image"]),
+                            x["disk_bytes"]
+                                .as_u64()
+                                .map(|b| format!("{} MiB", b >> 20))
+                                .unwrap_or_default(),
                             format!("{}/{}", k["net_allowed"], k["net_denied"]),
                             format!("{}/{}", k["exec_allowed"], k["exec_denied"]),
                             s(&x["detail"]),
@@ -593,6 +693,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         "profile",
                         "state",
                         "image",
+                        "kept disks",
                         "net ok/no",
                         "exec ok/no",
                         "detail",
@@ -605,6 +706,25 @@ async fn run(cli: Cli) -> Result<i32> {
             &c.json(Method::POST, &format!("/v1/sessions/{id}/stop"), None)
                 .await?,
         ),
+        Cmd::Start {
+            id,
+            accept_changed_disks,
+        } => {
+            eprintln!("zapper: checking {id}'s disks and starting it…");
+            let body = json!({ "accept_changed_disks": accept_changed_disks }).to_string();
+            let v = c
+                .json(
+                    Method::POST,
+                    &format!("/v1/sessions/{id}/start"),
+                    Some(body),
+                )
+                .await?;
+            if cli.json {
+                print_json(&v);
+            } else {
+                eprintln!("zapper: session {id} is ready; `zapper attach {id}`");
+            }
+        }
         Cmd::Tell { id, text } => {
             let body = json!({ "text": text.join(" ") }).to_string();
             let v = c
@@ -847,6 +967,17 @@ async fn run(cli: Cli) -> Result<i32> {
                 RecordCmd::Verify { firm, run } => {
                     (format!("/v1/firms/{firm}/runs/{run}/verify"), true)
                 }
+                RecordCmd::Session { id } => {
+                    let v = c
+                        .json(Method::GET, &format!("/v1/sessions/{id}/verify"), None)
+                        .await?;
+                    if cli.json {
+                        print_json(&v);
+                    } else {
+                        print_session_check(&v);
+                    }
+                    return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
+                }
             };
             let v = c.json(Method::GET, &path, None).await?;
             if cli.json || !verify {
@@ -890,22 +1021,33 @@ async fn run(cli: Cli) -> Result<i32> {
                     from,
                     run,
                     size,
+                    local,
                 } => {
-                    let r = image::recipe(&config, &name, from, run, &args)?;
-                    let out = image::build(image::Build {
-                        name: &name,
-                        from: &r.from,
-                        run: &r.run,
-                        inputs: &r.inputs,
-                        copies: &r.copies,
-                        after: &r.after,
-                        size: size.as_deref(),
-                        dir: &dir,
-                    })?;
+                    let daemon = !local
+                        && tokio::net::UnixStream::connect(client::socket_path())
+                            .await
+                            .is_ok();
+                    if daemon {
+                        return build_in_daemon(&c, &name, &args, from, run, size).await;
+                    }
+                    let r = images::recipe(&config, &name, from, run, &args)?;
+                    let out = images::build(
+                        images::Build {
+                            name: &name,
+                            from: &r.from,
+                            run: &r.run,
+                            inputs: &r.inputs,
+                            copies: &r.copies,
+                            after: &r.after,
+                            size: size.as_deref(),
+                            dir: &dir,
+                        },
+                        &|l| eprintln!("{l}"),
+                    )?;
                     println!("built {}", out.display());
                 }
                 ImageCmd::Ls => {
-                    let v = image::list(&dir)?;
+                    let v = images::list(&dir)?;
                     if cli.json {
                         print_json(&json!(v));
                     } else {
@@ -916,16 +1058,114 @@ async fn run(cli: Cli) -> Result<i32> {
                                     s(&i["name"]),
                                     format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
                                     s(&i["from"]),
+                                    i["sha256"]
+                                        .as_str()
+                                        .map(|h| h[..h.len().min(12)].to_string())
+                                        .unwrap_or_else(|| "-".into()),
                                 ]
                             })
                             .collect();
-                        table(&["name", "size", "from"], rows);
+                        table(&["name", "size", "from", "sha256"], rows);
                     }
                 }
             }
         }
     }
     Ok(0)
+}
+
+/// `zapper record session`, as people read it.
+fn print_session_check(v: &Value) {
+    let chain = &v["chain"];
+    match chain["ok"].as_bool() {
+        None => println!(
+            "note   chains not checked: {}",
+            chain["note"].as_str().unwrap_or("")
+        ),
+        Some(_) => {
+            for f in chain["files"].as_array().into_iter().flatten() {
+                if f["ok"] == json!(true) {
+                    println!("ok     {} ({} lines)", s(&f["file"]), f["lines"]);
+                } else {
+                    println!("BAD    {}: {}", s(&f["file"]), s(&f["error"]));
+                }
+            }
+        }
+    }
+    let findings = v["findings"].as_array().cloned().unwrap_or_default();
+    for f in &findings {
+        println!("FOUND  event {}: {}", f["seq"], s(&f["finding"]));
+    }
+    if findings.is_empty() {
+        println!("ok     the disks: each start checked what the stop before it recorded");
+    }
+}
+
+/// `zapper image build` through the daemon: it builds from its running
+/// config; its log is printed as it comes, and the exit code says how it
+/// ended.
+async fn build_in_daemon(
+    c: &Client,
+    name: &str,
+    args: &[String],
+    from: Option<String>,
+    run: Vec<String>,
+    size: Option<String>,
+) -> Result<i32> {
+    let mut named = serde_json::Map::new();
+    for a in args {
+        let (k, v) = a
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--arg {a:?}: NAME=PATH"))?;
+        // The daemon reads the files: give it absolute paths.
+        let path = std::path::absolute(v).unwrap_or_else(|_| PathBuf::from(v));
+        named.insert(k.into(), json!(path));
+    }
+    let body = json!({ "args": named, "from": from, "run": run, "size": size });
+    let started = c
+        .json(
+            Method::POST,
+            &format!("/v1/images/{name}/build"),
+            Some(body.to_string()),
+        )
+        .await?;
+    eprintln!(
+        "the daemon is building {name} (build {})",
+        s(&started["id"])
+    );
+    let mut body = c
+        .stream(&format!("/v1/images/builds/{}", s(&started["id"])))
+        .await?;
+    let mut buf = String::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.push_str(&String::from_utf8_lossy(data));
+        while let Some(i) = buf.find('\n') {
+            let line: String = buf.drain(..=i).collect();
+            let Some(v) = line
+                .trim()
+                .strip_prefix("data:")
+                .and_then(|j| serde_json::from_str::<Value>(j.trim()).ok())
+            else {
+                continue;
+            };
+            if let Some(l) = v["line"].as_str() {
+                eprintln!("{l}");
+            } else if let Some(n) = v["dropped"].as_u64() {
+                eprintln!("({n} lines not kept)");
+            } else if let Some(path) = v["end"]["built"].as_str() {
+                println!("built {path}");
+                return Ok(0);
+            } else if let Some(why) = v["end"]["failed"].as_str() {
+                eprintln!("zapper: building {name} failed: {why}");
+                return Ok(1);
+            }
+        }
+    }
+    bail!("the daemon's build log ended without saying how the build went")
 }
 
 async fn attach(c: &Client, id: &str, command: &[String], system: bool) -> Result<i32> {
@@ -982,19 +1222,22 @@ async fn service(c: &Client, cmd: ServiceCmd, json_out: bool) -> Result<()> {
             name,
             to,
             to_session,
+            to_socket,
+            tls,
             sessions,
         } => {
             let (name, port) = name
                 .rsplit_once(':')
                 .context("name:port, e.g. db.internal:5432")?;
             let port: u16 = port.parse().context("the port")?;
-            let to = match (to, to_session) {
-                (Some(addr), _) => json!({ "addr": addr }),
-                (None, Some(t)) => {
+            let to = match (to, to_session, to_socket) {
+                (Some(addr), _, _) => json!({ "addr": addr }),
+                (None, Some(t), _) => {
                     let (id, port) = t.rsplit_once(':').context("--to-session ID:port")?;
                     json!({ "session": id, "port": port.parse::<u32>().context("the port")? })
                 }
-                (None, None) => bail!("give --to or --to-session"),
+                (None, None, Some(name)) => json!({ "socket": name, "tls": tls }),
+                (None, None, None) => bail!("give --to, --to-session or --to-socket"),
             };
             let body = json!({ "name": name, "port": port, "sessions": label_pairs(&sessions)?, "to": to });
             let v = c
@@ -1334,7 +1577,7 @@ async fn check(config_path: &Path) -> Result<i32> {
             "sudo apt install iproute2 nftables, or use network: vsock",
         );
     }
-    let oci = image::engine();
+    let oci = images::engine();
     let oci_ok = std::process::Command::new(&oci)
         .arg("--version")
         .output()

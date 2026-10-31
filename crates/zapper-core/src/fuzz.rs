@@ -311,6 +311,7 @@ pub fn policy(data: &[u8]) {
         port: u16::from_be_bytes(*port),
         method: (!method.is_empty()).then(|| method.to_string()),
         path: f.next().map(str::to_string),
+        ..Default::default()
     };
     let layers = [
         (zapper_policy::Scope::Profile("p".into()), profile),
@@ -450,5 +451,45 @@ pub fn kafka_response(data: &[u8]) {
     let mut buf = Vec::new();
     while let Ok(body) = block_on(kafka::read_response(&mut src, &mut buf)) {
         let _ = kafka::auth_bytes(&body);
+    }
+}
+
+/// A label's value, in a rule's `{label:team}`: the path with that value
+/// matches the rule, and one with any other value doesn't. The bytes are
+/// two values, split at the first NUL.
+pub fn placeholder(data: &[u8]) {
+    static RULE: std::sync::OnceLock<zapper_policy::NetRule> = std::sync::OnceLock::new();
+    let rule = RULE.get_or_init(|| {
+        serde_yaml::from_str(
+            "{ action: allow, host: drive.internal, path: \"/t/{label:team}/**\" }",
+        )
+        .unwrap()
+    });
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let (mine, other) = text.split_once('\0').unwrap_or((text, ""));
+    // A value is one path segment, without what ends a path.
+    let segment = |v: &str| !v.is_empty() && !v.contains(['/', '?', '#', '\0']);
+    if !segment(mine) {
+        return;
+    }
+    let req = |path: String| zapper_policy::NetRequest {
+        host: "drive.internal".into(),
+        port: 443,
+        method: Some("GET".into()),
+        path: Some(path),
+        session: Some("s1".into()),
+        labels: [("team".to_string(), mine.to_string())].into(),
+    };
+    assert!(
+        rule.matches(&req(format!("/t/{mine}/x"))),
+        "{mine:?} matches itself"
+    );
+    if segment(other) && other != mine {
+        assert!(
+            !rule.matches(&req(format!("/t/{other}/x"))),
+            "{mine:?} matched {other:?}"
+        );
     }
 }

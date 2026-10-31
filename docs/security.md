@@ -23,22 +23,25 @@ Each office worker runs in a zapper session, and zapper assumes that whatever ru
 | Guest traffic goes through zapper. With a NIC, the VMM runs in a network namespace whose only interfaces are loopback and the guest's tap, and nftables there sends TCP to the daemon and DNS to its resolver and drops the rest. In vsock mode the guest has loopback only ([network](network.md)) | Network namespace and nftables outside the VM; Firecracker's device model | Yes |
 | DNS queries are validated (standard query, one question, class IN, a well-formed name) and rate-limited. A name is looked up on the host only if some request to it could be allowed, outright or after an `ask`; others are refused. Answers are never made up. With a broad `allow` or `ask` (`*`, or such a default), any name reaches the host's resolver, so queries could carry data out ([network: DNS](network.md#dns)) | Host resolver | Yes |
 | Host names from the guest (`CONNECT` targets, `Host` headers, TLS server names) are validated before any rule sees them | Host proxy | Yes |
+| A socket service reaches only a socket in the daemon's `state/services/` directory, named by file name; the program behind it learns the calling session from a line the daemon sends before the guest's bytes ([network: socket services](network.md#socket-services)) | Host | Yes |
 | Policy for each connection and, when inspected, each request | Host proxy | Yes |
 | Address checks: loopback, link-local, metadata and host addresses are unreachable, private ranges only if listed. The host resolves names and connects to the address it checked | Host proxy | Yes |
 | A TLS client's server name must equal the name the connection was decided on | Host proxy | Yes |
 | `proxy` secrets reach the guest as placeholders. Their values go into allowed requests to the secret's `hosts`, over TLS, or over plain HTTP if the secret sets `plaintext: true`, and are masked in the responses to them. `aws` secrets' keys sign allowed requests on the host; the guest holds a fake key | Host proxy | Yes |
 | An inspected request is judged on the path the upstream will act on (decoded and with dot segments resolved, and forwarded so), a path that upstreams may read differently is refused, and so is a request whose override header or parameter names another method ([network: connections](network.md#connections)) | Host proxy | Yes |
-| Each session has its own CA, kept in memory and trusted by that session's guest | Host | Yes |
+| Each session has its own CA, kept in memory and trusted by that session's guest; a persistent session's is kept in `ca.json` (0600) in its directory, outside the part the VMM sees, to be the same after a daemon restart. A leaf minted from it is used for six days, then minted again | Host | Yes |
 | Host directories are copied into per-session disks, so host files stay unchanged | Host | Yes |
 | Lifetime (`ttl_secs`), CPU, memory and disk size | Host, Firecracker | Yes |
 | Limits on input from the guest: line and frame sizes, connections per session, concurrent exec checks, pending approvals | Host | Yes |
-| The host accepts one control connection, which the agent makes before the workload starts, then removes the socket | Host | Yes |
+| The host accepts one control connection, which the agent makes before the workload starts, then removes the socket. For a persistent session, whose agent connects again when the connection is lost (the daemon restarted), the host takes a new one only if its first line carries the resume token `Init` gave the agent, then removes the socket again; any other is closed and recorded | Host | Yes |
+| While a persistent session's host is gone, the guest's exec checks wait, and are refused after 60 seconds | Guest agent | No |
 | Audit log, terminal recordings, console log (capped at 1 MiB) | Host | Yes |
 | With a keeper ([the record](#the-record)), the record can only be appended to by the daemon's user: firms' journals and transcripts, audit logs and terminal recordings belong to `zapper-keeper`, a separate user | `zapper-keeper`, OS users | Yes |
 | Each `execve` and `execveat` of the workload waits for the host's decision | Guest agent (seccomp user notification) | No |
 | The 32-bit and x32 syscall tables are blocked, so exec checks can't be bypassed through them | Guest agent (seccomp filter) | No |
 | The workload runs as uid 1000 with `no_new_privs`, so setuid binaries keep its privileges | Guest agent | No |
 | Terminal connections are accepted from the host's CID only | Guest agent | No |
+| A persistent terminal's holder takes its pty and connections only from PID 1, over a socketpair, and never forks or execs; it runs as root with `no_new_privs`, in a session of its own | Guest agent | No |
 | `fs` rules (`hidden`, `ro`) | Guest agent (bind mounts at boot) | No |
 | Process exit accounting | Guest kernel (`acct`) | No |
 
@@ -126,6 +129,22 @@ make test-e2e      # ends with "all e2e checks passed"
 - exec through the 32-bit and x32 syscall tables
 - exec a denied binary
 
+## Persistent sessions
+
+A persistent session (`zapper run --persistent`, `persistent: true`) keeps its disks when it stops, in its `vm/` directory, and can be started again (`zapper start`), also after the daemon restarts; `zapper rm` removes them. Its disks are files the daemon's user can change, so they get tamper evidence in the record:
+
+- **When it is made**, its image's SHA-256 is compared with the one recorded when the image was built (`images/NAME.json`), in a `disks` event (`image`): an image changed since is refused unless `--accept-changed-image` (`accept_changed_image`), recorded too; one built before images were hashed is recorded as unverified, and used.
+- **When it stops**, once its VM is off, each disk's SHA-256 is recorded in a `disks` event (`stopped`). The record is the only copy: nothing beside the disks holds their hashes.
+- **When it starts**, each disk is hashed again before Firecracker opens it, and compared with the last `disks stopped` event in the session's record: `checked` if the same; `changed` if not, naming what differs, and the start is refused; `unverified` if there is nothing to compare with, or the record shows the session running after that stop (the daemon ended while it ran, so its disks weren't hashed). `--accept-changed-disks` starts it anyway, recorded as `accepted`.
+- **`zapper record session ID`** (`GET /v1/sessions/{id}/verify`) checks the session's files against the keeper's chains, then the record's disks from beginning to end: a start that checked disks unlike the stop before it, a `disks stopped` event not following the session's stop, or with no run since the stop before (hashes appended later to cover a change), a start whose disks weren't checked, and every change, unverified start and accepted image. It exits 1 on any finding.
+
+What this does and doesn't establish:
+
+- **With a keeper**, the record is append-only, so a stop's hashes stay as they were written: a disk changed while stopped is refused at the start, and, if the start was made to pass anyway, shows in `zapper record session` as a start unlike its stop. Hashes appended to cover a change show as a stop with no run since the one before.
+- **Without a keeper**, the record is the daemon user's file like any other, and these checks catch accidents, not someone who edits the record too.
+- **Against the operator**, the daemon's checks show honest operation, not more: the operator is the daemon's user, and can run a `zapper` that hashes nothing and records what it likes. What it can't do, with a keeper, is change what was recorded before; checking a disk against those hashes with something the operator doesn't run (the keeper, or an auditor's own `sha256sum` against the record) is what holds against them.
+- **While the session runs**, no change to its disks is caught ([limitations](#limitations)). Its own secrets (`Session::secrets`, such as a firm worker's token) aren't kept across a daemon restart. A persistent session can't share policy layers with other sessions, so a firm's workers aren't persistent.
+
 ## Limitations
 
 - **Exec checks may race.** The host decides on the path the process passed. A multithreaded process written for it may change that memory between the check and the kernel's own read; the kernel documents this limit of seccomp user notification. The tests haven't shown it, but treat exec policy as a guardrail and rely on network and secrets for the boundary.
@@ -133,7 +152,8 @@ make test-e2e      # ends with "all e2e checks passed"
 - **Firecracker's uid needs subordinate ids.** With ranges for the daemon user in `/etc/subuid` and `/etc/subgid` and the `uidmap` helpers (`daemon.vmm_subids`, on by default), each session's Firecracker runs as a subordinate uid of its own, without capabilities: it owns nothing on the host and can't signal or trace the daemon or another session's VMM. The VMM process that sets up its namespaces keeps the daemon user's uid, as does Firecracker on a host without the ranges or helpers (`zapper check` says which). Either way the kernel interfaces it keeps (`/dev/kvm`, and `/dev/net/tun` with a NIC) are shared with the host, and Firecracker keeps the daemon user's groups, `kvm` among them.
 - **The daemon is one process that holds the secrets and runs the proxy.** It parses HTTP, TLS, JSON and frames from the guest with memory-safe libraries, and a bug in that code would be a bug in the boundary.
 - **Rate and volume limits** for network traffic are planned: see [the README](../README.md#next).
-- **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed.
+- **Sessions end when the daemon restarts.** Their audit logs stay on disk. So does a firm's run, which can be replayed but not resumed. A persistent session comes back stopped, with its disks, to be started again; one still running when the daemon ended runs on (its VMM outlives the daemon), and the next daemon adopts it, after checking the pid is its VMM's. While no daemon runs, its guest's connections are refused and its execs wait, then are refused; what the guest did meanwhile isn't recorded, as it could do nothing that needs a decision.
+- **The operator can change a running sandbox's disk without a trace.** A persistent session's disks changed while it is stopped show in the record ([persistent sessions](#persistent-sessions)); while it runs, Firecracker writes them constantly, and a write by the daemon's user looks no different.
 - **A firm tool's effect can outlive a failed record write.** The "no turns while the record can't be written" gate ([the record](#the-record)) is checked when a turn starts, but a worker's tool call appends to the journal *during* the turn. If that append fails (a full disk), the in-memory effect — a funding, a hire, an access decision — has already happened, while the event is missing from the journal the record, replay and the board pack are rebuilt from. So a run can act on a state the record doesn't show. `mail_send` is the exception: a message body lives only in the journal, so a failed write there fails the send rather than deliver a message that reads back empty. Making every state-changing tool fail the same way (append before the effect, or roll back) is not yet done.
 
 Network-specific limitations are on the [network](network.md#limitations) page.

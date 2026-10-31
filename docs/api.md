@@ -58,7 +58,7 @@ The layer workers run on: zapper's sessions, policy and config.
 
 | Method and path | ui | Purpose |
 |---|---|---|
-| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals |
+| `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals, and `epoch`: this daemon run's ID, which event ids start with |
 | `GET /v1/record` | ✓ | Who keeps the record and whether it is being written |
 | `GET /v1/config[?format=json]` | ✓ | Running config, YAML by default, secret values redacted |
 | `PUT /v1/config` | | Replace the running config (validated; `<redacted>` keeps old values) |
@@ -72,21 +72,27 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/profiles` | ✓ | Summaries |
 | `GET\|PUT\|DELETE /v1/profiles/{name}` | | Profile and its resolved form / set / remove |
 | `GET /v1/sessions` | ✓ | Sessions, each with its `labels` (a firm's: `firm`, `run`, `member` and `office`, `worker` or `facility`) |
-| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's |
+| `POST /v1/sessions` | | `{profile, workdir, rules?, labels?, persistent?, accept_changed_image?}`; returns once the guest is ready. Labels are `{key: value}`, short words; `firm`, `run`, `member` and `office` are the office's. `persistent`: its disks stay when it stops, to start it again; its info then has `disk_bytes`, what they take on the host; its image must be as it was built (its SHA-256), unless `accept_changed_image` |
 | `GET /v1/sessions/{id}` | ✓ | One session |
-| `POST /v1/sessions/{id}/stop` | | Stop, keep listed |
+| `POST /v1/sessions/{id}/stop` | | Stop, keep listed; a persistent session keeps its disks, their hashes recorded |
+| `POST /v1/sessions/{id}/start` | | `{accept_changed_disks?}`: start a stopped persistent session again; returns once the guest is ready. `409` if its disks changed while it was stopped, or weren't hashed when it stopped, unless accepted |
 | `POST /v1/sessions/{id}/prompt` | | `{text}`: a task for a driven session's agent, queued for its next turn → `202` `{queued, driver}`. `409` if the driver is off or the session isn't driven or running, `403` for a firm's worker (mail them instead) |
-| `DELETE /v1/sessions/{id}` | | Stop and forget |
+| `DELETE /v1/sessions/{id}` | | Stop and forget; a persistent session's disks go too |
+| `GET /v1/sessions/{id}/verify` | ✓ | `{ok, chain, findings}`: the session's files against the keeper's chains (`chain.ok` null, with a `note`, without a keeper), and what its record shows of its disks, each finding with the event's `seq` ([security: persistent sessions](security.md#persistent-sessions)) |
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |
 | `GET /v1/sessions/{id}/requests/{n}` | ✓ | One request with `request_headers`, `response_headers`, `request_body` and `response_body` (`text` or `base64`, `total`, `kept`, `truncated`, `encoding`); added secret values appear as `***` |
-| `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open` |
+| `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open`, `persistent`, `attached` |
+| `DELETE /v1/sessions/{id}/terminals/{n}` | | End persistent terminal `n`: its program gets `SIGHUP` → `{terminal, exit_code}` |
 | `GET /v1/sessions/{id}/terminals/{n}/stream` | ✓ | Server-sent events, read-only: the terminal's kept output, then live output. Each `data:` is `{"r": [rows, cols]}`, `{"o": "<base64 bytes>"}`, or `{"end": exit_code}` |
-| `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool` | | Upgrade (`Upgrade: zapper-shell`) to a terminal; frames below |
+| `GET /v1/sessions/{id}/attach?tty=RxC&argv=JSON&system=bool&persist=bool&terminal=N` | | Upgrade (`Upgrade: zapper-shell`) to a terminal, its number in `X-Zapper-Terminal`; frames below. `persist` (a `tty` only): its program keeps running when this connection closes; `terminal=N`: attach to persistent terminal N again, taking over from a client attached already |
 | `POST /v1/evaluate` | | `{session?\|profile?, net?: {host, port, method?, path?}, exec?: {path, argv}}` → decision |
-| `GET /v1/events[?session=ID&history=true]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)) |
+| `GET /v1/events[?session=ID&history=true&after=EPOCH:SEQ]` | ✓ | Server-sent events, one JSON event per `data:` line, with `summary` and `verdict` ([instrumentation](instrumentation.md#events)). Each has the SSE `id` `EPOCH:SEQ`. A client that reconnects with `after=`, or the `Last-Event-ID` header an EventSource sends again (which wins over `history`), gets the events since from recent history, then live ones. `{"type": "gap", "summary": …}` says what it can't have: events history no longer holds, events before a daemon restart (another epoch), or events it missed by falling behind. A malformed `after` is `400` |
+| `GET /v1/images` | ✓ | `{images, builds}`: the images (`name`, `from`, `size`, `built`) and the latest builds (`id`, `name`, `started`, `outcome`, null while it runs) |
+| `POST /v1/images/{name}/build` | | `{args?: {ARG: PATH}, from?, run?, size?}`: build by the running config's recipe (or from `from` and `run` steps), one build at a time → `202` `{id, name}`; `409` while another runs, `404` for no recipe ([images](images.md)) |
+| `GET /v1/images/builds/{id}` | ✓ | The build's log as server-sent events: `{"line"}` each (after `{"dropped": n}` for lines no longer kept), then `{"end": {"built": PATH}}` or `{"end": {"failed": WHY}}`, and the stream ends |
 | `GET /v1/services` | ✓ | Services and zones: `id`, `kind` (`service` or `zone`), `name`, `port`, `sessions` (labels; every session when empty), `to`, `owner` ([network: services](network.md#services)) |
-| `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port}}` → the service with its `id` |
+| `POST /v1/services` | | `{name, port, sessions?, to: {addr: "ip:port"} \| {session: ID, port} \| {socket: NAME, tls?}}` → the service with its `id`. `socket` is a file name in the daemon's `state/services/` directory ([network: socket services](network.md#socket-services)) |
 | `DELETE /v1/services/{id}` | | Remove a service added through the API; `409` for another owner's (a firm's) |
 | `GET /v1/approvals` | ✓ | Pending approvals with suggested rules |
 | `POST /v1/approvals/{id}` | ✓ | `{allow, remember?: session}`; through the UI, also needs `X-Zapper-UI: 1` and an `Origin` naming the UI |
@@ -102,6 +108,8 @@ After the upgrade, both directions carry frames: a 1-byte type, a 4-byte big-end
 | 2 resize | client → guest | rows u16, cols u16 |
 | 3 eof | client → guest | stdin closed |
 | 4 exit | guest → client | exit code i32; the last frame |
+| 5 attached | guest → client | from u64, to u64: first on a persistent terminal's connection; the output after it starts at byte `from` of all the terminal wrote (the oldest the guest keeps), and `to` is where it was then |
+| 6 hangup | client → guest | end a persistent terminal: its program gets `SIGHUP` |
 
 `system=true` runs as root without exec supervision. The CLI uses it for `zapper cp`.
 

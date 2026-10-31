@@ -109,14 +109,35 @@ pub struct GuestFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMsg {
-    Init { spec: Box<GuestSpec> },
-    ExecReply { id: u64, allow: bool },
+    Init {
+        spec: Box<GuestSpec>,
+        /// For a persistent session: what the agent, when its control
+        /// connection is lost, sends back on a new one (`GuestMsg::Resume`),
+        /// to be taken for itself; kept in PID 1's memory only. Without it,
+        /// a lost connection powers the guest off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
+    },
+    ExecReply {
+        id: u64,
+        allow: bool,
+    },
     Shutdown,
+    /// First on a control connection taken again (`GuestMsg::Resume`): the
+    /// host has it, and the agent asks again what was waiting.
+    Resumed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestMsg {
+    /// First on a control connection made again, after the first was lost
+    /// (the daemon restarted): the token from `Init`, and the persistent
+    /// terminals the guest keeps.
+    Resume {
+        token: String,
+        terminals: Vec<u64>,
+    },
     /// Setup finished; terminals can be opened.
     Ready,
     /// Setup failed; the session is unusable.
@@ -187,7 +208,21 @@ pub struct ShellRequest {
     /// (copying files out). Only the host can open shell connections.
     #[serde(default)]
     pub system: bool,
+    /// Keep the program running when this connection closes, to attach to
+    /// it again (`attach`): a terminal (`tty`) only. A holder process keeps
+    /// its terminal and the latest of its output meanwhile.
+    #[serde(default)]
+    pub persist: bool,
+    /// Attach to the persistent terminal `id`, which is running, instead of
+    /// starting a program: `argv`, `env` and `system` are ignored, and `tty`
+    /// is the attaching terminal's size. A connection attached already is
+    /// closed: the new one takes over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<u64>,
 }
+
+/// Most terminals a guest keeps persistent at once.
+pub const MAX_PERSISTENT_TERMINALS: usize = 16;
 
 /// A frame on a shell connection.
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +237,13 @@ pub enum Frame {
     Eof,
     /// Guest → host: the command exited; last frame.
     Exit(i32),
+    /// Guest → host, first on a persistent terminal's connection: the output
+    /// that follows starts at byte `from` of all the terminal has written
+    /// (the oldest it still keeps), then live; `to` is where it was then.
+    Attached { from: u64, to: u64 },
+    /// Host → guest: end the persistent terminal on purpose (its program
+    /// gets `SIGHUP`), rather than detaching from it.
+    Hangup,
 }
 
 impl Frame {
@@ -212,6 +254,8 @@ impl Frame {
             Frame::Resize(r, c) => (2, [r.to_be_bytes(), c.to_be_bytes()].concat()),
             Frame::Eof => (3, Vec::new()),
             Frame::Exit(code) => (4, code.to_be_bytes().to_vec()),
+            Frame::Attached { from, to } => (5, [from.to_be_bytes(), to.to_be_bytes()].concat()),
+            Frame::Hangup => (6, Vec::new()),
         };
         let mut buf = Vec::with_capacity(5 + body.len());
         buf.push(kind);
@@ -232,6 +276,11 @@ impl Frame {
             ),
             3 => Frame::Eof,
             4 if body.len() == 4 => Frame::Exit(i32::from_be_bytes(body.try_into().unwrap())),
+            5 if body.len() == 16 => Frame::Attached {
+                from: u64::from_be_bytes(body[..8].try_into().unwrap()),
+                to: u64::from_be_bytes(body[8..].try_into().unwrap()),
+            },
+            6 => Frame::Hangup,
             _ => return Err(bad()),
         })
     }
@@ -275,6 +324,11 @@ mod tests {
             Frame::Resize(24, 80),
             Frame::Eof,
             Frame::Exit(-3),
+            Frame::Attached {
+                from: 7,
+                to: 1 << 40,
+            },
+            Frame::Hangup,
         ];
         let mut buf = Vec::new();
         for f in &frames {

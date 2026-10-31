@@ -31,6 +31,51 @@ pub struct Leaf {
 
 impl SessionCa {
     pub fn new(session: &str) -> Result<Self> {
+        let now = time::OffsetDateTime::now_utc();
+        Self::with_key(session, KeyPair::generate()?, now, time::Duration::days(30))
+    }
+
+    /// The CA of a persistent session, kept in `path` (its key and when it
+    /// was made, 0600), made there the first time: the same CA after the
+    /// daemon restarts, so the guest, which trusts it by its name and key,
+    /// goes on trusting what it signs. Valid for ten years, as the session
+    /// may be started again for long.
+    pub fn kept(session: &str, path: &std::path::Path) -> Result<Self> {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Kept {
+            key: String,
+            made: i64,
+        }
+        let life = time::Duration::days(3650);
+        // Made afresh only when there is none: one that can't be read is an
+        // error, not replaced, as the guest trusts that one.
+        match std::fs::read(path) {
+            Ok(b) => {
+                let k: Kept = serde_json::from_slice(&b).context("the session's CA")?;
+                let made = time::OffsetDateTime::from_unix_timestamp(k.made)?;
+                return Self::with_key(session, KeyPair::from_pem(&k.key)?, made, life);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("reading {}", path.display())))
+            }
+        }
+        let key = KeyPair::generate()?;
+        let made = time::OffsetDateTime::now_utc();
+        let kept = Kept {
+            key: key.serialize_pem(),
+            made: made.unix_timestamp(),
+        };
+        crate::util::write_private(path, &serde_json::to_vec(&kept)?)?;
+        Self::with_key(session, key, made, life)
+    }
+
+    fn with_key(
+        session: &str,
+        key: KeyPair,
+        made: time::OffsetDateTime,
+        life: time::Duration,
+    ) -> Result<Self> {
         let mut params = CertificateParams::default();
         params
             .distinguished_name
@@ -40,10 +85,8 @@ impl SessionCa {
             .push(DnType::OrganizationName, "zapper");
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let now = time::OffsetDateTime::now_utc();
-        params.not_before = now - time::Duration::hours(1);
-        params.not_after = now + time::Duration::days(30);
-        let key = KeyPair::generate()?;
+        params.not_before = made - time::Duration::hours(1);
+        params.not_after = made + life;
         let cert = params.self_signed(&key)?;
         let pem = cert.pem();
         Ok(Self { cert, key, pem })
@@ -81,8 +124,15 @@ impl SessionCa {
 /// session's guest-facing TLS state.
 pub(crate) struct SessionTls {
     ca: SessionCa,
-    configs: Mutex<HashMap<String, Arc<ServerConfig>>>,
+    /// Each host's config, and when its leaf was minted.
+    configs: Mutex<HashMap<String, (Arc<ServerConfig>, std::time::Instant)>>,
 }
+
+/// How long a minted leaf (valid for a week) is used before another is.
+const LEAF_USE: std::time::Duration = std::time::Duration::from_secs(6 * 24 * 3600);
+/// Most hosts' configs kept at once: the names are the guest's, so a rule
+/// allowing a whole domain mustn't let it grow without end.
+const MAX_LEAVES: usize = 1024;
 
 impl SessionTls {
     pub fn new(session: &str) -> Result<Self> {
@@ -92,21 +142,50 @@ impl SessionTls {
         })
     }
 
+    /// A persistent session's, with its CA kept in `path` ([`SessionCa::kept`]).
+    pub fn kept(session: &str, path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            ca: SessionCa::kept(session, path)?,
+            configs: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The CA certificate the guest is given to trust (PEM).
     pub fn pem(&self) -> &str {
         &self.ca.pem
     }
 
+    /// The CA's public key, which the guest's trust rests on.
+    #[cfg(test)]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.ca.key.public_key_der()
+    }
+
     /// The server config for terminating an inspected connection to `host`:
-    /// a leaf minted from the CA and assembled on first use, then cached.
+    /// a leaf minted from the CA and assembled on first use, then cached,
+    /// and minted again before it expires (a session can run for weeks).
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let host = host.to_ascii_lowercase();
-        if let Some(c) = self.configs.lock().unwrap().get(&host) {
-            return Ok(c.clone());
+        if let Some((c, at)) = self.configs.lock().unwrap().get(&host) {
+            if at.elapsed() < LEAF_USE {
+                return Ok(c.clone());
+            }
         }
         let config = server_config(self.ca.leaf(&host)?)?;
-        self.configs.lock().unwrap().insert(host, config.clone());
+        let mut configs = self.configs.lock().unwrap();
+        if configs.len() >= MAX_LEAVES {
+            configs.retain(|_, (_, at)| at.elapsed() < LEAF_USE);
+            if configs.len() >= MAX_LEAVES {
+                configs.clear();
+            }
+        }
+        configs.insert(host, (config.clone(), std::time::Instant::now()));
         Ok(config)
+    }
+
+    #[cfg(test)]
+    pub fn cached(&self) -> usize {
+        self.configs.lock().unwrap().len()
     }
 }
 
@@ -219,6 +298,28 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// A kept CA that can't be read is an error, and stays as it was.
+    #[test]
+    fn an_unreadable_kept_ca_isnt_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zapper-ca-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ca.json");
+        let first = SessionCa::kept("abc234", &path).unwrap();
+        let kept = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // as root: nothing is unreadable
+        }
+        assert!(SessionCa::kept("abc234", &path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), kept, "left as it was");
+        let again = SessionCa::kept("abc234", &path).unwrap();
+        assert_eq!(again.key.public_key_der(), first.key.public_key_der());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
@@ -233,6 +334,16 @@ mod tests {
     fn session_tls_caches_a_config_per_host_case_insensitively() {
         let tls = SessionTls::new("t").unwrap();
         assert!(tls.pem().starts_with("-----BEGIN CERTIFICATE-----"));
+    }
+
+    /// Leaves for the guest's names are kept within a bound.
+    #[test]
+    fn the_leaf_cache_is_bounded() {
+        let tls = SessionTls::new("abc234").unwrap();
+        for i in 0..MAX_LEAVES + 10 {
+            tls.server_config(&format!("h{i}.example")).unwrap();
+        }
+        assert!(tls.cached() <= MAX_LEAVES, "{}", tls.cached());
         let a = tls.server_config("API.example.com").unwrap();
         let b = tls.server_config("api.example.com").unwrap();
         assert!(

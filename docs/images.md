@@ -10,6 +10,8 @@ An image is an ext4 file built from a container image's filesystem. A profile se
 
 `zapper image build NAME` builds the image from its recipe in the config, under `images:`: the OCI image it starts `from`, the commands it `run`s, the files or directories from the host it takes as `args` (each a name, a description and a default), where it `copy`s them, after those commands, and the commands to run once they are in (`after`). With the copies after `run`, changing an argument's file rebuilds only from the copy: the steps before it stay cached. `make image IMAGE=NAME` runs it after `make build`. Without a recipe, `zapper image build NAME --from REF [--run CMD]…` gives the base and steps on the command line.
 
+When the daemon is running, `zapper image build` asks it to build (`POST /v1/images/NAME/build`), from its running config, and prints the build's log as it comes; it exits 0 if the image was built. The daemon runs one build at a time and keeps each build's log, its latest 5000 lines, for anyone who follows it later (`GET /v1/images/builds/ID`), such as a UI; each build is an `image` event when it starts and when it ends. Without a daemon, or with `--local`, the CLI builds itself, from the config file; `make image` always does (`--local`), so it builds from the checkout's config whatever daemon runs. Either way, the same code builds the image, and the files a recipe's `args` name are read by whichever builds. One build of an image runs at a time, whichever starts it: a second, from the daemon or the CLI, is refused while the first runs.
+
 ```yaml
 images:
   office-fake:
@@ -33,7 +35,7 @@ images:
 1. Pulls `REF` with podman, or builds `FROM REF`: one `RUN` per step, then one `COPY` per `copy` entry (modes kept; a directory's contents into the directory named), then one `RUN` per `after` step. `$ZAPPER_OCI` selects another engine.
 2. Exports the container's filesystem as a tar.
 3. Extracts the tar and runs `mkfs.ext4 -d` inside `podman unshare`, the engine's user namespace. This keeps the image's file ownership without needing root; outside it, every file would belong to the building user, and uid 1000 in the guest would own `/usr`.
-4. Writes `images/NAME.ext4`, and `images/NAME.json` with the source, steps, size and build time.
+4. Writes `images/NAME.json` with the source, steps, size, build time and the new image's SHA-256, which `zapper image ls` shows and a persistent session's creation checks the image against ([security: persistent sessions](security.md#persistent-sessions)), then puts `images/NAME.ext4` in place: a build that ends between the two leaves the old image with the new hash, which is refused rather than trusted. Its work directory and a half-written image are removed however the build ends.
 
 The image is sized at its content plus 25% plus 256 MiB, unless `--size` is given. Each session's copy is grown to `engine.disk`.
 

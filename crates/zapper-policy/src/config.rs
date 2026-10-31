@@ -745,7 +745,7 @@ impl Default for AgentSpec {
 }
 
 /// A profile with its `extends` chain resolved.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedProfile {
     pub name: String,
     pub engine: Engine,

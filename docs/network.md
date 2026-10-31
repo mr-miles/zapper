@@ -57,7 +57,26 @@ When the guest connects to one of these synthetic addresses, the daemon knows wh
 
 ### Services
 
-A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule; rules with methods, paths or secrets don't apply to a service, since its traffic isn't inspected. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+A service is a name and port that the daemon connects itself, never looked up on the host: to an in-process handler (a firm's git server), a [socket](#socket-services) a program on the host serves, an address on the host's network (still subject to the [address checks](#address-checks)), or a port of another session's VM over vsock (a firm's cluster, or any session's). A service is for the sessions its labels pick (`zapper run --label team=a`), or for every session. Its name resolves only in those sessions, to a synthetic address like any other, and reaching it still needs a net rule. Rules with methods, paths or secrets apply to a service's plain HTTP, and to its HTTPS when the daemon terminates the service's TLS (an in-process handler with TLS, or a socket service with `--tls`): the proxy then decides each request as for any inspected host, and passes it to the service's plain side; a secret whose `hosts` name the service goes to it, as to any upstream. They don't apply to HTTPS to a service at an address or in another session's VM, whose TLS isn't the daemon's: such a connection is refused. A name with `*.` in front stands for every name under it; an exact name wins over `*.`. A service's name on a port it doesn't serve goes nowhere ("nothing serves NAME:PORT").
+
+#### Socket services
+
+A socket service is served by a program on the host outside the daemon, such as a facility of a layer built on zapper, on a unix socket in the daemon's `state/services/` directory. The service names the socket by its file name (letters, digits, `.`, `-`, `_`), never by a path, so it can't point a session at a socket elsewhere on the host, such as a container engine's. The daemon connects to the socket for each connection a session makes to the service. It first sends one line naming the caller, taken from the VM the connection came from, then relays the guest's stream:
+
+```
+{"session":"ab3cd4","labels":{"team":"a"},"name":"drive.internal","port":443}
+```
+
+The guest's bytes come only after that line, so nothing the guest sends can pose as it. With `--tls`, the daemon terminates TLS with the session's CA for the name asked for (offering HTTP/1.1), and the socket gets the plain stream, as an in-process handler does. A rule with `methods` or `path` for the service's name makes each request inspected and decided first, so the program behind the socket sees only requests the session's rules allow; `{session}` and `{label:KEY}` in a rule's path ([policy](policy.md#net)) give each session its own part of it:
+
+```
+- { kind: net, action: allow, host: drive.internal, path: "/outbox/{session}/**" }
+- { kind: net, action: allow, host: drive.internal, methods: [GET], path: "/teams/{label:team}/**" }
+``` A socket nobody listens on refuses the connection ("connecting to socket NAME, which serves HOST").
+
+```
+zapper service add drive.internal:443 --to-socket drive.sock --tls --for team=a
+```
 
 A zone is a domain whose names resolve only to services, for the sessions it is for: a name in it that nothing serves doesn't exist (`NXDOMAIN`), and nothing about it is looked up on the host. A firm's domain is one: the office registers the zone and its services (`git.`, `cluster.` and `apps.` under the domain) for the run's sessions ([office](office.md#names-and-who-reaches-what)).
 
@@ -88,7 +107,7 @@ Before an inspected request is decided:
 
 An AWS request the guest signed with an `aws` secret's fake key is signed again with the real keys after it is allowed ([policy: AWS](policy.md#aws)).
 
-A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched.
+A secret the proxy added never comes back to the guest: wherever its value appears in the response's headers or body, as an API that echoes requests returns it, it is overwritten with `*`, byte for byte, so lengths stay the same. A request carrying a secret asks for an uncompressed response (`Accept-Encoding: identity`), since a compressed body can't be searched. One the upstream compresses anyway (gzip, deflate or br) is decoded as it streams, masked, and sent on uncompressed, without `Content-Encoding`; one in a coding the proxy can't decode (zstd, or several stacked) is refused (502) rather than passed on unmasked. A response to a request without a secret added goes through as it came, compressed or not.
 
 ### vsock mode
 

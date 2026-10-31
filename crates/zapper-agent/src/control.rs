@@ -1,4 +1,8 @@
-//! The control channel to the host.
+//! The control channel to the host. For a persistent session it outlives a
+//! restart of the daemon: when it is lost, the agent connects again and sends
+//! the token `Init` gave it (`Resume`), and exec checks still waiting are
+//! asked again; one waiting longer than `HOST_GONE` while the host is gone
+//! is refused. Without a token, a lost channel powers the guest off.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -6,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use zapper_proto::proto::{
@@ -16,11 +20,24 @@ use zapper_proto::ExecRequest;
 
 use crate::sys;
 
+/// How long an exec check waits while the host is gone before it is
+/// refused.
+const HOST_GONE: Duration = Duration::from_secs(60);
+
+/// Exec checks waiting for an answer, by id: where to send it, and the
+/// question, to ask again on a new connection.
+type Pending = Arc<Mutex<HashMap<u64, (Sender<bool>, GuestMsg)>>>;
+
 #[derive(Clone)]
 pub struct Control {
     writer: Arc<Mutex<File>>,
-    pending: Arc<Mutex<HashMap<u64, Sender<bool>>>>,
+    pending: Pending,
     next_id: Arc<AtomicU64>,
+    /// What to send on a new connection, if this session's channel may be
+    /// made again.
+    resume: Option<String>,
+    /// Since when the host has been gone, while it is.
+    gone_since: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Control {
@@ -39,14 +56,16 @@ impl Control {
             }
         };
         let mut reader = BufReader::new(stream.try_clone()?);
-        let spec = match read_msg(&mut reader)? {
-            Some(HostMsg::Init { spec }) => *spec,
+        let (spec, resume) = match read_msg(&mut reader)? {
+            Some(HostMsg::Init { spec, resume }) => (*spec, resume),
             other => bail!("expected init, got {other:?}"),
         };
         let control = Control {
             writer: Arc::new(Mutex::new(stream)),
             pending: Default::default(),
             next_id: Arc::new(AtomicU64::new(1)),
+            resume,
+            gone_since: Default::default(),
         };
         let c = control.clone();
         std::thread::spawn(move || c.read_loop(reader));
@@ -57,17 +76,70 @@ impl Control {
         loop {
             match read_msg(&mut reader) {
                 Ok(Some(HostMsg::ExecReply { id, allow })) => {
-                    if let Some(tx) = self.pending.lock().unwrap().remove(&id) {
+                    if let Some((tx, _)) = self.pending.lock().unwrap().remove(&id) {
                         let _ = tx.send(allow);
                     }
                 }
-                Ok(Some(HostMsg::Shutdown)) | Ok(None) => sys::power_off(),
-                Ok(Some(HostMsg::Init { .. })) => {}
-                Err(e) => {
-                    eprintln!("zapper-agent: control: {e:#}");
-                    sys::power_off();
-                }
+                Ok(Some(HostMsg::Shutdown)) => sys::power_off(),
+                Ok(Some(HostMsg::Init { .. } | HostMsg::Resumed)) => {}
+                Ok(None) | Err(_) => match &self.resume {
+                    Some(token) => reader = self.reconnect(token),
+                    None => {
+                        eprintln!("zapper-agent: control channel lost");
+                        sys::power_off();
+                    }
+                },
             }
+        }
+    }
+
+    /// Connects to the host again until it answers (it may be restarting),
+    /// sends the resume token and the persistent terminals, and asks again
+    /// the exec checks waiting. Meanwhile, nothing that needs the host
+    /// happens: the guest's network goes nowhere, and execs wait.
+    fn reconnect(&self, token: &str) -> BufReader<File> {
+        self.gone_since
+            .lock()
+            .unwrap()
+            .get_or_insert_with(Instant::now);
+        eprintln!("zapper-agent: control channel lost; connecting again");
+        let mut wait = Duration::from_millis(200);
+        loop {
+            std::thread::sleep(wait);
+            wait = (wait * 2).min(Duration::from_secs(2));
+            let Ok(stream) = sys::vsock_connect(HOST_CID, CONTROL_PORT) else {
+                continue;
+            };
+            let (Ok(reader), Ok(writer)) = (stream.try_clone(), stream.try_clone()) else {
+                continue;
+            };
+            *self.writer.lock().unwrap() = writer;
+            self.send(&GuestMsg::Resume {
+                token: token.to_string(),
+                terminals: crate::holder::ids(),
+            });
+            // Taken only when the host says so: one that closes it (a host
+            // not adopting the session yet, or one refusing it) isn't, and
+            // the host stays gone, its 60 seconds running on.
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
+            sys::set_recv_timeout(fd, 5);
+            let mut reader = BufReader::new(reader);
+            if !matches!(read_msg(&mut reader), Ok(Some(HostMsg::Resumed))) {
+                continue;
+            }
+            sys::set_recv_timeout(fd, 0);
+            let waiting: Vec<GuestMsg> = self
+                .pending
+                .lock()
+                .unwrap()
+                .values()
+                .map(|(_, m)| m.clone())
+                .collect();
+            for m in &waiting {
+                self.send(m);
+            }
+            *self.gone_since.lock().unwrap() = None;
+            return reader;
         }
     }
 
@@ -83,14 +155,33 @@ impl Control {
         self.send(&GuestMsg::Event { event });
     }
 
-    /// Asks the host whether an exec may proceed. Fails closed.
+    /// Asks the host whether an exec may proceed. Fails closed: refused if
+    /// no answer comes, or the host is gone for longer than `HOST_GONE`.
     pub fn check_exec(&self, pid: i32, uid: u32, req: ExecRequest) -> bool {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        self.send(&GuestMsg::ExecCheck { id, pid, uid, req });
-        // The host bounds `ask` waits itself; this only guards a lost reply.
-        let allow = rx.recv_timeout(Duration::from_secs(600)).unwrap_or(false);
+        let msg = GuestMsg::ExecCheck { id, pid, uid, req };
+        self.pending.lock().unwrap().insert(id, (tx, msg.clone()));
+        self.send(&msg);
+        // The host bounds `ask` waits itself; this guards a lost reply, and
+        // a host that is gone.
+        let asked = Instant::now();
+        let allow = loop {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(allow) => break allow,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let gone = self
+                        .gone_since
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|t| t.elapsed() > HOST_GONE);
+                    if gone || asked.elapsed() > Duration::from_secs(600) {
+                        break false;
+                    }
+                }
+            }
+        };
         self.pending.lock().unwrap().remove(&id);
         allow
     }
@@ -106,4 +197,66 @@ fn read_msg(reader: &mut BufReader<File>) -> Result<Option<HostMsg>> {
         bail!("control line too long");
     }
     Ok(Some(serde_json::from_slice(&line)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A control channel whose host has been gone since `gone`, if at all;
+    /// what it sends goes nowhere.
+    fn control(gone: Option<Duration>) -> Control {
+        Control {
+            writer: Arc::new(Mutex::new(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/null")
+                    .unwrap(),
+            )),
+            pending: Default::default(),
+            next_id: Arc::new(AtomicU64::new(1)),
+            resume: Some("tok".into()),
+            gone_since: Arc::new(Mutex::new(gone.map(|d| Instant::now() - d))),
+        }
+    }
+
+    fn req() -> ExecRequest {
+        ExecRequest {
+            path: "/bin/true".into(),
+            argv: vec![],
+            cwd: None,
+        }
+    }
+
+    /// With the host gone past `HOST_GONE`, an exec is refused at once (in
+    /// a second or two), not left waiting.
+    #[test]
+    fn an_exec_is_refused_while_the_host_is_gone() {
+        let c = control(Some(HOST_GONE + Duration::from_secs(1)));
+        let asked = Instant::now();
+        assert!(!c.check_exec(10, 1000, req()));
+        assert!(
+            asked.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert!(c.pending.lock().unwrap().is_empty(), "not left waiting");
+    }
+
+    /// An answer that comes (after a reconnection, the host back) is taken.
+    #[test]
+    fn an_answer_is_taken_once_the_host_is_back() {
+        let c = control(Some(Duration::from_secs(5)));
+        let answerer = c.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(50));
+            *answerer.gone_since.lock().unwrap() = None;
+            let waiting = answerer.pending.lock().unwrap().remove(&1);
+            if let Some((tx, _)) = waiting {
+                let _ = tx.send(true);
+                return;
+            }
+        });
+        assert!(c.check_exec(10, 1000, req()));
+    }
 }

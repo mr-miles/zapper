@@ -22,6 +22,7 @@ use zapper_policy::{AnyRule, Config, Policy, Scope};
 
 use crate::daemon::{self, session, Daemon};
 
+pub use crate::daemon::builds::{BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome};
 pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
@@ -32,7 +33,7 @@ pub use crate::daemon::services::{
 pub use crate::daemon::session::{
     NewSession, Session, SessionInfo, Status, TermChunk, TerminalInfo,
 };
-pub use crate::daemon::{Event, EventBody, Pending, Remember};
+pub use crate::daemon::{Catchup, Cursor, Event, EventBody, Pending, Remember};
 
 /// A handle on a running daemon. Cheap to clone.
 #[derive(Clone)]
@@ -108,13 +109,18 @@ impl Core {
     }
 
     /// Runs the clients' shutdown hooks (the office stops its firms), then
-    /// stops sessions: the daemon is going away.
+    /// stops sessions: the daemon is going away. A persistent session that
+    /// runs is left running, for the next daemon.
     pub async fn shutdown(&self) {
         let hooks = self.d.clients.shutdown.read().unwrap().clone();
         for hook in hooks {
             hook(self.clone()).await;
         }
         for s in self.sessions() {
+            if s.persistent && s.is_running() {
+                tracing::info!(session = %s.id, "left running for the next daemon");
+                continue;
+            }
             session::stop(&self.d, &s, "daemon shutdown").await;
         }
     }
@@ -228,18 +234,32 @@ pub trait SessionApi {
     fn sessions_labelled(&self, key: &str, value: &str) -> Vec<Arc<Session>>;
     /// Starts a session; returns once its guest is ready.
     async fn create_session(&self, new: NewSession) -> Result<Arc<Session>>;
-    /// Stops a session; it stays listed, with its audit log.
+    /// Stops a session; it stays listed, with its audit log, and a
+    /// persistent one with its disks, their hashes recorded.
     async fn stop_session(&self, s: &Arc<Session>, reason: &str);
-    /// Takes a stopped session off the list; a session still starting or
-    /// running stays, as nothing would manage its VM.
+    /// Starts a stopped persistent session again from its kept disks, after
+    /// checking them against the hashes recorded when it stopped: a change
+    /// is recorded, and refused unless `accept_changed_disks`, which is
+    /// recorded too.
+    async fn start_session(&self, s: &Arc<Session>, accept_changed_disks: bool) -> Result<()>;
+    /// Takes a stopped session off the list, a persistent one's disks with
+    /// it; a session still starting or running stays, as nothing would
+    /// manage its VM.
     fn forget_session(&self, id: &str) -> Result<()>;
     /// A session's info, saying so when the driver is off.
     fn session_info(&self, s: &Session) -> SessionInfo;
     /// A session's audit log: kept by the session while it is listed, else
     /// from its directory.
     fn audit_path(&self, id: &str) -> Result<PathBuf>;
+    /// Checks a session's record: its files against the keeper's chains,
+    /// when there is a keeper, and what it says of the session's disks (a
+    /// start whose disks differ from the stop before it, a stop recorded
+    /// without the session stopping, changes accepted, images changed).
+    fn verify_session(&self, id: &str) -> Result<Value>;
     /// Pumps an attached client's frames to and from a terminal opened with
-    /// `Session::open_shell`, recording it.
+    /// `Session::open_shell`, recording it; `persist` for a terminal opened
+    /// persistent (one attached again is known by its id).
+    #[allow(clippy::too_many_arguments)]
     async fn pump_shell<C>(
         &self,
         s: Arc<Session>,
@@ -248,6 +268,7 @@ pub trait SessionApi {
         id: u64,
         argv: Vec<String>,
         tty: Option<(u16, u16)>,
+        persist: bool,
     ) where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
 }
@@ -276,6 +297,10 @@ impl SessionApi for Core {
         session::stop(&self.d, s, reason).await
     }
 
+    async fn start_session(&self, s: &Arc<Session>, accept_changed_disks: bool) -> Result<()> {
+        session::start(&self.d, s, accept_changed_disks).await
+    }
+
     fn forget_session(&self, id: &str) -> Result<()> {
         self.d.sessions.forget(id)
     }
@@ -286,6 +311,21 @@ impl SessionApi for Core {
             i.driver = json!("disabled");
         }
         i
+    }
+
+    fn verify_session(&self, id: &str) -> Result<Value> {
+        let audit = self.audit_path(id)?;
+        let text = std::fs::read_to_string(&audit)
+            .map_err(|e| anyhow!("no record for session {id}: {e}"))?;
+        let findings = session::disks::findings(&session::disks::events(&text));
+        let dir = self.d.paths.state.join("sessions").join(id);
+        let chain = match daemon::record::rel(&dir).map(|r| daemon::record::verify_dir(&r)) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => json!({ "ok": null, "note": format!("{e:#}") }),
+            None => json!({ "ok": null, "note": "no record" }),
+        };
+        let ok = findings.is_empty() && chain["ok"] != json!(false);
+        Ok(json!({ "session": id, "ok": ok, "chain": chain, "findings": findings }))
     }
 
     fn audit_path(&self, id: &str) -> Result<PathBuf> {
@@ -310,6 +350,7 @@ impl SessionApi for Core {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn pump_shell<C>(
         &self,
         s: Arc<Session>,
@@ -318,10 +359,11 @@ impl SessionApi for Core {
         id: u64,
         argv: Vec<String>,
         tty: Option<(u16, u16)>,
+        persist: bool,
     ) where
         C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty).await
+        session::pump_shell(self.d.clone(), s, client, guest, id, argv, tty, persist).await
     }
 }
 
@@ -394,18 +436,32 @@ impl RuleApi for Core {
                 return Ok(RuleRemoval::Revoked);
             }
         }
-        // `s-` ids are session-layer rules (`Rules::add` mints them);
-        // everything else lives in the config layers handled below.
+        // `s-` ids are session-layer rules (`Rules::add` mints them, with
+        // the session's id); everything else lives in the config layers
+        // handled below. An id several sessions hold (one a client put) is
+        // removed from none, rather than from whichever comes first.
         if id.starts_with("s-") {
-            for s in self.d.sessions.all() {
-                if let Some(r) = s.remove_rule(id) {
-                    return Ok(RuleRemoval::Removed(
+            let holders: Vec<Arc<Session>> = self
+                .d
+                .sessions
+                .all()
+                .into_iter()
+                .filter(|s| s.rules().iter().any(|r| r.id() == Some(id)))
+                .collect();
+            return match holders.as_slice() {
+                [] => Err(anyhow!("no rule {id}")),
+                [s] => {
+                    let r = s.remove_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;
+                    Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),
-                    ));
+                    ))
                 }
-            }
-            return Err(anyhow!("no rule {id}"));
+                many => {
+                    let ids: Vec<&str> = many.iter().map(|s| s.id.as_str()).collect();
+                    Err(anyhow!("rule {id} is in sessions {}", ids.join(", ")))
+                }
+            };
         }
         let (scope, rule) = self.d.change(&format!("rule {id} removed"), |c| {
             let scope = c.find_rule(id).ok_or_else(|| anyhow!("no rule {id}"))?;
@@ -553,6 +609,20 @@ pub trait EventApi {
     fn recent_events(&self, session: Option<&str>) -> Vec<Event>;
     /// Events as they happen.
     fn subscribe(&self) -> broadcast::Receiver<Event>;
+    /// This daemon run's ID, which a [`Cursor`] names: `seq` counts from 1
+    /// again after a restart.
+    fn epoch(&self) -> String;
+    /// What to send a subscriber before live events, of one session or all:
+    /// after `after`, what it missed (with gaps for what it can't have);
+    /// else, with `history`, recent history; and, when something was sent,
+    /// the last `seq` it covers, so live events up to it are skipped.
+    /// Subscribe first, then call this, so nothing falls between.
+    fn catch_up(
+        &self,
+        session: Option<&str>,
+        after: Option<&Cursor>,
+        history: bool,
+    ) -> (Vec<Catchup>, Option<u64>);
 }
 
 impl EventApi for Core {
@@ -562,6 +632,117 @@ impl EventApi for Core {
 
     fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.d.events.subscribe()
+    }
+
+    fn epoch(&self) -> String {
+        self.d.events.epoch().to_string()
+    }
+
+    fn catch_up(
+        &self,
+        session: Option<&str>,
+        after: Option<&Cursor>,
+        history: bool,
+    ) -> (Vec<Catchup>, Option<u64>) {
+        self.d.events.catch_up(session, after, history)
+    }
+}
+
+/// What to build: by the image's recipe in the running config, with
+/// `args` (`NAME=PATH`) for its files; or, with `from`, from that OCI image
+/// and `run` steps. `size` overrides the content-based size.
+#[derive(Debug, Clone, Default)]
+pub struct BuildRequest {
+    pub args: Vec<String>,
+    pub from: Option<String>,
+    pub run: Vec<String>,
+    pub size: Option<String>,
+}
+
+/// Root filesystem images: listing them, and building them in the daemon.
+pub trait ImageApi {
+    /// The images in the images directory, as `zapper image ls` shows them.
+    fn images(&self) -> Result<Vec<Value>>;
+    /// Starts building `name`, one build at a time; its log is followed with
+    /// [`ImageBuild::follow`]. A recipe that doesn't resolve is refused here,
+    /// before anything runs.
+    fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>>;
+    fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>>;
+    /// The build running and the latest that ended.
+    fn image_builds(&self) -> Vec<BuildInfo>;
+}
+
+impl ImageApi for Core {
+    fn images(&self) -> Result<Vec<Value>> {
+        crate::images::list(&self.d.paths.images)
+    }
+
+    fn build_image(&self, name: &str, req: BuildRequest) -> Result<Arc<ImageBuild>> {
+        let recipe = {
+            let c = self.d.config.read().unwrap();
+            crate::images::recipe(&c, name, req.from, req.run, &req.args)?
+        };
+        let (dir, image, size) = (self.d.paths.images.clone(), name.to_string(), req.size);
+        let images_dir = dir.clone();
+        let event = |b: &ImageBuild, state: &str, detail: Option<String>| EventBody::Image {
+            name: b.name.clone(),
+            build: b.id,
+            state: state.into(),
+            detail,
+        };
+        let (d, d2) = (self.d.clone(), self.d.clone());
+        let started = EventBody::Image {
+            name: name.to_string(),
+            build: 0,
+            state: "started".into(),
+            detail: None,
+        };
+        let build = self.d.builds.start(
+            name,
+            move |id, log| {
+                // On the build's thread, before its work: before its end.
+                let mut started = started;
+                if let EventBody::Image { build, .. } = &mut started {
+                    *build = id;
+                }
+                d2.emit(None, started);
+                crate::images::build(
+                    crate::images::Build {
+                        name: &image,
+                        from: &recipe.from,
+                        run: &recipe.run,
+                        inputs: &recipe.inputs,
+                        copies: &recipe.copies,
+                        after: &recipe.after,
+                        size: size.as_deref(),
+                        dir: &dir,
+                    },
+                    log,
+                )
+            },
+            move |b| {
+                let body = match b.info().outcome {
+                    Some(Outcome::Built(path)) => {
+                        let hash = crate::images::built_hash(&images_dir, &b.name)
+                            .map(|h| format!(" sha256 {h}"))
+                            .unwrap_or_default();
+                        event(b, "built", Some(format!("{path}{hash}")))
+                    }
+                    Some(Outcome::Failed(e)) => event(b, "failed", Some(e)),
+                    None => return,
+                };
+                d.emit(None, body);
+            },
+        )?;
+        Ok(build)
+    }
+
+    fn image_build(&self, id: u64) -> Option<Arc<ImageBuild>> {
+        self.d.builds.get(id)
+    }
+
+    fn image_builds(&self) -> Vec<BuildInfo> {
+        self.d.builds.list()
     }
 }
 

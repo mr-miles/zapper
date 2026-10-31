@@ -41,12 +41,20 @@ pub struct Args {
     /// Firecracker runs as (`crate::subids`); else the namespace's root is
     /// the daemon user, and so is Firecracker.
     pub sub: bool,
+    /// A persistent session's VMM, which outlives the daemon (no death
+    /// signal from it), and copies Firecracker's console to its own stdout
+    /// (the session's `console.log`) itself, capped, as no daemon may be
+    /// there to read it. Firecracker still dies with the VMM.
+    pub durable: bool,
 }
+
+/// How much of a console the session keeps.
+pub const CONSOLE_LIMIT: u64 = 1 << 20;
 
 impl Args {
     /// Arguments after `__vmm`, in the order `to_args` writes them.
     fn parse(args: &[String]) -> Option<Args> {
-        let [dir, firecracker, config, id, kernel, initrd, net, ids] = args else {
+        let [dir, firecracker, config, id, kernel, initrd, net, ids, life] = args else {
             return None;
         };
         Some(Args {
@@ -66,6 +74,11 @@ impl Args {
                 "own" => false,
                 _ => return None,
             },
+            durable: match life.as_str() {
+                "keep" => true,
+                "die" => false,
+                _ => return None,
+            },
         })
     }
 
@@ -79,6 +92,7 @@ impl Args {
         v.push((&self.initrd).into());
         v.push(if self.nic { "nic" } else { "none" }.into());
         v.push(if self.sub { "sub" } else { "own" }.into());
+        v.push(if self.durable { "keep" } else { "die" }.into());
         v
     }
 }
@@ -299,7 +313,9 @@ fn probe(nic: bool) -> i32 {
 
 fn main(args: &[String]) -> i32 {
     let Some(a) = Args::parse(args) else {
-        eprintln!("usage: zapper __vmm DIR FIRECRACKER CONFIG ID KERNEL INITRD nic|none sub|own");
+        eprintln!(
+            "usage: zapper __vmm DIR FIRECRACKER CONFIG ID KERNEL INITRD nic|none sub|own keep|die"
+        );
         return 2;
     };
     match run(&a) {
@@ -324,8 +340,11 @@ fn run(a: &Args) -> Result<i32> {
         share_with_firecracker(&a.dir)?;
     }
     // Entering the user namespace changed credentials, which cleared the
-    // parent-death signal the daemon set: set it again.
-    unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+    // parent-death signal the daemon set: set it again, unless this VMM is
+    // to outlive the daemon.
+    if !a.durable {
+        unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+    }
     if unsafe { libc::getppid() } != parent {
         return Ok(1);
     }
@@ -333,9 +352,12 @@ fn run(a: &Args) -> Result<i32> {
         netns::serve(&a.dir)?;
     }
     let sub = a.sub;
-    let status = unsafe {
-        Command::new(&a.firecracker)
-            .arg("--no-api")
+    let mut cmd = Command::new(&a.firecracker);
+    if a.durable {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = unsafe {
+        cmd.arg("--no-api")
             .arg("--config-file")
             .arg(&a.config)
             .args(["--level", "Warn", "--id", &a.id])
@@ -353,12 +375,81 @@ fn run(a: &Args) -> Result<i32> {
                         return Err(io::Error::last_os_error());
                     }
                 }
-                // After any change of uid, which clears it.
+                // After any change of uid, which clears it. Firecracker dies
+                // with this VMM, whether or not the VMM dies with the daemon.
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 Ok(())
             })
-            .status()
+            .spawn()
             .with_context(|| format!("starting {}", a.firecracker.display()))?
     };
+    if a.durable {
+        console(child.stdout.take(), child.stderr.take());
+    }
+    let status = child.wait()?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Firecracker's console to this VMM's stdout (the session's
+/// `console.log`), together at most `CONSOLE_LIMIT`; what follows is read
+/// and dropped, so Firecracker never blocks on it.
+fn console(out: Option<std::process::ChildStdout>, err: Option<std::process::ChildStderr>) {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let written = Arc::new(AtomicU64::new(0));
+    let streams: Vec<Box<dyn Read + Send>> = [
+        out.map(|o| Box::new(o) as Box<dyn Read + Send>),
+        err.map(|e| Box::new(e) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for mut s in streams {
+        let written = written.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 8192];
+            while let Ok(n) = s.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if written.fetch_add(n as u64, Ordering::Relaxed) < CONSOLE_LIMIT {
+                    let _ = std::io::stdout().write_all(&buf[..n]);
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+
+    /// What the daemon writes, the VMM reads back: a durable one's too.
+    #[test]
+    fn args_round_trip() {
+        for (nic, sub, durable) in [(true, true, true), (false, false, false)] {
+            let a = Args {
+                dir: "/s/vm".into(),
+                firecracker: "/bin/fc".into(),
+                config: "/s/vm/vm.json".into(),
+                id: "abc234".into(),
+                kernel: "/k".into(),
+                initrd: "/i".into(),
+                nic,
+                sub,
+                durable,
+            };
+            let args: Vec<String> = a.to_args()[1..]
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            let b = Args::parse(&args).unwrap();
+            assert_eq!(
+                (b.nic, b.sub, b.durable, b.id.as_str()),
+                (nic, sub, durable, "abc234")
+            );
+        }
+        assert!(Args::parse(&["x".to_string()]).is_none());
+    }
 }

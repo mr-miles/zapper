@@ -39,6 +39,39 @@ impl SessionDns {
         }
     }
 
+    /// A persistent session's: the names it has given out are kept in `path`,
+    /// a line each with its address, and given out again from it, so the
+    /// addresses the guest has cached mean the same after the daemon
+    /// restarts. A line that can't be read changes no other's address.
+    pub fn kept(path: &std::path::Path) -> Self {
+        let dns = Self::new();
+        {
+            let mut names = dns.names();
+            if let Ok(text) = std::fs::read_to_string(path) {
+                for line in text.lines() {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let name = v["name"].as_str().unwrap_or_default();
+                    let ip = v["ip"].as_str().and_then(|ip| ip.parse::<IpAddr>().ok());
+                    match (v["v"].as_u64(), ip) {
+                        (_, Some(ip)) => names.restore(name, ip),
+                        // Kept before lines held the address: as given.
+                        (Some(4), None) => drop(names.address(name)),
+                        (Some(6), None) => drop(names.address6(name)),
+                        _ => {}
+                    }
+                }
+            }
+            names.log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok();
+        }
+        dns
+    }
+
     /// The synthetic-name table: names given out by synthetic address, and
     /// what the host's resolver said about each.
     pub fn names(&self) -> MutexGuard<'_, FakeDns> {
@@ -82,6 +115,44 @@ pub struct FakeDns {
     by_ip: HashMap<IpAddr, String>,
     /// Whether looked-up names exist, and when that was found out.
     exists: HashMap<String, (bool, Instant)>,
+    /// Where each name given out is written, for a persistent session.
+    log: Option<std::fs::File>,
+}
+
+impl FakeDns {
+    fn note(&mut self, name: &str, ip: IpAddr) {
+        if let Some(f) = self.log.as_mut() {
+            use std::io::Write;
+            let version = if ip.is_ipv4() { 4 } else { 6 };
+            let line = serde_json::json!({ "v": version, "name": name, "ip": ip.to_string() });
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    /// `name` at `ip` again, as kept: if `ip` is in the pool and neither it
+    /// nor the name has another.
+    fn restore(&mut self, name: &str, ip: IpAddr) {
+        if name.is_empty() || self.by_ip.contains_key(&ip) {
+            return;
+        }
+        match ip {
+            IpAddr::V4(v4) => {
+                let n = u32::from(v4).wrapping_sub(BASE);
+                if n == 0 || n >= SIZE || self.v4.contains_key(name) {
+                    return;
+                }
+                self.v4.insert(name.to_string(), v4);
+            }
+            IpAddr::V6(v6) => {
+                let n = v6.to_bits().wrapping_sub(BASE6);
+                if n == 0 || n >= SIZE as u128 || self.v6.contains_key(name) {
+                    return;
+                }
+                self.v6.insert(name.to_string(), v6);
+            }
+        }
+        self.by_ip.insert(ip, name.to_string());
+    }
 }
 
 impl FakeDns {
@@ -90,13 +161,14 @@ impl FakeDns {
         if let Some(ip) = self.v4.get(name) {
             return Some(*ip);
         }
-        let n = self.v4.len() as u32 + 1;
-        if n >= SIZE {
-            return None;
-        }
-        let ip = Ipv4Addr::from(BASE + n);
+        // The next free: past those given, skipping any a kept session's
+        // restore placed further on.
+        let ip = (self.v4.len() as u32 + 1..SIZE)
+            .map(|n| Ipv4Addr::from(BASE + n))
+            .find(|ip| !self.by_ip.contains_key(&IpAddr::V4(*ip)))?;
         self.v4.insert(name.to_string(), ip);
         self.by_ip.insert(IpAddr::V4(ip), name.to_string());
+        self.note(name, IpAddr::V4(ip));
         Some(ip)
     }
 
@@ -105,13 +177,12 @@ impl FakeDns {
         if let Some(ip) = self.v6.get(name) {
             return Some(*ip);
         }
-        let n = self.v6.len() as u128 + 1;
-        if n >= SIZE as u128 {
-            return None;
-        }
-        let ip = Ipv6Addr::from(BASE6 + n);
+        let ip = (self.v6.len() as u128 + 1..SIZE as u128)
+            .map(|n| Ipv6Addr::from(BASE6 + n))
+            .find(|ip| !self.by_ip.contains_key(&IpAddr::V6(*ip)))?;
         self.v6.insert(name.to_string(), ip);
         self.by_ip.insert(IpAddr::V6(ip), name.to_string());
+        self.note(name, IpAddr::V6(ip));
         Some(ip)
     }
 
@@ -276,6 +347,42 @@ impl RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kept names come back at the addresses they had, whatever lines
+    /// around them can't be read; a new name gets one no kept name has.
+    #[test]
+    fn kept_names_keep_their_addresses_past_a_corrupt_line() {
+        let dir = std::env::temp_dir().join(format!("zapper-dns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dns.jsonl");
+        let (a, b, c, b6) = {
+            let dns = SessionDns::kept(&path);
+            let mut n = dns.names();
+            (
+                n.address("a.example").unwrap(),
+                n.address("b.example").unwrap(),
+                n.address("c.example").unwrap(),
+                n.address6("b.example").unwrap(),
+            )
+        };
+        // The line for a.example torn.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let torn = text.replacen("{\"ip\"", "{\"ip", 1);
+        assert_ne!(torn, text);
+        std::fs::write(&path, torn).unwrap();
+
+        let dns = SessionDns::kept(&path);
+        let mut n = dns.names();
+        assert_eq!(n.address("b.example"), Some(b));
+        assert_eq!(n.address("c.example"), Some(c));
+        assert_eq!(n.address6("b.example"), Some(b6));
+        let fresh = n.address("d.example").unwrap();
+        assert!(fresh != b && fresh != c, "{fresh}");
+        assert_eq!(n.name(IpAddr::V4(fresh)), Some("d.example"));
+        let _ = a;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn query(labels: &[&[u8]], qtype: u16, qclass: u16) -> Vec<u8> {
         let mut q = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];

@@ -4,7 +4,7 @@
 
 ## Overview
 
-zapper records what each session does, an office worker's included, as events. Each event goes to the session's audit log, to the live stream (`zapper events`, `GET /v1/events`), and to an in-memory buffer of the latest 2000 events that the UI reads. Terminals are recorded as asciicast files. All of this is written on the host. A firm's run adds its own journal and each worker's agent transcript ([office: state](office.md#state)).
+zapper records what each session does, an office worker's included, as events. Each event goes to the session's audit log, to the live stream (`zapper events`, `GET /v1/events`), and to an in-memory buffer of the latest 2000 events that the UI reads, and that a client reconnecting to the stream resumes from ([API](api.md#sessions-rules-and-config)). Terminals are recorded as asciicast files. All of this is written on the host. A firm's run adds its own journal and each worker's agent transcript ([office: state](office.md#state)).
 
 ## Events
 
@@ -18,10 +18,12 @@ Each event has `seq`, `ts` (Unix seconds), `session` and `type`:
 | `guest` / `exit` | `pid`, `ppid`, `uid`, `comm`, `exit_code`, `signal`, `elapsed_ms`, `user_ms`, `sys_ms`, `mem_kib`, `io_bytes` | Guest kernel process accounting |
 | `guest` / `setup` | `step`, `ok`, `output` (last 8 KiB) | Profile setup commands |
 | `ask` / `answer` | `id`, `kind`, `subject` / `allow`, `remember` | Approvals |
-| `shell` | `id`, `state` (`open`, `closed`), `argv`, `exit_code` | Terminals |
+| `shell` | `id`, `state` (`open`, `closed`; for a persistent terminal also `detached`, when its client goes and its program keeps running, and `attached`, when one attaches again), `argv`, `exit_code` | Terminals |
 | `session` | `state` (`starting`, `running`, `failed`, `stopped`), `detail` | Lifecycle, including start time |
 | `config` | `change` | Running config changes |
 | `driver` | `event` (`started`, `turn_start`, `activity`, `steered`, `turn_end`, `exited`, `error`), `detail` (`prompts`; `activity`; `outcome` `done`, `rate_limited`, `failed` or `timed_out`, `tokens`, `ms`, `error`; `code`; `resumed`) | [The driver](#the-driver) of a driven session |
+| `disks` | `state` (`image`, `stopped`, `checked`, `changed`, `unverified`, `accepted`), `disks` (each disk's SHA-256, by file name; for `image`, the image's), `detail` (what changed, or how the image compares with its build) | A persistent session's disks, hashed when it stops and checked when it starts ([security: persistent sessions](security.md#persistent-sessions)) |
+| `image` | `name`, `build`, `state` (`started`, `built`, `failed`), `detail` (the image's file, or why it failed) | An image build the daemon runs ([images](images.md)) |
 | `mcp` | `server`, `tool`, `ok`, `ms`, `error` (the first 512 characters) | A tool called through the [MCP gateway](architecture.md), an office tool included; a call to a server the session hasn't is one too, refused. Names are kept to 128 characters; arguments and results aren't recorded |
 
 The live stream adds `summary`, the event as one line, and `verdict` (`allow`, `deny` or `ask`) when the event decided something; `zapper events` and the UI's events view show those, and the audit log keeps the fields alone.

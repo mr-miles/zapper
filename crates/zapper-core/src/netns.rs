@@ -16,6 +16,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -33,6 +35,47 @@ const TCP_PORT: u16 = 15001;
 const DNS_PORT: u16 = 15053;
 /// Daemon socket in the VMM's directory.
 pub const SOCKET: &str = "nic.sock";
+/// TCP connections relayed at once, each two threads: the daemon takes as
+/// many of a session's (`GuestRuntime::conns`). One over is closed.
+const MAX_TCP: usize = 256;
+/// DNS queries relayed at once, each a thread; one over is dropped (the
+/// guest's resolver asks again).
+const MAX_DNS: usize = 32;
+
+/// A count of relays running, at most `max`.
+#[derive(Clone)]
+struct Slots {
+    used: Arc<AtomicUsize>,
+    max: usize,
+}
+
+/// One of `Slots`', given back when dropped.
+struct Slot(Arc<AtomicUsize>);
+
+impl Slots {
+    fn new(max: usize) -> Self {
+        Self {
+            used: Arc::new(AtomicUsize::new(0)),
+            max,
+        }
+    }
+
+    /// A slot, or `None` when all are taken.
+    fn take(&self) -> Option<Slot> {
+        self.used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Slot(self.used.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Kernel command line that configures the guest's `eth0`.
 pub fn boot_args() -> String {
@@ -146,14 +189,20 @@ pub fn serve(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Relays each captured TCP connection to the daemon. `v6` selects how the
-/// pre-redirect destination is read.
+/// Relays each captured TCP connection to the daemon, at most `MAX_TCP` at
+/// once (per listener). `v6` selects how the pre-redirect destination is
+/// read.
 fn serve_tcp(listener: TcpListener, socket: PathBuf, v6: bool) {
+    let slots = Slots::new(MAX_TCP);
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
+            let Some(slot) = slots.take() else {
+                continue; // dropped: closed
+            };
             let s = socket.clone();
             thread::spawn(move || {
                 let _ = relay_tcp(conn, &s, v6);
+                drop(slot);
             });
         }
     });
@@ -163,10 +212,14 @@ fn serve_tcp(listener: TcpListener, socket: PathBuf, v6: bool) {
 /// Address-family-agnostic: a v6 query comes in on the v6 socket and the
 /// answer (an A or AAAA record) goes back the same way.
 fn serve_dns(udp: UdpSocket, socket: PathBuf) {
+    let slots = Slots::new(MAX_DNS);
     thread::spawn(move || {
         let mut buf = [0u8; 1500];
         loop {
             let Ok((n, peer)) = udp.recv_from(&mut buf) else {
+                continue;
+            };
+            let Some(slot) = slots.take() else {
                 continue;
             };
             let (query, socket, udp) = (buf[..n].to_vec(), socket.clone(), udp.try_clone());
@@ -174,6 +227,7 @@ fn serve_dns(udp: UdpSocket, socket: PathBuf) {
                 if let (Ok(answer), Ok(udp)) = (relay_dns(&query, &socket), udp) {
                     let _ = udp.send_to(&answer, peer);
                 }
+                drop(slot);
             });
         }
     });
@@ -236,6 +290,13 @@ fn relay_tcp(conn: TcpStream, socket: &Path, v6: bool) -> io::Result<()> {
     // The destination's IP literal; a v6 address writes as e.g. `2001:2::1`,
     // which the daemon parses as an `IpAddr`.
     up.write_all(format!("TCP {} {}\n", dst.ip(), dst.port()).as_bytes())?;
+    relay(conn, up)
+}
+
+/// Copies between the guest's connection and the daemon's until the
+/// daemon's side ends; then the guest's is shut both ways, so a guest that
+/// sends nothing more can't keep the other thread (reading from it) alive.
+fn relay(conn: TcpStream, up: UnixStream) -> io::Result<()> {
     let (mut cr, mut uw) = (conn.try_clone()?, up.try_clone()?);
     let t = thread::spawn(move || {
         let _ = io::copy(&mut cr, &mut uw);
@@ -243,7 +304,7 @@ fn relay_tcp(conn: TcpStream, socket: &Path, v6: bool) -> io::Result<()> {
     });
     let (mut ur, mut cw) = (up, conn);
     let _ = io::copy(&mut ur, &mut cw);
-    let _ = cw.shutdown(std::net::Shutdown::Write);
+    let _ = cw.shutdown(std::net::Shutdown::Both);
     let _ = t.join();
     Ok(())
 }
@@ -258,4 +319,44 @@ fn relay_dns(query: &[u8], socket: &Path) -> io::Result<Vec<u8>> {
     let mut answer = vec![0u8; u16::from_be_bytes(len) as usize];
     up.read_exact(&mut answer)?;
     Ok(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slots_are_bounded_and_given_back() {
+        let slots = Slots::new(2);
+        let (a, b) = (slots.take().unwrap(), slots.take().unwrap());
+        assert!(slots.take().is_none(), "the third is refused");
+        drop(a);
+        let c = slots.take().expect("one given back");
+        drop((b, c));
+        assert_eq!(slots.used.load(Ordering::Acquire), 0);
+    }
+
+    /// The daemon ends its side: the relay ends, and the guest's connection
+    /// is closed, though the guest sent nothing and kept it open.
+    #[test]
+    fn a_silent_guest_cant_hold_a_relay_after_the_daemon_ends() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut guest = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (conn, _) = listener.accept().unwrap();
+        let (up, daemon) = UnixStream::pair().unwrap();
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            relay(conn, up).unwrap();
+            done.send(()).unwrap();
+        });
+        drop(daemon);
+        ended
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the relay ended");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut b = [0u8; 1];
+        assert_eq!(guest.read(&mut b).unwrap(), 0, "the guest's side closed");
+    }
 }

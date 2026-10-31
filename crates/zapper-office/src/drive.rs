@@ -145,6 +145,8 @@ where
             tty: None,
             env: Default::default(),
             system: true,
+            persist: false,
+            attach: None,
         })
         .await?;
     let (mut r, mut w) = stream.into_split();

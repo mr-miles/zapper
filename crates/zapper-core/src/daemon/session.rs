@@ -11,21 +11,23 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::process::Child;
 use tokio::sync::{mpsc, watch, Semaphore};
-use zapper_policy::proto::{Forward, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT};
+use zapper_policy::proto::{
+    Forward, Frame, GuestFile, HostMsg, ShellRequest, MAX_LINE, SHELL_PORT,
+};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
 
 use super::{tls, Daemon, Event, EventBody};
 
 mod boot;
+pub(crate) mod disks;
 mod lifecycle;
 mod spec;
 mod terminal;
 
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use lifecycle::register;
-pub(crate) use lifecycle::{create, stop};
+pub(crate) use lifecycle::{create, restore, start, stop};
 pub(crate) use terminal::pump_shell;
 pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
@@ -105,6 +107,8 @@ impl SessionStore {
 
     /// Take a stopped session off the list; a starting or running one stays,
     /// as nothing would manage its VM.
+    /// Takes a stopped session off the list; a persistent one's disks go
+    /// with it.
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {
@@ -115,7 +119,23 @@ impl SessionStore {
                 bail!("session {id} is still running; stop it first");
             }
         }
-        sessions.remove(id);
+        if let Some(s) = sessions.remove(id) {
+            if s.persistent {
+                // What it kept to be started again, or adopted: gone, so no
+                // daemon lists it again. Its record stays.
+                let _ = std::fs::remove_dir_all(s.dir.vm());
+                for kept in [
+                    s.dir.saved(),
+                    s.dir.ca(),
+                    s.dir.dns(),
+                    s.dir.resume_token(),
+                    s.dir.vmm(),
+                    s.dir.conversation(),
+                ] {
+                    let _ = std::fs::remove_file(kept);
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -155,6 +175,54 @@ impl SessionDir {
     pub fn root_disk(&self) -> PathBuf {
         self.vm().join("root.ext4")
     }
+    /// The disks in the VMM's directory, by file name: kept while a
+    /// persistent session is stopped.
+    pub fn disks(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(self.vm())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "ext4"))
+            .collect();
+        v.sort();
+        v
+    }
+    /// What the disks take on the host: their allocated blocks, not their
+    /// sparse size.
+    pub fn disk_bytes(&self) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        self.disks()
+            .iter()
+            .filter_map(|p| p.metadata().ok())
+            .map(|m| m.blocks() * 512)
+            .sum()
+    }
+    /// A persistent session's CA, kept (`tls::SessionCa::kept`).
+    pub fn ca(&self) -> PathBuf {
+        self.root.join("ca.json")
+    }
+    /// The synthetic names a persistent session has been given, in order
+    /// (`dns::SessionDns::kept`).
+    pub fn dns(&self) -> PathBuf {
+        self.root.join("dns.jsonl")
+    }
+    /// A durable VMM's pid and subordinate id (`vm::Vmm`), for a daemon that
+    /// didn't start it.
+    pub fn vmm(&self) -> PathBuf {
+        self.root.join("vmm.json")
+    }
+    /// A persistent session's resume token: what its agent sends to take
+    /// its control channel again (`GuestMsg::Resume`).
+    pub fn resume_token(&self) -> PathBuf {
+        self.root.join("resume.token")
+    }
+    /// A persistent session as it was created ([`Saved`]), so a daemon that
+    /// starts again lists it, stopped.
+    pub fn saved(&self) -> PathBuf {
+        self.root.join("session.json")
+    }
+
     pub fn data_disk(&self, i: usize) -> PathBuf {
         self.vm().join(format!("disk{i}.ext4"))
     }
@@ -186,6 +254,12 @@ impl SessionDir {
     pub fn driver_log(&self) -> PathBuf {
         self.root.join("driver.jsonl")
     }
+
+    /// A persistent session's driven agent's conversation id
+    /// (`driver::Driver::kept`).
+    pub fn conversation(&self) -> PathBuf {
+        self.root.join("conversation.json")
+    }
 }
 
 /// A session's rule state: its own policy layer, and the shared layers a
@@ -193,13 +267,16 @@ impl SessionDir {
 /// profile's). The owner of the session's rules; `Session` wraps these with
 /// the identity and events they need.
 pub(crate) struct Rules {
+    /// The session's id, in the ids `add` mints.
+    session: String,
     own: RwLock<Policy>,
     shared: Vec<(Scope, Arc<RwLock<Policy>>)>,
 }
 
 impl Rules {
-    pub fn new(shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
+    pub fn new(session: &str, shared: Vec<(Scope, Arc<RwLock<Policy>>)>) -> Self {
         Self {
+            session: session.to_string(),
             own: RwLock::new(Policy::default()),
             shared,
         }
@@ -215,8 +292,9 @@ impl Rules {
         self.own.read().unwrap().rules()
     }
 
-    /// Adds a rule to the own layer under a fresh `s-<kind>-<n>` id, so
-    /// session rule ids never clash with config ones.
+    /// Adds a rule to the own layer under a fresh `s-<session>-<kind>-<n>`
+    /// id, so session rule ids clash neither with config ones nor with
+    /// another session's.
     pub fn add(&self, mut rule: AnyRule, position: Option<usize>) -> AnyRule {
         let mut policy = self.own.write().unwrap();
         let taken: Vec<String> = policy
@@ -226,7 +304,7 @@ impl Rules {
             .collect();
         let kind = rule.kind();
         let id = (1..)
-            .map(|n| format!("s-{kind}-{n}"))
+            .map(|n| format!("s-{}-{kind}-{n}", self.session))
             .find(|i| !taken.contains(i))
             .unwrap();
         rule.set_id(id);
@@ -243,6 +321,12 @@ impl Rules {
         p.remove(&id);
         p.insert(rule, Some(0));
         id
+    }
+
+    /// The own layer as it was kept (a persistent session's, restored):
+    /// its rules with the ids they had, which clients remove them by.
+    pub fn restore(&self, policy: Policy) {
+        *self.own.write().unwrap() = policy;
     }
 
     /// Removes a rule from the own layer, returning it if it was there.
@@ -279,7 +363,7 @@ impl Rules {
 /// and dropped when it stops; the owner of "the session while it runs".
 pub(crate) struct GuestRuntime {
     status: watch::Sender<Status>,
-    vm: tokio::sync::Mutex<Option<Child>>,
+    vm: tokio::sync::Mutex<Option<super::vm::VmProc>>,
     /// The control channel to the guest agent, once it connects.
     guest: Mutex<Option<mpsc::Sender<HostMsg>>>,
     next_shell: AtomicU64,
@@ -287,6 +371,9 @@ pub(crate) struct GuestRuntime {
     exec_checks: Arc<Semaphore>,
     /// Bounds concurrent proxy connections from the guest.
     conns: Arc<Semaphore>,
+    /// The tasks accepting on the guest's sockets (`boot::serve_guest`),
+    /// ended with the VM: each holds the session.
+    listeners: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl GuestRuntime {
@@ -298,6 +385,7 @@ impl GuestRuntime {
             next_shell: AtomicU64::new(1),
             exec_checks: Arc::new(Semaphore::new(64)),
             conns: Arc::new(Semaphore::new(256)),
+            listeners: Mutex::new(Vec::new()),
         }
     }
 
@@ -307,8 +395,74 @@ impl GuestRuntime {
         &self.status
     }
 
+    /// Starting → Running: the guest is ready. From no other state: a stop
+    /// that came first stands.
+    pub fn mark_ready(&self) -> bool {
+        self.status.send_if_modified(|s| {
+            let starting = matches!(s, Status::Starting);
+            if starting {
+                *s = Status::Running;
+            }
+            starting
+        })
+    }
+
+    /// Starting → Failed(`why`): it never came up. A session stopped
+    /// meanwhile stays stopped.
+    pub fn fail_if_starting(&self, why: String) -> bool {
+        self.status.send_if_modified(|s| {
+            let starting = matches!(s, Status::Starting);
+            if starting {
+                *s = Status::Failed(why);
+            }
+            starting
+        })
+    }
+
+    /// Starting or Running → Failed(`why`). A stopped one stays stopped.
+    pub fn fail(&self, why: String) -> bool {
+        self.status.send_if_modified(|s| {
+            let up = matches!(s, Status::Starting | Status::Running);
+            if up {
+                *s = Status::Failed(why);
+            }
+            up
+        })
+    }
+
+    /// Stopped or Failed → Starting: claims a start, which only one caller
+    /// gets; false while it is starting or running.
+    pub fn claim_start(&self) -> bool {
+        self.status.send_if_modified(|s| {
+            let down = matches!(s, Status::Stopped(_) | Status::Failed(_));
+            if down {
+                *s = Status::Starting;
+            }
+            down
+        })
+    }
+
+    /// → Stopped(`reason`), a failure kept as it is: whether this caller is
+    /// the one stopping it (not if it was stopped already).
+    pub fn begin_stop(&self, reason: &str) -> bool {
+        let mut first = false;
+        self.status.send_if_modified(|s| match s {
+            Status::Stopped(_) => false,
+            Status::Failed(_) => {
+                first = true;
+                false
+            }
+            _ => {
+                first = true;
+                *s = Status::Stopped(reason.into());
+                true
+            }
+        });
+        first
+    }
+
     /// The Firecracker process handle: set at boot, taken at teardown.
-    pub fn vm(&self) -> &tokio::sync::Mutex<Option<Child>> {
+    pub fn vm(&self) -> &tokio::sync::Mutex<Option<super::vm::VmProc>> {
         &self.vm
     }
 
@@ -317,9 +471,24 @@ impl GuestRuntime {
         *self.guest.lock().unwrap() = Some(tx);
     }
 
-    /// Drops the control channel (teardown).
+    /// Drops the control channel and ends the tasks accepting on the
+    /// guest's sockets (teardown).
     pub fn clear_guest(&self) {
         *self.guest.lock().unwrap() = None;
+        self.end_listeners();
+    }
+
+    /// Keeps a task accepting on one of the guest's sockets, to end with
+    /// the VM.
+    pub fn hold_listener(&self, task: tokio::task::AbortHandle) {
+        self.listeners.lock().unwrap().push(task);
+    }
+
+    /// Ends the tasks accepting on the guest's sockets.
+    pub fn end_listeners(&self) {
+        for task in self.listeners.lock().unwrap().drain(..) {
+            task.abort();
+        }
     }
 
     /// Sends a message to the guest agent, if the channel is up.
@@ -332,6 +501,11 @@ impl GuestRuntime {
     /// The next terminal id.
     pub fn next_shell(&self) -> u64 {
         self.next_shell.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// New terminals get numbers after `n`, one the guest already has.
+    pub fn shells_after(&self, n: u64) {
+        self.next_shell.fetch_max(n + 1, Ordering::Relaxed);
     }
 
     /// A permit for one concurrent exec decision, or `None` over the cap.
@@ -349,7 +523,23 @@ pub struct Session {
     pub id: String,
     pub profile: String,
     pub created: f64,
-    pub expires: Option<f64>,
+    /// When its `ttl_secs` ends this run: from its start, as it may be
+    /// started again (`persistent`).
+    pub(crate) expires: Mutex<Option<f64>>,
+    /// Its disks stay when it stops, and it can be started again; they go
+    /// when it is forgotten (`zapper rm`).
+    pub persistent: bool,
+    /// How many times it has booted: a run's timers end with it.
+    pub(crate) boots: AtomicU64,
+    /// Held across a persistent session's save, from the snapshot of its
+    /// rules to the write, so an older snapshot can't be written last.
+    pub(crate) saving: Mutex<()>,
+    /// Held by a stop through its teardown, and by a start until it has
+    /// checked the disks: neither runs while the other is on the disks.
+    pub(crate) lifecycle: tokio::sync::Mutex<()>,
+    /// Make a persistent session from its image even if the image changed
+    /// since it was built (recorded); not kept.
+    pub(crate) accept_changed_image: bool,
     pub resolved: ResolvedProfile,
     pub workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
@@ -371,7 +561,7 @@ pub struct Session {
     pub(crate) requests: Arc<Mutex<super::httplog::RequestLog>>,
     /// The session's terminals, for watching them from the UI.
     pub(crate) terminals: Mutex<std::collections::BTreeMap<u64, Arc<Terminal>>>,
-    audit: Mutex<Option<super::record::Writer>>,
+    pub(crate) audit: Mutex<Option<super::record::Writer>>,
     /// What the session is to whoever started it, e.g. `{firm: acme,
     /// member: pat}`: shown in its info and events, and how a client finds
     /// its own sessions.
@@ -392,6 +582,10 @@ pub struct SessionInfo {
     pub status: Status,
     pub created: f64,
     pub expires: Option<f64>,
+    pub persistent: bool,
+    /// For a persistent session: what its disks take on the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     pub image: String,
     pub vcpus: u8,
     pub memory_mib: u32,
@@ -425,7 +619,9 @@ impl Session {
             profile: self.profile.clone(),
             status: self.runtime.status().borrow().clone(),
             created: self.created,
-            expires: self.expires,
+            expires: *self.expires.lock().unwrap(),
+            persistent: self.persistent,
+            disk_bytes: self.persistent.then(|| self.dir.disk_bytes()),
             image: self.resolved.engine.image.clone(),
             vcpus: self.resolved.engine.vcpus,
             memory_mib: self.resolved.engine.memory_mib,
@@ -539,10 +735,31 @@ impl Session {
         layers.iter().map(|(s, p)| (s.clone(), p)).collect()
     }
 
+    /// `req` as this session asks it: with its ID and labels, for
+    /// `{session}` and `{label:KEY}` in rules' paths.
+    pub fn caller_of(&self, req: &zapper_policy::NetRequest) -> zapper_policy::NetRequest {
+        zapper_policy::NetRequest {
+            session: Some(self.id.clone()),
+            labels: self.labels.clone(),
+            ..req.clone()
+        }
+    }
+
     /// Adds a rule to the session layer under a fresh `s-<kind>-<n>` id, so
     /// session rule ids never clash with config ones.
     pub fn add_rule(&self, rule: AnyRule, position: Option<usize>) -> AnyRule {
-        self.rules.add(rule, position)
+        let rule = self.rules.add(rule, position);
+        self.rules_changed();
+        rule
+    }
+
+    /// A persistent session's rules are kept, for a daemon that adopts it.
+    fn rules_changed(&self) {
+        if self.persistent {
+            if let Err(e) = lifecycle::save(self) {
+                tracing::warn!(session = %self.id, "keeping its rules: {e:#}");
+            }
+        }
     }
 
     /// The rules of the session's own layer.
@@ -555,6 +772,7 @@ impl Session {
     /// network a credential grant needs). It is in the session's events.
     pub fn put_rule(&self, rule: AnyRule) {
         let id = self.rules.put(rule);
+        self.rules_changed();
         self.config_event(format!(
             "rule {id} added to {}",
             Scope::Session(self.id.clone())
@@ -565,6 +783,7 @@ impl Session {
     /// and an event of the session's.
     pub fn remove_rule(&self, id: &str) -> Option<AnyRule> {
         let rule = self.rules.remove(id)?;
+        self.rules_changed();
         self.config_event(format!(
             "rule {id} removed from {}",
             Scope::Session(self.id.clone())
@@ -652,10 +871,30 @@ impl Session {
         if !self.is_running() {
             bail!("session {} is not running", self.id);
         }
-        if req.argv.is_empty() {
-            req.argv = self.resolved.agent.command.clone();
+        if req.persist && req.tty.is_none() {
+            bail!("only a terminal (tty) can be persistent");
         }
-        let id = self.runtime.next_shell();
+        let id = match req.attach {
+            // A persistent terminal of this session, still running.
+            Some(n) => {
+                let open = self
+                    .terminals
+                    .lock()
+                    .unwrap()
+                    .get(&n)
+                    .is_some_and(|t| t.persistent && t.info().open);
+                if !open {
+                    bail!("session {} has no persistent terminal {n} open", self.id);
+                }
+                n
+            }
+            None => {
+                if req.argv.is_empty() {
+                    req.argv = self.resolved.agent.command.clone();
+                }
+                self.runtime.next_shell()
+            }
+        };
         req.id = id;
         let mut stream = connect_vsock(
             self.dir.vsock(),
@@ -668,6 +907,42 @@ impl Session {
         stream.write_all(&json).await?;
         self.counters.shells.fetch_add(1, Ordering::Relaxed);
         Ok((stream, id))
+    }
+}
+
+impl Session {
+    /// Ends persistent terminal `n` on purpose: its program gets `SIGHUP`,
+    /// and a client attached to it is closed. Its exit code, if it said one
+    /// in time.
+    pub async fn hangup(&self, n: u64) -> Result<Option<i32>> {
+        let req = ShellRequest {
+            id: 0,
+            argv: vec![],
+            tty: None,
+            env: Default::default(),
+            system: false,
+            persist: false,
+            attach: Some(n),
+        };
+        let (mut stream, _) = self.open_shell(req).await?;
+        let mut buf = Vec::new();
+        Frame::Hangup.write_to(&mut buf)?;
+        stream.write_all(&buf).await?;
+        let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Ok(Some(frame)) = terminal::read_frame(&mut stream).await {
+                if let Frame::Exit(c) = frame {
+                    return Some(c);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(t) = self.terminals.lock().unwrap().get(&n) {
+            t.end(code);
+        }
+        Ok(code)
     }
 }
 
@@ -686,6 +961,12 @@ pub struct NewSession {
     /// Merged over the profile's `agent`.
     pub agent_overlay: Option<serde_json::Value>,
     pub forwards: Vec<Forward>,
+    /// Keep its disks when it stops, so it can be started again
+    /// (`Session::persistent`).
+    pub persistent: bool,
+    /// For a persistent session: make it from its image even if the image
+    /// changed since it was built, which is recorded.
+    pub accept_changed_image: bool,
 }
 
 impl NewSession {
@@ -700,8 +981,28 @@ impl NewSession {
             mounts: vec![],
             agent_overlay: None,
             forwards: vec![],
+            persistent: false,
+            accept_changed_image: false,
         }
     }
+}
+
+/// What a persistent session is, kept in its `session.json`: enough to list
+/// it again after the daemon restarts and to start it from its disks. Its
+/// own secrets aren't kept (`Session::secrets`): put them again.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub(crate) struct Saved {
+    pub id: String,
+    pub profile: String,
+    pub created: f64,
+    pub workdir: PathBuf,
+    pub resolved: ResolvedProfile,
+    pub labels: BTreeMap<String, String>,
+    /// Its own layer's rules, as of its last stop.
+    pub rules: Policy,
+    pub files: Vec<GuestFile>,
+    pub forwards: Vec<Forward>,
+    pub driven: bool,
 }
 
 /// One line from the guest's control channel, at most `MAX_LINE` bytes:
@@ -763,34 +1064,38 @@ mod tests {
 
     #[test]
     fn rules_mint_per_kind_ids_and_reuse_a_freed_one() {
-        let r = Rules::new(vec![]);
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-2"));
+        let r = Rules::new("sid", vec![]);
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-2"));
         // Each kind has its own sequence.
-        assert_eq!(r.add(exec_rule(), None).id(), Some("s-exec-1"));
+        assert_eq!(r.add(exec_rule(), None).id(), Some("s-sid-exec-1"));
         // The lowest free id is reused once one is removed.
-        assert!(r.remove("s-net-1").is_some());
-        assert_eq!(r.add(net_rule(), None).id(), Some("s-net-1"));
+        assert!(r.remove("s-sid-net-1").is_some());
+        assert_eq!(r.add(net_rule(), None).id(), Some("s-sid-net-1"));
         // Removing it again finds nothing.
-        assert!(r.remove("s-net-1").is_some());
-        assert!(r.remove("s-net-1").is_none());
+        assert!(r.remove("s-sid-net-1").is_some());
+        assert!(r.remove("s-sid-net-1").is_none());
     }
 
     #[test]
     fn put_replaces_a_rule_by_id_and_puts_it_first() {
-        let r = Rules::new(vec![]);
-        r.add(net_rule(), None); // s-net-1
-        r.add(net_rule(), None); // s-net-2
+        let r = Rules::new("sid", vec![]);
+        r.add(net_rule(), None); // s-sid-net-1
+        r.add(net_rule(), None); // s-sid-net-2
         let replacement: AnyRule = AnyRule::Net(
             serde_json::from_value(
-                serde_json::json!({ "id": "s-net-1", "action": "deny", "host": "y.example" }),
+                serde_json::json!({ "id": "s-sid-net-1", "action": "deny", "host": "y.example" }),
             )
             .unwrap(),
         );
         r.put(replacement);
         let rules = r.list();
         assert_eq!(rules.len(), 2, "replaced, not added");
-        assert_eq!(rules[0].id(), Some("s-net-1"), "the replacement is first");
+        assert_eq!(
+            rules[0].id(),
+            Some("s-sid-net-1"),
+            "the replacement is first"
+        );
         assert!(
             matches!(&rules[0], AnyRule::Net(n) if n.action == zapper_policy::Action::Deny),
             "it is the new rule"
@@ -806,7 +1111,7 @@ mod tests {
         let resolved = c1.resolve("web").unwrap();
         // A running config that no longer has `web`.
         let c2 = Config::from_yaml("profiles:\n  other: {}\n").unwrap();
-        let layers = Rules::new(vec![]).layers("sid", "web", &resolved, &c2);
+        let layers = Rules::new("sid", vec![]).layers("sid", "web", &resolved, &c2);
         let scopes: Vec<Scope> = layers.iter().map(|(s, _)| s.clone()).collect();
         assert_eq!(scopes.first(), Some(&Scope::Session("sid".into())));
         assert_eq!(scopes.last(), Some(&Scope::Global));
@@ -817,5 +1122,70 @@ mod tests {
                 .any(|(s, p)| matches!(s, Scope::Profile(n) if n == "web") && !p.net.is_empty()),
             "fell back to the resolved web layers: {scopes:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::{GuestRuntime, Status};
+
+    fn at(r: &GuestRuntime, s: Status) {
+        r.status().send_replace(s);
+    }
+
+    /// A session stopped while it started stays stopped: its guest's late
+    /// `Ready`, or failure, doesn't bring it back.
+    #[test]
+    fn a_stop_stands_against_a_late_ready() {
+        let r = GuestRuntime::new();
+        assert!(r.begin_stop("stopped by operator"));
+        assert!(!r.mark_ready());
+        assert!(!r.fail("guest setup: x".into()));
+        assert!(!r.fail_if_starting("vm exited".into()));
+        assert_eq!(
+            *r.status().borrow(),
+            Status::Stopped("stopped by operator".into())
+        );
+        assert!(!r.begin_stop("again"), "stopped once");
+    }
+
+    #[test]
+    fn ready_only_from_starting() {
+        let r = GuestRuntime::new();
+        assert!(r.mark_ready());
+        assert_eq!(*r.status().borrow(), Status::Running);
+        at(&r, Status::Failed("x".into()));
+        assert!(!r.mark_ready());
+        // A failure is kept by a stop, which still goes ahead.
+        assert!(r.begin_stop("stopped"));
+        assert_eq!(*r.status().borrow(), Status::Failed("x".into()));
+    }
+
+    /// A start is claimed once: not while one is starting or running, and by
+    /// one of many callers at once.
+    #[test]
+    fn a_start_is_claimed_once() {
+        let r = GuestRuntime::new();
+        assert!(!r.claim_start(), "starting already");
+        at(&r, Status::Running);
+        assert!(!r.claim_start(), "running");
+        at(&r, Status::Stopped("x".into()));
+        let r = std::sync::Arc::new(r);
+        let won = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (r, won) = (r.clone(), won.clone());
+                std::thread::spawn(move || {
+                    if r.claim_start() {
+                        won.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(won.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*r.status().borrow(), Status::Starting);
     }
 }

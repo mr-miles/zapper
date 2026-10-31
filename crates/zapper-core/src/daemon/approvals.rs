@@ -66,6 +66,25 @@ impl Approvals {
         self.0.lock().unwrap().remove(id)
     }
 
+    /// Removes every approval of `session` (it stopped), refusing each to
+    /// whoever waits on it; the ones removed.
+    pub(crate) fn take_session(&self, session: &str) -> Vec<Pending> {
+        let mut approvals = self.0.lock().unwrap();
+        let ids: Vec<String> = approvals
+            .values()
+            .filter(|p| p.session == session)
+            .map(|p| p.id.clone())
+            .collect();
+        ids.iter()
+            .filter_map(|id| approvals.remove(id))
+            .inspect(|p| {
+                if let Some(tx) = p.tx.lock().unwrap().take() {
+                    let _ = tx.send(false);
+                }
+            })
+            .collect()
+    }
+
     /// The outstanding approvals, oldest first.
     pub(crate) fn list(&self) -> Vec<Pending> {
         let mut v: Vec<_> = self.0.lock().unwrap().values().cloned().collect();

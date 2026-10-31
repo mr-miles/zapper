@@ -76,27 +76,30 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 
 | Command | Purpose |
 |---|---|
-| `zapper run [-p PROFILE] [-C DIR] [--keep] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. Labels pick it for services |
-| `zapper attach ID [-- CMD…]` | Another terminal in a running session |
+| `zapper run [-p PROFILE] [-C DIR] [--keep] [--persistent [--accept-changed-image]] [-l KEY=VALUE…] [-- CMD…]` | Start a session and attach to its command, in a terminal when stdin is one; the session is removed when the command exits, unless `--keep`. `--persistent` (which keeps it) also keeps its disks when it stops, so `zapper start` can start it again, also after the daemon restarts ([persistent sessions](security.md#persistent-sessions)). Labels pick it for services |
+| `zapper attach ID [--persist] [-- CMD…]` / `zapper attach ID --terminal N` | Another terminal in a running session. `--persist`: its program keeps running when the terminal closes (your connection drops, or you close it), and it prints its number; `--terminal N` attaches to it again, showing what it kept, then live, and closing a client attached already ([architecture: persistent terminals](architecture.md#persistent-terminals)) |
+| `zapper hangup ID N` | End persistent terminal N on purpose: its program gets `SIGHUP` |
 | `zapper exec ID [--system] -- CMD…` | Run a command without a terminal, returning its exit code; `--system` runs it as root without exec supervision, for the operator's own maintenance (e.g. a firm's cluster VM) |
 | `zapper cp ID:/path DIR` | Copy a guest directory out |
 | `zapper ps` | Sessions with state, image and allow/deny counters |
 | `zapper tell ID TEXT…` | Give a driven session's agent a task (`agent.driven`); it waits for the agent's next turn. `zapper events --session ID` follows it |
-| `zapper stop ID` / `zapper rm ID` | Stop a session and keep it listed / stop it and remove it from the list; audit logs stay on disk |
+| `zapper stop ID` / `zapper rm ID` | Stop a session and keep it listed (a persistent one with its disks, their hashes recorded) / stop it and remove it from the list, a persistent one's disks with it; audit logs stay on disk |
+| `zapper record session ID` | Check a session's record: its files against the keeper's chains (with a keeper), and its disks' hashes from each stop to the start after it; exits 1 on any finding ([security: persistent sessions](security.md#persistent-sessions)) |
+| `zapper start ID [--accept-changed-disks]` | Start a stopped persistent session again from its disks, once they are checked against the hashes recorded when it stopped; a disk changed since is recorded, and refused unless `--accept-changed-disks`, which is recorded too |
 | `zapper audit ID` | The session's audit log (JSON lines) |
 | `zapper events [-s ID] [--history]` | Follow events, one line each, or raw with `--json` |
 | `zapper approvals` | Pending `ask` decisions (outside firms; in a firm, see `zapper firm security`) |
 | `zapper approve ID [--remember session]` / `zapper deny …` | Answer one, for this request or the rest of the session |
 | `zapper rules [--scope S]` | List rules of all layers, or of `global`, `profile:NAME` or `session:ID` |
 | `zapper service ls` | Services and zones, a firm's included ([network: services](network.md#services)) |
-| `zapper service add NAME:PORT (--to IP:PORT \| --to-session ID:PORT) [--for KEY=VALUE…]` | A name sessions use that the daemon connects: to an address, or a port of a session's VM; for sessions with those labels, else every session. They still need a net rule for it |
+| `zapper service add NAME:PORT (--to IP:PORT \| --to-session ID:PORT \| --to-socket NAME [--tls]) [--for KEY=VALUE…]` | A name sessions use that the daemon connects: to an address, a port of a session's VM, or a socket in `state/services/` that a program on the host serves, told which session calls ([network: socket services](network.md#socket-services)); for sessions with those labels, else every session. They still need a net rule for it |
 | `zapper service rm ID` | Remove a service added with `add` |
 | `zapper rule add SCOPE 'YAML' [--at N]` / `zapper rule rm ID` | Change rules in the running config |
 | `zapper eval [-s ID\|-p PROFILE] net HOST[:PORT] [METHOD PATH]` | Dry run of a connection or request |
 | `zapper eval [-s ID\|-p PROFILE] exec PATH [ARGV…]` | Dry run of an exec |
 | `zapper config show\|startup\|diff\|save\|reload\|edit\|apply FILE` | [Running and startup config](configuration.md#running-and-startup-config) |
 | `zapper profile ls\|show NAME\|set NAME FILE\|rm NAME` | Profiles in the running config |
-| `zapper image build NAME [--arg ARG=PATH]… [--size S]`, or `zapper image build NAME --from REF [--run CMD]…` / `zapper image ls` | Build an image from its recipe in the config, or from a base and steps given here; [images](images.md) |
+| `zapper image build NAME [--arg ARG=PATH]… [--size S] [--local]`, or `zapper image build NAME --from REF [--run CMD]…` / `zapper image ls` | Build an image from its recipe in the config, or from a base and steps given here: by the daemon, from its running config, when it is up (`--local`: here, from the config file); [images](images.md) |
 
 Examples:
 

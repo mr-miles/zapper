@@ -754,6 +754,62 @@ async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     );
 }
 
+/// The UI's writes are answering approvals and prompting a driven session
+/// (AGENTS.md); every other write the API has is no route of the UI's,
+/// however the request is marked.
+#[tokio::test]
+async fn the_ui_has_no_writes_beyond_its_list() {
+    let t = TestCore::new(CONFIG);
+    let app = super::ui(t.core.clone(), PORT, false, &Mount::default());
+    let cookie = signed_in(&app, t.core.ui_token()).await;
+    let origin = format!("http://{HOST}");
+    let marked = [
+        ("host", HOST),
+        ("cookie", cookie.as_str()),
+        ("x-zapper-ui", "1"),
+        ("origin", origin.as_str()),
+    ];
+    let writes = [
+        (Method::PUT, "/config"),
+        (Method::POST, "/config/save"),
+        (Method::POST, "/config/reload"),
+        (Method::POST, "/rules"),
+        (Method::DELETE, "/rules/r1"),
+        (Method::PUT, "/profiles/web"),
+        (Method::DELETE, "/profiles/web"),
+        (Method::POST, "/sessions"),
+        (Method::POST, "/services"),
+        (Method::DELETE, "/services/x"),
+        (Method::DELETE, "/sessions/abc234"),
+        (Method::POST, "/sessions/abc234/stop"),
+        (Method::POST, "/sessions/abc234/start"),
+        (Method::GET, "/sessions/abc234/attach"),
+        (Method::DELETE, "/sessions/abc234/terminals/1"),
+        (Method::POST, "/evaluate"),
+        (Method::POST, "/images/web/build"),
+    ];
+    for (method, path) in writes {
+        let r = send(&app, method.clone(), &format!("/api{path}"), &marked, "{}").await;
+        assert!(
+            r.status == StatusCode::NOT_FOUND || r.status == StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+    // The two it has get past routing.
+    for path in ["/api/approvals/nosuch", "/api/sessions/nosuch/prompt"] {
+        let r = send(&app, Method::POST, path, &marked, "{}").await;
+        assert!(
+            r.status != StatusCode::NOT_FOUND && r.status != StatusCode::METHOD_NOT_ALLOWED
+                || r.body.contains("no session"),
+            "{path}: {} {}",
+            r.status,
+            r.body
+        );
+    }
+}
+
 /// The front page and `/sessions` of a UI with `mount`, and `GET /api/x`.
 async fn pages(t: &TestCore, mount: &Mount) -> (Reply, Reply, Reply) {
     let app = super::ui(t.core.clone(), PORT, false, mount);
@@ -834,4 +890,173 @@ async fn the_ui_front_page_is_the_mounted_one_or_the_sessions() {
     )
     .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+/// The first `n` SSE events of `uri` (with `headers`): each `(id, data)`.
+async fn first_events(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    n: usize,
+) -> Vec<(String, Value)> {
+    let mut req = Request::builder().uri(uri);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let parsed: Vec<(String, Value)> = text
+                .split("\n\n")
+                .filter(|block| block.contains("data: "))
+                .map(|block| {
+                    let id = block
+                        .lines()
+                        .find_map(|l| l.strip_prefix("id: "))
+                        .unwrap_or("")
+                        .to_string();
+                    let data = block
+                        .lines()
+                        .find_map(|l| l.strip_prefix("data: "))
+                        .and_then(|l| serde_json::from_str(l).ok())
+                        .unwrap_or(Value::Null);
+                    (id, data)
+                })
+                .collect();
+            if parsed.len() >= n {
+                return parsed[..n].to_vec();
+            }
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    })
+    .await
+    .expect("the events stream")
+}
+
+/// A subscriber that reconnects resumes after its last event (`after=`, or
+/// the `Last-Event-ID` an EventSource sends again), and is told when the
+/// daemon restarted since.
+#[tokio::test]
+async fn events_resume_after_the_last_one_seen() {
+    let t = TestCore::new(CONFIG);
+    for _ in 0..3 {
+        session(&t, "web", &[], true);
+    }
+    let app = super::api(t.core.clone(), &Mount::default());
+    let epoch = get(&app, "/v1/status").await.json()["epoch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let all = first_events(&app, "/v1/events?history=true", &[], 2).await;
+    assert_eq!(all[0].0, format!("{epoch}:1"));
+
+    // After event 1, by header (and it wins over history=true): 2 comes next.
+    let last = format!("{epoch}:1");
+    let resumed = first_events(
+        &app,
+        "/v1/events?history=true",
+        &[("last-event-id", &last)],
+        1,
+    )
+    .await;
+    assert_eq!(resumed[0].0, format!("{epoch}:2"));
+    let resumed = first_events(&app, &format!("/v1/events?after={epoch}:2"), &[], 1).await;
+    assert_eq!(resumed[0].0, format!("{epoch}:3"));
+
+    // From another run: a gap saying so, then this run's history.
+    let other = first_events(&app, "/v1/events?after=older:900", &[], 2).await;
+    assert_eq!(other[0].1["type"], "gap", "{:?}", other[0]);
+    assert!(
+        other[0].1["summary"]
+            .as_str()
+            .unwrap()
+            .contains("the daemon restarted"),
+        "{:?}",
+        other[0]
+    );
+    assert_eq!(other[1].0, format!("{epoch}:1"));
+
+    let bad = get(&app, "/v1/events?after=nonsense").await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+}
+
+/// Images through the API: the list, a recipe that doesn't resolve refused
+/// before anything runs, and a build that isn't there.
+#[tokio::test]
+async fn images_are_listed_and_unknown_recipes_refused() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let list = get(&app, "/v1/images").await;
+    assert_eq!(
+        list.json(),
+        json!({ "images": [], "builds": [] }),
+        "{}",
+        list.body
+    );
+    let r = post(&app, "/v1/images/nonesuch/build", "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    assert!(r.body.contains("no recipe for image"), "{}", r.body);
+    let r = post(
+        &app,
+        "/v1/images/web/build",
+        r#"{"from": "x", "args": {"a": "/b"}}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.contains("with --from there is none"), "{}", r.body);
+    assert_eq!(
+        get(&app, "/v1/images/builds/7").await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// A session's record checked: a start whose disks differ from the stop
+/// before it is a finding, and `ok` is false; without a keeper, the chains
+/// aren't checked, and it says so.
+#[tokio::test]
+async fn a_sessions_record_shows_a_disk_changed_while_stopped() {
+    let t = TestCore::new(CONFIG);
+    let id = session(&t, "web", &[], true);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let clean = get(&app, &format!("/v1/sessions/{id}/verify")).await;
+    assert_eq!(clean.json()["ok"], json!(true), "{}", clean.body);
+    // No keeper here: the chains aren't checked, and a note says why.
+    assert_eq!(clean.json()["chain"]["ok"], Value::Null, "{}", clean.body);
+    assert!(clean.json()["chain"]["note"].is_string(), "{}", clean.body);
+
+    let audit = t
+        .core
+        .state_dir()
+        .join("sessions")
+        .join(&id)
+        .join("audit.jsonl");
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(audit)
+        .unwrap();
+    for line in [
+        r#"{"seq":90,"type":"session","state":"stopped"}"#,
+        r#"{"seq":91,"type":"disks","state":"stopped","disks":{"root.ext4":"aaaa"}}"#,
+        r#"{"seq":92,"type":"disks","state":"checked","disks":{"root.ext4":"bbbb"}}"#,
+    ] {
+        writeln!(f, "{line}").unwrap();
+    }
+    let v = get(&app, &format!("/v1/sessions/{id}/verify")).await.json();
+    assert_eq!(v["ok"], json!(false), "{v}");
+    assert_eq!(v["findings"][0]["seq"], 92, "{v}");
+    assert!(v["findings"][0]["finding"]
+        .as_str()
+        .unwrap()
+        .contains("root.ext4 changed while stopped"));
 }

@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use zapper_core::{
-    ApiError, Core, NewSession, Remember, RuleRemoval, ServiceSpec, ServiceTarget, SessionInfo,
-    TermChunk, TerminalInfo,
+    ApiError, BuildMessage, BuildRequest, Catchup, Core, Cursor, NewSession, Remember, RuleRemoval,
+    ServiceSpec, ServiceTarget, SessionInfo, TermChunk, TerminalInfo,
 };
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{
@@ -68,6 +68,7 @@ fn read_routes() -> Router<Core> {
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/audit", get(get_audit))
+        .route("/sessions/{id}/verify", get(verify_session))
         .route("/sessions/{id}/terminals", get(list_terminals))
         .route("/sessions/{id}/requests", get(list_requests))
         .route("/sessions/{id}/requests/{n}", get(get_request))
@@ -76,6 +77,8 @@ fn read_routes() -> Router<Core> {
         .route("/record", get(record_status))
         .route("/approvals", get(list_approvals))
         .route("/services", get(list_services))
+        .route("/images", get(list_images))
+        .route("/images/builds/{id}", get(follow_build))
 }
 
 /// What a client of the core (the office) adds to the API and the UI: its
@@ -107,9 +110,15 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/sessions/{id}", axum::routing::delete(delete_session))
         .route("/sessions/{id}/stop", post(stop_session))
+        .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
+        .route(
+            "/sessions/{id}/terminals/{n}",
+            axum::routing::delete(hangup_terminal),
+        )
         .route("/evaluate", post(evaluate))
+        .route("/images/{name}/build", post(build_image))
         .route("/approvals/{id}", post(answer));
     Router::new().nest(
         "/v1",
@@ -315,6 +324,7 @@ async fn status(State(d): D) -> Json<Value> {
         "sessions": sessions.len(),
         "running": running,
         "pending_approvals": d.approvals().len(),
+        "epoch": d.epoch(),
     }))
 }
 
@@ -609,6 +619,13 @@ struct CreateSession {
     /// Labels for the session, which service selectors pick.
     #[serde(default)]
     labels: BTreeMap<String, String>,
+    /// Keep its disks when it stops, to start it again.
+    #[serde(default)]
+    persistent: bool,
+    /// For a persistent session: make it from its image even if the image
+    /// changed since it was built; recorded.
+    #[serde(default)]
+    accept_changed_image: bool,
 }
 
 /// Labels the operator may give a session: short words, and none of the
@@ -652,6 +669,8 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
     }
     let mut new = NewSession::plain(req.profile, req.workdir, policy);
     new.labels = req.labels;
+    new.persistent = req.persistent;
+    new.accept_changed_image = req.accept_changed_image;
     let s = d.create_session(new).await?;
     Ok(Json(d.session_info(&s)))
 }
@@ -659,6 +678,36 @@ async fn create_session(State(d): D, body: String) -> R<Json<SessionInfo>> {
 async fn stop_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo>> {
     let s = d.session(&id)?;
     d.stop_session(&s, "stopped by operator").await;
+    Ok(Json(d.session_info(&s)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct StartSession {
+    /// Boot its disks even if they changed while it was stopped; recorded.
+    accept_changed_disks: bool,
+}
+
+/// Starts a stopped persistent session again; returns once its guest is
+/// ready. `409` if its disks changed while it was stopped, unless accepted.
+async fn start_session(State(d): D, Path(id): Path<String>, body: String) -> R<Json<SessionInfo>> {
+    let req: StartSession = if body.trim().is_empty() {
+        StartSession::default()
+    } else {
+        parse_body(&body)?
+    };
+    let s = d.session(&id)?;
+    d.start_session(&s, req.accept_changed_disks)
+        .await
+        .map_err(|e| {
+            let msg = format!("{e:#}");
+            let code = if msg.contains("--accept-changed-disks") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            ApiError(code, msg)
+        })?;
     Ok(Json(d.session_info(&s)))
 }
 
@@ -677,10 +726,24 @@ struct AttachQuery {
     argv: Option<String>,
     #[serde(default)]
     system: bool,
+    /// Keep the program running when this connection closes, to attach
+    /// again: a terminal (`tty`) only.
+    #[serde(default)]
+    persist: bool,
+    /// Attach to this persistent terminal, which is running, instead of
+    /// starting a program; it takes over from a client attached already.
+    terminal: Option<u64>,
 }
 
 /// Upgrades the connection to a terminal in the guest; frames as in
 /// `zapper_policy::proto::Frame`.
+/// Ends a persistent terminal on purpose: its program gets `SIGHUP`.
+async fn hangup_terminal(State(d): D, Path((id, n)): Path<(String, u64)>) -> R<Json<Value>> {
+    let s = d.session(&id)?;
+    let code = s.hangup(n).await?;
+    Ok(Json(json!({ "terminal": n, "exit_code": code })))
+}
+
 async fn attach(
     State(d): D,
     Path(id): Path<String>,
@@ -704,6 +767,8 @@ async fn attach(
         tty,
         env: Default::default(),
         system: q.system,
+        persist: q.persist,
+        attach: q.terminal,
     };
     let (guest, shell_id) = s.open_shell(shell.clone()).await?;
     let argv = if shell.argv.is_empty() {
@@ -714,7 +779,7 @@ async fn attach(
     let on_upgrade = hyper::upgrade::on(req);
     tokio::spawn(async move {
         if let Ok(up) = on_upgrade.await {
-            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty)
+            d.pump_shell(s, TokioIo::new(up), guest, shell_id, argv, tty, q.persist)
                 .await;
         }
     });
@@ -722,6 +787,7 @@ async fn attach(
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "upgrade")
         .header(header::UPGRADE, "zapper-shell")
+        .header("x-zapper-terminal", shell_id.to_string())
         .body(Body::empty())
         .unwrap())
 }
@@ -741,6 +807,11 @@ async fn evaluate(State(d): D, body: String) -> R<Json<Value>> {
     let layers: Vec<(Scope, &Policy)> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     if let Some(n) = e.net {
         let inspected = needs_inspection(&layers, &n.host, n.port);
+        // As the session would ask it, for `{session}` and `{label:KEY}`.
+        let n = match e.session.as_deref() {
+            Some(id) => d.session(id)?.caller_of(&n),
+            None => n,
+        };
         let (decision, effects) = evaluate_net(&layers, &n);
         return Ok(Json(
             json!({ "decision": decision, "inspected": inspected, "secrets": effects.secrets }),
@@ -757,29 +828,159 @@ struct EventsQuery {
     session: Option<String>,
     #[serde(default)]
     history: bool,
+    /// `EPOCH:SEQ`: resume after this event, as `Last-Event-ID` does.
+    after: Option<String>,
 }
 
 async fn events(
     State(d): D,
     Query(q): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let history = if q.history {
-        d.recent_events(q.session.as_deref())
-    } else {
-        vec![]
+    headers: axum::http::HeaderMap,
+) -> R<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    // Where the subscriber left off: `after=`, or the `Last-Event-ID` an
+    // EventSource sends again when it reconnects, which wins over `history`.
+    let after = q.after.clone().or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    });
+    let after = match after {
+        Some(a) => Some(Cursor::parse(&a).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("{a:?} is not an event to resume after: EPOCH:SEQ"),
+            )
+        })?),
+        None => None,
     };
+    let epoch = d.epoch();
+    // Subscribe first, then read history, so no event falls between them.
+    let rx = d.subscribe();
+    let (catchup, cut) = d.catch_up(q.session.as_deref(), after.as_ref(), q.history);
     let session = q.session.clone();
-    let live = BroadcastStream::new(d.subscribe()).filter_map(move |e| {
+    let live = BroadcastStream::new(rx).filter_map(move |e| {
         let session = session.clone();
         async move {
-            let e = e.ok()?;
-            (session.is_none() || e.session == session).then_some(e)
+            match e {
+                Ok(e) if cut.is_some_and(|c| e.seq <= c) => None,
+                Ok(e) => (session.is_none() || e.session == session).then_some(Catchup::Event(e)),
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Some(
+                    Catchup::Gap(format!("this stream fell behind and missed {n} events")),
+                ),
+            }
         }
     });
-    let stream = stream::iter(history)
-        .chain(live)
-        .map(|e| Ok(SseEvent::default().json_data(e.view()).unwrap_or_default()));
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let stream = stream::iter(catchup).chain(live).map(move |item| {
+        Ok(match item {
+            Catchup::Event(e) => SseEvent::default()
+                .id(format!("{epoch}:{}", e.seq))
+                .json_data(e.view())
+                .unwrap_or_default(),
+            Catchup::Gap(why) => SseEvent::default()
+                .json_data(json!({ "type": "gap", "ts": zapper_core::util::now(), "epoch": epoch, "summary": why }))
+                .unwrap_or_default(),
+        })
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// A session's record checked: the keeper's chains, and its disks' hashes
+/// from each stop to the start after it.
+async fn verify_session(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
+    Ok(Json(d.verify_session(&id)?))
+}
+
+async fn list_images(State(d): D) -> R<Json<Value>> {
+    Ok(Json(
+        json!({ "images": d.images()?, "builds": d.image_builds() }),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct NewBuild {
+    /// The recipe's files, by argument name, instead of their defaults.
+    args: BTreeMap<String, String>,
+    /// Without a recipe: the OCI image to start from, and the steps.
+    from: Option<String>,
+    run: Vec<String>,
+    size: Option<String>,
+}
+
+/// Starts building an image in the daemon, from the running config: `202`
+/// with the build's id, whose log `/images/builds/{id}` streams; `409`
+/// while another build runs.
+async fn build_image(
+    State(d): D,
+    Path(name): Path<String>,
+    body: String,
+) -> R<(StatusCode, Json<Value>)> {
+    let b: NewBuild = if body.trim().is_empty() {
+        NewBuild::default()
+    } else {
+        parse_body(&body)?
+    };
+    if let Some(running) = d.image_builds().into_iter().find(|b| b.outcome.is_none()) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "image {} is being built (build {}); one build runs at a time",
+                running.name, running.id
+            ),
+        ));
+    }
+    let req = BuildRequest {
+        args: b
+            .args
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect(),
+        from: b.from,
+        run: b.run,
+        size: b.size,
+    };
+    let build = d.build_image(&name, req)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "id": build.id, "name": build.name })),
+    ))
+}
+
+/// A build's log as server-sent events: `{"line"}` each, `{"dropped": n}`
+/// for lines no longer kept, and last `{"end": {"built": PATH}}` or
+/// `{"end": {"failed": WHY}}`, when the stream ends.
+async fn follow_build(
+    State(d): D,
+    Path(id): Path<u64>,
+) -> R<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let build = d
+        .image_build(id)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no build {id}")))?;
+    let f = build.follow();
+    let mut head = Vec::new();
+    if f.dropped > 0 {
+        head.push(json!({ "dropped": f.dropped }));
+    }
+    head.extend(f.kept.into_iter().map(|l| json!({ "line": l })));
+    let tail = match f.outcome {
+        Some(o) => stream::iter(vec![json!({ "end": o })]).boxed(),
+        None => stream::unfold(Some(f.live), |live| async move {
+            let mut live = live?;
+            use tokio::sync::broadcast::error::RecvError;
+            match live.recv().await {
+                Ok(BuildMessage::Line(l)) => Some((json!({ "line": l }), Some(live))),
+                Ok(BuildMessage::End(o)) => Some((json!({ "end": o }), None)),
+                Err(RecvError::Lagged(n)) => Some((json!({ "dropped": n }), Some(live))),
+                Err(RecvError::Closed) => None,
+            }
+        })
+        .boxed(),
+    };
+    let stream = stream::iter(head)
+        .chain(tail)
+        .map(|v| Ok(SseEvent::default().json_data(v).unwrap_or_default()));
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn list_approvals(State(d): D) -> Json<Value> {
@@ -793,8 +994,18 @@ async fn list_services(State(d): D) -> Json<Value> {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ServiceTo {
-    Addr { addr: std::net::SocketAddr },
-    Session { session: String, port: u32 },
+    Addr {
+        addr: std::net::SocketAddr,
+    },
+    Session {
+        session: String,
+        port: u32,
+    },
+    Socket {
+        socket: String,
+        #[serde(default)]
+        tls: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -807,8 +1018,8 @@ struct NewService {
     to: ServiceTo,
 }
 
-/// The operator's services: to an address on the host's network, or a port
-/// of a session's VM.
+/// The operator's services: to an address on the host's network, a port of
+/// a session's VM, or a socket in the daemon's `state/services/` directory.
 async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
     let n: NewService = parse_body(&body)?;
     let target = match n.to {
@@ -817,6 +1028,7 @@ async fn add_service(State(d): D, body: String) -> R<Json<Value>> {
             d.session(&session)?;
             ServiceTarget::Session { id: session, port }
         }
+        ServiceTo::Socket { socket, tls } => ServiceTarget::Socket { name: socket, tls },
     };
     let id = d.add_service(ServiceSpec {
         name: n.name,

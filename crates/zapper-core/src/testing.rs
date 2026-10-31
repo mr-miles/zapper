@@ -93,6 +93,12 @@ pub fn dial6(t: &TestCore, s: &Arc<Session>, name: &str, port: u16) -> UnixStrea
     dial_ip(t, s, ip, port)
 }
 
+/// Like `dial`, to an address the guest reached without a name: decided on
+/// the address itself.
+pub fn dial_addr(t: &TestCore, s: &Arc<Session>, ip: std::net::IpAddr, port: u16) -> UnixStream {
+    dial_ip(t, s, ip, port)
+}
+
 fn dial_ip(t: &TestCore, s: &Arc<Session>, ip: std::net::IpAddr, port: u16) -> UnixStream {
     let (guest, host) = UnixStream::pair().unwrap();
     tokio::spawn(crate::daemon::proxy::transparent(

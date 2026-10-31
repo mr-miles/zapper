@@ -136,3 +136,10 @@ path = "fuzz_targets/kafka_response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "placeholder"
+path = "fuzz_targets/placeholder.rs"
+test = false
+doc = false
+bench = false

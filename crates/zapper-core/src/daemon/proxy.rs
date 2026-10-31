@@ -29,8 +29,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zapper_policy::{
-    evaluate_net, needs_inspection, placeholder, render, Action, AnyRule, Decision, Kind,
-    NetEffects, NetProtocol, NetRequest, NetRule,
+    evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
+    Kind, NetEffects, NetProtocol, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
@@ -156,7 +156,7 @@ async fn decide(d: &Daemon, s: &Session, req: &NetRequest) -> Verdict {
     let (decision, effects) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        evaluate_net(&Session::layers_of(&layers), req)
+        evaluate_net(&Session::layers_of(&layers), &s.caller_of(req))
     };
     let mut pending = None;
     let decider = d.deciders.first(s, |_| true);
@@ -253,7 +253,7 @@ fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<S
 fn note_response(
     s: &Session,
     rec: &httplog::Shared,
-    resp: Response<Incoming>,
+    resp: Response<Body>,
     used: Vec<String>,
     values: Vec<String>,
 ) -> Response<Body> {
@@ -270,7 +270,7 @@ fn note_response(
         r.redact = values;
     }
     let (rec, log) = (rec.clone(), s.requests.clone());
-    let body = sanitize::Masked::wrap(body.boxed(), masked);
+    let body = sanitize::Masked::wrap(body, masked);
     Response::from_parts(
         parts,
         httplog::Tee::wrap(body, rec, log, httplog::Side::Response),
@@ -319,14 +319,14 @@ fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
 #[derive(Clone)]
 enum Target {
     Addr(SocketAddr),
-    Service(String, services::Target),
+    Service(String, u16, services::Target),
 }
 
 /// The target for `host:port`: a service by name, anything else resolved on
 /// the host and checked against the address policy.
 async fn target(d: &Daemon, s: &Session, host: &str, port: u16) -> Result<Target, String> {
     match d.services.route(s, host, port) {
-        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), t)),
+        Some(services::Route::Service(t)) => Ok(Target::Service(host.to_string(), port, t)),
         Some(services::Route::Unserved) => Err(format!("nothing serves {host}:{port}")),
         None => resolve(d, host, port).await.map(Target::Addr),
     }
@@ -339,7 +339,7 @@ async fn dial_target(
 ) -> std::io::Result<Box<dyn services::Io>> {
     match t {
         Target::Addr(a) => Ok(Box::new(dial(*a).await?)),
-        Target::Service(host, t) => services::connect(d, s, host, t)
+        Target::Service(host, port, t) => services::connect(d, s, host, *port, t)
             .await
             .map_err(|e| std::io::Error::other(format!("{e:#}"))),
     }
@@ -395,13 +395,38 @@ async fn prepare(
         port,
         method: None,
         path: None,
+        ..Default::default()
     };
-    // Inspected tunnels are decided per request; others here, once.
-    let inspect = {
+    // Inspected tunnels are decided per request; others here, once. A name
+    // no request to could be allowed is refused here even so, before it is
+    // looked up on the host, as the DNS resolver refuses it: else a rule
+    // with a path, which makes every connection to its host inspected,
+    // would let a guest have any name looked up.
+    let (inspect, reachable) = {
         let c = d.config.read().unwrap();
         let layers = s.layers(&c);
-        needs_inspection(&Session::layers_of(&layers), &endpoint.host, port)
+        let layers = Session::layers_of(&layers);
+        (
+            needs_inspection(&layers, &endpoint.host, port),
+            resolvable(&layers, &endpoint.host),
+        )
     };
+    if inspect && !reachable && d.services.route(s, &endpoint.host, port).is_none() {
+        let why = format!("refused {} (no rule allows this name)", endpoint.host);
+        log(
+            d,
+            s,
+            NetLog {
+                req: &endpoint,
+                verdict: None,
+                inspected: true,
+                status: None,
+                secrets: vec![],
+                error: Some(why.clone()),
+            },
+        );
+        return Err(why);
+    }
     let verdict = if inspect {
         None
     } else {
@@ -458,11 +483,20 @@ async fn connect(d: Arc<Daemon>, s: Arc<Session>, req: Request<Incoming>) -> Res
         Ok(ready) => ready,
         Err(denial) => return text(StatusCode::FORBIDDEN, denial),
     };
+    // The tunnel outlives the connection it was asked on, whose permit goes
+    // when the upgrade takes it over: it holds one of its own.
+    let Ok(permit) = s.runtime.conns().try_acquire_owned() else {
+        return text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many connections from this session",
+        );
+    };
     tokio::spawn(async move {
         let Ok(up) = hyper::upgrade::on(req).await else {
             return;
         };
         stream(d, s, TokioIo::new(up), endpoint, addr, verdict).await;
+        drop(permit);
     });
     Response::builder()
         .status(StatusCode::OK)

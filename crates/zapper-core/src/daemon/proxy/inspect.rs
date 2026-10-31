@@ -23,13 +23,15 @@ struct Upstream(Arc<tokio::sync::Mutex<Option<Sender>>>);
 
 impl Upstream {
     /// Sends one request, reusing the pooled connection (reconnecting via
-    /// `open_tls` when missing or not ready), then calls `shape` with the
+    /// `open_upstream` when missing or not ready), then calls `shape` with the
     /// negotiated protocol (`true` = HTTP/2, which needs an absolute URI) to
     /// build the request and dispatches it. HTTP/2 multiplexes — clone the
     /// sender and release the lock so concurrent streams run in parallel;
     /// HTTP/1 is serial, so hold the sender across the send.
     async fn send(
         &self,
+        d: &Daemon,
+        s: &Arc<Session>,
         host: &str,
         addr: &Target,
         shape: impl FnOnce(bool) -> Request<Body>,
@@ -41,7 +43,7 @@ impl Upstream {
             None => false,
         };
         if !ready {
-            *guard = Some(open_tls(host, addr).await?);
+            *guard = Some(open_upstream(d, s, host, addr).await?);
         }
         let is_h2 = matches!(guard.as_ref(), Some(Sender::H2(_)));
         let out = shape(is_h2);
@@ -195,6 +197,21 @@ fn responded(
     used: Vec<String>,
     values: Vec<String>,
 ) -> Response<Body> {
+    // Asked for uncompressed and sent compressed anyway: decoded, so a value
+    // echoed back is found to mask; one that can't be decoded here isn't
+    // passed on.
+    let resp = match sanitize::unmaskable(resp.headers(), &values) {
+        None => resp.map(|b| b.boxed()),
+        Some(coding) => match sanitize::decode_response(resp, &coding) {
+            Ok(r) => r,
+            Err(why) => {
+                let e = format!(
+                    "the upstream sent {why}, to a request carrying a secret: it can't be checked for it"
+                );
+                return fail(d, s, rec, net, v, StatusCode::BAD_GATEWAY, used, e);
+            }
+        },
+    };
     log(
         d,
         s,
@@ -225,6 +242,7 @@ pub(super) async fn mitm<S>(
         port,
         method: None,
         path: None,
+        ..Default::default()
     };
     let config = match s.tls.server_config(&host) {
         Ok(c) => c,
@@ -579,6 +597,7 @@ where
         port,
         method: Some(req.method().to_string()),
         path: Some(path.clone()),
+        ..Default::default()
     };
     // Headers as the guest sent them: before secrets are added.
     let rec = s.requests.lock().unwrap().start(
@@ -678,6 +697,7 @@ async fn inspected(
     addr: Target,
     upstream: Upstream,
 ) -> Response<Body> {
+    let (d2, s2) = (d.clone(), s.clone());
     forward(
         &d,
         &s,
@@ -693,7 +713,7 @@ async fn inspected(
             // origin-form path. The Host header from `clean_headers` agrees.
             let uri_host = host.clone();
             upstream
-                .send(&host, &addr, move |is_h2| {
+                .send(&d2, &s2, &host, &addr, move |is_h2| {
                     let mut parts = parts;
                     parts.uri = upstream_uri(&uri_host, port, &path, is_h2);
                     parts.version = if is_h2 {
@@ -710,11 +730,33 @@ async fn inspected(
     .await
 }
 
-async fn open_tls(host: &str, addr: &Target) -> Result<Sender, String> {
-    let Target::Addr(addr) = addr else {
-        return Err(format!(
-            "{host} is a service; rules with methods, paths or secrets don't apply to it"
-        ));
+/// The upstream for an inspected TLS connection: TLS to a real address, or,
+/// for a service whose TLS the daemon terminates (a handler or a socket with
+/// `tls`), HTTP/1.1 on its plain side, the guest's TLS having ended here.
+async fn open_upstream(
+    d: &Daemon,
+    s: &Arc<Session>,
+    host: &str,
+    addr: &Target,
+) -> Result<Sender, String> {
+    let addr = match addr {
+        Target::Addr(a) => a,
+        Target::Service(name, port, t) => {
+            let plain = services::connect_plain(d, s, name, *port, t)
+                .await
+                .map_err(|e| format!("{e:#}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "{host} is a service whose TLS isn't the daemon's; rules with methods, \
+                         paths or secrets don't apply to it"
+                    )
+                })?;
+            let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(plain))
+                .await
+                .map_err(|e| e.to_string())?;
+            tokio::spawn(conn);
+            return Ok(Sender::H1(sender));
+        }
     };
     let tcp = dial(*addr)
         .await

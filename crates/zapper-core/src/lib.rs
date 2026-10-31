@@ -6,6 +6,7 @@
 mod daemon;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;
+pub mod images;
 mod interface;
 pub mod mint;
 pub(crate) mod netns;
@@ -25,7 +26,8 @@ pub use daemon::harness;
 /// `zapper-keeper` as a separate user.
 pub use daemon::record;
 pub use interface::{
-    ApprovalApi, ConfigApi, Core, Decider, Event, EventApi, EventBody, McpServer, NewSession,
+    ApprovalApi, BuildInfo, BuildMessage, BuildRequest, Catchup, ConfigApi, Core, Cursor, Decider,
+    Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer, NewSession, Outcome,
     Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi, ServiceHandler,
     ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi, SessionInfo, Status,
     TermChunk, TerminalInfo,
@@ -39,5 +41,7 @@ pub use vmm::shim as vmm_shim;
 /// The `Core` API traits, so a consumer can `use zapper_core::prelude::*;`
 /// and call any of them on a `Core` (or depend on one narrow trait).
 pub mod prelude {
-    pub use crate::interface::{ApprovalApi, ConfigApi, EventApi, RuleApi, ServiceApi, SessionApi};
+    pub use crate::interface::{
+        ApprovalApi, ConfigApi, EventApi, ImageApi, RuleApi, ServiceApi, SessionApi,
+    };
 }

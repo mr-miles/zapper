@@ -75,6 +75,35 @@ fn a_change_applies_whole_or_not_at_all_and_is_an_event() {
     assert!(t.core.with_config(|c| c.profiles.contains_key("x")));
 }
 
+/// A change made while another is between its copy of the config and
+/// applying it: both are kept.
+#[test]
+fn changes_at_once_both_apply() {
+    let t = TestCore::new(RULES);
+    let core = t.core.clone();
+    let (inside, entered) = std::sync::mpsc::channel();
+    let first = std::thread::spawn(move || {
+        core.change("a", |c| {
+            inside.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            c.profiles.insert("a".into(), Default::default());
+            Ok(())
+        })
+        .unwrap()
+    });
+    entered.recv().unwrap();
+    t.core
+        .change("b", |c| {
+            c.profiles.insert("b".into(), Default::default());
+            Ok(())
+        })
+        .unwrap();
+    first.join().unwrap();
+    let c = t.core.config();
+    assert!(c.profiles.contains_key("a"), "the first change kept");
+    assert!(c.profiles.contains_key("b"));
+}
+
 #[test]
 fn diff_save_and_reload() {
     let t = TestCore::new(RULES);
@@ -290,6 +319,67 @@ fn only_a_stopped_session_is_forgotten() {
         .send_replace(Status::Failed("no VM".into()));
     t.core.forget_session(&starting.id).unwrap();
     assert!(t.core.sessions().is_empty());
+}
+
+#[test]
+fn removing_a_sessions_rule_leaves_another_sessions_alone() {
+    let t = TestCore::new(RULES);
+    let a = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let b = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let rule = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, action: allow, host: api.example.com }").unwrap()
+    };
+    let in_a = t.core.add_session_rule(&a, rule(), None);
+    let in_b = t.core.add_session_rule(&b, rule(), None);
+    assert_ne!(in_a.id(), in_b.id(), "each session's first rule");
+
+    match t.core.remove_rule(in_b.id().unwrap()).unwrap() {
+        RuleRemoval::Removed(scope, _) => assert_eq!(scope, Scope::Session(b.id.clone())),
+        RuleRemoval::Revoked => panic!("not a firm's"),
+    }
+    assert_eq!(a.rules().len(), 1, "A keeps its rule");
+    assert!(b.rules().is_empty());
+
+    // An id both hold (put by a client): removed from neither.
+    let shared = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, id: s-both, action: allow, host: x.example }").unwrap()
+    };
+    a.put_rule(shared());
+    b.put_rule(shared());
+    let e = t.core.remove_rule("s-both").err().unwrap().to_string();
+    assert!(e.contains(&a.id) && e.contains(&b.id), "{e}");
+    assert_eq!((a.rules().len(), b.rules().len()), (2, 1));
+}
+
+/// A subscriber of one session's events, resuming, is sent that session's
+/// alone: another's that came meanwhile are no part of it.
+#[test]
+fn a_resumed_sessions_events_are_its_own() {
+    let t = TestCore::new(RULES);
+    let a = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let b = t.core.test_session(new_session(&t, "web"), true).unwrap();
+    let rule = || -> AnyRule {
+        serde_yaml::from_str("{ kind: net, action: allow, host: api.example.com }").unwrap()
+    };
+    let (_, start) = t.core.catch_up(None, None, true);
+    let after = crate::Cursor {
+        epoch: t.core.epoch(),
+        seq: start.unwrap_or(0),
+    };
+    for _ in 0..3 {
+        t.core.add_session_rule(&a, rule(), None);
+        t.core.add_session_rule(&b, rule(), None);
+    }
+    let (items, _) = t.core.catch_up(Some(&a.id), Some(&after), false);
+    let sessions: Vec<Option<String>> = items
+        .iter()
+        .filter_map(|i| match i {
+            crate::Catchup::Event(e) => Some(e.session.clone()),
+            crate::Catchup::Gap(_) => None,
+        })
+        .collect();
+    assert_eq!(sessions.len(), 3, "{sessions:?}");
+    assert!(sessions.iter().all(|s| s.as_deref() == Some(a.id.as_str())));
 }
 
 #[test]

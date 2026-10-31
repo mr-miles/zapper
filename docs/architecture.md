@@ -55,7 +55,7 @@ What happens when a session starts, for each worker at `zapper firm up` or for `
 7. The agent sets up the guest and reports ready.
 8. A terminal is opened to the workload: for a worker, by the foreman, which starts its agent headless through the agent's harness, Claude Code or pi ([the office](#the-office), [agent harnesses](configuration.md#agent-harnesses)); for `zapper run`, by the CLI.
 
-When the workload exits, the daemon stops the VM and deletes its disks. The audit log and the terminal recordings stay.
+When the workload exits, the daemon stops the VM and deletes its disks. The audit log and the terminal recordings stay. A persistent session keeps its disks instead, with their hashes recorded, and boots them again when started; it is listed, stopped, after the daemon restarts ([security: persistent sessions](security.md#persistent-sessions)).
 
 ### The session directory
 
@@ -64,7 +64,13 @@ state/sessions/<id>/
   audit.jsonl        every event of the session
   shell-1.cast       terminal recording
   console.log        boot messages
-  vm/                the only part Firecracker can see; deleted at the end
+  session.json       a persistent session: what it is, to be listed again after a restart
+  ca.json            a persistent session's CA: its key, kept (0600)
+  dns.jsonl          a persistent session's synthetic names, each with its address
+  resume.token       a persistent session's resume token (0600)
+  vmm.json           a persistent session's running VMM: its pid, when that process started, and its subordinate id
+  conversation.json  a persistent, driven session's agent's conversation id, resumed by a daemon that adopts it
+  vm/                the only part Firecracker can see; deleted at the end (a persistent session's disks stay)
     root.ext4          the guest's disk, a copy of the image
     disk0.ext4         a copy of a mounted host directory
     vm.json            Firecracker's configuration; kept, with metrics.json, next to the audit log at the end
@@ -81,9 +87,19 @@ The guest and the daemon use vsock, a direct channel between a VM and its host. 
 | Terminal | the daemon, once per terminal | Your keystrokes in, the workload's output out |
 | Network | the guest, per connection | The guest's internet traffic ([network](network.md)) |
 
-The daemon accepts one control connection per session. After that the socket is removed, so a workload can't pretend to be the agent.
+The daemon accepts one control connection per session. After that the socket is removed, so a workload can't pretend to be the agent. A persistent session's agent is given a resume token in `Init`, kept in PID 1's memory: when its control connection is lost, it connects again and sends the token first (`resume`), with its persistent terminals, then asks again the exec checks that were waiting; the daemon takes that connection only, and removes the socket again. Meanwhile the guest's execs wait, refused after 60 seconds. A connection without the token is closed, and the agent, which never gives up, tries again every two seconds. The daemon checks up to 64 connections at once, each given two seconds for its first line; when that many wait, the oldest is closed for the new one, which is never refused, so connections the workload opens and keeps silent can't keep the agent out. It answers the agent's with `resumed`, and only then does the agent take its connection as the host's and ask again what was waiting; until then the host is still gone, and the 60 seconds run on. Refusals are recorded at most every ten seconds, counted. `zapper stop` still stops the session: its VM is killed when no agent answers. A session that isn't persistent powers off when its control connection is lost.
 
 The CLI talks to the daemon over a unix socket that only your user can open. The web UI, for watching firms and sessions, the board's writes and answering approvals, uses `127.0.0.1:7878`. Both are described on the [API](api.md) page.
+
+### Persistent terminals
+
+A terminal opened persistent (`zapper attach --persist`, `persist=true`) keeps its program running when its connection to the host closes: the user's SSH or network drops, or they close their terminal. Its program is started as any terminal's, by the agent, as the workload, with every exec checked. The agent then hands its pty to a holder: the agent's own binary (`zapper-agent hold`), one process per terminal, which keeps the terminal's latest 256 KiB of output and passes keystrokes on. When the host attaches again (`zapper attach ID --terminal N`), the agent hands the holder the connection: it is told where the output it gets starts (`attached` frame), sent what was kept, then live output, and the program is made to redraw at the new size. A connection attached before is closed. The holder exits once the program has and an attached host has been told, or 24 hours after, with nobody attached. The host records the terminal once across its attachments, and marks what the guest no longer kept. A guest keeps at most 16 persistent terminals.
+
+### A persistent session's VM and the daemon
+
+A persistent session's VMM doesn't die with the daemon: it runs in a session of its own, without the daemon's death signal, and copies Firecracker's console to `console.log` itself (capped), as no daemon may be there to read it; Firecracker still dies with the VMM. A daemon that shuts down leaves a running persistent session running. What a daemon needs to take such a session on is kept beside it: its CA (`ca.json`), so the guest goes on trusting what the daemon signs; its synthetic names, given out again in the same order, so the addresses the guest has cached mean the same; its rules, saved as they change; its resume token; and its VMM's pid. The next daemon **adopts** it: it checks that the pid in `vmm.json` is that session's VMM, by its command line and by the start time recorded with it (not a pid reused since), lists the session as running, binds its guest's sockets again (the egress proxy, the MCP gateway, the NIC's capture; the old daemon's are removed, Firecracker's own `v.sock` never), waits for its agent to take the control channel again with its resume token (which also lists its persistent terminals, to attach to again), watches its VMM by pid, starts its driver again (a driven agent resumes its conversation), and counts its lifetime from when its VM started. While no daemon runs, the guest reaches nothing: its connections are refused, and its execs wait, then are refused. A daemon without a runtime to serve the session (a test's) stops its VMM instead.
+
+Under systemd, `KillMode=process` keeps a restart of `zapper serve` from killing the VMMs with it; the default (`control-group`) stops every process of the unit, VMMs included.
 
 ### Checking each program
 

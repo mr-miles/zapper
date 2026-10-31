@@ -8,6 +8,7 @@
 pub(crate) mod addr;
 pub(crate) mod api_error;
 pub(crate) mod approvals;
+pub(crate) mod builds;
 pub(crate) mod clients;
 pub(crate) mod dbwire;
 pub(crate) mod deciders;
@@ -41,7 +42,7 @@ use session::Session;
 // The event model and the stream live in `events`; the approval model and
 // the outstanding approvals in `approvals`.
 pub use approvals::{Pending, Remember};
-pub use events::{Event, EventBody};
+pub use events::{Catchup, Cursor, Event, EventBody};
 
 // Generic helpers live in `crate::util` (the clients' shared helpers);
 // re-exported here so the daemon's modules reach them as `super::now` etc.
@@ -59,6 +60,9 @@ pub struct Paths {
 // handle — so its fields are `pub(crate)`, not `pub`.
 pub struct Daemon {
     pub(crate) config: RwLock<Config>,
+    /// Held across a change, from the clone to the swap, so two at once
+    /// can't each start from the config before the other.
+    changing: Mutex<()>,
     pub(crate) startup_path: PathBuf,
     pub(crate) paths: Paths,
     pub(crate) addrs: RwLock<addr::AddressPolicy>,
@@ -70,6 +74,7 @@ pub struct Daemon {
     pub(crate) services: services::Services,
     pub(crate) deciders: deciders::Deciders,
     pub(crate) gateway: gateway::Gateway,
+    pub(crate) builds: builds::Builds,
 }
 
 /// Accepts connections on `listener` and serves each with `handle`, running at
@@ -145,14 +150,20 @@ fn load_startup_config(path: &Path) -> Result<Config> {
 }
 
 /// Resolves and prepares the state directory: creates it (0700) with its
-/// `sessions` subdirectory, and clears the VMM directories a previous daemon
-/// left behind (audit logs and recordings stay).
+/// `sessions` subdirectory and the `services` one for socket services'
+/// sockets, and clears the VMM directories a previous daemon left behind
+/// (audit logs and recordings stay), but for persistent sessions', whose
+/// disks are theirs until they are removed.
 fn prepare_state_dir(state: &str) -> Result<PathBuf> {
     let state = PathBuf::from(expand_home(state));
     std::fs::create_dir_all(state.join("sessions"))?;
+    std::fs::create_dir_all(state.join(services::SOCKETS_DIR))?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     for dir in std::fs::read_dir(state.join("sessions"))?.flatten() {
-        let _ = std::fs::remove_dir_all(session::SessionDir::new(dir.path()).vm());
+        let sd = session::SessionDir::new(dir.path());
+        if !sd.saved().exists() {
+            let _ = std::fs::remove_dir_all(sd.vm());
+        }
     }
     Ok(state)
 }
@@ -177,8 +188,9 @@ impl Daemon {
             bail!("firecracker not found at {}", paths.firecracker.display());
         }
         let addrs = addr::AddressPolicy::new(&d.private_networks)?;
-        Ok(Arc::new(Daemon {
+        let daemon = Arc::new(Daemon {
             config: RwLock::new(config),
+            changing: Mutex::new(()),
             startup_path,
             paths,
             addrs: RwLock::new(addrs),
@@ -190,7 +202,10 @@ impl Daemon {
             services: services::Services::default(),
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
-        }))
+            builds: builds::Builds::default(),
+        });
+        session::restore(&daemon);
+        Ok(daemon)
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {
@@ -209,6 +224,7 @@ impl Daemon {
 
     /// Applies a change to the running config if the result is valid.
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
+        let _changing = self.changing.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = self.config.read().unwrap().clone();
         let old_networks = next.daemon.private_networks.clone();
         let out = f(&mut next)?;
@@ -259,19 +275,24 @@ impl Daemon {
     }
 
     /// Replaces the running config; redacted inline secrets keep their values.
+    /// The values come from the config it replaces, in the same change.
     pub fn replace_config(&self, mut new: Config) -> Result<()> {
-        let old = self.config.read().unwrap().clone();
-        for (name, s) in new.secrets.iter_mut() {
-            if let SecretSource::Value { value } = &mut s.source {
-                if value == REDACTED {
-                    match old.secrets.get(name).map(|o| &o.source) {
-                        Some(SecretSource::Value { value: v }) => *value = v.clone(),
-                        _ => bail!("secret {name}: value is redacted and there is no old value"),
+        self.change("config replaced", |old| {
+            for (name, s) in new.secrets.iter_mut() {
+                if let SecretSource::Value { value } = &mut s.source {
+                    if value == REDACTED {
+                        match old.secrets.get(name).map(|o| &o.source) {
+                            Some(SecretSource::Value { value: v }) => *value = v.clone(),
+                            _ => {
+                                bail!("secret {name}: value is redacted and there is no old value")
+                            }
+                        }
                     }
                 }
             }
-        }
-        self.set_config("config replaced", new)
+            *old = new;
+            Ok(())
+        })
     }
 
     /// Replaces the whole running config, validated and applied atomically.
@@ -364,6 +385,15 @@ impl Daemon {
         if !self.approvals.register(pending) {
             return false;
         }
+        // Unlisted however the wait ends, also when the request waiting on
+        // it is dropped (its connection gone).
+        struct Unlist<'a>(&'a approvals::Approvals, String);
+        impl Drop for Unlist<'_> {
+            fn drop(&mut self) {
+                self.0.take(&self.1);
+            }
+        }
+        let _unlist = Unlist(&self.approvals, id.clone());
         self.emit(
             Some(session),
             EventBody::Ask {
@@ -393,6 +423,21 @@ impl Daemon {
 
     pub fn approvals(&self) -> Vec<Pending> {
         self.approvals.list()
+    }
+
+    /// Refuses and unlists a stopped session's outstanding approvals, each
+    /// answer in its events.
+    pub(crate) fn drop_approvals(&self, session: &Session) {
+        for p in self.approvals.take_session(&session.id) {
+            self.emit(
+                Some(session),
+                EventBody::Answer {
+                    id: p.id,
+                    allow: false,
+                    remember: Some("session stopped".into()),
+                },
+            );
+        }
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
