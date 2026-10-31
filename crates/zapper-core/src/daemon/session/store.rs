@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use anyhow::{bail, Result};
 
-use super::{Session, Status};
+use super::Session;
 
 /// The daemon's live sessions, by id. Behind one lock; readers take a cloned
 /// snapshot so the lock is never held across other work. The second lock is
@@ -50,7 +50,7 @@ impl SessionStore {
     fn live(&self) -> impl Iterator<Item = Arc<Session>> {
         self.all()
             .into_iter()
-            .filter(|s| matches!(s.runtime.current(), Status::Starting | Status::Running))
+            .filter(|s| s.runtime.current().is_live())
     }
 
     /// Take a stopped session off the list; a starting or running one stays,
@@ -60,7 +60,7 @@ impl SessionStore {
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {
-            if matches!(s.runtime.current(), Status::Starting | Status::Running) {
+            if s.runtime.current().is_live() {
                 bail!("session {id} is still running; stop it first");
             }
         }

@@ -14,7 +14,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 use super::persist::save;
-use super::Session;
+use super::{Session, SessionDir};
 use crate::daemon::{Daemon, EventBody};
 
 pub(crate) type Hashes = BTreeMap<String, String>;
@@ -80,6 +80,14 @@ pub(crate) fn events(text: &str) -> Vec<Value> {
     text.lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
+}
+
+/// What the record in `dir` says of the session's disks at its last stop
+/// (an unreadable record says nothing: no hashes).
+pub(super) fn last_stop_in(dir: &SessionDir) -> LastStop {
+    let record =
+        std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
+    last_stop(&events(&record))
 }
 
 /// From a session's record, oldest first: its disks at its last stop.
@@ -184,8 +192,7 @@ pub(super) async fn check_disks(
 ) -> Result<()> {
     let dir = session.dir.clone();
     let now = tokio::task::spawn_blocking(move || hash(&dir.disks())).await??;
-    let record = std::fs::read_to_string(session.audit_path()).unwrap_or_default();
-    let (state, detail) = match last_stop(&events(&record)) {
+    let (state, detail) = match last_stop_in(&session.dir) {
         LastStop::Hashed(before) if before == now => ("checked", None),
         LastStop::Hashed(before) => ("changed", Some(changes(&before, &now))),
         LastStop::RanSince => (

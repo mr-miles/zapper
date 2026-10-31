@@ -11,8 +11,9 @@ use zapper_policy::proto::HostMsg;
 use super::create::admit;
 use super::disks::{check_disks, keep_disks};
 use super::launch::launch;
+use super::{session_event, with_warning};
 use super::{Session, Status};
-use crate::daemon::{driver, now, record, Daemon, EventBody};
+use crate::daemon::{driver, now, record, Daemon};
 
 /// Stops the session at `at` (unix seconds), its lifetime ended, if it is
 /// still in run `run`: a session stopped and started again since has a
@@ -40,13 +41,7 @@ pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result
     if let Err(e) = launch(&daemon, &session).await {
         let msg = format!("{e:#}");
         session.runtime.fail_if_starting(msg.clone());
-        daemon.emit(
-            Some(&session),
-            EventBody::Session {
-                state: "failed".into(),
-                detail: Some(msg.clone()),
-            },
-        );
+        session_event(&daemon, &session, "failed", msg.as_str());
         teardown(&daemon, &session, None).await;
         return Err(anyhow!(msg));
     }
@@ -61,13 +56,7 @@ pub(super) async fn boot(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result
     match (ready, state) {
         (true, Status::Running) => {
             let ms = started.elapsed().as_millis();
-            daemon.emit(
-                Some(&session),
-                EventBody::Session {
-                    state: "running".into(),
-                    detail: Some(format!("ready in {ms} ms")),
-                },
-            );
+            session_event(&daemon, &session, "running", format!("ready in {ms} ms"));
             driver::drive(&daemon, &session);
         }
         (_, state) => {
@@ -124,16 +113,8 @@ pub(crate) async fn start(
     drop(lifecycle);
     let ttl = session.resolved.engine.ttl_secs;
     *session.expires.lock().unwrap() = (ttl > 0).then(|| now() + ttl as f64);
-    daemon.emit(
-        Some(session),
-        EventBody::Session {
-            state: "starting".into(),
-            detail: Some(match &memory_warning {
-                Some(w) => format!("started again, from its kept disks; {w}"),
-                None => "started again, from its kept disks".into(),
-            }),
-        },
-    );
+    let detail = with_warning("started again, from its kept disks".into(), &memory_warning);
+    session_event(daemon, session, "starting", detail);
     if let Some(driver) = &session.driver {
         driver.revive();
     }
@@ -171,13 +152,7 @@ pub(super) async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reaso
     session.runtime.clear_guest();
     daemon.drop_approvals(session);
     if let Some(reason) = reason {
-        daemon.emit(
-            Some(session),
-            EventBody::Session {
-                state: "stopped".into(),
-                detail: Some(reason.into()),
-            },
-        );
+        session_event(daemon, session, "stopped", reason);
     }
     // The VMM's directory: disks and sockets go; its config and metrics are
     // kept next to the audit log.

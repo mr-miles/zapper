@@ -53,6 +53,25 @@ pub(crate) use run::{start, stop};
 pub(crate) use terminal::pump_shell;
 pub use terminal::{read_frame, TermChunk, Terminal, TerminalInfo};
 
+/// Records a `session` event of `s`: its new `state`, and why.
+fn session_event(daemon: &Daemon, s: &Session, state: &str, detail: impl Into<String>) {
+    daemon.emit(
+        Some(s),
+        EventBody::Session {
+            state: state.into(),
+            detail: Some(detail.into()),
+        },
+    );
+}
+
+/// `detail`, and a warning after it if there is one.
+fn with_warning(detail: String, warning: &Option<String>) -> String {
+    match warning {
+        Some(w) => format!("{detail}; {w}"),
+        None => detail,
+    }
+}
+
 /// Opens the session's vsock at `path` and asks the guest for `port`,
 /// returning the stream once the guest answers `OK `. A connect/write failure
 /// propagates; a refusal is reported as `refused: <the guest's line>`.
@@ -233,10 +252,7 @@ impl Session {
 
     /// Whether the session has ended, stopped or failed.
     pub fn ended(&self) -> bool {
-        matches!(
-            self.runtime.current(),
-            Status::Stopped(_) | Status::Failed(_)
-        )
+        !self.runtime.current().is_live()
     }
 
     /// The session's HTTP requests and connections, oldest first.

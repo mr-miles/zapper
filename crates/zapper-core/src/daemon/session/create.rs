@@ -8,8 +8,9 @@ use anyhow::{bail, Context, Result};
 
 use super::persist::save;
 use super::run::boot;
+use super::{session_event, with_warning};
 use super::{Counters, GuestRuntime, NewSession, Rules, Saved, Session, SessionDir};
-use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon, EventBody};
+use crate::daemon::{dns, driver, harness, now, random_id, record, tls, Daemon};
 
 /// Creates a session without booting it: its profile resolved, its
 /// directory and audit log, its rules; listed, as starting.
@@ -66,16 +67,8 @@ pub(crate) fn register(daemon: &Arc<Daemon>, new: &NewSession) -> Result<Arc<Ses
     }
     daemon.sessions.insert(session.clone());
     drop(admitted);
-    daemon.emit(
-        Some(&session),
-        EventBody::Session {
-            state: "starting".into(),
-            detail: Some(match &memory_warning {
-                Some(w) => format!("profile {}; {w}", new.profile),
-                None => format!("profile {}", new.profile),
-            }),
-        },
-    );
+    let detail = with_warning(format!("profile {}", new.profile), &memory_warning);
+    session_event(daemon, &session, "starting", detail);
     Ok(session)
 }
 

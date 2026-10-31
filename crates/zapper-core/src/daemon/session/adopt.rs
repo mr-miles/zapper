@@ -11,8 +11,9 @@ use super::control::resume_control;
 use super::create::assemble;
 use super::launch::{serve_guest, watch_vm};
 use super::run::{arm_ttl, stop};
+use super::session_event;
 use super::{disks, Saved, Session, SessionDir};
-use crate::daemon::{driver, now, record, vm, Daemon, EventBody};
+use crate::daemon::{driver, now, record, vm, Daemon};
 
 /// At the daemon's start: lists the persistent sessions an earlier daemon
 /// left, stopped, to be started again. One whose VM was running when that
@@ -58,9 +59,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
             left_running = kill_vmm(&vmm, &saved.id);
         }
         let _ = std::fs::remove_file(dir.vmm());
-        let record =
-            std::fs::read_to_string(crate::daemon::record::view(&dir.audit())).unwrap_or_default();
-        let was_running = disks::last_stop(&disks::events(&record)) == disks::LastStop::RanSince;
+        let was_running = disks::last_stop_in(&dir) == disks::LastStop::RanSince;
         let session = match assemble(daemon, saved, vec![], true, false, None, true) {
             Ok(s) => s,
             Err(e) => {
@@ -134,12 +133,11 @@ pub(super) fn adopt(
     *session.expires.lock().unwrap() = expires;
     session.runtime.adopted();
     daemon.sessions.insert(session.clone());
-    daemon.emit(
-        Some(&session),
-        EventBody::Session {
-            state: "running".into(),
-            detail: Some("adopted: its VM ran on through a daemon restart".into()),
-        },
+    session_event(
+        daemon,
+        &session,
+        "running",
+        "adopted: its VM ran on through a daemon restart",
     );
     let (d, s, vmm) = (daemon.clone(), session, vmm.clone());
     rt.spawn(async move {

@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 use zapper_policy::proto::{GuestMsg, HostMsg, CONTROL_PORT, MAX_LINE};
 
 use super::exec::decide_exec;
-use super::{Session, Status};
+use super::session_event;
+use super::Session;
 use crate::daemon::{Daemon, EventBody};
 
 pub(super) async fn guest_control(
@@ -60,7 +61,7 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
     let path = session.dir.vsock_port(CONTROL_PORT);
     let mut status = session.runtime.subscribe();
     loop {
-        if !matches!(*status.borrow(), Status::Starting | Status::Running) {
+        if !status.borrow().is_live() {
             return Ok(());
         }
         let token = std::fs::read_to_string(session.dir.resume_token())
@@ -116,13 +117,7 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
         session.adopt_terminals(&terminals);
         drop(listener);
         let _ = std::fs::remove_file(&path);
-        daemon.emit(
-            Some(session),
-            EventBody::Session {
-                state: "running".into(),
-                detail: Some("its agent connected again".into()),
-            },
-        );
+        session_event(daemon, session, "running", "its agent connected again");
         // Told it was taken: the agent asks again what was waiting.
         serve_control(daemon, session, stream, Some(HostMsg::Resumed)).await?;
     }
@@ -143,15 +138,14 @@ pub(super) fn note_refused(
         return;
     }
     tracing::warn!(session = %session.id, "refused {n} control connections: {why}");
-    daemon.emit(
-        Some(session),
-        EventBody::Session {
-            state: "running".into(),
-            detail: Some(format!(
-                "refused {n} control connection{} (the last: {why})",
-                if n == 1 { "" } else { "s" }
-            )),
-        },
+    session_event(
+        daemon,
+        session,
+        "running",
+        format!(
+            "refused {n} control connection{} (the last: {why})",
+            if n == 1 { "" } else { "s" }
+        ),
     );
 }
 
@@ -419,7 +413,8 @@ mod resume_tests {
         assert!(s.terminals.lock().unwrap().contains_key(&3));
         assert!(s.runtime.next_shell() > 3);
 
-        s.runtime.force(Status::Stopped("stopped".into()));
+        s.runtime
+            .force(super::super::Status::Stopped("stopped".into()));
         drop(reader);
         tokio::time::timeout(Duration::from_secs(5), task)
             .await

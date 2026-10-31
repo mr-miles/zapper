@@ -18,6 +18,13 @@ pub enum Status {
     Stopped(String),
 }
 
+impl Status {
+    /// Starting or running: its VM is being made, or runs.
+    pub fn is_live(&self) -> bool {
+        matches!(self, Status::Starting | Status::Running)
+    }
+}
+
 /// A session's live machinery: its lifecycle status, the Firecracker
 /// process, the control channel to the guest agent, and the counters that
 /// gate shells and exec decisions. Made once with the session and kept
@@ -103,31 +110,19 @@ impl GuestRuntime {
     /// Starting → Running: the guest is ready. From no other state: a stop
     /// that came first stands.
     pub fn mark_ready(&self) -> bool {
-        self.status.send_if_modified(|s| {
-            let starting = matches!(s, Status::Starting);
-            if starting {
-                *s = Status::Running;
-            }
-            starting
-        })
+        self.leave_starting(Status::Running)
     }
 
     /// Starting → Failed(`why`): it never came up. A session stopped
     /// meanwhile stays stopped.
     pub fn fail_if_starting(&self, why: String) -> bool {
-        self.status.send_if_modified(|s| {
-            let starting = matches!(s, Status::Starting);
-            if starting {
-                *s = Status::Failed(why);
-            }
-            starting
-        })
+        self.leave_starting(Status::Failed(why))
     }
 
     /// Starting or Running → Failed(`why`). A stopped one stays stopped.
     pub fn fail(&self, why: String) -> bool {
         self.status.send_if_modified(|s| {
-            let up = matches!(s, Status::Starting | Status::Running);
+            let up = s.is_live();
             if up {
                 *s = Status::Failed(why);
             }
