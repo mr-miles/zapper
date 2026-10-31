@@ -76,6 +76,32 @@ pub fn host_key(path: &Path) -> Result<PrivateKey> {
     Ok(key)
 }
 
+/// The sandbox an SSH target names: `ID` or `ID.zapper` (as `%h` or the
+/// forced command's `SSH_ORIGINAL_COMMAND` has it), the ID a session's.
+pub fn sandbox_id(target: &str) -> Result<String> {
+    let id = target.trim();
+    let id = id.strip_suffix(".zapper").unwrap_or(id);
+    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        anyhow::bail!("{target:?} doesn't name a sandbox: `ssh ID.zapper`");
+    }
+    Ok(id.to_string())
+}
+
+/// A public key as `authorized_keys` takes it, from what a user pasted:
+/// its algorithm and its key, checked by parsing, without options or a
+/// comment (which a line of the workbench's own gives).
+pub fn public_key(line: &str) -> Result<String> {
+    let line = line.trim();
+    if line.contains('\n') || line.contains('\r') {
+        anyhow::bail!("one key, on one line");
+    }
+    let key = russh::keys::PublicKey::from_openssh(line)
+        .map_err(|e| anyhow::anyhow!("not an OpenSSH public key ({e}): `ssh-ed25519 AAAA…`"))?;
+    let mut key = key;
+    key.set_comment("");
+    Ok(key.to_openssh()?.trim().to_string())
+}
+
 /// The `known_hosts` line for `key` under the alias `zapper`, which every
 /// sandbox's name matches through `HostKeyAlias`.
 pub fn known_hosts_line(key: &PrivateKey) -> Result<String> {
@@ -642,6 +668,40 @@ mod tests {
         assert_eq!(size(0, 0), (24, 80));
         assert_eq!(size(200, 50), (50, 200));
         assert_eq!(size(u32::MAX, u32::MAX), (u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn a_target_names_a_sandbox_with_or_without_its_suffix() {
+        assert_eq!(sandbox_id("abc234.zapper").unwrap(), "abc234");
+        assert_eq!(sandbox_id("abc234").unwrap(), "abc234");
+        assert_eq!(sandbox_id(" abc234.zapper\n").unwrap(), "abc234");
+        for bad in [
+            "",
+            ".zapper",
+            "abc;rm -rf /",
+            "../x",
+            "a b",
+            "abc234.example",
+        ] {
+            assert!(sandbox_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_public_key_is_parsed_and_kept_without_options_or_comment() {
+        let k = key().public_key().to_openssh().unwrap();
+        let pasted = format!("  {k} laptop@home \n");
+        let kept = public_key(&pasted).unwrap();
+        assert_eq!(kept, k.split(' ').take(2).collect::<Vec<_>>().join(" "));
+        assert!(!kept.contains("laptop"));
+        for bad in [
+            "".to_string(),
+            "ssh-ed25519 not-base64".to_string(),
+            format!("command=\"sh\" {k}"),
+            format!("{k}\n{k}"),
+        ] {
+            assert!(public_key(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 # The workbench
 
-A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface) and phase 2 (the [secrets](#secrets) facility). The drive, the configuration's repository, SSH keys and the wizard come in later phases.
+A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility) and phase 6 (the [SSH connector](#ssh-keys)). The drive, the configuration's repository and the wizard come in later phases.
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
@@ -60,6 +60,7 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /facilities` | the facilities and their panels |
 | `GET /config/diff`, `POST /config/save` | what saving would change in zapper's startup file; save zapper's running config there (the owner's token only: it writes everything running) |
 | `GET /secrets`, `GET /secrets/presets`, `PUT /secrets/{name}`, `DELETE /secrets/{name}` | the [secrets](#secrets) facility [secrets] |
+| `GET /ssh/keys`, `PUT /ssh/keys/{name}` `{key, reach}`, `DELETE /ssh/keys/{name}`, `GET /ssh/config?host=USER@HOST` | the [SSH keys](#ssh-keys) (the owner's token only) |
 | `/w/v1/<facility>/…` | each facility's own routes |
 
 ## Secrets
@@ -86,6 +87,20 @@ Presets fill in the hosts and mode, and check what a value looks like (its form,
 Without a preset, give `hosts` and `mode` (`proxy`, `guest`, `aws`, `dbauth`); a `guest` secret is readable by everything in the session ([security](security.md#secrets-given-to-a-session-can-be-used-by-it)), and the panel says so. `PUT /w/v1/secrets/{name}` takes `{preset?, value?, hosts?, mode?, plaintext?, user?, database?, mechanism?}`: a value for a new secret, any of them to change one.
 
 A secret reaches a session through a rule that lists it (and, for a profile's agent, `{{secret:NAME}}` in its `env`), which the wizard (phase 4) will write; until then, through the session's rules (`POST /w/v1/sessions/{id}/rules` with `secrets: [NAME]`, which takes the `secrets` right) or the config.
+
+## SSH keys
+
+The SSH connector ([SSH](ssh.md) has how SSH reaches a sandbox): your public keys, each with a name and the sandboxes it reaches, which the host's sshd checks.
+
+```
+zapper-workbench ssh-proxy --key NAME [ID.zapper]   # what sshd runs for a key; the sandbox from $SSH_ORIGINAL_COMMAND
+```
+
+- **A key reaches** every sandbox, those with given labels, or given IDs (`reach`: `"all"`, `{"labels": {…}}`, `{"sessions": [ID…]}`); and of those, only one whose SSH is on (`zapper ssh on ID`, or created with `ssh`).
+- **Each key is a line of `~/.ssh/authorized_keys`**, between markers the workbench owns; every other line is left as it is. The line is `restrict,command="ZAPPER_SOCKET=… zapper-workbench ssh-proxy --key NAME" KEY NAME`: the key gets no shell on the host and no forwarding, and sshd runs only the proxy. The workbench rewrites the block as keys are added and removed (the file stays 0600, `~/.ssh` 0700).
+- **The proxy decides at each connection**: the key still the workbench's, the sandbox one it reaches (another is answered as one that isn't there), and SSH on for it; then it carries SSH as `zapper ssh proxy` does, with the key's name in the terminal's events. A key's reach changed applies at its next connection, without rewriting `authorized_keys`.
+- **The owner's token only** manages keys: a key is a shell in the sandboxes it reaches, which a token limited to some must not hand out for more.
+- **Your machine's lines**: `GET /w/v1/ssh/config?host=you@host` (and the panel) give the `~/.ssh/config` block, `ProxyCommand ssh -T -i ~/.ssh/YOUR_KEY you@host %h` with `HostKeyAlias zapper`, and the `known_hosts` line for the gateway's host key, which is zapper's own (`~/.config/zapper/ssh_host_ed25519`), so one line serves `zapper ssh` and the workbench.
 
 ## Facilities
 

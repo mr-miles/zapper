@@ -3066,6 +3066,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "ring",
+ "russh",
  "serde",
  "serde_json",
  "tokio",
@@ -3074,6 +3075,7 @@ dependencies = [
  "tracing-subscriber",
  "zapper-api",
  "zapper-core",
+ "zapper-ssh",
 ]
 
 [[package]]

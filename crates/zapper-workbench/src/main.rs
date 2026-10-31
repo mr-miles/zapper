@@ -42,6 +42,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
+    /// What the host's sshd runs for a key the workbench added: SSH on
+    /// stdin and stdout, for the sandbox named (else by
+    /// `$SSH_ORIGINAL_COMMAND`), if the key reaches it.
+    SshProxy {
+        target: Option<String>,
+        #[arg(long)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -95,17 +103,23 @@ async fn main() -> Result<()> {
             let ctx = Ctx {
                 zapper: Zapper::new(socket_path()),
                 tokens: tokens.clone(),
-                facilities: Arc::new(Facilities::new(vec![Arc::new(
-                    zapper_workbench::secrets::Secrets::new(
+                facilities: Arc::new(Facilities::new(vec![
+                    Arc::new(zapper_workbench::secrets::Secrets::new(
                         zapper_workbench::config_dir().join("secrets"),
-                    )?,
-                )])?),
+                    )?),
+                    Arc::new(zapper_workbench::ssh::Ssh::new(
+                        zapper_workbench::ssh_keys(&std::env::current_exe()?)?,
+                        zapper_ssh::known_hosts_line(&zapper_ssh::host_key(
+                            &zapper_workbench::ssh_host_key(),
+                        )?)?,
+                    )),
+                ])?),
                 work,
                 port: listen.port(),
                 remote: !listen.ip().is_loopback(),
             };
             facility::register(&ctx).await?;
-            if ctx.facilities.iter().next().is_some() {
+            if ctx.facilities.iter().any(|f| f.wants_events()) {
                 tokio::spawn(facility::follow(ctx.clone()));
             }
             let listener = tokio::net::TcpListener::bind(listen)
@@ -128,6 +142,17 @@ async fn main() -> Result<()> {
             axum::serve(listener, gateway::app(ctx)).await?;
         }
         Cmd::Url { listen } => println!("{}", url(listen)),
+        Cmd::SshProxy { target, key } => {
+            let keys = zapper_workbench::ssh_keys(&std::env::current_exe()?)?;
+            zapper_workbench::ssh::proxy(
+                Zapper::new(socket_path()),
+                &keys,
+                &key,
+                target,
+                &zapper_workbench::ssh_host_key(),
+            )
+            .await?
+        }
         Cmd::Token { cmd } => match cmd {
             TokenCmd::Add {
                 name,

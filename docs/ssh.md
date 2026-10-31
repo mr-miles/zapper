@@ -27,6 +27,8 @@ On the zapper host, `zapper ssh config --host you@host` prints three things:
 
 Without `--host`, the lines are for SSH on the host itself (`ProxyCommand zapper ssh proxy %h`).
 
+The [workbench](workbench.md#ssh-keys) manages these for you: named keys, each limited to the sandboxes it reaches, written as `authorized_keys` lines that run `zapper-workbench ssh-proxy --key NAME`.
+
 ## On and off, per sandbox
 
 A sandbox takes SSH only when it was created with `--ssh` (`zapper run --ssh`, `"ssh": true` in `POST /v1/sessions`) or turned on later; it is off by default.

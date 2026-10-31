@@ -50,7 +50,13 @@ pub trait Facility: Send + Sync + 'static {
         vec![]
     }
 
-    /// Each of zapper's events (`/v1/events`), as the stream carries it.
+    /// Whether it follows zapper's events (`on_event`).
+    fn wants_events(&self) -> bool {
+        false
+    }
+
+    /// Each of zapper's events (`/v1/events`), as the stream carries it,
+    /// for a facility that `wants_events`.
     fn on_event(&self, _ctx: &Ctx, _event: &Value) {}
 }
 

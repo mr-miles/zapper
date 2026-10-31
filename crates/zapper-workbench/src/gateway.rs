@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use crate::facility::Facilities;
 use crate::sse;
 use crate::tokens::{Grant, Right, Tokens};
-use crate::zapper::Zapper;
+use crate::zapper::{url_encode, Zapper};
 
 /// What the gateway's handlers share.
 #[derive(Clone)]
@@ -477,17 +477,6 @@ struct AttachQuery {
     #[serde(default)]
     persist: bool,
     terminal: Option<u64>,
-}
-
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            b => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 /// A terminal in the session, as the token's: run as the workload user
