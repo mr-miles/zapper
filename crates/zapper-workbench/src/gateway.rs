@@ -887,7 +887,10 @@ async fn guard(State(ctx): State<Ctx>, mut req: Request, next: Next) -> Response
 async fn hardened(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
-    h.insert("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'".parse().unwrap());
+    // A response with a policy of its own (a download, sandboxed) keeps it.
+    if !h.contains_key("content-security-policy") {
+        h.insert("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'".parse().unwrap());
+    }
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
     h.insert("referrer-policy", "no-referrer".parse().unwrap());
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());

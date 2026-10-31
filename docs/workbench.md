@@ -2,7 +2,7 @@
 
 # The workbench
 
-A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility) and phase 6 (the [SSH connector](#ssh-keys)). The drive, the configuration's repository and the wizard come in later phases.
+A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)) and phase 6 (the [SSH connector](#ssh-keys)). The configuration's repository and the wizard come in later phases.
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
@@ -61,6 +61,7 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /config/diff`, `POST /config/save` | what saving would change in zapper's startup file; save zapper's running config there (the owner's token only: it writes everything running) |
 | `GET /secrets`, `GET /secrets/presets`, `PUT /secrets/{name}`, `DELETE /secrets/{name}` | the [secrets](#secrets) facility [secrets] |
 | `GET /ssh/keys`, `PUT /ssh/keys/{name}` `{key, reach}`, `DELETE /ssh/keys/{name}`, `GET /ssh/config?host=USER@HOST` | the [SSH keys](#ssh-keys) (the owner's token only) |
+| `GET\|PUT\|DELETE /drive/files/{path}`; `GET /drive/rules/usual`, `POST /drive/rules` | the [drive](#the-drive)'s files, and its usual rules added (the owner's token only) |
 | `/w/v1/<facility>/…` | each facility's own routes |
 
 ## Secrets
@@ -87,6 +88,26 @@ Presets fill in the hosts and mode, and check what a value looks like (its form,
 Without a preset, give `hosts` and `mode` (`proxy`, `guest`, `aws`, `dbauth`); a `guest` secret is readable by everything in the session ([security](security.md#secrets-given-to-a-session-can-be-used-by-it)), and the panel says so. `PUT /w/v1/secrets/{name}` takes `{preset?, value?, hosts?, mode?, plaintext?, user?, database?, mechanism?}`: a value for a new secret, any of them to change one.
 
 A secret reaches a session through a rule that lists it (and, for a profile's agent, `{{secret:NAME}}` in its `env`), which the wizard (phase 4) will write; until then, through the session's rules (`POST /w/v1/sessions/{id}/rules` with `secrets: [NAME]`, which takes the `secrets` right) or the config.
+
+## The drive
+
+Files in `~/.local/share/zapper-workbench/drive/` (0700, with `inbox/` and `outbox/`), which you reach through the workbench and sessions reach as `drive.zapper:443`.
+
+- **For sessions it is a [socket service](network.md#socket-services)** for the workbench's sessions (label `workbench=1`): the workbench serves `workbench-drive.sock` in zapper's `state/services/` (`socket_dir` in zapper's status), and zapper terminates the guest's TLS with the session's CA, names the caller in the first line, and decides each request against `net` rules with methods and paths before passing it on. The drive decides no access itself. It registers the service at start and again whenever zapper has lost it (a restart).
+- **The usual rules**, which **Let workbench sessions use it…** adds to zapper's global layer (`POST /w/v1/drive/rules`; running config, saved when you save it): read the inbox, and read and write the session's own outbox.
+
+  ```yaml
+  - { id: drive-inbox, kind: net, action: allow, host: drive.zapper, ports: [443], methods: [GET, HEAD], path: "/inbox/**" }
+  - { id: drive-outbox, kind: net, action: allow, host: drive.zapper, ports: [443], methods: [GET, HEAD, PUT, DELETE], path: "/outbox/{session}/**" }
+  ```
+
+  Only the workbench's sessions resolve `drive.zapper`, so these reach no other.
+- **What a session does**: `GET` a directory for a JSON listing (`{path, entries: [{name, kind, size, modified}]}`), `GET` or `HEAD` a file, `PUT` a file (written whole or not at all, at most 256 MiB, its directories made as needed), `DELETE` a file or an empty directory: `curl https://drive.zapper/inbox/`, `curl -T report.pdf https://drive.zapper/outbox/$SESSION/`.
+- **Every path stays in the drive.** A path is cleaned to its components (relative, no `.`, `..`, empty or hidden ones, at most 32 deep; as the office's drive cleans archive paths) and walked from the drive's root a component at a time without following a link, so a symbolic link anywhere, whoever made it, fails the request instead of leading out. Only regular files and directories are served or listed (at most 2,000 entries); a write goes to a hidden temporary file, renamed into place once whole.
+- **Nothing runs.** A session gets text as text (HTML and scripts as `text/plain`, SVG as bytes), with `nosniff`. Your downloads through the workbench are always `application/octet-stream` attachments with `Content-Security-Policy: sandbox`, so a file a session wrote can't run in the workbench's page with your cookie.
+- **The owner's token only** reaches it through the workbench (the panel: folders, upload, download, remove).
+
+Not yet: `scp` and `sftp` to `drive.zapper` through the SSH connector, which needs an SFTP server in the gateway.
 
 ## SSH keys
 

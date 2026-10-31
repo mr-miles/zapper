@@ -107,6 +107,9 @@ async fn main() -> Result<()> {
                     Arc::new(zapper_workbench::secrets::Secrets::new(
                         zapper_workbench::config_dir().join("secrets"),
                     )?),
+                    Arc::new(zapper_workbench::drive::Drive::new(
+                        zapper_workbench::data_dir().join("drive"),
+                    )?),
                     Arc::new(zapper_workbench::ssh::Ssh::new(
                         zapper_workbench::ssh_keys(&std::env::current_exe()?)?,
                         zapper_ssh::known_hosts_line(&zapper_ssh::host_key(
@@ -118,7 +121,10 @@ async fn main() -> Result<()> {
                 port: listen.port(),
                 remote: !listen.ip().is_loopback(),
             };
-            facility::register(&ctx).await?;
+            for f in ctx.facilities.iter() {
+                f.start(&ctx);
+            }
+            tokio::spawn(facility::keep_registered(ctx.clone()));
             if ctx.facilities.iter().any(|f| f.wants_events()) {
                 tokio::spawn(facility::follow(ctx.clone()));
             }

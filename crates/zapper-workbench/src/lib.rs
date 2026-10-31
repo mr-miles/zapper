@@ -4,6 +4,7 @@
 //! authenticates and authorizes its clients, and hosts facilities behind
 //! one interface.
 
+pub mod drive;
 pub mod facility;
 pub mod gateway;
 pub mod secrets;

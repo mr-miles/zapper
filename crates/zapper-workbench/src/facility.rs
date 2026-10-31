@@ -50,6 +50,10 @@ pub trait Facility: Send + Sync + 'static {
         vec![]
     }
 
+    /// Starts what it runs beside its routes (a socket it serves), when the
+    /// workbench starts.
+    fn start(&self, _ctx: &Ctx) {}
+
     /// Whether it follows zapper's events (`on_event`).
     fn wants_events(&self) -> bool {
         false
@@ -125,10 +129,27 @@ impl Facilities {
     }
 }
 
-/// Registers the facilities' services in zapper.
+/// Registers in zapper the facilities' services it lacks: at start, and
+/// again whenever zapper has lost them (it restarted).
 pub async fn register(ctx: &Ctx) -> Result<()> {
+    let have = ctx
+        .zapper
+        .call(Method::GET, "/v1/services", None)
+        .await?
+        .ok()
+        .map_err(|(s, why)| anyhow::anyhow!("services: {s} {why}"))?;
     for f in ctx.facilities.iter() {
         for spec in f.services() {
+            let present = have.as_array().into_iter().flatten().any(|s| {
+                s["name"] == spec["name"]
+                    && s["port"] == spec["port"]
+                    && spec["to"]["socket"]
+                        .as_str()
+                        .is_some_and(|sock| s["to"].as_str().is_some_and(|to| to.contains(sock)))
+            });
+            if present {
+                continue;
+            }
             ctx.zapper
                 .call(Method::POST, "/v1/services", Some(&spec))
                 .await?
@@ -139,6 +160,24 @@ pub async fn register(ctx: &Ctx) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Keeps the facilities' services registered for as long as the workbench
+/// runs, checking every few seconds; zapper being away is said once, not
+/// fatal.
+pub async fn keep_registered(ctx: Ctx) {
+    let mut said = false;
+    loop {
+        match register(&ctx).await {
+            Ok(()) => said = false,
+            Err(e) if !said => {
+                tracing::warn!("facilities' services: {e:#}");
+                said = true;
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
 }
 
 /// Follows zapper's events for the facilities, for as long as the

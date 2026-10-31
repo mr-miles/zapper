@@ -3067,14 +3067,17 @@ dependencies = [
  "libc",
  "ring",
  "russh",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "zapper-api",
  "zapper-core",
+ "zapper-proto",
  "zapper-ssh",
 ]
 
