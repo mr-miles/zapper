@@ -37,6 +37,16 @@ pub fn error(kind: ErrorKind, msg: impl fmt::Display) -> anyhow::Error {
     })
 }
 
+/// What was named isn't there: a [`ErrorKind::NotFound`].
+pub fn not_found(msg: impl fmt::Display) -> anyhow::Error {
+    error(ErrorKind::NotFound, msg)
+}
+
+/// It can't be done as things are: a [`ErrorKind::Conflict`].
+pub fn conflict(msg: impl fmt::Display) -> anyhow::Error {
+    error(ErrorKind::Conflict, msg)
+}
+
 /// The kind of `e`, if it has one (anywhere in its chain, so context added
 /// on the way keeps it).
 pub fn kind_of(e: &anyhow::Error) -> Option<ErrorKind> {

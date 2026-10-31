@@ -217,9 +217,7 @@ pub(super) async fn check_disks(
     );
     if let Some(detail) = detail {
         if !accept {
-            return Err(crate::errors::error(
-                crate::errors::ErrorKind::Conflict,
-                format!(
+            return Err(crate::errors::conflict(format!(
                     "session {}: {detail}; start it with --accept-changed-disks to boot its disks as they are",
                     session.id
                 ),

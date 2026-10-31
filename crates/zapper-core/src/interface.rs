@@ -308,12 +308,8 @@ impl SessionApi for Core {
 
     fn verify_session(&self, id: &str) -> Result<Value> {
         let audit = self.audit_path(id)?;
-        let text = std::fs::read_to_string(&audit).map_err(|e| {
-            crate::errors::error(
-                crate::errors::ErrorKind::NotFound,
-                format!("no record for session {id}: {e}"),
-            )
-        })?;
+        let text = std::fs::read_to_string(&audit)
+            .map_err(|e| crate::errors::not_found(format!("no record for session {id}: {e}")))?;
         let findings = session::disks::findings(&session::disks::events(&text));
         let dir = self.d.paths.session_dir(id);
         // Without a keeper, nothing to check the files against: said so.
@@ -436,17 +432,11 @@ impl RuleApi for Core {
                 .filter(|s| s.rules().iter().any(|r| r.id() == Some(id)))
                 .collect();
             return match holders.as_slice() {
-                [] => Err(crate::errors::error(
-                    crate::errors::ErrorKind::NotFound,
-                    format!("no rule {id}"),
-                )),
+                [] => Err(crate::errors::not_found(format!("no rule {id}"))),
                 [s] => {
-                    let r = s.remove_rule(id).ok_or_else(|| {
-                        crate::errors::error(
-                            crate::errors::ErrorKind::NotFound,
-                            format!("no rule {id}"),
-                        )
-                    })?;
+                    let r = s
+                        .remove_rule(id)
+                        .ok_or_else(|| crate::errors::not_found(format!("no rule {id}")))?;
                     Ok(RuleRemoval::Removed(
                         Scope::Session(s.id.clone()),
                         Box::new(r),
@@ -459,9 +449,9 @@ impl RuleApi for Core {
             };
         }
         let (scope, rule) = self.d.change(&format!("rule {id} removed"), |c| {
-            let scope = c.find_rule(id).ok_or_else(|| {
-                crate::errors::error(crate::errors::ErrorKind::NotFound, format!("no rule {id}"))
-            })?;
+            let scope = c
+                .find_rule(id)
+                .ok_or_else(|| crate::errors::not_found(format!("no rule {id}")))?;
             let rule = c.policy_mut(&scope).unwrap().remove(id).unwrap();
             Ok((scope, rule))
         })?;

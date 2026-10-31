@@ -257,12 +257,9 @@ impl Daemon {
     }
 
     pub fn session(&self, id: &str) -> Result<Arc<Session>> {
-        self.sessions.get(id).ok_or_else(|| {
-            crate::errors::error(
-                crate::errors::ErrorKind::NotFound,
-                format!("no session {id}"),
-            )
-        })
+        self.sessions
+            .get(id)
+            .ok_or_else(|| crate::errors::not_found(format!("no session {id}")))
     }
 
     /// Applies a change to the running config if the result is valid.
@@ -479,12 +476,10 @@ impl Daemon {
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
-        let pending = self.approvals.take(id).ok_or_else(|| {
-            crate::errors::error(
-                crate::errors::ErrorKind::NotFound,
-                format!("no pending approval {id}"),
-            )
-        })?;
+        let pending = self
+            .approvals
+            .take(id)
+            .ok_or_else(|| crate::errors::not_found(format!("no pending approval {id}")))?;
         let session = self.session(&pending.session)?;
         if let Some(r) = remember {
             let mut rule = pending.suggestion.clone();
