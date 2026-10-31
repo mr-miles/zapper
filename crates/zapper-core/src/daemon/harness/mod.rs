@@ -159,19 +159,20 @@ pub(super) fn sum_u64(usage: &Value, keys: &[&str]) -> u64 {
 
 /// An error message that means "later": the provider's limits or load. Shared
 /// by both harnesses (Claude adds its own is-error guard at the call site).
+/// The status codes count only as numbers of their own, not inside others
+/// (`line 1429`, `port 4290`).
 pub(super) fn rate_limited(text: &str) -> bool {
     let w = text.to_ascii_lowercase();
-    [
+    let words = [
         "rate limit",
         "rate_limit",
         "usage limit",
-        "429",
         "overloaded",
-        "529",
         "too many requests",
-    ]
-    .iter()
-    .any(|k| w.contains(k))
+    ];
+    words.iter().any(|k| w.contains(k))
+        || w.split(|c: char| !c.is_ascii_digit())
+            .any(|n| n == "429" || n == "529")
 }
 
 /// Pretty-prints JSON for a config file.
@@ -218,6 +219,26 @@ impl Harness for Generic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_limit_is_said_in_words_or_its_own_status() {
+        for t in [
+            "API Error: 429 rate_limit_error",
+            "HTTP 429",
+            "status=529",
+            "Overloaded",
+            "429 Too Many Requests",
+        ] {
+            assert!(rate_limited(t), "{t}");
+        }
+        for t in [
+            "error at line 1429",
+            "connect to port 4290",
+            "id 5291 failed",
+        ] {
+            assert!(!rate_limited(t), "{t}");
+        }
+    }
 
     #[test]
     fn kinds() {
