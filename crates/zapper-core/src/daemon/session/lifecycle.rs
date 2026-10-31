@@ -186,6 +186,10 @@ fn assemble(
         (tls::SessionTls::new(&saved.id)?, dns::SessionDns::new())
     };
     let rules = Rules::new(&saved.id, shared_layers);
+    let driver = saved.driven.then(|| match persistent {
+        true => driver::Driver::kept(dir.conversation()),
+        false => driver::Driver::new(),
+    });
     let session = Arc::new(Session {
         tls,
         id: saved.id,
@@ -210,7 +214,7 @@ fn assemble(
         requests: Default::default(),
         audit: Mutex::new(audit),
         labels: saved.labels,
-        driver: saved.driven.then(driver::Driver::new),
+        driver,
         daemon: Arc::downgrade(daemon),
         extra_files: saved.files,
         forwards: saved.forwards,
@@ -939,10 +943,22 @@ mod tests {
             0o600
         );
 
+        // Each of what a daemon adopting it would need, there to be removed.
+        crate::util::write_private(&back.dir.resume_token(), b"tok").unwrap();
+        crate::util::write_private(&back.dir.vmm(), b"{}").unwrap();
+        crate::util::write_private(&back.dir.conversation(), b"{}").unwrap();
         t.core.forget_session(&back.id).unwrap();
-        for f in [back.dir.saved(), back.dir.ca(), back.dir.dns()] {
+        for f in [
+            back.dir.saved(),
+            back.dir.ca(),
+            back.dir.dns(),
+            back.dir.resume_token(),
+            back.dir.vmm(),
+            back.dir.conversation(),
+        ] {
             assert!(!f.exists(), "{}", f.display());
         }
+        assert!(back.dir.audit().exists(), "the record stays");
         restore(t.core.daemon());
         assert!(
             t.core.daemon().sessions.get(&back.id).is_none(),

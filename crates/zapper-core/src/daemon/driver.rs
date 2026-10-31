@@ -84,23 +84,56 @@ pub struct Driver {
     state: Mutex<State>,
     wake: Notify,
     stopping: Notify,
+    /// Where a persistent session's conversation id is kept, so a daemon
+    /// adopting the session resumes the conversation.
+    kept: Option<std::path::PathBuf>,
 }
 
 impl Driver {
     pub fn new() -> Arc<Driver> {
+        Self::with(None, None)
+    }
+
+    /// A persistent session's: its conversation id kept in `path`, and
+    /// read back from it.
+    pub fn kept(path: std::path::PathBuf) -> Arc<Driver> {
+        let conversation = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["conversation"].as_str().map(str::to_string));
+        Self::with(conversation, Some(path))
+    }
+
+    fn with(conversation: Option<String>, kept: Option<std::path::PathBuf>) -> Arc<Driver> {
         Arc::new(Driver {
             state: Mutex::new(State {
                 status: Status::Idle,
                 queue: VecDeque::new(),
                 activity: None,
                 error: None,
-                conversation: None,
+                conversation,
                 turns: 0,
                 tokens: 0,
             }),
             wake: Notify::new(),
             stopping: Notify::new(),
+            kept,
         })
+    }
+
+    /// The conversation the agent is in, kept if the session is persistent.
+    fn set_conversation(&self, id: &str) {
+        let mut st = self.state.lock().unwrap();
+        if st.conversation.as_deref() == Some(id) {
+            return;
+        }
+        st.conversation = Some(id.to_string());
+        if let Some(path) = &self.kept {
+            let body = json!({ "conversation": id }).to_string();
+            if let Err(e) = crate::util::write_private(path, body.as_bytes()) {
+                tracing::warn!("keeping the conversation id in {}: {e:#}", path.display());
+            }
+        }
     }
 
     /// Queues a prompt; how many are waiting, this one included.
@@ -216,7 +249,7 @@ impl Observer for Watch {
     }
 
     fn conversation(&self, id: &str) {
-        self.driver.state.lock().unwrap().conversation = Some(id.to_string());
+        self.driver.set_conversation(id);
     }
 
     fn activity(&self, text: &str) {

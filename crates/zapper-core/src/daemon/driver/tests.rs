@@ -514,3 +514,32 @@ async fn a_kind_without_a_driver_is_an_error_at_once() {
     super::drive(t.core.daemon(), &s);
     assert!(s.driver.is_none());
 }
+
+/// A persistent session's driver keeps the conversation its agent is in,
+/// so a daemon adopting the session resumes it; a plain one keeps none.
+#[test]
+fn a_kept_conversation_comes_back() {
+    let dir = std::env::temp_dir().join(format!("zapper-conv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("conversation.json");
+    let first = Driver::kept(path.clone());
+    assert_eq!(first.state.lock().unwrap().conversation, None);
+    first.set_conversation("c-1");
+    let again = Driver::kept(path.clone());
+    assert_eq!(
+        again.state.lock().unwrap().conversation.as_deref(),
+        Some("c-1")
+    );
+    Driver::new().set_conversation("c-2");
+    assert_eq!(
+        Driver::kept(path)
+            .state
+            .lock()
+            .unwrap()
+            .conversation
+            .as_deref(),
+        Some("c-1")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

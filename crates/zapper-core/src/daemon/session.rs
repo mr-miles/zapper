@@ -130,6 +130,7 @@ impl SessionStore {
                     s.dir.dns(),
                     s.dir.resume_token(),
                     s.dir.vmm(),
+                    s.dir.conversation(),
                 ] {
                     let _ = std::fs::remove_file(kept);
                 }
@@ -252,6 +253,12 @@ impl SessionDir {
     }
     pub fn driver_log(&self) -> PathBuf {
         self.root.join("driver.jsonl")
+    }
+
+    /// A persistent session's driven agent's conversation id
+    /// (`driver::Driver::kept`).
+    pub fn conversation(&self) -> PathBuf {
+        self.root.join("conversation.json")
     }
 }
 

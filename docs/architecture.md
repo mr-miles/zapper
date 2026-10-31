@@ -66,9 +66,10 @@ state/sessions/<id>/
   console.log        boot messages
   session.json       a persistent session: what it is, to be listed again after a restart
   ca.json            a persistent session's CA: its key, kept (0600)
-  dns.jsonl          a persistent session's synthetic names, in the order given
+  dns.jsonl          a persistent session's synthetic names, each with its address
   resume.token       a persistent session's resume token (0600)
   vmm.json           a persistent session's running VMM: its pid, when that process started, and its subordinate id
+  conversation.json  a persistent, driven session's agent's conversation id, resumed by a daemon that adopts it
   vm/                the only part Firecracker can see; deleted at the end (a persistent session's disks stay)
     root.ext4          the guest's disk, a copy of the image
     disk0.ext4         a copy of a mounted host directory
