@@ -127,11 +127,11 @@ pub struct Session {
     lifecycle: tokio::sync::Mutex<()>,
     /// Make a persistent session from its image even if the image changed
     /// since it was built (recorded); not kept.
-    pub(crate) accept_changed_image: bool,
+    accept_changed_image: bool,
     pub resolved: ResolvedProfile,
     pub(crate) workdir: PathBuf,
     /// The session's rules: its own layer and any shared layers. Not saved.
-    pub(crate) rules: Rules,
+    rules: Rules,
     /// Secrets only this session's rules can use: a credential scoped to
     /// one agent, which a client puts with `put_secret` (no client does
     /// today; it is a requirement, so keep it). Not in the config, so

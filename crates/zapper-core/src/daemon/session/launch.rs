@@ -17,7 +17,7 @@ use crate::daemon::{gateway, nic, proxy, vm, Daemon};
 
 /// The guest ports the host connects to over vsock: those the session was
 /// created with, then the profile's `engine.ports` not among them.
-pub(super) fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
+fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
     let mut v = given.to_vec();
     for p in &engine.ports {
         if !v.iter().any(|f| f.vsock_port == *p as u32) {

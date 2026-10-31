@@ -311,7 +311,7 @@ pub fn respond(
 }
 
 /// Per-session query budget: `RATE` per second, bursts of `BURST`.
-pub struct RateLimit {
+struct RateLimit {
     tokens: f64,
     at: Instant,
 }

@@ -41,10 +41,10 @@ pub trait Observer: Send + Sync {
 
 pub struct Proc {
     stdin: OwnedWriteHalf,
-    pub events: mpsc::Receiver<Out>,
-    pub conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
+    events: mpsc::Receiver<Out>,
+    conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
-    pub steers: bool,
+    steers: bool,
     /// Reads the agent's output; it holds the connection's other half.
     reader: tokio::task::JoinHandle<()>,
 }
@@ -57,14 +57,14 @@ impl Drop for Proc {
 }
 
 impl Proc {
-    pub async fn write(&mut self, line: Vec<u8>) -> Result<()> {
+    async fn write(&mut self, line: Vec<u8>) -> Result<()> {
         let mut buf = Vec::new();
         Frame::Data(line).write_to(&mut buf)?;
         self.stdin.write_all(&buf).await?;
         Ok(())
     }
 
-    pub async fn send(&mut self, text: &str) -> Result<()> {
+    async fn send(&mut self, text: &str) -> Result<()> {
         let line = self.conv.lock().unwrap().prompt(text);
         self.write(line).await
     }

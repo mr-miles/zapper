@@ -18,7 +18,7 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-pub struct SessionCa {
+struct SessionCa {
     cert: rcgen::Certificate,
     key: KeyPair,
     pub pem: String,
@@ -26,7 +26,7 @@ pub struct SessionCa {
 
 /// A leaf certificate minted by a [`SessionCa`]: the chain (leaf then CA) and
 /// the leaf's private key, ready for a rustls server config.
-pub struct Leaf {
+struct Leaf {
     pub chain: Vec<CertificateDer<'static>>,
     pub key: PrivateKeyDer<'static>,
 }
@@ -236,7 +236,7 @@ impl SessionTls {
 
 /// Server config for an inspected connection, presenting `leaf`. The mirror
 /// of [`client_config`] for the guest-facing side.
-pub(crate) fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
+fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
     let mut config = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()

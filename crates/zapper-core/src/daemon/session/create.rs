@@ -112,7 +112,7 @@ pub(super) fn admit<'a>(
 
 /// The host's memory against a new VM's, in MiB. `total` and `available`
 /// are unknown when `/proc/meminfo` can't be read.
-pub(super) struct Memory {
+struct Memory {
     /// Given to the VMs starting or running.
     given: u64,
     /// The new VM's.
@@ -126,7 +126,7 @@ pub(super) struct Memory {
 /// than the host has, or the host has less available than the VM's size.
 /// Firecracker takes a guest's memory as the guest touches it, so a host
 /// can run more than fits on paper, until the guests fill theirs.
-pub(super) fn memory_admission(m: &Memory, overcommit: Option<f64>) -> Result<Option<String>> {
+fn memory_admission(m: &Memory, overcommit: Option<f64>) -> Result<Option<String>> {
     let Some(total) = m.total else {
         return Ok(None);
     };

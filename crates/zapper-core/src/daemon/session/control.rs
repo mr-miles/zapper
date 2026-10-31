@@ -57,7 +57,7 @@ pub(super) async fn guest_control(
 /// line is `Resume` with the session's token (others, which could be the
 /// workload's, are closed); then the socket goes again, as after the first
 /// connection. Until the session stops.
-pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
+pub(super) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let path = session.dir.vsock_port(CONTROL_PORT);
     let mut status = session.runtime.subscribe();
     loop {
@@ -124,11 +124,11 @@ pub(crate) async fn resume_control(daemon: &Arc<Daemon>, session: &Arc<Session>)
 }
 
 /// Connections checked for a resumption at once.
-pub(super) const RESUME_CHECKS: usize = 64;
+const RESUME_CHECKS: usize = 64;
 
 /// Records the control connections refused since last time, if any: how
 /// many, and why the last was.
-pub(super) fn note_refused(
+fn note_refused(
     daemon: &Arc<Daemon>,
     session: &Arc<Session>,
     refused: &std::sync::Mutex<(u64, String)>,
@@ -151,10 +151,7 @@ pub(super) fn note_refused(
 
 /// Reads a resumed connection's first line: `Resume` with `token`, and the
 /// persistent terminals the guest keeps.
-pub(super) async fn resumed(
-    stream: &mut tokio::net::UnixStream,
-    token: &str,
-) -> Result<Vec<u64>, String> {
+async fn resumed(stream: &mut tokio::net::UnixStream, token: &str) -> Result<Vec<u64>, String> {
     // A byte at a time: the exec checks the agent asks again follow the line
     // at once, and must stay in the stream for `serve_control`.
     let read = crate::daemon::read_line_unbuffered(stream, MAX_LINE);
@@ -176,7 +173,7 @@ pub(super) async fn resumed(
 
 /// Serves a guest's control connection until it closes: its messages in, and
 /// the host's out (`first` before any).
-pub(super) async fn serve_control(
+async fn serve_control(
     daemon: &Arc<Daemon>,
     session: &Arc<Session>,
     stream: tokio::net::UnixStream,

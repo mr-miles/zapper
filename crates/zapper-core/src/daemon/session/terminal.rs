@@ -160,7 +160,7 @@ impl Session {
     /// channel comes back (a daemon that adopts the session knows none of
     /// them): listed, detached, to attach to again, their recordings going
     /// on in their files.
-    pub(crate) fn adopt_terminals(&self, ids: &[u64]) {
+    pub(super) fn adopt_terminals(&self, ids: &[u64]) {
         let mut terminals = self.terminals.lock().unwrap();
         for &id in ids {
             self.runtime.shells_after(id);

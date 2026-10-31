@@ -80,7 +80,7 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
 
 /// The durable VMM of session `id` in `dir`, if it still runs (its pid that
 /// session's VMM, not one reused since).
-pub(super) fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
+fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
     let vmm: crate::daemon::vm::Vmm =
         serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
     vmm.runs_for(id).then_some(vmm)
@@ -88,7 +88,7 @@ pub(super) fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::
 
 /// Stops session `id`'s VMM `vmm` (its Firecracker dies with it); whether
 /// it was running.
-pub(super) fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
+fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
     if !vmm.runs_for(id) {
         return false;
     }
@@ -107,7 +107,7 @@ pub(super) fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
 /// claimed again, its lifetime from when its VM started; then, in `rt`, its
 /// guest served again ([`serve_adopted`]), its driver started, and its
 /// lifetime watched.
-pub(super) fn adopt(
+fn adopt(
     daemon: &Arc<Daemon>,
     saved: Saved,
     dir: &SessionDir,
@@ -152,11 +152,7 @@ pub(super) fn adopt(
 /// Takes on a persistent session whose VM an earlier daemon left running:
 /// its guest's sockets bound again, its VMM watched by pid and start, and
 /// its agent's control channel taken again when it connects with its token.
-pub(super) async fn serve_adopted(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    vmm: vm::Vmm,
-) -> Result<()> {
+async fn serve_adopted(daemon: &Arc<Daemon>, session: &Arc<Session>, vmm: vm::Vmm) -> Result<()> {
     serve_guest(daemon, session)?;
     *session.runtime.vm().lock().await = Some(vm::VmProc::Adopted {
         vmm,

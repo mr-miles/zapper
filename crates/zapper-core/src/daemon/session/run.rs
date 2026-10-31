@@ -150,7 +150,7 @@ pub(crate) async fn stop(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: &
     teardown(daemon, session, Some(reason)).await;
 }
 
-pub(super) async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&str>) {
+async fn teardown(daemon: &Arc<Daemon>, session: &Arc<Session>, reason: Option<&str>) {
     if let Some(driver) = &session.driver {
         driver.stop();
     }

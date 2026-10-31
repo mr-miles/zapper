@@ -17,10 +17,10 @@ use super::persist::save;
 use super::{Session, SessionDir};
 use crate::daemon::{Daemon, EventBody};
 
-pub(crate) type Hashes = BTreeMap<String, String>;
+pub(super) type Hashes = BTreeMap<String, String>;
 
 /// Each disk's SHA-256, by file name.
-pub(crate) fn hash(disks: &[PathBuf]) -> Result<Hashes> {
+fn hash(disks: &[PathBuf]) -> Result<Hashes> {
     let mut out = BTreeMap::new();
     for path in disks {
         let name = path
@@ -33,7 +33,7 @@ pub(crate) fn hash(disks: &[PathBuf]) -> Result<Hashes> {
 }
 
 /// What differs between two sets of disk hashes, in words.
-pub(crate) fn changes(before: &Hashes, now: &Hashes) -> String {
+fn changes(before: &Hashes, now: &Hashes) -> String {
     let mut v = Vec::new();
     for (name, hash) in before {
         match now.get(name) {
@@ -50,7 +50,7 @@ pub(crate) fn changes(before: &Hashes, now: &Hashes) -> String {
 
 /// What a session's record says its disks were when it last stopped.
 #[derive(Debug, PartialEq)]
-pub(crate) enum LastStop {
+pub(super) enum LastStop {
     /// Their hashes, from the last `disks stopped` event.
     Hashed(Hashes),
     /// It ran after that (or never stopped since it was made) without its
@@ -91,7 +91,7 @@ pub(super) fn last_stop_in(dir: &SessionDir) -> LastStop {
 }
 
 /// From a session's record, oldest first: its disks at its last stop.
-pub(crate) fn last_stop(events: &[Value]) -> LastStop {
+fn last_stop(events: &[Value]) -> LastStop {
     let mut last = LastStop::None;
     for e in events {
         match (str_of(e, "type"), str_of(e, "state")) {

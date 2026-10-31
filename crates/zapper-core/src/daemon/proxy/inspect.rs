@@ -323,7 +323,7 @@ pub(super) fn inject(
 /// `inject` for a session's request: the config's secrets, then the
 /// session's own. Command secrets it will use are minted first, without
 /// holding a thread while they are.
-pub(super) async fn inject_for(
+async fn inject_for(
     d: &Daemon,
     s: &Session,
     host: &str,
