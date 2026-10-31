@@ -27,20 +27,17 @@ pub fn is_aws_fake_key_id(id: &str) -> bool {
     id.len() == 20 && id.starts_with("ZAPPER")
 }
 
+/// How a template names a secret: `{{secret:NAME}}`.
+const OPEN: &str = "{{secret:";
+const CLOSE: &str = "}}";
+
 /// Names referenced as `{{secret:NAME}}` in a template.
 pub fn secret_refs(template: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("{{secret:") {
-        let after = &rest[start + 9..];
-        match after.find("}}") {
-            Some(end) => {
-                out.push(after[..end].to_string());
-                rest = &after[end + 2..];
-            }
-            None => break,
-        }
-    }
+    render(template, |name| {
+        out.push(name.to_string());
+        String::new()
+    });
     out
 }
 
@@ -48,12 +45,12 @@ pub fn secret_refs(template: &str) -> Vec<String> {
 pub fn render(template: &str, mut value: impl FnMut(&str) -> String) -> String {
     let mut out = String::new();
     let mut rest = template;
-    while let Some(start) = rest.find("{{secret:") {
-        let after = &rest[start + 9..];
-        let Some(end) = after.find("}}") else { break };
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(CLOSE) else { break };
         out.push_str(&rest[..start]);
         out.push_str(&value(&after[..end]));
-        rest = &after[end + 2..];
+        rest = &after[end + CLOSE.len()..];
     }
     out.push_str(rest);
     out

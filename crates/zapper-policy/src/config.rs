@@ -954,12 +954,20 @@ impl Config {
 
     /// Ids of every rule in the config.
     pub fn rule_ids(&self) -> BTreeSet<String> {
-        let profiles = self.profiles.values().flat_map(|p| p.policy.ids());
-        self.policy
-            .ids()
-            .chain(profiles)
+        self.layers()
+            .flat_map(|(_, p)| p.ids())
             .map(str::to_string)
             .collect()
+    }
+
+    /// The config's policy layers, the global one first, then each
+    /// profile's.
+    fn layers(&self) -> impl Iterator<Item = (Scope, &Policy)> {
+        let profiles = self
+            .profiles
+            .iter()
+            .map(|(n, p)| (Scope::Profile(n.clone()), &p.policy));
+        std::iter::once((Scope::Global, &self.policy)).chain(profiles)
     }
 
     /// Gives every rule an id.
@@ -989,13 +997,9 @@ impl Config {
 
     /// Finds the scope holding the rule with this id.
     pub fn find_rule(&self, id: &str) -> Option<Scope> {
-        if self.policy.ids().any(|i| i == id) {
-            return Some(Scope::Global);
-        }
-        self.profiles
-            .iter()
-            .find(|(_, p)| p.policy.ids().any(|i| i == id))
-            .map(|(n, _)| Scope::Profile(n.clone()))
+        self.layers()
+            .find(|(_, p)| p.ids().any(|i| i == id))
+            .map(|(scope, _)| scope)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1015,13 +1019,7 @@ impl Config {
     /// Every layer's rules: unique ids, valid globs, the secrets they name, a database rule's shape.
     fn check_rules(&self, errors: &mut Vec<String>) {
         let mut seen = BTreeSet::new();
-        let mut layers = vec![(Scope::Global, &self.policy)];
-        layers.extend(
-            self.profiles
-                .iter()
-                .map(|(n, p)| (Scope::Profile(n.clone()), &p.policy)),
-        );
-        for (scope, policy) in layers {
+        for (scope, policy) in self.layers() {
             for id in policy.ids() {
                 if !seen.insert(id) {
                     errors.push(format!("{scope}: duplicate rule id {id}"));
