@@ -80,19 +80,17 @@ pub(crate) fn restore(daemon: &Arc<Daemon>) {
 
 /// The durable VMM of session `id` in `dir`, if it still runs (its pid that
 /// session's VMM, not one reused since).
-pub(super) fn live_vmm(dir: &SessionDir, id: &str) -> Option<crate::daemon::vm::Vmm> {
-    let vmm: crate::daemon::vm::Vmm =
-        serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
+fn live_vmm(dir: &SessionDir, id: &str) -> Option<vm::Vmm> {
+    let vmm: vm::Vmm = serde_json::from_slice(&std::fs::read(dir.vmm()).ok()?).ok()?;
     vmm.runs_for(id).then_some(vmm)
 }
 
 /// Stops session `id`'s VMM `vmm` (its Firecracker dies with it); whether
 /// it was running.
-pub(super) fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
-    if !vmm.runs_for(id) {
+fn kill_vmm(vmm: &vm::Vmm, id: &str) -> bool {
+    if !vmm.kill(id) {
         return false;
     }
-    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
     for _ in 0..50 {
         if !vmm.runs_for(id) {
             break;
@@ -107,11 +105,11 @@ pub(super) fn kill_vmm(vmm: &crate::daemon::vm::Vmm, id: &str) -> bool {
 /// claimed again, its lifetime from when its VM started; then, in `rt`, its
 /// guest served again ([`serve_adopted`]), its driver started, and its
 /// lifetime watched.
-pub(super) fn adopt(
+fn adopt(
     daemon: &Arc<Daemon>,
     saved: Saved,
     dir: &SessionDir,
-    vmm: &crate::daemon::vm::Vmm,
+    vmm: &vm::Vmm,
     rt: &tokio::runtime::Handle,
 ) -> Result<()> {
     let audit = record::Writer::open(&dir.audit())?;
@@ -152,11 +150,7 @@ pub(super) fn adopt(
 /// Takes on a persistent session whose VM an earlier daemon left running:
 /// its guest's sockets bound again, its VMM watched by pid and start, and
 /// its agent's control channel taken again when it connects with its token.
-pub(super) async fn serve_adopted(
-    daemon: &Arc<Daemon>,
-    session: &Arc<Session>,
-    vmm: vm::Vmm,
-) -> Result<()> {
+async fn serve_adopted(daemon: &Arc<Daemon>, session: &Arc<Session>, vmm: vm::Vmm) -> Result<()> {
     serve_guest(daemon, session)?;
     *session.runtime.vm().lock().await = Some(vm::VmProc::Adopted {
         vmm,

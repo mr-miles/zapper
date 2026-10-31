@@ -1,6 +1,6 @@
 //! Minimal Kafka protocol bits for the Kafka auth-relay: the
 //! proxy authenticates the server leg with SASL — `SCRAM-SHA-256` (reusing
-//! [`super::pgwire::scram`]), `PLAIN`, or `OAUTHBEARER` (a bearer token) —
+//! [`super::scram`]), `PLAIN`, or `OAUTHBEARER` (a bearer token) —
 //! carried over `SaslHandshake`/`SaslAuthenticate` (KIP-152), then the relay
 //! splices. The guest holds no credential and connects as a plaintext Kafka
 //! client; its requests run on the pre-authenticated connection.
@@ -11,7 +11,7 @@
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use super::pgwire::scram;
+use super::scram;
 
 const API_SASL_HANDSHAKE: i16 = 17;
 const API_SASL_AUTHENTICATE: i16 = 36;

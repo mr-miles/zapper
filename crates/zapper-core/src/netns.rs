@@ -23,21 +23,21 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-pub const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 1);
-pub const GUEST: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
-/// The point-to-point IPv6 link (ULA), the counterpart of GATEWAY/GUEST. Used
-/// only when the host and guest kernels have IPv6; otherwise the datapath
-/// stays IPv4-only.
-pub const GATEWAY6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+/// The link's addresses, the guest agent's too (`zapper_proto::proto`).
+/// IPv6 only when the host and guest kernels have it; otherwise the
+/// datapath stays IPv4-only.
+const GATEWAY: Ipv4Addr = zapper_policy::proto::NIC_GATEWAY;
+const GUEST: Ipv4Addr = zapper_policy::proto::NIC_GUEST;
+const GATEWAY6: Ipv6Addr = zapper_policy::proto::NIC_GATEWAY6;
 pub const GUEST_MAC: &str = "06:00:0a:00:02:02";
 pub const TAP: &str = "tap0";
 const TCP_PORT: u16 = 15001;
 const DNS_PORT: u16 = 15053;
 /// Daemon socket in the VMM's directory.
 pub const SOCKET: &str = "nic.sock";
-/// TCP connections relayed at once, each two threads: the daemon takes as
-/// many of a session's (`GuestRuntime::conns`). One over is closed.
-const MAX_TCP: usize = 256;
+/// TCP connections relayed at once, v4 and v6 together, each two threads:
+/// as many as the daemon takes of a session's. One over is closed.
+const MAX_TCP: usize = crate::daemon::session::MAX_GUEST_CONNECTIONS;
 /// DNS queries relayed at once, each a thread; one over is dropped (the
 /// guest's resolver asks again).
 const MAX_DNS: usize = 32;
@@ -171,17 +171,20 @@ pub fn setup(tap_user: Option<u32>) -> Result<()> {
 /// started only when the tap has an IPv6 address (a host with IPv6).
 pub fn serve(dir: &Path) -> Result<()> {
     let socket = dir.join(SOCKET);
+    // One count for both listeners' connections.
+    let slots = Slots::new(MAX_TCP);
     serve_tcp(
         TcpListener::bind(SocketAddrV4::new(GATEWAY, TCP_PORT))?,
         socket.clone(),
         false,
+        slots.clone(),
     );
     serve_dns(
         UdpSocket::bind(SocketAddrV4::new(GATEWAY, DNS_PORT))?,
         socket.clone(),
     );
     if let Ok(tcp6) = TcpListener::bind(SocketAddrV6::new(GATEWAY6, TCP_PORT, 0, 0)) {
-        serve_tcp(tcp6, socket.clone(), true);
+        serve_tcp(tcp6, socket.clone(), true, slots);
     }
     if let Ok(udp6) = UdpSocket::bind(SocketAddrV6::new(GATEWAY6, DNS_PORT, 0, 0)) {
         serve_dns(udp6, socket.clone());
@@ -189,11 +192,10 @@ pub fn serve(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Relays each captured TCP connection to the daemon, at most `MAX_TCP` at
-/// once (per listener). `v6` selects how the pre-redirect destination is
-/// read.
-fn serve_tcp(listener: TcpListener, socket: PathBuf, v6: bool) {
-    let slots = Slots::new(MAX_TCP);
+/// Relays each captured TCP connection to the daemon, while `slots` (shared
+/// with the other family's listener) has room. `v6` selects how the
+/// pre-redirect destination is read.
+fn serve_tcp(listener: TcpListener, socket: PathBuf, v6: bool, slots: Slots) {
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let Some(slot) = slots.take() else {

@@ -572,7 +572,7 @@ impl ServiceApi for Core {
     }
 
     fn remove_mcp_server(&self, id: u64) -> bool {
-        self.d.gateway.remove(id).is_some()
+        self.d.gateway.remove(id)
     }
 }
 

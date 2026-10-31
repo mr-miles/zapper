@@ -505,7 +505,10 @@ async fn a_kind_without_a_driver_is_an_error_at_once() {
     let driver = s.driver.clone().expect("driven by its profile");
     super::drive(t.core.daemon(), &s);
     assert_eq!(driver.status(), Status::Error);
-    assert_eq!(driver.info()["error"], "agent kind generic can't be driven");
+    assert_eq!(
+        driver.info()["error"],
+        "agent kind generic can't be run headless (those that can: claude-code, pi)"
+    );
     assert!(driver_events(&t, &s).is_empty(), "no loop runs");
 
     // Sessions without a driver: nothing to start.

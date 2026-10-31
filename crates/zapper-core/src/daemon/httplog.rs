@@ -45,13 +45,13 @@ impl Captured {
 }
 
 pub struct Record {
-    pub id: u64,
-    pub ts: f64,
-    pub scheme: &'static str,
-    pub method: String,
-    pub host: String,
-    pub port: u16,
-    pub path: Option<String>,
+    id: u64,
+    ts: f64,
+    scheme: &'static str,
+    method: String,
+    host: String,
+    port: u16,
+    path: Option<String>,
     pub action: Action,
     pub rule: Option<String>,
     pub scope: Option<String>,
@@ -61,14 +61,14 @@ pub struct Record {
     pub redact: Vec<String>,
     pub error: Option<String>,
     pub status: Option<u16>,
-    pub req_headers: Vec<(String, String)>,
+    req_headers: Vec<(String, String)>,
     pub resp_headers: Vec<(String, String)>,
     pub req_body: Captured,
     pub resp_body: Captured,
     start: Instant,
-    pub ttfb_ms: Option<f64>,
-    pub total_ms: Option<f64>,
-    pub done: bool,
+    ttfb_ms: Option<f64>,
+    total_ms: Option<f64>,
+    done: bool,
 }
 
 impl Record {
@@ -78,7 +78,7 @@ impl Record {
     }
 }
 
-pub type Shared = Arc<Mutex<Record>>;
+pub(super) type Shared = Arc<Mutex<Record>>;
 
 #[derive(Default)]
 pub struct RequestLog {
@@ -87,7 +87,7 @@ pub struct RequestLog {
     body_bytes: usize,
 }
 
-pub fn headers(h: &hyper::HeaderMap) -> Vec<(String, String)> {
+pub(super) fn headers(h: &hyper::HeaderMap) -> Vec<(String, String)> {
     h.iter()
         .map(|(k, v)| {
             (
@@ -99,7 +99,6 @@ pub fn headers(h: &hyper::HeaderMap) -> Vec<(String, String)> {
 }
 
 impl RequestLog {
-    #[allow(clippy::too_many_arguments)]
     /// A connection's record (a tunnel, a relay, a refusal): `CONNECT`, no
     /// path, no headers.
     pub fn start_connect(&mut self, scheme: &'static str, host: &str, port: u16) -> Shared {
@@ -195,7 +194,7 @@ impl RequestLog {
 /// lock records while holding the log, so the record's lock is released
 /// here before the log's is taken; holding both the other way round
 /// deadlocked the proxy against the officers' digest.
-pub fn finish(log: &Mutex<RequestLog>, rec: &Shared) {
+pub(super) fn finish(log: &Mutex<RequestLog>, rec: &Shared) {
     let bytes = {
         let mut r = rec.lock().unwrap();
         if r.done {
@@ -209,7 +208,7 @@ pub fn finish(log: &Mutex<RequestLog>, rec: &Shared) {
     log.lock().unwrap().account(rec, bytes);
 }
 
-pub fn mark_ttfb(rec: &Shared) {
+pub(super) fn mark_ttfb(rec: &Shared) {
     let mut r = rec.lock().unwrap();
     r.ttfb_ms = Some(r.elapsed_ms());
 }
@@ -239,7 +238,7 @@ fn summary(r: &Record) -> Value {
 }
 
 /// Replaces each added secret value with `***`.
-pub(crate) fn redact(text: &str, values: &[String]) -> String {
+fn redact(text: &str, values: &[String]) -> String {
     let mut out = text.to_string();
     for v in values.iter().filter(|v| v.len() >= 4) {
         out = out.replace(v.as_str(), "***");
@@ -318,7 +317,7 @@ pub enum Side {
 }
 
 /// Passes a body through unchanged, keeping its start and counting it.
-pub struct Tee {
+pub(super) struct Tee {
     inner: Body,
     rec: Shared,
     log: Arc<Mutex<RequestLog>>,

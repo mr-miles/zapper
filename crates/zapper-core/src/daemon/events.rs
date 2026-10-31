@@ -5,7 +5,6 @@
 //! events to its audit log.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -162,11 +161,17 @@ pub enum EventBody {
 /// The live event stream and its recent history.
 pub(crate) struct EventBus {
     tx: broadcast::Sender<Event>,
-    recent: Mutex<VecDeque<Event>>,
-    seq: AtomicU64,
+    recent: Mutex<Recent>,
     /// This daemon run's ID: `seq` counts from 1 again after a restart, so a
     /// subscriber resumes from `EPOCH:SEQ`.
     epoch: String,
+}
+
+/// Recent history, and the `seq` the next event gets: numbered under the
+/// same lock it is kept under.
+struct Recent {
+    events: VecDeque<Event>,
+    next: u64,
 }
 
 /// Where a subscriber left off: the epoch and the last `seq` it got, as
@@ -207,8 +212,10 @@ impl EventBus {
         let (tx, _) = broadcast::channel(1024);
         EventBus {
             tx,
-            recent: Mutex::new(VecDeque::new()),
-            seq: AtomicU64::new(1),
+            recent: Mutex::new(Recent {
+                events: VecDeque::new(),
+                next: 1,
+            }),
             epoch: super::random_id(8),
         }
     }
@@ -229,10 +236,18 @@ impl EventBus {
         after: Option<&Cursor>,
         history: bool,
     ) -> (Vec<Catchup>, Option<u64>) {
-        let recent = self.recent.lock().unwrap();
+        let guard = self.recent.lock().unwrap();
+        let recent = &guard.events;
         let cut = recent.back().map(|e| e.seq).unwrap_or(0);
-        let wanted = |e: &&Event| session.is_none() || e.session.as_deref() == session;
-        let all = || recent.iter().filter(wanted).cloned().map(Catchup::Event);
+        // A session's (or all) events after `seq`; `seq`s start at 1.
+        let since = |seq: u64| {
+            recent
+                .iter()
+                .filter(move |e| e.seq > seq)
+                .filter(move |e| session.is_none() || e.session.as_deref() == session)
+                .cloned()
+                .map(Catchup::Event)
+        };
         let mut out = Vec::new();
         match after {
             Some(c) if c.epoch == self.epoch => {
@@ -245,23 +260,16 @@ impl EventBus {
                         )));
                     }
                 }
-                out.extend(
-                    recent
-                        .iter()
-                        .filter(wanted)
-                        .filter(|e| e.seq > c.seq)
-                        .cloned()
-                        .map(Catchup::Event),
-                );
+                out.extend(since(c.seq));
             }
             Some(c) => {
                 out.push(Catchup::Gap(format!(
                     "the daemon restarted: its events before run {} are gone (they were run {})",
                     self.epoch, c.epoch
                 )));
-                out.extend(all());
+                out.extend(since(0));
             }
-            None if history => out.extend(all()),
+            None if history => out.extend(since(0)),
             None => return (out, None),
         }
         (out, Some(cut))
@@ -275,17 +283,18 @@ impl EventBus {
         // skips live events up to the last it was sent from history.
         let event = {
             let mut recent = self.recent.lock().unwrap();
+            recent.next += 1;
             let event = Event {
-                seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                seq: recent.next - 1,
                 epoch: self.epoch.clone(),
                 ts: now(),
                 session: session.map(|s| s.id.clone()),
                 body,
             };
-            if recent.len() >= RECENT_EVENTS {
-                recent.pop_front();
+            if recent.events.len() >= RECENT_EVENTS {
+                recent.events.pop_front();
             }
-            recent.push_back(event.clone());
+            recent.events.push_back(event.clone());
             let _ = self.tx.send(event.clone());
             event
         };
@@ -299,6 +308,7 @@ impl EventBus {
         self.recent
             .lock()
             .unwrap()
+            .events
             .iter()
             .filter(|e| session.is_none() || e.session.as_deref() == session)
             .cloned()

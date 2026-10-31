@@ -24,7 +24,7 @@ where
 }
 
 enum Sender {
-    H1(hyper::client::conn::http1::SendRequest<Body>),
+    H1(SendRequestH1),
     H2(hyper::client::conn::http2::SendRequest<Body>),
 }
 
@@ -150,18 +150,7 @@ fn deny(
     v: &Verdict,
     denial: String,
 ) -> Response<Body> {
-    log(
-        d,
-        s,
-        NetLog {
-            req: net,
-            verdict: Some(v),
-            inspected: true,
-            status: None,
-            secrets: vec![],
-            error: None,
-        },
-    );
+    log(d, s, NetLog::new(net, Some(v), true));
     note_failure(s, rec, 403, None);
     text(StatusCode::FORBIDDEN, denial)
 }
@@ -242,19 +231,12 @@ pub(super) async fn mitm<S>(
     d: Arc<Daemon>,
     s: Arc<Session>,
     io: S,
-    host: String,
-    port: u16,
+    endpoint: NetRequest,
     addr: Target,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let endpoint = NetRequest {
-        host: host.clone(),
-        port,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
     let tls = match s.tls.accept(io, &host, tls::Alpn::Any).await {
         Ok(t) => t,
         Err(error) => {
@@ -262,18 +244,14 @@ pub(super) async fn mitm<S>(
                 &d,
                 &s,
                 NetLog {
-                    req: &endpoint,
-                    verdict: None,
-                    inspected: true,
-                    status: None,
-                    secrets: vec![],
                     error: Some(error),
+                    ..NetLog::new(&endpoint, None, true)
                 },
             );
             return;
         }
     };
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
+    let h2 = tls::is_h2(tls.get_ref().1);
     let upstream: Upstream = Default::default();
     let svc = service_fn(move |req| {
         let (d, s, host, upstream, addr) = (
@@ -298,7 +276,7 @@ pub(super) async fn mitm<S>(
 /// request log replaces with `***` wherever they show up.
 pub(crate) struct Injected {
     pub(crate) names: Vec<String>,
-    pub(crate) values: Vec<String>,
+    values: Vec<String>,
 }
 
 #[cfg(test)]
@@ -323,7 +301,7 @@ pub(super) fn inject(
 /// `inject` for a session's request: the config's secrets, then the
 /// session's own. Command secrets it will use are minted first, without
 /// holding a thread while they are.
-pub(super) async fn inject_for(
+async fn inject_for(
     d: &Daemon,
     s: &Session,
     host: &str,
@@ -575,12 +553,8 @@ where
             d,
             s,
             NetLog {
-                req: &net,
-                verdict: None,
-                inspected: true,
-                status: None,
-                secrets: vec![],
                 error: Some(why.clone()),
+                ..NetLog::new(&net, None, true)
             },
         );
         note_failure(s, &rec, status.as_u16(), Some(why.clone()));
@@ -716,7 +690,7 @@ async fn open_upstream(
         .map_err(|e| format!("connecting to {host}: {e}"))?;
     let tls = tls::connect(tcp, host).await?;
     // Speak whatever the server negotiated by ALPN.
-    let h2 = tls.get_ref().1.alpn_protocol().is_some_and(|p| p == b"h2");
+    let h2 = tls::is_h2(tls.get_ref().1);
     if h2 {
         let (sender, conn) =
             hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
@@ -748,37 +722,49 @@ pub(super) async fn plain(
     else {
         return text(StatusCode::BAD_REQUEST, "bad request target");
     };
-    forward_plain(d, s, req, host, port, pool).await
+    forward_plain(d, s, req, host, port, None, pool).await
 }
 
-/// Inspects plain HTTP on a captured connection to `host:port`.
+/// Inspects plain HTTP on a captured connection to `host:port`, whose
+/// address `addr` was resolved and checked when it was made: every request
+/// on it goes there, as an inspected HTTPS connection's do.
 pub(super) async fn plain_inspected<S>(
     d: Arc<Daemon>,
     s: Arc<Session>,
     io: S,
     host: String,
     port: u16,
+    addr: Target,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // One pool for this captured connection's requests (all to one origin).
     let pool = PlainPool::default();
     let svc = service_fn(move |req| {
-        let (d, s, host, pool) = (d.clone(), s.clone(), host.clone(), pool.clone());
-        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, pool).await) }
+        let (d, s, host, pool, addr) = (
+            d.clone(),
+            s.clone(),
+            host.clone(),
+            pool.clone(),
+            addr.clone(),
+        );
+        async move { Ok::<_, Infallible>(forward_plain(d, s, req, host, port, Some(addr), pool).await) }
     });
     let _ = http1().serve_connection(TokioIo::new(io), svc).await;
 }
 
 /// An inspected plain-HTTP request to `host:port`, forwarded through the
-/// per-connection, origin-keyed `PlainPool`. The target is resolved here (a
-/// bad/forbidden one is a 403) since a plain proxy connection is multi-origin.
+/// per-connection, origin-keyed `PlainPool`, to `addr` when the connection's
+/// is known (a captured one). Without it (a proxy-aware client's absolute
+/// URIs, each naming its own host) the target is resolved and checked here,
+/// for this request: a bad or forbidden one is a 403.
 async fn forward_plain(
     d: Arc<Daemon>,
     s: Arc<Session>,
     req: Request<Incoming>,
     host: String,
     port: u16,
+    addr: Option<Target>,
     pool: PlainPool,
 ) -> Response<Body> {
     let (dc, sc) = (d.clone(), s.clone());
@@ -792,9 +778,12 @@ async fn forward_plain(
         80,
         true,
         move |mut parts, body, path| async move {
-            let addr = target(&dc, &sc, &host, port)
-                .await
-                .map_err(|e| (StatusCode::FORBIDDEN, e))?;
+            let addr = match addr {
+                Some(a) => a,
+                None => target(&dc, &sc, &host, port)
+                    .await
+                    .map_err(|e| (StatusCode::FORBIDDEN, e))?,
+            };
             parts.uri = path.parse().unwrap_or_default();
             pool.send(
                 &dc,

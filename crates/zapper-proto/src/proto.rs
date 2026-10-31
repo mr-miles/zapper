@@ -31,8 +31,14 @@ pub const SHELL_PORT: u32 = 1024;
 /// session. A connection names a server on its first line, then carries MCP
 /// as on stdio: one JSON-RPC message per line, each way.
 pub const MCP_PORT: u32 = 1100;
-/// The guest's address on its NIC (`crate::netns` on the host sets it).
-pub const GUEST_NIC_ADDR: &str = "10.0.2.2";
+/// The NIC's point-to-point link, for the host (its namespace's end of the
+/// tap, `zapper_core::netns`) and the guest agent alike: the gateway, which
+/// is also the guest's DNS server, and the guest. IPv6 (a ULA) only where
+/// the host and guest kernels have it.
+pub const NIC_GATEWAY: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 1);
+pub const NIC_GUEST: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 2);
+pub const NIC_GATEWAY6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 1);
+pub const NIC_GUEST6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0xfd00, 0x2, 0, 0, 0, 0, 0, 2);
 /// Longest MCP message from the guest.
 pub const MAX_MCP_LINE: usize = 128 * 1024;
 
@@ -276,7 +282,8 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+    /// The frame on the wire: its kind, its body's length, its body.
+    pub fn encode(&self) -> Vec<u8> {
         let (kind, body): (u8, Vec<u8>) = match self {
             Frame::Data(d) => (0, d.clone()),
             Frame::Stderr(d) => (1, d.clone()),
@@ -290,7 +297,24 @@ impl Frame {
         buf.push(kind);
         buf.extend_from_slice(&(body.len() as u32).to_be_bytes());
         buf.extend_from_slice(&body);
-        w.write_all(&buf)
+        buf
+    }
+
+    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+        w.write_all(&self.encode())
+    }
+
+    /// What a frame's header says: its kind and its body's length, refused
+    /// past `MAX_FRAME`. The one check of it, for every reader.
+    pub fn header(header: &[u8; 5]) -> io::Result<(u8, usize)> {
+        let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
+        if len > MAX_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
+        }
+        Ok((header[0], len))
     }
 
     /// Parses a frame from its header and body.
@@ -321,22 +345,26 @@ impl Frame {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             other => other?,
         }
-        let len = u32::from_be_bytes(header[1..].try_into().unwrap()) as usize;
-        if len > MAX_FRAME {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "frame too large",
-            ));
-        }
+        let (kind, len) = Frame::header(&header)?;
         let mut body = vec![0; len];
         r.read_exact(&mut body)?;
-        Frame::decode(header[0], body).map(Some)
+        Frame::decode(kind, body).map(Some)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The NIC's addresses as the guest writes them (resolv.conf, `ip`) and
+    /// the host configures them: one link.
+    #[test]
+    fn the_nic_link_addresses() {
+        assert_eq!(NIC_GATEWAY.to_string(), "10.0.2.1");
+        assert_eq!(NIC_GUEST.to_string(), "10.0.2.2");
+        assert_eq!(NIC_GATEWAY6.to_string(), "fd00:2::1");
+        assert_eq!(NIC_GUEST6.to_string(), "fd00:2::2");
+    }
 
     #[test]
     fn a_tool_is_named_without_its_server() {

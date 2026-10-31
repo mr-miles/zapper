@@ -54,18 +54,36 @@ struct Relayed {
 }
 
 /// Resolves the one `dbauth` secret a database rule names (the config validates
-/// there is exactly one with a user).
-async fn db_cred(d: &Daemon, name: Option<&str>) -> Result<DbCred, String> {
+/// there is exactly one with a user), for `host`: checked and read from one
+/// config, so the secret checked is the one used. A refusal is a 403, a
+/// credential that can't be had a 500.
+async fn db_cred(d: &Daemon, name: Option<&str>, host: &str) -> Result<DbCred, (u16, String)> {
     let sec = {
         let c = d.config.read().unwrap();
-        name.and_then(|n| c.secrets.get(n))
-            .cloned()
-            .ok_or("database rule has no dbauth secret")?
+        let name = name.ok_or((500, "database rule has no dbauth secret".to_string()))?;
+        let sec = c
+            .secrets
+            .get(name)
+            .ok_or_else(|| (403, format!("unknown secret {name}")))?;
+        // The credential goes only to its secret's hosts, as an injected one
+        // does: a rule wider than them doesn't widen where the secret goes.
+        crate::daemon::secrets::check(
+            name,
+            sec,
+            crate::daemon::secrets::Use::Database,
+            host,
+            false,
+        )
+        .map_err(|e| (403, e))?;
+        sec.clone()
     };
-    let user = sec.user.clone().ok_or("dbauth secret has no user")?;
+    let user = sec
+        .user
+        .clone()
+        .ok_or((500, "dbauth secret has no user".to_string()))?;
     let password = crate::mint::secret_value(&sec.source)
         .await
-        .map_err(|e| format!("resolving dbauth secret: {e:#}"))?;
+        .map_err(|e| (500, format!("resolving dbauth secret: {e:#}")))?;
     Ok(DbCred {
         user,
         database: sec.database.clone(),
@@ -107,12 +125,8 @@ pub(super) async fn relay_database<S>(
             d,
             s,
             NetLog {
-                req: endpoint,
-                verdict: Some(&v),
-                inspected: false,
-                status: None,
-                secrets: vec![],
                 error: Some(error.clone()),
+                ..NetLog::new(endpoint, Some(&v), false)
             },
         );
         note_failure(s, &rec, status, Some(error));
@@ -129,26 +143,9 @@ pub(super) async fn relay_database<S>(
         );
     };
     let name = v.effects.secrets.first().cloned();
-    // The credential goes only to its secret's hosts, as an injected one
-    // does: a rule wider than them doesn't widen where the secret goes.
-    if let Some(n) = &name {
-        let checked = match d.config.read().unwrap().secrets.get(n) {
-            Some(sec) => crate::daemon::secrets::check(
-                n,
-                sec,
-                crate::daemon::secrets::Use::Database,
-                &endpoint.host,
-                false,
-            ),
-            None => Err(format!("unknown secret {n}")),
-        };
-        if let Err(e) = checked {
-            return fail(403, e);
-        }
-    }
-    let cred = match db_cred(d, name.as_deref()).await {
+    let cred = match db_cred(d, name.as_deref(), &endpoint.host).await {
         Ok(c) => c,
-        Err(e) => return fail(500, e),
+        Err((status, e)) => return fail(status, e),
     };
     let server = match dial(*server_addr).await {
         Ok(c) => c,
@@ -433,25 +430,21 @@ where
             .write_all(&mysql::packet(1, &mysql::ssl_request(db.is_some())))
             .await
             .map_err(|e| format!("sending SSLRequest: {e}"))?;
-        let mut b: Box<dyn services::Io> = Box::new(tls::connect(server, host).await?);
-        b.write_all(&mysql::packet(
-            2,
-            &mysql::handshake_response(true, &cred.user, &auth, db, &hs.plugin),
+        Box::new(tls::connect(server, host).await?)
+    } else {
+        plaintext_leg_ok(cred.plaintext, host)?;
+        Box::new(server)
+    };
+    // The handshake response: after the SSLRequest (seq 1) over TLS, else
+    // first.
+    let seq = if guest_tls { 2 } else { 1 };
+    server
+        .write_all(&mysql::packet(
+            seq,
+            &mysql::handshake_response(guest_tls, &cred.user, &auth, db, &hs.plugin),
         ))
         .await
         .map_err(|e| format!("sending the handshake response: {e}"))?;
-        b
-    } else {
-        plaintext_leg_ok(cred.plaintext, host)?;
-        server
-            .write_all(&mysql::packet(
-                1,
-                &mysql::handshake_response(false, &cred.user, &auth, db, &hs.plugin),
-            ))
-            .await
-            .map_err(|e| format!("sending the handshake response: {e}"))?;
-        Box::new(server)
-    };
     mysql::complete_auth(&mut server, &mut sbuf, &cred.password, guest_tls).await?;
 
     // Tell the guest it is logged in (OK follows its handshake response).

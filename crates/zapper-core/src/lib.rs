@@ -4,7 +4,7 @@
 //! `zapper` binary is the CLI over it.
 
 mod daemon;
-pub mod errors;
+pub(crate) mod errors;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;
 pub mod images;

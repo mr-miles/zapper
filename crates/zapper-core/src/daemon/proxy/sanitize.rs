@@ -40,7 +40,7 @@ fn hex(b: u8) -> Option<u8> {
 
 /// The path and query to judge and forward, or why the path is refused. The
 /// query is kept as sent; it is the path that rules match.
-pub fn normalize_path(path_and_query: &str) -> Result<String, String> {
+pub(super) fn normalize_path(path_and_query: &str) -> Result<String, String> {
     let (path, query) = match path_and_query.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (path_and_query, None),
@@ -168,7 +168,11 @@ pub(super) fn percent_decode(s: &str, plus_is_space: bool) -> String {
 /// Why a request is refused for naming another method than its own, if it
 /// does: in an override header (each comma-separated value) or an override
 /// query parameter. Naming its own method is harmless.
-pub fn method_override(method: &str, path_and_query: &str, headers: &HeaderMap) -> Option<String> {
+pub(super) fn method_override(
+    method: &str,
+    path_and_query: &str,
+    headers: &HeaderMap,
+) -> Option<String> {
     let other = |named: &str| !named.trim().eq_ignore_ascii_case(method);
     for name in OVERRIDE_HEADERS {
         for v in headers.get_all(name) {
@@ -204,7 +208,7 @@ pub fn method_override(method: &str, path_and_query: &str, headers: &HeaderMap) 
 const MASK_MIN: usize = 8;
 
 /// The injected values worth masking, longest first.
-pub fn mask_values(values: &[String]) -> Arc<Vec<Vec<u8>>> {
+pub(super) fn mask_values(values: &[String]) -> Arc<Vec<Vec<u8>>> {
     let mut v: Vec<Vec<u8>> = values
         .iter()
         .filter(|v| v.len() >= MASK_MIN)
@@ -218,7 +222,7 @@ pub fn mask_values(values: &[String]) -> Arc<Vec<Vec<u8>>> {
 /// The response's content coding, when it has one other than `identity`
 /// and some of `values` would be masked in it: a body that can't be
 /// searched for them until it is decoded ([`decode_response`]).
-pub fn unmaskable(headers: &HeaderMap, values: &[String]) -> Option<String> {
+pub(super) fn unmaskable(headers: &HeaderMap, values: &[String]) -> Option<String> {
     if !values.iter().any(|v| v.len() >= MASK_MIN) {
         return None;
     }
@@ -289,7 +293,7 @@ impl Decoder {
 /// uncompressed, without `Content-Encoding` or `Content-Length`. An error
 /// for a coding that can't be decoded here (several, or one unknown).
 /// Malformed compressed data ends the body where it stops decoding.
-pub fn decode_response(
+pub(super) fn decode_response(
     resp: hyper::Response<hyper::body::Incoming>,
     coding: &str,
 ) -> Result<hyper::Response<Body>, String> {
@@ -397,7 +401,7 @@ fn mask(buf: &mut [u8], values: &[Vec<u8>]) {
 }
 
 /// Masks the values in every response header.
-pub fn mask_headers(headers: &mut HeaderMap, values: &[Vec<u8>]) {
+pub(super) fn mask_headers(headers: &mut HeaderMap, values: &[Vec<u8>]) {
     if values.is_empty() {
         return;
     }
@@ -416,7 +420,7 @@ pub fn mask_headers(headers: &mut HeaderMap, values: &[Vec<u8>]) {
 /// `longest - 1` bytes are held back until more arrive, so a value split
 /// across two frames is still caught. Lengths don't change, so the body's
 /// size (and `Content-Length`) stays right.
-pub struct Masked {
+pub(super) struct Masked {
     inner: Body,
     values: Arc<Vec<Vec<u8>>>,
     held: Vec<u8>,

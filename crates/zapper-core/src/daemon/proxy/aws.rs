@@ -25,7 +25,7 @@ use super::Body;
 
 /// Real keys, from the secret's credential_process JSON.
 #[derive(Clone)]
-pub struct Creds {
+pub(super) struct Creds {
     pub key_id: String,
     pub secret: String,
     pub token: Option<String>,
@@ -52,7 +52,7 @@ impl Creds {
 
 /// What a guest's signature says: who, when for, and over what.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Signed {
+pub(super) struct Signed {
     pub key_id: String,
     pub region: String,
     pub service: String,
@@ -64,8 +64,8 @@ pub struct Signed {
 
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-pub const STREAMING: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
-pub const STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+const STREAMING: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+const STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 
 fn token_ok(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -81,7 +81,7 @@ fn parse_credential(c: &str) -> Option<(String, String, String)> {
 }
 
 /// The guest's signature, from its `Authorization` header or its query.
-pub fn signed(headers: &HeaderMap, query: &str) -> Option<Signed> {
+fn signed(headers: &HeaderMap, query: &str) -> Option<Signed> {
     if let Some(auth) = headers
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -222,7 +222,7 @@ fn signing_key(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8>
 }
 
 /// `20130524T000000Z`.
-pub fn amz_date(t: time::OffsetDateTime) -> String {
+fn amz_date(t: time::OffsetDateTime) -> String {
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
         t.year(),
@@ -236,7 +236,7 @@ pub fn amz_date(t: time::OffsetDateTime) -> String {
 
 /// What a request was signed with: for its chunks to follow.
 #[derive(Clone)]
-pub struct Signer {
+pub(super) struct Signer {
     key: Vec<u8>,
     date: String,
     scope: String,
@@ -254,7 +254,7 @@ impl Signer {
 /// returned path carries them. Returns the path to forward, the signature
 /// and what chunks are signed with.
 #[allow(clippy::too_many_arguments)]
-pub fn sign(
+fn sign(
     method: &str,
     path_and_query: &str,
     headers: &mut HeaderMap,
@@ -372,7 +372,7 @@ pub fn sign(
 /// A body in aws-chunked encoding, its chunk signatures (and the trailer's)
 /// redone as it streams, each chained from the one before and the request's
 /// own. Lengths don't change, so `Content-Length` stays right.
-pub struct Chunks {
+struct Chunks {
     inner: Body,
     signer: Arc<Signer>,
     prev: String,
@@ -603,7 +603,7 @@ pub(super) enum Outcome {
 }
 
 /// A request signed again with an `aws` secret's keys.
-pub struct Resigned {
+pub(super) struct Resigned {
     pub body: Body,
     pub path: String,
     /// The secret's name, for the record.
@@ -662,13 +662,10 @@ pub(super) async fn resign(
         host,
         !plaintext,
     )?;
-    let creds = match crate::mint::secret_value(&secret.source).await {
-        Ok(v) => match Creds::parse(&v) {
-            Ok(c) => c,
-            Err(e) => return Err(format!("secret {name}: {e}")),
-        },
-        Err(e) => return Err(format!("secret {name}: {e:#}")),
-    };
+    let value = crate::mint::secret_value(&secret.source)
+        .await
+        .map_err(|e| format!("secret {name}: {e:#}"))?;
+    let creds = Creds::parse(&value).map_err(|e| format!("secret {name}: {e}"))?;
     let claimed = parts
         .headers
         .get("x-amz-content-sha256")
@@ -713,7 +710,7 @@ pub(super) async fn resign(
         HeaderValue::from_static("identity"),
     );
     let now = time::OffsetDateTime::now_utc();
-    let (out_path, seed, signer) = match sign(
+    let (out_path, seed, signer) = sign(
         parts.method.as_str(),
         path,
         &mut parts.headers,
@@ -721,10 +718,7 @@ pub(super) async fn resign(
         &creds,
         &payload,
         now,
-    ) {
-        Ok(x) => x,
-        Err(e) => return Err(e),
-    };
+    )?;
     let body = match chunked {
         Some(trailer) => Chunks::wrap(body, signer, seed, trailer),
         None => body,

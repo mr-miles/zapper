@@ -14,7 +14,7 @@ use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 pub(crate) const MANAGED_SETTINGS: &str = "/etc/claude-code/managed-settings.json";
 
 /// Claude Code.
-pub struct ClaudeCode;
+pub(crate) struct ClaudeCode;
 
 impl Harness for ClaudeCode {
     fn kind(&self) -> &'static str {
@@ -37,7 +37,11 @@ impl Harness for ClaudeCode {
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
             "1".into(),
         );
-        files.extend(claude_files(profile, home, env.get("ANTHROPIC_API_KEY")));
+        files.extend(claude_files(
+            profile,
+            home,
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+        ));
     }
 
     fn headless(&self) -> Option<&dyn Headless> {
@@ -173,7 +177,7 @@ fn claude_settings(agent: &AgentSpec) -> Value {
 
 /// `~/.claude.json`: onboarding/trust state, MCP servers, and the pre-approved
 /// API key (so Claude Code does not prompt about it).
-fn claude_state(agent: &AgentSpec, api_key: Option<&String>) -> Value {
+fn claude_state(agent: &AgentSpec, api_key: Option<&str>) -> Value {
     let mut state = json!({
         "hasCompletedOnboarding": true,
         "bypassPermissionsModeAccepted": true,
@@ -183,16 +187,10 @@ fn claude_state(agent: &AgentSpec, api_key: Option<&String>) -> Value {
         merge(&mut state, &json!({ "mcpServers": m }));
     }
     if let Some(key) = api_key {
-        // The last 20 characters of the key, by char not byte (reverse, take,
-        // reverse back) — what Claude Code records as the approved-key suffix.
-        let tail: String = key
-            .chars()
-            .rev()
-            .take(20)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        // The last 20 characters of the key, by char not byte: what Claude
+        // Code records as the approved-key suffix.
+        let skip = key.chars().count().saturating_sub(20);
+        let tail: String = key.chars().skip(skip).collect();
         merge(
             &mut state,
             &json!({ "customApiKeyResponses": { "approved": [tail], "rejected": [] } }),
@@ -221,7 +219,7 @@ fn claude_managed(agent: &AgentSpec) -> Option<Value> {
     })
 }
 
-fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&String>) -> Vec<GuestFile> {
+fn claude_files(profile: &ResolvedProfile, home: &str, api_key: Option<&str>) -> Vec<GuestFile> {
     let agent = &profile.agent;
     let mut files = vec![
         super::user_file(

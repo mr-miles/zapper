@@ -99,7 +99,7 @@ pub async fn resolve(spec: &Spec) -> Result<String> {
 }
 
 /// A secret's value: minted for a `command` secret, read for the others.
-pub async fn secret_value(source: &SecretSource) -> Result<String> {
+pub(crate) async fn secret_value(source: &SecretSource) -> Result<String> {
     match source.mint_spec() {
         Some(spec) => resolve(&spec).await.context("minting the secret"),
         None => source.resolve(),
@@ -303,7 +303,7 @@ async fn read_capped(mut r: impl tokio::io::AsyncRead + Unpin, limit: u64) -> Ve
 }
 
 /// Runs the command and parses what it printed.
-pub async fn run_command(spec: Spec) -> Result<Minted> {
+async fn run_command(spec: Spec) -> Result<Minted> {
     let mut argv = spec.argv.clone();
     if argv.first().is_none_or(|a| a.is_empty()) {
         bail!("the command is empty");

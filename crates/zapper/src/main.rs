@@ -1514,7 +1514,7 @@ async fn check(config_path: &Path) -> Result<i32> {
     let images = PathBuf::from(expand_home(&d.images));
     for name in config.profiles.keys() {
         if let Ok(p) = config.resolve(name) {
-            let img = images.join(format!("{}.ext4", p.engine.image));
+            let img = zapper_core::images::disk(&images, &p.engine.image);
             report(
                 img.is_file(),
                 &format!("profile {name}: image {}", p.engine.image),

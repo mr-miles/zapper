@@ -197,7 +197,7 @@ pub struct Secret {
 }
 
 /// The SASL mechanisms the Kafka relay can speak.
-pub const KAFKA_MECHANISMS: [&str; 4] = ["SCRAM-SHA-256", "SCRAM-SHA-512", "PLAIN", "OAUTHBEARER"];
+const KAFKA_MECHANISMS: [&str; 4] = ["SCRAM-SHA-256", "SCRAM-SHA-512", "PLAIN", "OAUTHBEARER"];
 
 impl Secret {
     pub fn allows_host(&self, host: &str) -> bool {
@@ -260,6 +260,12 @@ pub enum NetProtocol {
 impl NetProtocol {
     fn is_tcp(&self) -> bool {
         *self == NetProtocol::Tcp
+    }
+
+    /// A database's: a connection the auth relay takes (`proxy::relay`),
+    /// injecting a `dbauth` secret, not the HTTP or tunnel path.
+    pub fn is_db(&self) -> bool {
+        !self.is_tcp()
     }
 
     /// The protocol's name as a static string (for request-log schemes etc.).
@@ -516,7 +522,7 @@ impl NetRule {
 
     /// The database protocol whose auth-relay this rule routes to, if any.
     /// `None` for an ordinary `tcp` rule (HTTP inspection or a plain tunnel).
-    pub fn db_relay(&self) -> Option<NetProtocol> {
+    fn db_relay(&self) -> Option<NetProtocol> {
         match self.protocol {
             NetProtocol::Tcp => None,
             p => Some(p),
@@ -878,7 +884,7 @@ impl Policy {
     }
 
     /// Gives every rule without an id one that is not in `taken`.
-    pub fn assign_ids(&mut self, taken: &mut BTreeSet<String>) {
+    fn assign_ids(&mut self, taken: &mut BTreeSet<String>) {
         fn fresh(kind: Kind, taken: &mut BTreeSet<String>) -> String {
             let id = (1..)
                 .map(|n| format!("{kind}-{n}"))
@@ -948,12 +954,20 @@ impl Config {
 
     /// Ids of every rule in the config.
     pub fn rule_ids(&self) -> BTreeSet<String> {
-        let profiles = self.profiles.values().flat_map(|p| p.policy.ids());
-        self.policy
-            .ids()
-            .chain(profiles)
+        self.layers()
+            .flat_map(|(_, p)| p.ids())
             .map(str::to_string)
             .collect()
+    }
+
+    /// The config's policy layers, the global one first, then each
+    /// profile's.
+    fn layers(&self) -> impl Iterator<Item = (Scope, &Policy)> {
+        let profiles = self
+            .profiles
+            .iter()
+            .map(|(n, p)| (Scope::Profile(n.clone()), &p.policy));
+        std::iter::once((Scope::Global, &self.policy)).chain(profiles)
     }
 
     /// Gives every rule an id.
@@ -983,13 +997,9 @@ impl Config {
 
     /// Finds the scope holding the rule with this id.
     pub fn find_rule(&self, id: &str) -> Option<Scope> {
-        if self.policy.ids().any(|i| i == id) {
-            return Some(Scope::Global);
-        }
-        self.profiles
-            .iter()
-            .find(|(_, p)| p.policy.ids().any(|i| i == id))
-            .map(|(n, _)| Scope::Profile(n.clone()))
+        self.layers()
+            .find(|(_, p)| p.ids().any(|i| i == id))
+            .map(|(scope, _)| scope)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1009,13 +1019,7 @@ impl Config {
     /// Every layer's rules: unique ids, valid globs, the secrets they name, a database rule's shape.
     fn check_rules(&self, errors: &mut Vec<String>) {
         let mut seen = BTreeSet::new();
-        let mut layers = vec![(Scope::Global, &self.policy)];
-        layers.extend(
-            self.profiles
-                .iter()
-                .map(|(n, p)| (Scope::Profile(n.clone()), &p.policy)),
-        );
-        for (scope, policy) in layers {
+        for (scope, policy) in self.layers() {
             for id in policy.ids() {
                 if !seen.insert(id) {
                     errors.push(format!("{scope}: duplicate rule id {id}"));

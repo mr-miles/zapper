@@ -19,8 +19,8 @@
 mod claude;
 mod pi;
 
-pub use claude::ClaudeCode;
-pub use pi::Pi;
+use claude::ClaudeCode;
+use pi::Pi;
 
 #[cfg(test)]
 pub(crate) use claude::MANAGED_SETTINGS;
@@ -149,7 +149,7 @@ pub enum Outcome {
 
 /// Sums `keys` from a usage object; a missing key counts as 0. Shared by the
 /// harnesses, which differ only in the key spellings.
-pub(super) fn sum_u64(usage: &Value, keys: &[&str]) -> u64 {
+fn sum_u64(usage: &Value, keys: &[&str]) -> u64 {
     keys.iter().map(|k| usage[*k].as_u64().unwrap_or(0)).sum()
 }
 
@@ -157,7 +157,7 @@ pub(super) fn sum_u64(usage: &Value, keys: &[&str]) -> u64 {
 /// by both harnesses (Claude adds its own is-error guard at the call site).
 /// The status codes count only as numbers of their own, not inside others
 /// (`line 1429`, `port 4290`).
-pub(super) fn rate_limited(text: &str) -> bool {
+fn rate_limited(text: &str) -> bool {
     let w = text.to_ascii_lowercase();
     let words = [
         "rate limit",
@@ -172,7 +172,7 @@ pub(super) fn rate_limited(text: &str) -> bool {
 }
 
 /// `v` as one JSON line, newline included: what the agents read on stdin.
-pub(super) fn json_line(v: &Value) -> Vec<u8> {
+fn json_line(v: &Value) -> Vec<u8> {
     let mut line = serde_json::to_vec(v).expect("JSON");
     line.push(b'\n');
     line
@@ -180,7 +180,7 @@ pub(super) fn json_line(v: &Value) -> Vec<u8> {
 
 /// A file of the agent's configuration, in its user's home, theirs and
 /// readable.
-pub(super) fn user_file(path: String, content: String) -> GuestFile {
+fn user_file(path: String, content: String) -> GuestFile {
     GuestFile {
         path,
         content,
@@ -191,7 +191,7 @@ pub(super) fn user_file(path: String, content: String) -> GuestFile {
 
 /// What the agent is doing, from a tool call's name and input: `Edit
 /// pricing.md`.
-pub(super) fn tool_activity(name: &str, input: &Value) -> String {
+fn tool_activity(name: &str, input: &Value) -> String {
     let name = zapper_policy::proto::mcp_tool_name(name);
     let arg = [
         "file_path",
@@ -221,11 +221,22 @@ pub(super) fn tool_activity(name: &str, input: &Value) -> String {
 }
 
 /// Pretty-prints JSON for a config file.
-pub(super) fn pretty(v: &Value) -> String {
+fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap()
 }
 
 /// The harness of an `agent.kind`.
+/// How to run an agent of `kind` headless (a driven session, an office
+/// worker); an error naming the kinds that can be, if this one can't.
+pub fn headless(kind: &str) -> anyhow::Result<&'static dyn Headless> {
+    get(kind).and_then(|h| h.headless()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "agent kind {kind} can't be run headless (those that can: {})",
+            zapper_policy::DRIVABLE_KINDS.join(", ")
+        )
+    })
+}
+
 pub fn get(kind: &str) -> Option<&'static dyn Harness> {
     match kind {
         "claude-code" => Some(&ClaudeCode),
@@ -236,7 +247,7 @@ pub fn get(kind: &str) -> Option<&'static dyn Harness> {
 }
 
 /// Any command; nothing to set up beyond `agent.files` and `env`.
-pub struct Generic;
+pub(crate) struct Generic;
 
 impl Harness for Generic {
     fn kind(&self) -> &'static str {

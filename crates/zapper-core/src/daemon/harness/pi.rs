@@ -13,7 +13,7 @@ use zapper_policy::{merge, ResolvedProfile};
 use super::{Conversation, Event, Harness, Headless, Outcome, TurnEnd};
 
 /// pi: configuration in `~/.pi/agent`, driven over `pi --mode rpc`.
-pub struct Pi;
+pub(crate) struct Pi;
 
 impl Harness for Pi {
     fn kind(&self) -> &'static str {
@@ -93,18 +93,18 @@ impl PiConversation {
         // `stop == "error"` is the sentinel `read()` sets for a failed turn
         // (message_end/auto_retry_end/response with an error); `self.error`
         // carries the message.
-        let outcome = match (&self.stop, &self.error) {
-            (Some(s), why) if s == "error" => {
-                let why = why
-                    .clone()
-                    .unwrap_or_else(|| "the model request failed".into());
-                if super::rate_limited(&why) {
-                    Outcome::RateLimited
-                } else {
-                    Outcome::Failed(why.chars().take(200).collect())
-                }
+        let outcome = if self.stop.as_deref() == Some("error") {
+            let why = self
+                .error
+                .clone()
+                .unwrap_or_else(|| "the model request failed".into());
+            if super::rate_limited(&why) {
+                Outcome::RateLimited
+            } else {
+                Outcome::Failed(why.chars().take(200).collect())
             }
-            _ => Outcome::Done,
+        } else {
+            Outcome::Done
         };
         let t = TurnEnd {
             tokens: self.tokens,

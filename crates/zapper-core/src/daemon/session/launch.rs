@@ -17,7 +17,7 @@ use crate::daemon::{gateway, nic, proxy, vm, Daemon};
 
 /// The guest ports the host connects to over vsock: those the session was
 /// created with, then the profile's `engine.ports` not among them.
-pub(super) fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
+fn forwards(engine: &zapper_policy::Engine, given: &[Forward]) -> Vec<Forward> {
     let mut v = given.to_vec();
     for p in &engine.ports {
         if !v.iter().any(|f| f.vsock_port == *p as u32) {
@@ -40,11 +40,11 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
     // already (`run::start`); otherwise each is made afresh.
     let kept = |p: &std::path::Path| session.persistent && p.exists();
     if !kept(&root) {
-        let image = daemon.paths.images.join(format!("{}.ext4", engine.image));
+        let image = crate::images::disk(&daemon.paths.images, &engine.image);
         if session.persistent {
             check_image(daemon, session).await?;
         }
-        vm::root_disk(&image, &root, vm::parse_size(&engine.disk)?)
+        vm::root_disk(&image, &root, zapper_policy::parse_size(&engine.disk)?)
             .await
             .context("root disk")?;
     }
@@ -86,7 +86,7 @@ pub(super) async fn launch(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Resu
             session.tls.pem(),
             guest_disks,
             session.extra_files.clone(),
-            forwards(&session.resolved.engine, &session.forwards),
+            forwards(engine, &session.forwards),
         )?
     };
 

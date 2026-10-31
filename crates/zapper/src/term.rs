@@ -49,12 +49,6 @@ impl Drop for Raw {
     }
 }
 
-fn encode(f: &Frame) -> Vec<u8> {
-    let mut v = Vec::new();
-    f.write_to(&mut v).expect("vec write");
-    v
-}
-
 /// Runs a terminal session over `io`; returns the remote exit code.
 pub async fn run<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     io: T,
@@ -100,7 +94,7 @@ pub async fn run<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     drop(tx);
     tokio::spawn(async move {
         while let Some(f) = rx.recv().await {
-            if w.write_all(&encode(&f)).await.is_err() {
+            if w.write_all(&f.encode()).await.is_err() {
                 break;
             }
         }

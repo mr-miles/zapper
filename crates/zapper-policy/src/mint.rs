@@ -9,10 +9,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 
 /// A mint timeout, unless the secret sets one.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a bare value (one with no `expires_at`) is kept, unless the
 /// secret sets `ttl_secs`.
-pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
 /// What to run and how long to wait for it.
 #[derive(Debug, Clone, PartialEq, Eq)]

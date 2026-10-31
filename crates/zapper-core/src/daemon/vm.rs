@@ -14,9 +14,9 @@ use super::session::SessionDir;
 use crate::vmm::CONSOLE_LIMIT;
 
 /// Guest CID; every VM has its own vsock device, so they can share it.
-pub const GUEST_CID: u32 = 3;
+const GUEST_CID: u32 = 3;
 
-pub use zapper_policy::parse_size;
+use zapper_policy::parse_size;
 
 async fn run(cmd: &mut Command) -> Result<()> {
     let out = cmd
@@ -176,6 +176,16 @@ impl Vmm {
         })
     }
 
+    /// Kills it if it still runs as session `id`'s VMM (its Firecracker
+    /// dies with it): whether it did. The one kill of a VMM known by pid.
+    pub fn kill(&self, id: &str) -> bool {
+        if !self.runs_for(id) {
+            return false;
+        }
+        unsafe { libc::kill(self.pid as i32, libc::SIGKILL) };
+        true
+    }
+
     /// Whether it still runs as session `id`'s VMM: the same process (its
     /// pid not reused since), `zapper __vmm` with the id among its
     /// arguments.
@@ -254,9 +264,7 @@ impl VmProc {
                 while vmm.runs_for(session) && std::time::Instant::now() < until {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                if vmm.runs_for(session) {
-                    unsafe { libc::kill(vmm.pid as i32, libc::SIGKILL) };
-                }
+                vmm.kill(session);
             }
         }
     }

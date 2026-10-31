@@ -18,6 +18,11 @@ pub enum Status {
     Stopped(String),
 }
 
+/// A session's guest connections handled at once (to the proxy, the
+/// gateway, through the NIC); one over is closed. The NIC's relays in the
+/// VMM's namespace keep to it too (`netns`).
+pub(crate) const MAX_GUEST_CONNECTIONS: usize = 256;
+
 impl Status {
     /// Starting or running: its VM is being made, or runs.
     pub fn is_live(&self) -> bool {
@@ -54,7 +59,7 @@ impl GuestRuntime {
             guest: Mutex::new(None),
             next_shell: AtomicU64::new(1),
             exec_checks: Arc::new(Semaphore::new(64)),
-            conns: Arc::new(Semaphore::new(256)),
+            conns: Arc::new(Semaphore::new(MAX_GUEST_CONNECTIONS)),
             listeners: Mutex::new(Vec::new()),
         }
     }

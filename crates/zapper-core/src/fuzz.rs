@@ -9,11 +9,15 @@ use zapper_policy::proto::{Frame, GuestMsg, MAX_FRAME, MAX_LINE, MAX_MCP_LINE};
 
 use crate::daemon::{dns, gateway, httplog, proxy, session, tls};
 
+/// Runs `f` to completion on this thread's runtime, built once: the targets
+/// read input in loops, a runtime per item would be most of their time.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(f)
+    thread_local! {
+        static RT: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+    }
+    RT.with(|rt| rt.block_on(f))
 }
 
 /// A DNS query from the guest: parsed, and answered as the resolver would.
@@ -382,11 +386,11 @@ pub fn pg_startup(data: &[u8]) {
     }
 }
 
-/// The SCRAM server-first / server-final parsing (`pgwire::scram`), shared by
+/// The SCRAM server-first / server-final parsing (`dbwire::scram`), shared by
 /// Postgres, MongoDB and Kafka: the proxy reads these from the server, so they
 /// must never panic on arbitrary bytes, for either hash.
 pub fn scram_server(data: &[u8]) {
-    use crate::daemon::dbwire::pgwire::scram;
+    use crate::daemon::dbwire::scram;
     for hash in [scram::Hash::Sha256, scram::Hash::Sha512] {
         let client = scram::Client::with_hash(hash, "user", "pencil", "clientnonce");
         if let Ok(fin) = client.client_final(data) {

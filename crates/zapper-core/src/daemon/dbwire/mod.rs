@@ -14,13 +14,14 @@ pub(crate) mod mongodb;
 pub(crate) mod mysql;
 pub(crate) mod pgwire;
 pub(crate) mod redis;
+pub(crate) mod scram;
 pub(crate) mod tds;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// The SASL/PLAIN token `\0authcid\0passwd` (no authzid), shared by the
 /// protocols that authenticate with it (Cassandra, Kafka).
-pub(super) fn sasl_plain_token(user: &str, password: &str) -> Vec<u8> {
+fn sasl_plain_token(user: &str, password: &str) -> Vec<u8> {
     let mut t = vec![0];
     t.extend_from_slice(user.as_bytes());
     t.push(0);
@@ -40,7 +41,7 @@ pub(super) fn sasl_plain_token(user: &str, password: &str) -> Vec<u8> {
 /// buffer would grow past `max` without one — so a protocol's own early length
 /// check (returning `Err`) is what bounds a legitimate large frame; `max` is
 /// the backstop against a peer that never completes one.
-pub(crate) async fn read_framed<S, T>(
+async fn read_framed<S, T>(
     stream: &mut S,
     buf: &mut Vec<u8>,
     max: usize,

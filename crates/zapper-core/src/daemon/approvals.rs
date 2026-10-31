@@ -13,13 +13,13 @@ use zapper_policy::{AnyRule, Kind};
 /// A pending `ask` decision.
 #[derive(Debug, Clone, Serialize)]
 pub struct Pending {
-    pub id: String,
-    pub session: String,
-    pub kind: Kind,
-    pub subject: String,
-    pub created: f64,
+    pub(crate) id: String,
+    pub(crate) session: String,
+    pub(crate) kind: Kind,
+    pub(crate) subject: String,
+    pub(crate) created: f64,
     /// Rule added if the answer is remembered.
-    pub suggestion: AnyRule,
+    pub(crate) suggestion: AnyRule,
     /// Fired with the answer; set by `ask`, taken by `answer` (both on Daemon).
     #[serde(skip)]
     pub(super) tx: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
@@ -39,6 +39,15 @@ impl Remember {
     pub fn as_str(self) -> &'static str {
         match self {
             Remember::Session => "session",
+        }
+    }
+}
+
+impl Pending {
+    /// Tells whoever waits on it the answer, once.
+    pub(super) fn fire(&self, allow: bool) {
+        if let Some(tx) = self.tx.lock().unwrap().take() {
+            let _ = tx.send(allow);
         }
     }
 }
@@ -86,11 +95,7 @@ impl Approvals {
             .collect();
         ids.iter()
             .filter_map(|id| approvals.remove(id))
-            .inspect(|p| {
-                if let Some(tx) = p.tx.lock().unwrap().take() {
-                    let _ = tx.send(false);
-                }
-            })
+            .inspect(|p| p.fire(false))
             .collect()
     }
 

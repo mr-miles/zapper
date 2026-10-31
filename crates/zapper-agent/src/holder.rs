@@ -204,8 +204,7 @@ impl State {
     /// Sends `frame` to the attached connection; on failure it detaches.
     fn send(&mut self, frame: &Frame) {
         if let Some((_, conn)) = self.conn.as_mut() {
-            let mut buf = Vec::new();
-            let ok = frame.write_to(&mut buf).is_ok() && conn.write_all(&buf).is_ok();
+            let ok = conn.write_all(&frame.encode()).is_ok();
             if !ok {
                 self.detach();
             }

@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use zapper_keeper::Client;
 
-pub(crate) struct Keeper {
+struct Keeper {
     client: Client,
     socket: PathBuf,
     dir: PathBuf,

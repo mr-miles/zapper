@@ -53,10 +53,9 @@ impl SessionStore {
             .filter(|s| s.runtime.current().is_live())
     }
 
-    /// Take a stopped session off the list; a starting or running one stays,
-    /// as nothing would manage its VM.
-    /// Takes a stopped session off the list; a persistent one's disks go
-    /// with it.
+    /// Takes a stopped session off the list, a persistent one's kept files
+    /// and disks with it; a starting or running one stays, as nothing would
+    /// manage its VM.
     pub(crate) fn forget(&self, id: &str) -> Result<()> {
         let mut sessions = self.0.write().unwrap();
         if let Some(s) = sessions.get(id) {

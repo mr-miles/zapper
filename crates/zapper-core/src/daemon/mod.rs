@@ -382,7 +382,6 @@ impl Daemon {
         Ok(())
     }
 
-    /// Replaces the running config with the startup file.
     /// Replaces the running config with the startup file, validated and
     /// applied atomically. Without a file there is nothing to reload: an
     /// error, not an empty config.
@@ -444,14 +443,7 @@ impl Daemon {
             .and_then(Result::ok)
             .unwrap_or(false);
         if self.approvals.take(&id).is_some() {
-            self.emit(
-                Some(session),
-                EventBody::Answer {
-                    id,
-                    allow: false,
-                    remember: Some("timeout".into()),
-                },
-            );
+            self.emit_answer(session, id, false, Some("timeout"));
         }
         allow
     }
@@ -464,15 +456,21 @@ impl Daemon {
     /// answer in its events.
     pub(crate) fn drop_approvals(&self, session: &Session) {
         for p in self.approvals.take_session(&session.id) {
-            self.emit(
-                Some(session),
-                EventBody::Answer {
-                    id: p.id,
-                    allow: false,
-                    remember: Some("session stopped".into()),
-                },
-            );
+            self.emit_answer(session, p.id, false, Some("session stopped"));
         }
+    }
+
+    /// Records an approval's answer in its session's events: `remember`
+    /// what it is remembered for, or why it was refused unasked.
+    fn emit_answer(&self, session: &Session, id: String, allow: bool, remember: Option<&str>) {
+        self.emit(
+            Some(session),
+            EventBody::Answer {
+                id,
+                allow,
+                remember: remember.map(str::to_string),
+            },
+        );
     }
 
     pub fn answer(&self, id: &str, allow: bool, remember: Option<Remember>) -> Result<()> {
@@ -495,18 +493,8 @@ impl Daemon {
                 }
             }
         }
-        if let Some(tx) = pending.tx.lock().unwrap().take() {
-            let _ = tx.send(allow);
-        }
-        let remember = remember.map(|r| r.as_str().to_string());
-        self.emit(
-            Some(&session),
-            EventBody::Answer {
-                id: id.into(),
-                allow,
-                remember,
-            },
-        );
+        pending.fire(allow);
+        self.emit_answer(&session, id.into(), allow, remember.map(Remember::as_str));
         Ok(())
     }
 }

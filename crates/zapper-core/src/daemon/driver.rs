@@ -240,12 +240,12 @@ struct Watch {
 }
 
 impl Observer for Watch {
-    fn transcript(&self, kind: &str, line: Value) {
-        (self.transcript)(if kind == "line" {
-            line
-        } else {
-            json!({ "zapper": kind, "detail": line })
-        });
+    fn line(&self, line: Value) {
+        (self.transcript)(line);
+    }
+
+    fn note(&self, kind: &str, detail: Value) {
+        (self.transcript)(json!({ "zapper": kind, "detail": detail }));
     }
 
     fn conversation(&self, id: &str) {
@@ -315,10 +315,9 @@ async fn run(
             driver.set(Status::Starting, None);
             let resume = driver.state.lock().unwrap().conversation.clone();
             let conv = conversations(resume.as_deref());
-            let started = match spawn(conv.argv()).await {
-                Ok(stream) => start(stream, conv, watch.clone()).await,
-                Err(e) => Err(e),
-            };
+            let started = spawn(conv.argv())
+                .await
+                .map(|stream| start(stream, conv, watch.clone()));
             match started {
                 Ok(p) => {
                     report.event("started", json!({ "resumed": resume }));
@@ -360,22 +359,26 @@ async fn run(
         match outcome {
             Out::End(end) => {
                 let t = end.tokens;
-                if end.outcome == Outcome::RateLimited {
-                    // Not the agent's fault: the same prompts, later.
+                if end.outcome != Outcome::Done {
+                    // The agent never saw the prompts (or the provider's
+                    // limits held them up, not the agent): the same prompts,
+                    // later.
                     driver.requeue(prompts);
                     backoff_until = Instant::now() + Duration::from_secs(60);
-                    driver.set(Status::Backoff, None);
-                    report.event("turn_end", json!({ "outcome": "rate_limited", "ms": ms }));
-                } else if let Outcome::Failed(why) = end.outcome {
-                    // The agent never saw the prompts: keep them, say why,
-                    // retry later.
-                    driver.requeue(prompts);
-                    backoff_until = Instant::now() + Duration::from_secs(60);
-                    report.event(
-                        "turn_end",
-                        json!({ "outcome": "failed", "ms": ms, "error": why }),
-                    );
-                    driver.set(Status::Error, Some(why));
+                    match end.outcome {
+                        Outcome::Failed(why) => {
+                            report.event(
+                                "turn_end",
+                                json!({ "outcome": "failed", "ms": ms, "error": why }),
+                            );
+                            driver.set(Status::Error, Some(why));
+                        }
+                        _ => {
+                            report
+                                .event("turn_end", json!({ "outcome": "rate_limited", "ms": ms }));
+                            driver.set(Status::Backoff, None);
+                        }
+                    }
                 } else {
                     {
                         let mut st = driver.state.lock().unwrap();
@@ -476,13 +479,13 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
         return;
     };
     let kind = session.resolved.agent.kind.clone();
-    let Some(harness) = super::harness::get(&kind).and_then(|h| h.headless()) else {
+    let harness = match super::harness::headless(&kind) {
+        Ok(h) => h,
         // Validation allows only kinds with a driver; said here all the same.
-        driver.set(
-            Status::Error,
-            Some(format!("agent kind {kind} can't be driven")),
-        );
-        return;
+        Err(e) => {
+            driver.set(Status::Error, Some(format!("{e:#}")));
+            return;
+        }
     };
     let conversations: Conversations = Box::new(move |resume| harness.conversation(resume));
     let s = session.clone();

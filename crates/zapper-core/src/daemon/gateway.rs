@@ -17,7 +17,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 use zapper_policy::proto::MAX_MCP_LINE;
 
-use super::registry::{Entry, Registry, Selector};
+use super::registry::{Registry, Selector};
 use super::session::Session;
 use super::EventBody;
 
@@ -41,7 +41,7 @@ pub trait McpServer: Send + Sync {
 
 /// A server by its name.
 #[derive(Clone)]
-pub struct Named {
+struct Named {
     name: String,
     server: Arc<dyn McpServer>,
 }
@@ -68,8 +68,9 @@ impl Gateway {
             .ok_or_else(|| anyhow!("an MCP server {name} is already registered for these sessions"))
     }
 
-    pub fn remove(&self, id: u64) -> Option<Entry<Named>> {
-        self.0.remove(id)
+    /// Stops serving server `id`; whether it was served.
+    pub fn remove(&self, id: u64) -> bool {
+        self.0.remove(id).is_some()
     }
 
     /// The server `name` for `s`: the earliest registered that picks it.
@@ -79,7 +80,7 @@ impl Gateway {
 }
 
 /// Accepts the session's connections to the gateway.
-pub async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListener) {
+pub(super) async fn serve(d: Arc<super::Daemon>, s: Arc<Session>, listener: UnixListener) {
     let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     super::accept_loop(listener, limit, move |stream| {
         let (d, s) = (d.clone(), s.clone());

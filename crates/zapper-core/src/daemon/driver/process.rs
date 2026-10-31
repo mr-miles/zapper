@@ -30,9 +30,11 @@ pub enum Out {
 
 /// Where a driven agent's output goes: its transcript and what it is doing.
 pub trait Observer: Send + Sync {
-    /// An output line: a JSON object, or text from stderr or not JSON
-    /// (`kind` says which).
-    fn transcript(&self, kind: &str, line: Value);
+    /// An output line the conversation transcribes: a JSON object.
+    fn line(&self, line: Value);
+    /// Anything else the transcript notes: stderr, text that isn't JSON, a
+    /// line cut short (`kind` says which).
+    fn note(&self, kind: &str, detail: Value);
     /// The conversation's id, for resuming it.
     fn conversation(&self, id: &str);
     /// What the agent is doing now.
@@ -41,10 +43,10 @@ pub trait Observer: Send + Sync {
 
 pub struct Proc {
     stdin: OwnedWriteHalf,
-    pub events: mpsc::Receiver<Out>,
-    pub conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
+    events: mpsc::Receiver<Out>,
+    conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
-    pub steers: bool,
+    steers: bool,
     /// Reads the agent's output; it holds the connection's other half.
     reader: tokio::task::JoinHandle<()>,
 }
@@ -57,14 +59,12 @@ impl Drop for Proc {
 }
 
 impl Proc {
-    pub async fn write(&mut self, line: Vec<u8>) -> Result<()> {
-        let mut buf = Vec::new();
-        Frame::Data(line).write_to(&mut buf)?;
-        self.stdin.write_all(&buf).await?;
+    async fn write(&mut self, line: Vec<u8>) -> Result<()> {
+        self.stdin.write_all(&Frame::Data(line).encode()).await?;
         Ok(())
     }
 
-    pub async fn send(&mut self, text: &str) -> Result<()> {
+    async fn send(&mut self, text: &str) -> Result<()> {
         let line = self.conv.lock().unwrap().prompt(text);
         self.write(line).await
     }
@@ -104,11 +104,7 @@ impl Proc {
     }
 }
 
-pub async fn start(
-    stream: UnixStream,
-    conv: Box<dyn Conversation>,
-    observer: Arc<dyn Observer>,
-) -> Result<Proc> {
+pub fn start(stream: UnixStream, conv: Box<dyn Conversation>, observer: Arc<dyn Observer>) -> Proc {
     let steers = conv.steers();
     let conv = Arc::new(std::sync::Mutex::new(conv));
     let reader = conv.clone();
@@ -126,7 +122,7 @@ pub async fn start(
                 return None;
             }
             if buf_err {
-                observer.transcript(
+                observer.note(
                     "stderr",
                     json!({ "text": text.chars().take(4096).collect::<String>() }),
                 );
@@ -135,12 +131,12 @@ pub async fn start(
             match serde_json::from_str::<Value>(text) {
                 Ok(v) if v.is_object() => {
                     if reader.lock().unwrap().transcribe(&v) {
-                        observer.transcript("line", v.clone());
+                        observer.line(v.clone());
                     }
                     Some(v)
                 }
                 _ => {
-                    observer.transcript(
+                    observer.note(
                         "raw",
                         json!({ "text": text.chars().take(4096).collect::<String>() }),
                     );
@@ -187,16 +183,16 @@ pub async fn start(
             }
             if b.len() > MAX_LINE {
                 let line: Vec<u8> = std::mem::take(b);
-                observer.transcript("truncated", json!({ "bytes": line.len() }));
+                observer.note("truncated", json!({ "bytes": line.len() }));
             }
         }
         let _ = tx.send(Out::Exit(code)).await;
     });
-    Ok(Proc {
+    Proc {
         stdin,
         events,
         conv,
         steers,
         reader: reader_task,
-    })
+    }
 }

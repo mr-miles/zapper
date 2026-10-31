@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use anyhow::{anyhow, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Cidr {
+struct Cidr {
     addr: IpAddr,
     prefix: u8,
 }
@@ -69,8 +69,8 @@ impl Cidr {
 }
 
 pub struct AddressPolicy {
-    pub host_addrs: Vec<IpAddr>,
-    pub private_allowed: Vec<Cidr>,
+    host_addrs: Vec<IpAddr>,
+    private_allowed: Vec<Cidr>,
 }
 
 fn is_private(ip: IpAddr) -> bool {

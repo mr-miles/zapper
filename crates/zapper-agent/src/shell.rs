@@ -65,10 +65,9 @@ fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
     if let Some(id) = req.attach {
         if let Err(e) = crate::holder::attach(id, &conn, req.tty) {
             let mut conn = &conn;
-            let _ = conn.write_all(&encode(&Frame::Stderr(
-                format!("zapper: {e:#}\r\n").into_bytes(),
-            )));
-            let _ = conn.write_all(&encode(&Frame::Exit(127)));
+            let _ =
+                conn.write_all(&Frame::Stderr(format!("zapper: {e:#}\r\n").into_bytes()).encode());
+            let _ = conn.write_all(&Frame::Exit(127).encode());
         }
         return Ok(());
     }
@@ -76,7 +75,7 @@ fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
     let writer = Arc::new(Mutex::new(conn));
     let send = {
         let writer = writer.clone();
-        move |f: Frame| writer.lock().unwrap().write_all(&encode(&f)).is_ok()
+        move |f: Frame| writer.lock().unwrap().write_all(&f.encode()).is_ok()
     };
 
     let mut env = spec.env.clone();
@@ -204,12 +203,6 @@ fn session(conn: File, control: &Control, spec: &GuestSpec) -> Result<()> {
     let w = writer.lock().unwrap();
     unsafe { libc::shutdown(w.as_raw_fd(), libc::SHUT_RDWR) };
     Ok(())
-}
-
-fn encode(f: &Frame) -> Vec<u8> {
-    let mut v = Vec::new();
-    f.write_to(&mut v).expect("vec write");
-    v
 }
 
 struct Child {

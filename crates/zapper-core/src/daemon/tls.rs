@@ -1,8 +1,10 @@
 //! TLS for inspected connections.
 //!
-//! Every session has its own CA, generated in memory when the session starts
-//! and never written to disk; the guest trusts only that CA. Leaf
-//! certificates are minted per host on first use.
+//! Every session has its own CA, made when the session is; the guest trusts
+//! only that CA. A plain session's lives in memory alone; a persistent
+//! session's key is kept in its `ca.json` (0600), so the guest goes on
+//! trusting it after a restart (`SessionCa::kept`). Leaf certificates are
+//! minted per host on first use.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,7 +18,7 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-pub struct SessionCa {
+struct SessionCa {
     cert: rcgen::Certificate,
     key: KeyPair,
     pub pem: String,
@@ -24,7 +26,7 @@ pub struct SessionCa {
 
 /// A leaf certificate minted by a [`SessionCa`]: the chain (leaf then CA) and
 /// the leaf's private key, ready for a rustls server config.
-pub struct Leaf {
+struct Leaf {
     pub chain: Vec<CertificateDer<'static>>,
     pub key: PrivateKeyDer<'static>,
 }
@@ -234,21 +236,21 @@ impl SessionTls {
 
 /// Server config for an inspected connection, presenting `leaf`. The mirror
 /// of [`client_config`] for the guest-facing side.
-pub(crate) fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
+fn server_config(leaf: Leaf) -> Result<Arc<ServerConfig>> {
     let mut config = ServerConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(leaf.chain, leaf.key)?;
     // Offer HTTP/2 and HTTP/1.1; the guest's client picks. h2 lets us inspect
     // gRPC and other HTTP/2 traffic rather than forcing a downgrade.
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = h2_then_http11();
     Ok(Arc::new(config))
 }
 
 /// TLS to an upstream `host` over `stream`, its certificate checked against
 /// the Mozilla roots and its name: the proxy's side of an inspected
 /// connection, and a database relay's server leg.
-pub(crate) async fn connect<S>(
+pub(super) async fn connect<S>(
     stream: S,
     host: &str,
 ) -> std::result::Result<tokio_rustls::client::TlsStream<S>, String>
@@ -263,15 +265,26 @@ where
         .map_err(|e| format!("TLS to {host}: {e}"))
 }
 
+/// The ALPN protocols an inspected connection offers, on either side: HTTP/2
+/// first, then HTTP/1.1.
+fn h2_then_http11() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+}
+
+/// Whether a TLS connection negotiated HTTP/2 by ALPN.
+pub(super) fn is_h2(conn: &rustls::CommonState) -> bool {
+    conn.alpn_protocol() == Some(b"h2")
+}
+
 /// Whether `buf` starts a TLS handshake record (`0x16`): a ClientHello, as
 /// the first byte a TLS client sends.
-pub(crate) fn starts_handshake(buf: &[u8]) -> bool {
+pub(super) fn starts_handshake(buf: &[u8]) -> bool {
     buf.first() == Some(&0x16)
 }
 
 /// Client config for upstream connections, verifying against the Mozilla
 /// roots.
-pub fn client_config() -> Arc<ClientConfig> {
+pub(super) fn client_config() -> Arc<ClientConfig> {
     static C: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     C.get_or_init(|| {
         let roots = RootCertStore {
@@ -284,7 +297,7 @@ pub fn client_config() -> Arc<ClientConfig> {
             .with_no_client_auth();
         // Offer HTTP/2 and HTTP/1.1 upstream; we speak to the real server in
         // whatever it negotiates, independently of the guest-facing protocol.
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config.alpn_protocols = h2_then_http11();
         Arc::new(config)
     })
     .clone()
@@ -298,8 +311,7 @@ pub(crate) fn client_hello_sni(buf: &[u8]) -> Result<Option<String>, ()> {
     if !starts_handshake(buf) {
         return Ok(None);
     }
-    let rec_len = u16::from_be_bytes([*buf.get(3).ok_or(())?, *buf.get(4).ok_or(())?]) as usize;
-    let rec = buf.get(5..5 + rec_len).ok_or(())?;
+    let rec = buf.get(5..tls_record_len(buf).ok_or(())?).ok_or(())?;
     let mut p = Parser(rec);
     if p.u8()? != 1 {
         return Err(());

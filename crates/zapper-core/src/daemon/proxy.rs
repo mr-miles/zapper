@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use zapper_policy::{
     evaluate_net, needs_inspection, placeholder, render, resolvable, Action, AnyRule, Decision,
-    Kind, NetEffects, NetProtocol, NetRequest, NetRule,
+    Kind, NetEffects, NetRequest, NetRule,
 };
 
 use super::deciders::Referral;
@@ -272,6 +272,21 @@ struct NetLog<'a> {
     error: Option<String>,
 }
 
+impl<'a> NetLog<'a> {
+    /// A log of `req`, decided as `verdict` says if it was, with no
+    /// response, secrets or error yet (struct update adds them).
+    fn new(req: &'a NetRequest, verdict: Option<&'a Verdict>, inspected: bool) -> Self {
+        NetLog {
+            req,
+            verdict,
+            inspected,
+            status: None,
+            secrets: vec![],
+            error: None,
+        }
+    }
+}
+
 fn log(d: &Daemon, s: &Session, l: NetLog<'_>) {
     let allowed = l.verdict.is_some_and(|v| v.allowed) && l.error.is_none();
     let counter = if allowed {
@@ -402,12 +417,8 @@ async fn prepare(
             d,
             s,
             NetLog {
-                req: &endpoint,
-                verdict: None,
-                inspected: true,
-                status: None,
-                secrets: vec![],
                 error: Some(why.clone()),
+                ..NetLog::new(&endpoint, None, true)
             },
         );
         return Err(why);
@@ -419,18 +430,7 @@ async fn prepare(
     };
     if let Some(v) = &verdict {
         if !v.allowed {
-            log(
-                d,
-                s,
-                NetLog {
-                    req: &endpoint,
-                    verdict: Some(v),
-                    inspected: false,
-                    status: None,
-                    secrets: vec![],
-                    error: None,
-                },
-            );
+            log(d, s, NetLog::new(&endpoint, Some(v), false));
             note_refused(s, scheme, &endpoint, v);
             return Err(v.denial(&format!("{}:{}", endpoint.host, port)));
         }
@@ -442,12 +442,8 @@ async fn prepare(
                 d,
                 s,
                 NetLog {
-                    req: &endpoint,
-                    verdict: verdict.as_ref(),
-                    inspected: inspect,
-                    status: None,
-                    secrets: vec![],
                     error: Some(e.clone()),
+                    ..NetLog::new(&endpoint, verdict.as_ref(), inspect)
                 },
             );
             return Err(e);
@@ -527,12 +523,13 @@ async fn stream<S>(
     };
     let is_tls = tls::starts_handshake(&first);
     match verdict {
-        Some(v) if v.effects.protocol != NetProtocol::Tcp => {
+        Some(v) if v.effects.protocol.is_db() => {
             relay::relay_database(&d, &s, io, first, &endpoint, &addr, v).await
         }
         Some(v) => tunnel(&d, &s, io, first, &endpoint, &addr, v).await,
-        None if is_tls => {
-            inspect::mitm(
+        None if is_tls => inspect::mitm(d, s, Prefixed::new(first, io), endpoint, addr).await,
+        None => {
+            inspect::plain_inspected(
                 d,
                 s,
                 Prefixed::new(first, io),
@@ -541,10 +538,6 @@ async fn stream<S>(
                 addr,
             )
             .await
-        }
-        None => {
-            inspect::plain_inspected(d, s, Prefixed::new(first, io), endpoint.host, endpoint.port)
-                .await
         }
     }
 }

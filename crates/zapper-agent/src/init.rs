@@ -132,22 +132,22 @@ fn setup(control: &Control, spec: &GuestSpec) -> Result<()> {
         // The kernel configured eth0's IPv4 (`ip=` on the command line). That
         // parameter is IPv4-only, so add the IPv6 address and default route
         // here, best-effort: on a guest or kernel without IPv6 these do nothing
-        // and the session stays IPv4-only. The addresses match `netns` (the
-        // host end of the tap): gateway fd00:2::1, guest fd00:2::2.
-        ip_cmd(&["-6", "addr", "add", "fd00:2::2/64", "dev", "eth0"]);
+        // and the session stays IPv4-only. The addresses are the host's
+        // (`proto::NIC_*`, the host end of the tap).
+        use zapper_proto::proto::{NIC_GATEWAY, NIC_GATEWAY6, NIC_GUEST6};
         ip_cmd(&[
             "-6",
-            "route",
+            "addr",
             "add",
-            "default",
-            "via",
-            "fd00:2::1",
+            &format!("{NIC_GUEST6}/64"),
             "dev",
             "eth0",
         ]);
+        let via = NIC_GATEWAY6.to_string();
+        ip_cmd(&["-6", "route", "add", "default", "via", &via, "dev", "eth0"]);
         fs::write(
             "/etc/resolv.conf",
-            "nameserver 10.0.2.1\nnameserver fd00:2::1\n",
+            format!("nameserver {NIC_GATEWAY}\nnameserver {NIC_GATEWAY6}\n"),
         )?;
     } else {
         fs::write(

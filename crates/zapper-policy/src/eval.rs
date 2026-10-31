@@ -134,7 +134,7 @@ fn args_glob(pattern: &str) -> Result<GlobMatcher> {
 }
 
 /// Checks that every glob in a layer compiles.
-pub fn check_globs(policy: &Policy) -> Result<()> {
+pub(crate) fn check_globs(policy: &Policy) -> Result<()> {
     for r in &policy.net {
         host_glob(&r.host).with_context(|| format!("host {:?}", r.host))?;
         if let Some(p) = &r.path {
@@ -156,7 +156,7 @@ pub fn check_globs(policy: &Policy) -> Result<()> {
 
 impl NetRule {
     /// Matches host and port only.
-    pub fn matches_endpoint(&self, host: &str, port: u16) -> bool {
+    fn matches_endpoint(&self, host: &str, port: u16) -> bool {
         (self.ports.is_empty() || self.ports.contains(&port)) && host_matches(&self.host, host)
     }
 
@@ -204,23 +204,37 @@ impl ExecRule {
     }
 }
 
+/// Every rule of the layers in the order they decide, with its layer's
+/// scope: final rules from the least specific layer down, then the others
+/// from the most specific up.
+fn ordered<'a, R: 'a + RuleInfo>(
+    layers: &'a Layers<'a>,
+    rules: impl Fn(&'a Policy) -> &'a [R] + Copy,
+) -> impl Iterator<Item = (&'a Scope, &'a R)> {
+    let finals = layers.iter().rev().flat_map(move |(scope, policy)| {
+        rules(policy)
+            .iter()
+            .filter(|r| r.is_final())
+            .map(move |r| (scope, r))
+    });
+    let others = layers.iter().flat_map(move |(scope, policy)| {
+        rules(policy)
+            .iter()
+            .filter(|r| !r.is_final())
+            .map(move |r| (scope, r))
+    });
+    finals.chain(others)
+}
+
 /// Generic layered first-match evaluation.
 fn evaluate<'a, R: 'a + RuleInfo>(
     layers: &'a Layers<'a>,
-    rules: impl Fn(&'a Policy) -> &'a [R],
+    rules: impl Fn(&'a Policy) -> &'a [R] + Copy,
     matches: impl Fn(&R) -> bool,
     default: impl Fn(&Policy) -> Option<Action>,
 ) -> (Decision, Option<&'a R>) {
-    // Final rules first, from the least specific layer down.
-    for (scope, policy) in layers.iter().rev() {
-        if let Some(r) = rules(policy).iter().find(|r| r.is_final() && matches(r)) {
-            return (r.decision(scope), Some(r));
-        }
-    }
-    for (scope, policy) in layers {
-        if let Some(r) = rules(policy).iter().find(|r| !r.is_final() && matches(r)) {
-            return (r.decision(scope), Some(r));
-        }
+    if let Some((scope, r)) = ordered(layers, rules).find(|(_, r)| matches(r)) {
+        return (r.decision(scope), Some(r));
     }
     for (scope, policy) in layers {
         if let Some(action) = default(policy) {
@@ -313,7 +327,7 @@ pub fn needs_inspection(layers: &Layers<'_>, host: &str, port: u16) -> bool {
 
 /// What a session can do with a name, over every port and request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
+enum Reach {
     /// Some request to it would be allowed outright.
     Allow,
     /// Requests to it can only be asked about.
@@ -327,19 +341,13 @@ pub enum Reach {
 /// the layers, then the default). A matching rule without `ports`, `methods`
 /// or `path` decides every request still undecided; a narrower one decides
 /// only some, so the search goes on past it.
-pub fn reach(layers: &Layers<'_>, name: &str) -> Reach {
+fn reach(layers: &Layers<'_>, name: &str) -> Reach {
     let unconditional =
         |r: &NetRule| r.ports.is_empty() && r.methods.is_empty() && r.path.is_none();
-    let finals = layers
-        .iter()
-        .rev()
-        .flat_map(|(_, p)| p.net.iter().filter(|r| r.final_));
-    let others = layers
-        .iter()
-        .flat_map(|(_, p)| p.net.iter().filter(|r| !r.final_));
     let (mut allow, mut ask) = (false, false);
     let mut settled = false;
-    for r in finals.chain(others).filter(|r| host_matches(&r.host, name)) {
+    let rules = ordered(layers, |p| &p.net[..]).map(|(_, r)| r);
+    for r in rules.filter(|r| host_matches(&r.host, name)) {
         match r.action {
             Action::Allow => allow = true,
             Action::Ask => ask = true,

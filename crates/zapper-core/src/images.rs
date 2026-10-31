@@ -278,7 +278,7 @@ pub struct Build<'a> {
 
 /// An image's name: a file name in the images directory, never hidden (a
 /// build's own files are) or a path out of it.
-pub fn check_name(name: &str) -> Result<()> {
+fn check_name(name: &str) -> Result<()> {
     let starts_well = name.starts_with(|c: char| c.is_ascii_alphanumeric());
     if !starts_well
         || !name
@@ -336,7 +336,7 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
         Some(s) => parse_size(s)?,
         None => tar_size + tar_size / 4 + (256 << 20),
     };
-    let out = b.dir.join(format!("{}.ext4", b.name));
+    let out = disk(b.dir, b.name);
     let tmp = b.dir.join(format!(".{}.ext4.tmp", b.name));
     // Gone however the build ends: renamed into place, or left half-written.
     let _partial = Removed(tmp.clone());
@@ -380,7 +380,7 @@ pub fn build(b: Build<'_>, log: Log) -> Result<PathBuf> {
     let sha256 = crate::util::sha256_file(&tmp)?;
     log(&format!("sha256 {sha256}"));
     let meta = json!({ "name": b.name, "sha256": sha256, "from": rec.from, "run": rec.run, "copy": rec.copies.iter().map(|(i, to)| json!({ "from": rec.inputs[*i], "to": to })).collect::<Vec<_>>(), "after": rec.after, "size": size, "built": crate::util::now() as u64 });
-    let json = b.dir.join(format!("{}.json", b.name));
+    let json = meta_path(b.dir, b.name);
     let json_tmp = b.dir.join(format!(".{}.json.tmp", b.name));
     std::fs::write(&json_tmp, serde_json::to_vec_pretty(&meta)?)?;
     std::fs::rename(&json_tmp, &json)?;
@@ -447,11 +447,21 @@ pub fn list(dir: &Path) -> Result<Vec<serde_json::Value>> {
     Ok(out)
 }
 
+/// The image `name`'s disk in `dir`.
+pub fn disk(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.ext4"))
+}
+
+/// What was recorded when the image `name` in `dir` was built.
+fn meta_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.json"))
+}
+
 /// The SHA-256 recorded when the image `name` in `dir` was built; `None`
 /// for one built before images were hashed.
-pub fn built_hash(dir: &Path, name: &str) -> Option<String> {
+pub(crate) fn built_hash(dir: &Path, name: &str) -> Option<String> {
     let meta: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.json"))).ok()?).ok()?;
+        serde_json::from_slice(&std::fs::read(meta_path(dir, name)).ok()?).ok()?;
     meta["sha256"].as_str().map(str::to_string)
 }
 

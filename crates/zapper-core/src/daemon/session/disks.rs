@@ -17,10 +17,10 @@ use super::persist::save;
 use super::{Session, SessionDir};
 use crate::daemon::{Daemon, EventBody};
 
-pub(crate) type Hashes = BTreeMap<String, String>;
+pub(super) type Hashes = BTreeMap<String, String>;
 
 /// Each disk's SHA-256, by file name.
-pub(crate) fn hash(disks: &[PathBuf]) -> Result<Hashes> {
+fn hash(disks: &[PathBuf]) -> Result<Hashes> {
     let mut out = BTreeMap::new();
     for path in disks {
         let name = path
@@ -33,7 +33,7 @@ pub(crate) fn hash(disks: &[PathBuf]) -> Result<Hashes> {
 }
 
 /// What differs between two sets of disk hashes, in words.
-pub(crate) fn changes(before: &Hashes, now: &Hashes) -> String {
+fn changes(before: &Hashes, now: &Hashes) -> String {
     let mut v = Vec::new();
     for (name, hash) in before {
         match now.get(name) {
@@ -50,7 +50,7 @@ pub(crate) fn changes(before: &Hashes, now: &Hashes) -> String {
 
 /// What a session's record says its disks were when it last stopped.
 #[derive(Debug, PartialEq)]
-pub(crate) enum LastStop {
+pub(super) enum LastStop {
     /// Their hashes, from the last `disks stopped` event.
     Hashed(Hashes),
     /// It ran after that (or never stopped since it was made) without its
@@ -91,7 +91,7 @@ pub(super) fn last_stop_in(dir: &SessionDir) -> LastStop {
 }
 
 /// From a session's record, oldest first: its disks at its last stop.
-pub(crate) fn last_stop(events: &[Value]) -> LastStop {
+fn last_stop(events: &[Value]) -> LastStop {
     let mut last = LastStop::None;
     for e in events {
         match (str_of(e, "type"), str_of(e, "state")) {
@@ -104,7 +104,7 @@ pub(crate) fn last_stop(events: &[Value]) -> LastStop {
 }
 
 /// What `zapper record session` finds in a session's record about its
-/// disks, oldest first: each `{seq, ts, finding}`. A disk changed while
+/// disks, oldest first: each `{epoch, seq, ts, finding}`. A disk changed while
 /// stopped shows here even when the start said `checked` (a daemon that
 /// didn't check), as the stop's hashes were recorded before.
 pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
@@ -182,6 +182,25 @@ pub(crate) fn findings(events: &[Value]) -> Vec<Value> {
     out
 }
 
+/// Records a `disks` event of `session`: what its disks were found to be
+/// (`state`), their hashes, and why.
+fn disks_event(
+    daemon: &Daemon,
+    session: &Session,
+    state: &str,
+    disks: Hashes,
+    detail: Option<String>,
+) {
+    daemon.emit(
+        Some(session),
+        EventBody::Disks {
+            state: state.into(),
+            disks,
+            detail,
+        },
+    );
+}
+
 /// Hashes a stopped session's disks and compares them with what its record
 /// says they were when it last stopped (the record, not a file beside it:
 /// with a keeper it is append-only); records what it found (`disks`).
@@ -207,14 +226,7 @@ pub(super) async fn check_disks(
             Some("no hashes from its last stop to compare with".to_string()),
         ),
     };
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: state.into(),
-            disks: now.clone(),
-            detail: detail.clone(),
-        },
-    );
+    disks_event(daemon, session, state, now.clone(), detail.clone());
     if let Some(detail) = detail {
         if !accept {
             return Err(crate::errors::conflict(format!(
@@ -223,13 +235,12 @@ pub(super) async fn check_disks(
                 ),
             ));
         }
-        daemon.emit(
-            Some(session),
-            EventBody::Disks {
-                state: "accepted".into(),
-                disks: now,
-                detail: Some(format!("started as they are: {detail}")),
-            },
+        disks_event(
+            daemon,
+            session,
+            "accepted",
+            now,
+            Some(format!("started as they are: {detail}")),
         );
     }
     Ok(())
@@ -237,7 +248,8 @@ pub(super) async fn check_disks(
 
 /// A persistent session's VM is off: its disks stay, the rest of the VMM's
 /// directory (sockets) goes, and the disks' hashes are recorded, in its
-/// record, to be checked against when it starts again.
+/// record, to be checked against when it starts again. Its `session.json`
+/// is saved as it stands too, to be listed again stopped.
 pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
     let sd = &session.dir;
     for e in std::fs::read_dir(sd.vm()).into_iter().flatten().flatten() {
@@ -262,14 +274,7 @@ pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
         Err(e) => (BTreeMap::new(), Some(format!("hashing: {e}"))),
     };
     // In the record, which the next start checks the disks against.
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: "stopped".into(),
-            disks: hashes,
-            detail,
-        },
-    );
+    disks_event(daemon, session, "stopped", hashes, detail);
 }
 
 /// Before a persistent session's disk is made from its image: the image's
@@ -279,7 +284,7 @@ pub(super) async fn keep_disks(daemon: &Arc<Daemon>, session: &Arc<Session>) {
 /// as unverified, and used.
 pub(super) async fn check_image(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<()> {
     let name = session.resolved.engine.image.clone();
-    let path = daemon.paths.images.join(format!("{name}.ext4"));
+    let path = crate::images::disk(&daemon.paths.images, &name);
     let hash = tokio::task::spawn_blocking(move || crate::util::sha256_file(&path)).await??;
     let built = crate::images::built_hash(&daemon.paths.images, &name);
     let (changed, detail) = match &built {
@@ -291,17 +296,16 @@ pub(super) async fn check_image(daemon: &Arc<Daemon>, session: &Arc<Session>) ->
         ),
     };
     let accepted = changed && session.accept_changed_image;
-    daemon.emit(
-        Some(session),
-        EventBody::Disks {
-            state: "image".into(),
-            disks: [(format!("{name}.ext4"), hash)].into(),
-            detail: Some(if accepted {
-                format!("{detail}; used as it is, as asked")
-            } else {
-                detail.clone()
-            }),
-        },
+    disks_event(
+        daemon,
+        session,
+        "image",
+        [(format!("{name}.ext4"), hash)].into(),
+        Some(if accepted {
+            format!("{detail}; used as it is, as asked")
+        } else {
+            detail.clone()
+        }),
     );
     if changed && !accepted {
         bail!("{detail}; give accept_changed_image (--accept-changed-image) to make the session from it as it is");

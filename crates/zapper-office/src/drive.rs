@@ -148,16 +148,15 @@ where
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
-                let mut f = Vec::new();
-                Frame::Data(buf[..n].to_vec()).write_to(&mut f).ok();
-                if w.write_all(&f).await.is_err() {
+                if w.write_all(&Frame::Data(buf[..n].to_vec()).encode())
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
         }
-        let mut f = Vec::new();
-        Frame::Eof.write_to(&mut f).ok();
-        let _ = w.write_all(&f).await;
+        let _ = w.write_all(&Frame::Eof.encode()).await;
         // Keep the write half open until the command exits.
         std::future::pending::<()>().await;
     });
