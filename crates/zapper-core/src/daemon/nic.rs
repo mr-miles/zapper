@@ -26,15 +26,9 @@ pub async fn serve(d: Arc<Daemon>, s: Arc<Session>, listener: UnixListener) {
 async fn handle(d: Arc<Daemon>, s: Arc<Session>, mut stream: UnixStream) -> std::io::Result<()> {
     // The capture shim's one-line command (`TCP <ip> <port>` or `DNS <len>`)
     // fits well under 64 bytes; read that much, then the protocol takes over.
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 64 {
-        stream.read_exact(&mut byte).await?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
+    let Some(line) = super::read_line_unbuffered(&mut stream, 64).await? else {
+        return Ok(());
+    };
     let line = String::from_utf8_lossy(&line).into_owned();
     let parts: Vec<&str> = line.split(' ').collect();
     match parts.as_slice() {

@@ -163,19 +163,13 @@ pub(super) async fn resumed(
 ) -> Result<Vec<u64>, String> {
     // A byte at a time: the exec checks the agent asks again follow the line
     // at once, and must stay in the stream for `serve_control`.
-    let line = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut line = Vec::new();
-        loop {
-            match stream.read_u8().await {
-                Ok(b'\n') => return Ok(line),
-                Ok(b) if line.len() < MAX_LINE => line.push(b),
-                Ok(_) => return Err("an oversized first line".to_string()),
-                Err(_) => return Err("closed before its first line".to_string()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| "no first line in time".to_string())??;
+    let read = crate::daemon::read_line_unbuffered(stream, MAX_LINE);
+    let line = match tokio::time::timeout(Duration::from_secs(2), read).await {
+        Err(_) => return Err("no first line in time".into()),
+        Ok(Err(_)) => return Err("closed before its first line".into()),
+        Ok(Ok(None)) => return Err("an oversized first line".into()),
+        Ok(Ok(Some(line))) => line,
+    };
     match serde_json::from_slice::<GuestMsg>(&line) {
         Ok(GuestMsg::Resume {
             token: t,

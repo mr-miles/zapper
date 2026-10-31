@@ -77,6 +77,24 @@ pub struct Daemon {
     pub(crate) builds: builds::Builds,
 }
 
+/// One line from `io`, read a byte at a time so nothing after it is taken
+/// from the stream (what follows is another reader's): without its `\n`, or
+/// `None` if it runs past `max` bytes. An error at the end of the stream.
+pub(crate) async fn read_line_unbuffered(
+    io: &mut (impl tokio::io::AsyncRead + Unpin),
+    max: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    use tokio::io::AsyncReadExt as _;
+    let mut line = Vec::new();
+    loop {
+        match io.read_u8().await? {
+            b'\n' => return Ok(Some(line)),
+            _ if line.len() >= max => return Ok(None),
+            b => line.push(b),
+        }
+    }
+}
+
 /// Accepts connections on `listener` and serves each with `handle`, running at
 /// most `limit` permits' worth at once; a connection over the limit is dropped
 /// rather than queued. The permit is held until the spawned task ends.
@@ -493,6 +511,26 @@ mod limits_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line is taken up to its `\n` and no further; one longer than the
+    /// limit isn't; the stream ending before the line does is an error.
+    #[tokio::test]
+    async fn a_line_read_unbuffered_leaves_the_rest() {
+        use tokio::io::AsyncReadExt as _;
+        let mut io: &[u8] = b"OK 1\nafter";
+        assert_eq!(
+            read_line_unbuffered(&mut io, 4).await.unwrap(),
+            Some(b"OK 1".to_vec())
+        );
+        let mut rest = String::new();
+        io.read_to_string(&mut rest).await.unwrap();
+        assert_eq!(rest, "after", "nothing after the line taken");
+
+        let mut long: &[u8] = b"OK 12\n";
+        assert_eq!(read_line_unbuffered(&mut long, 4).await.unwrap(), None);
+        let mut cut: &[u8] = b"OK";
+        assert!(read_line_unbuffered(&mut cut, 4).await.is_err());
+    }
 
     #[test]
     fn redacted_config_hides_inline_secret_values() {

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{bail, Result};
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use zapper_policy::proto::{Forward, Frame, GuestFile, HostMsg, ShellRequest, SHELL_PORT};
 use zapper_policy::{AnyRule, Config, Policy, ResolvedProfile, Scope};
@@ -61,15 +61,9 @@ async fn connect_vsock(path: PathBuf, port: &str, refused: &str) -> Result<UnixS
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;
-    let mut line = Vec::new();
-    let mut byte = [0u8; 1];
-    while line.len() < 64 {
-        stream.read_exact(&mut byte).await?;
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-    }
+    let line = super::read_line_unbuffered(&mut stream, 64)
+        .await?
+        .unwrap_or_default();
     if !line.starts_with(b"OK ") {
         bail!("{refused}: {}", String::from_utf8_lossy(&line));
     }
