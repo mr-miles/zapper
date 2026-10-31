@@ -120,7 +120,7 @@ struct Rig {
     task: tokio::task::JoinHandle<()>,
 }
 
-fn rig(turn_timeout: Option<Duration>, exit_at_once: bool) -> Rig {
+fn rig(turn_timeout: Duration, exit_at_once: bool) -> Rig {
     let driver = Driver::new();
     let rec = Arc::new(Rec::default());
     let seen = Arc::new(Seen::default());
@@ -190,7 +190,7 @@ async fn until(what: &str, ok: impl Fn() -> bool) {
 
 #[tokio::test(start_paused = true)]
 async fn a_prompt_is_a_turn() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     assert_eq!(r.driver.prompt("hello").unwrap(), 1);
     until("the turn's end", || r.rec.named("turn_end").len() == 1).await;
     let end = &r.rec.named("turn_end")[0];
@@ -229,7 +229,7 @@ async fn a_prompt_is_a_turn() {
 
 #[tokio::test(start_paused = true)]
 async fn prompts_during_a_turn_wait_for_the_next_one_together() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     r.driver.prompt("slow work").unwrap();
     until("the slow turn", || r.driver.status() == Status::Working).await;
     assert_eq!(r.driver.prompt("a").unwrap(), 1);
@@ -245,7 +245,7 @@ async fn prompts_during_a_turn_wait_for_the_next_one_together() {
 
 #[tokio::test(start_paused = true)]
 async fn a_rate_limit_retries_the_same_prompt_later() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     r.driver.prompt("ratelimit me").unwrap();
     until("the retry", || r.rec.named("turn_end").len() == 2).await;
     let ends = r.rec.named("turn_end");
@@ -261,7 +261,7 @@ async fn a_rate_limit_retries_the_same_prompt_later() {
 
 #[tokio::test(start_paused = true)]
 async fn an_api_failure_keeps_the_prompt_and_retries_later() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     r.driver.prompt("fail").unwrap();
     until("the failed turn", || r.rec.named("turn_end").len() == 1).await;
     assert_eq!(r.rec.named("turn_end")[0]["outcome"], "failed");
@@ -283,7 +283,7 @@ async fn an_api_failure_keeps_the_prompt_and_retries_later() {
 
 #[tokio::test(start_paused = true)]
 async fn after_a_crash_the_prompt_goes_to_the_resumed_conversation() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     r.driver.prompt("hello").unwrap();
     until("the first turn", || r.rec.named("turn_end").len() == 1).await;
     r.driver.prompt("crash now").unwrap();
@@ -306,7 +306,7 @@ async fn after_a_crash_the_prompt_goes_to_the_resumed_conversation() {
 
 #[tokio::test(start_paused = true)]
 async fn a_turn_that_runs_too_long_drops_the_process() {
-    let r = rig(Some(Duration::from_secs(60)), false);
+    let r = rig(Duration::from_secs(60), false);
     r.driver.prompt("hello").unwrap();
     until("the first turn", || r.rec.named("turn_end").len() == 1).await;
     r.driver.prompt("hang").unwrap();
@@ -323,7 +323,7 @@ async fn a_turn_that_runs_too_long_drops_the_process() {
 
 #[tokio::test(start_paused = true)]
 async fn turns_that_keep_timing_out_make_the_driver_rest() {
-    let r = rig(Some(Duration::from_secs(60)), false);
+    let r = rig(Duration::from_secs(60), false);
     // Each `hang` turn times out; a turn that went through would reset the
     // count, but none does, so MAX_TIMEOUTS in a row make the driver rest.
     for n in 1..=super::MAX_TIMEOUTS {
@@ -350,7 +350,7 @@ async fn turns_that_keep_timing_out_make_the_driver_rest() {
 
 #[tokio::test(start_paused = true)]
 async fn an_agent_that_keeps_exiting_rests_then_tries_again() {
-    let r = rig(None, true);
+    let r = rig(super::TURN_TIMEOUT, true);
     r.driver.prompt("hello").unwrap();
     until("resting", || r.driver.status() == Status::Error).await;
     assert_eq!(
@@ -374,7 +374,7 @@ async fn an_agent_that_keeps_exiting_rests_then_tries_again() {
 
 #[tokio::test(start_paused = true)]
 async fn prompts_are_bounded_and_end_with_the_session() {
-    let r = rig(None, false);
+    let r = rig(super::TURN_TIMEOUT, false);
     assert!(r.driver.prompt("  ").is_err());
     assert!(r.driver.prompt(&"x".repeat(super::MAX_PROMPT + 1)).is_err());
     r.driver.prompt("slow").unwrap();

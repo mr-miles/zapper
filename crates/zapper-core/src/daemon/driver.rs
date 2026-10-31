@@ -286,7 +286,7 @@ async fn run(
     spawn: Spawn,
     report: Arc<dyn Report>,
     transcript: Box<dyn Fn(Value) + Send + Sync>,
-    turn_timeout: Option<Duration>,
+    turn_timeout: Duration,
 ) {
     use tokio::time::Instant;
     let watch: Arc<dyn Observer> = Arc::new(Watch {
@@ -294,7 +294,6 @@ async fn run(
         report: report.clone(),
         transcript,
     });
-    let turn_timeout = turn_timeout.unwrap_or(TURN_TIMEOUT);
     let mut proc: Option<Proc> = None;
     let mut restarts: VecDeque<Instant> = VecDeque::new();
     let mut backoff_until = Instant::now();
@@ -518,7 +517,14 @@ pub(crate) fn drive(daemon: &Arc<super::Daemon>, session: &Arc<super::session::S
             let _ = f.line(&serde_json::to_vec(&v).unwrap_or_default());
         }
     });
-    tokio::spawn(run(driver, conversations, spawn, report, transcript, None));
+    tokio::spawn(run(
+        driver,
+        conversations,
+        spawn,
+        report,
+        transcript,
+        TURN_TIMEOUT,
+    ));
 }
 
 #[cfg(test)]
