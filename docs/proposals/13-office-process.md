@@ -1,8 +1,10 @@
 # The office as a process of its own
 
-Status: part 1 is built (`tidy/office-api`, below); of part 2, §7 is decided (the office's own listener) and the rest is for discussion.
+Status: part 1 is built (`tidy/office-api`, below), and the office runs on it in-process. Of part 2: §7's own listener is decided and now has a built template to copy (below); §8 is largely settled by the `serve` shutdown that has since landed (below); §4–§6, and §7's config file, are still for discussion.
 
-The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is (built on `feat/workbench`): it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
+The office moves out of the daemon into `zapper-office`, an executable that is a client of zapper's API on zapper's socket in exactly the way the [workbench](12-single-user-layer.md#part-2-the-workbench) is: it depends on the API and on `zapper-proto` and `zapper-policy`, never on `zapper-core`. It replaces [firm separation](../firm-separation.md#later-if-wanted-a-separate-process)'s "later, if wanted" section, which predates the workbench and assumed one process.
+
+The workbench is no longer a plan to follow: it is built — its own executable (`zapper-workbench`), its own gateway that authenticates clients and calls zapper over the socket, a facilities interface, tokens and grants, SSE, the drive, git served as a socket service, and SSH. So the office is not charting a new pattern; it copies a working one, and §7's shared gateway is a concrete extraction, not a sketch.
 
 Why:
 
@@ -94,20 +96,21 @@ Today the foreman opens a terminal in the worker's VM and runs the core's driver
 
 ### 7. The office's UI, CLI and config
 
-*Decided: its own listener.* The second option below, behind the workbench, is set aside. Its config and its CLI are still open.
+*Decided: its own listener.* The alternative — the office behind the workbench, as a facility it proxies (one sign-in for both, but the office then needs the workbench to run) — is set aside. Its config file is still open.
 
-- **Its own listener.** The office serves its pages and the board's writes itself, behind its own guard: the workbench's gateway code (sign-in, cookie, `Host`, `Origin`, the UI's header), moved into a crate both use. AGENTS.md's list of the UI's writes splits into zapper's and the office's.
-- **Or behind the workbench**, as a facility the workbench proxies: one sign-in for both, but the office then needs the workbench to run.
+- **Its own listener.** The office serves its pages and the board's writes itself, behind its own guard. This is no longer a plan to write but an extraction: the workbench's `gateway.rs` already owns remote security (token or the UI's cookie with `Host`, `Origin` and the header check), creates sessions with the token's labels and a directory of its own, scopes a rule to a session's own layer, never opens a `system` terminal, and filters lists, approvals and events to a token's sessions. The part both need — sign-in, cookie, the origin checks, the per-session filtering — moves into a crate both depend on; each keeps its own facilities and routes. AGENTS.md's list of the UI's writes splits into zapper's and the office's.
 - **`zapper firm …`** moves to `zapper-office firm …` (or the `zapper` CLI finds the office's socket), and `zapper-inspect` stays as it is, reading runs from disk.
-- **Config.** The `firms:` section moves to the office's own file (`~/.config/zapper/office.yaml`, or beside zapper's in a checkout), parsed and validated by the office; or stays in zapper's, which the core stores without reading and hands to the office through the API. The first is simpler; the second keeps one `config diff` and one `config save`.
+- **Config (open).** The `firms:` section moves to the office's own file (`~/.config/zapper/office.yaml`, or beside zapper's in a checkout), parsed and validated by the office; or stays in zapper's, which the core stores without reading and hands to the office through the API. The first is simpler and now has precedent: the workbench keeps its own `~/.config/zapper-workbench` and `~/.local/share/zapper-workbench` already. The second keeps one `config diff` and one `config save` for the operator.
 
 ### 8. Two lifecycles
 
-Today both stop together, and a run ends with the daemon ([firm separation: restarts](../firm-separation.md#restarts)). Apart:
+Today both stop together, and a run ends with the daemon ([firm separation: restarts](../firm-separation.md#restarts)). The `serve` shutdown that has since landed (`bae773f`) settles the mechanic this builds on: on stop the daemon stops sessions at once (each waits up to 5 s for its guest to power off, not one after another), gives requests under way 3 s, then returns and drops open streams; their clients resume from the next daemon by their cursors, and persistent sessions are left running. So a client that follows events and terminals already survives the daemon going and coming back by its cursor — the office is one such client.
 
-- **The daemon after the office goes.** Its services, MCP servers and deciders point at a process that isn't there, and its workers run on. Registrations could be **leases** held by a connection the client keeps open (gone with it), or stay until removed, with what they do while the client is away stated (a socket service refuses, a decider's sessions are refused, §4). Workers: stopped by the daemon when the office's lease ends, or left for the office to find again.
-- **The office after the daemon restarts.** Workers aren't persistent sessions (they share layers today, which persistent sessions can't), so they end with the daemon, and the run with them, as now. Resuming a run is the office's own, later work; §5(a) or (b) would let workers be persistent.
-- **The office restarting alone.** With leases, a restart ends the run; without them, the office could find its sessions again by their labels and its registrations by name.
+On that footing the direction is **kept-until-removed, not leases**:
+
+- **The daemon after the office goes.** Registrations (socket services, MCP servers, deciders) stay until removed, each with a stated behaviour while the client is away: a socket service and an MCP server refuse, a decider's sessions are refused as denials (never sent to the operator, §4). No lease to lose, so an office restart or upgrade doesn't tear the registrations down — the point of the split.
+- **The office after a daemon restart.** It re-finds its sessions by their labels and its registrations by name, and resumes the event and terminal streams from its cursors, exactly as the shutdown leaves room for. Non-persistent workers still end with the daemon, and the run with them, as now; making workers persistent (so a run outlives a daemon restart) waits on §5(a) and is later work.
+- **The one open sub-question:** the office's workers while the office is away. Left running, they idle (nothing drives them until the office returns); stopped by the daemon after the office's registrations have been gone for a grace period, they free their VMs but end the run. Leaning *left running with a grace stop*: the office usually comes back, and a short idle is cheaper than a lost run.
 
 ### 9. The record
 
@@ -128,8 +131,13 @@ Every step needs a KVM host for `make test-e2e-office`.
 
 ## Open questions
 
+Four are open:
+
 - §4: referrals as events (a), or a decider socket (b)?
 - §5: named shared layers in the core (a), rules per session (b), or profiles per role (c)?
 - §6: the driver as a crate the office uses (a), or the core's driver with an owner in the API (b)?
-- §7: its config in its own file, or in zapper's? (Its own listener is decided.)
-- §8: registrations as leases, or kept until removed? Are workers stopped when the office goes?
+- §7: the `firms:` config in the office's own file, or in zapper's? (The office's own listener is decided.)
+
+Settled since this was written, left here for the record:
+
+- §8: kept-until-removed, not leases, with the office resuming by cursor (the `serve` shutdown made this the cheap path). The lone remainder is whether an away office's workers are left idling or grace-stopped — leaning left running.
