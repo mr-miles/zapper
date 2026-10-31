@@ -208,18 +208,17 @@ impl ExecRule {
 fn evaluate<'a, R: 'a + RuleInfo>(
     layers: &'a Layers<'a>,
     rules: impl Fn(&'a Policy) -> &'a [R],
-    is_final: impl Fn(&R) -> bool,
     matches: impl Fn(&R) -> bool,
     default: impl Fn(&Policy) -> Option<Action>,
 ) -> (Decision, Option<&'a R>) {
     // Final rules first, from the least specific layer down.
     for (scope, policy) in layers.iter().rev() {
-        if let Some(r) = rules(policy).iter().find(|r| is_final(r) && matches(r)) {
+        if let Some(r) = rules(policy).iter().find(|r| r.is_final() && matches(r)) {
             return (r.decision(scope), Some(r));
         }
     }
     for (scope, policy) in layers {
-        if let Some(r) = rules(policy).iter().find(|r| !is_final(r) && matches(r)) {
+        if let Some(r) = rules(policy).iter().find(|r| !r.is_final() && matches(r)) {
             return (r.decision(scope), Some(r));
         }
     }
@@ -245,39 +244,48 @@ fn evaluate<'a, R: 'a + RuleInfo>(
     )
 }
 
+/// What `evaluate` needs of a rule of either kind.
 trait RuleInfo {
-    fn decision(&self, scope: &Scope) -> Decision;
-}
+    fn action(&self) -> Action;
+    fn id(&self) -> Option<&String>;
+    fn is_final(&self) -> bool;
 
-impl RuleInfo for NetRule {
     fn decision(&self, scope: &Scope) -> Decision {
         Decision {
-            action: self.action,
-            rule: self.id.clone(),
+            action: self.action(),
+            rule: self.id().cloned(),
             scope: Some(scope.clone()),
         }
     }
 }
 
+impl RuleInfo for NetRule {
+    fn action(&self) -> Action {
+        self.action
+    }
+    fn id(&self) -> Option<&String> {
+        self.id.as_ref()
+    }
+    fn is_final(&self) -> bool {
+        self.final_
+    }
+}
+
 impl RuleInfo for ExecRule {
-    fn decision(&self, scope: &Scope) -> Decision {
-        Decision {
-            action: self.action,
-            rule: self.id.clone(),
-            scope: Some(scope.clone()),
-        }
+    fn action(&self) -> Action {
+        self.action
+    }
+    fn id(&self) -> Option<&String> {
+        self.id.as_ref()
+    }
+    fn is_final(&self) -> bool {
+        self.final_
     }
 }
 
 /// Evaluates a connection or request. Effects are only set when allowed.
 pub fn evaluate_net(layers: &Layers<'_>, req: &NetRequest) -> (Decision, NetEffects) {
-    let (decision, rule) = evaluate(
-        layers,
-        |p| &p.net,
-        |r| r.final_,
-        |r| r.matches(req),
-        |p| p.defaults.net,
-    );
+    let (decision, rule) = evaluate(layers, |p| &p.net, |r| r.matches(req), |p| p.defaults.net);
     let effects = match rule {
         Some(r) if decision.action == Action::Allow => NetEffects {
             secrets: r.secrets.clone(),
@@ -365,14 +373,7 @@ pub fn resolvable(layers: &Layers<'_>, name: &str) -> bool {
 }
 
 pub fn evaluate_exec(layers: &Layers<'_>, req: &ExecRequest) -> Decision {
-    evaluate(
-        layers,
-        |p| &p.exec,
-        |r| r.final_,
-        |r| r.matches(req),
-        |p| p.defaults.exec,
-    )
-    .0
+    evaluate(layers, |p| &p.exec, |r| r.matches(req), |p| p.defaults.exec).0
 }
 
 #[cfg(test)]
