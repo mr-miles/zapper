@@ -353,8 +353,21 @@ async fn get_diff(State(d): D) -> String {
     d.diff()
 }
 
-async fn put_config(State(d): D, body: String) -> R<Json<Value>> {
+#[derive(Deserialize)]
+struct PutConfig {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Replaces the running config, validated as a whole and applied
+/// atomically; with `dry_run`, checked the same way and not applied, the
+/// answer saying what would change.
+async fn put_config(State(d): D, Query(q): Query<PutConfig>, body: String) -> R<Json<Value>> {
     let config: Config = parse_body(&body)?;
+    if q.dry_run {
+        let diff = d.check_replace(config)?;
+        return Ok(Json(json!({ "ok": true, "applied": false, "diff": diff })));
+    }
     d.replace_config(config)?;
     Ok(Json(json!({ "ok": true })))
 }

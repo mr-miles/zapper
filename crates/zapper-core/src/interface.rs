@@ -172,6 +172,9 @@ pub trait ConfigApi {
     fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T>;
     /// Replaces the running config wholesale (secrets left redacted kept).
     fn replace_config(&self, config: Config) -> Result<()>;
+    /// What replacing it with `config` would change, checked as
+    /// `replace_config` checks it, not applied: a diff, empty for nothing.
+    fn check_replace(&self, config: Config) -> Result<String>;
     /// Writes the running config to the startup file.
     fn save(&self) -> Result<()>;
     /// Drops running changes: the startup file again.
@@ -214,6 +217,10 @@ impl ConfigApi for Core {
 
     fn replace_config(&self, config: Config) -> Result<()> {
         self.d.replace_config(config)
+    }
+
+    fn check_replace(&self, config: Config) -> Result<String> {
+        self.d.check_replace(config)
     }
 
     fn save(&self) -> Result<()> {
