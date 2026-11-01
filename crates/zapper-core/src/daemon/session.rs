@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use zapper_policy::proto::{Forward, Frame, GuestFile, ShellRequest, SHELL_PORT};
@@ -180,19 +180,20 @@ pub struct Session {
     ssh_opening: tokio::sync::Mutex<()>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SessionInfo {
     pub(crate) id: String,
     pub(crate) profile: String,
     #[serde(flatten)]
     pub(crate) status: Status,
     pub(crate) created: f64,
+    #[serde(default)]
     pub(crate) expires: Option<f64>,
     pub(crate) persistent: bool,
     /// Whether the SSH gateway may open terminals in it.
     pub(crate) ssh: bool,
     /// For a persistent session: what its disks take on the host.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) disk_bytes: Option<u64>,
     pub(crate) image: String,
     pub(crate) vcpus: u8,
@@ -206,15 +207,15 @@ pub struct SessionInfo {
     pub(crate) counters: serde_json::Value,
     pub(crate) usage: Option<zapper_policy::proto::GuestEvent>,
     pub(crate) rules: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) firm: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) member: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) labels: BTreeMap<String, String>,
     /// The driver's state for a driven session; `"disabled"` with the
     /// driver off (`daemon.driver: false`).
-    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub(crate) driver: serde_json::Value,
 }
 

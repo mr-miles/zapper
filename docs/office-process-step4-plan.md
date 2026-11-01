@@ -188,10 +188,26 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
       office state + client.
 
 ## P3 — `Remote` impls + API routes
-- [ ] **P3-a** Flesh `Remote` for every trait method: hyper-upgrade for `attach`; GET/POST for
-      sessions / `admit` / registrations / `resolve`; SSE for `subscribe`.
-- [ ] **P3-b** Add the missing `zapper-api` routes (`/v1/admit`, `/v1/deciders`, open-shell /
-      attach upgrade, …) the `Remote` methods call.
+- [~] **P3-a** Flesh `Remote` for every trait method. **Done:** the session CRUD —
+      `create_session` (POST `/v1/sessions`, mapping `NewSession`→the API's `CreateSession`
+      shape), `stop_session` (POST `/v1/sessions/{id}/stop`), `forget_session` (DELETE), and
+      `session` (GET). The async methods `.await` directly; the sync ones use `block`. This
+      needed **`SessionInfo: Deserialize`** (+ `Status`; `GuestEvent`/`NetworkMode` already
+      had it) so `Remote` can read the API's responses — covered by a JSON round-trip in
+      `client::tests`. **Left:** `attach` (hyper-upgrade the attach route to a raw stream),
+      and the registration methods (`add_mcp_socket`/`add_decider_socket`/`add_service`/
+      `add_zone`/`remove_*`) — see the FINDING below. **Not unit-tested end-to-end** (no live
+      socket until the P4 binary); the serde round-trip is the testable part.
+- [ ] **P3-b** Add the missing `zapper-api` routes (`/v1/deciders` for decider-socket register/
+      remove; a zone POST; the mcp-socket variant) the registration `Remote` methods call.
+
+### P3 FINDING — remote facility registration needs restructuring (P4)
+`add_service` carries an in-process `Arc<dyn ServiceHandler>` (the firm's git server). That
+**cannot cross the socket** — a remote office cannot hand the daemon a handler. So a standalone
+office must serve git on a **socket** (as it already does its tools and decider via
+`serve_facility`), not via `add_service(Handler)`. That restructuring belongs with P4-b (the
+office holding its own state / serving its own facilities); the `Remote` registration methods
+are blocked on it, which is why P3-a did the session CRUD (no such gap) first.
 
 ## P4 — own listener + the split (D3 = A)
 - [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the

@@ -238,26 +238,64 @@ impl OfficeClient for Remote {
             .map_err(|(_, why)| anyhow::anyhow!(why))?;
         Ok(serde_json::from_value(v)?)
     }
-    // The session surface over the socket is P3-a: GET/POST for create / stop
-    // / forget / session, and a hyper upgrade for `attach`. The `zapper-office`
-    // binary does not drive firms until P4, so these are unreachable today.
-    fn create_session<'a>(&'a self, _new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
-        Box::pin(async { unimplemented!("Remote::create_session (P3-a)") })
+    fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
+        // The API takes its own `CreateSession` shape (rules, not a `Policy`;
+        // no shared layers — the office sets none on a worker/cluster session).
+        let body = serde_json::json!({
+            "profile": new.profile,
+            "workdir": new.workdir,
+            "rules": new.policy.rules(),
+            "labels": new.labels,
+            "persistent": new.persistent,
+            "accept_changed_image": new.accept_changed_image,
+            "ssh": new.ssh,
+            "files": new.files,
+            "mounts": new.mounts,
+            "agent_overlay": new.agent_overlay,
+            "forwards": new.forwards,
+        });
+        Box::pin(async move {
+            let v = self
+                .0
+                .call(Method::POST, "/v1/sessions", Some(&body))
+                .await?
+                .ok()
+                .map_err(|(_, why)| anyhow::anyhow!(why))?;
+            Ok(serde_json::from_value(v)?)
+        })
     }
-    fn stop_session<'a>(&'a self, _id: &'a str, _reason: &'a str) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { unimplemented!("Remote::stop_session (P3-a)") })
+    fn stop_session<'a>(&'a self, id: &'a str, _reason: &'a str) -> BoxFuture<'a, Result<()>> {
+        // The daemon records its own stop reason; the route takes none.
+        Box::pin(async move {
+            self.0
+                .call(Method::POST, &format!("/v1/sessions/{id}/stop"), None)
+                .await?
+                .ok()
+                .map_err(|(_, why)| anyhow::anyhow!(why))?;
+            Ok(())
+        })
     }
-    fn forget_session(&self, _id: &str) -> Result<()> {
-        unimplemented!("Remote::forget_session (P3-a)")
+    fn forget_session(&self, id: &str) -> Result<()> {
+        block(
+            self.0
+                .call(Method::DELETE, &format!("/v1/sessions/{id}"), None),
+        )?
+        .ok()
+        .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        Ok(())
     }
-    fn session(&self, _id: &str) -> Result<SessionInfo> {
-        unimplemented!("Remote::session (P3-a)")
+    fn session(&self, id: &str) -> Result<SessionInfo> {
+        let v = block(self.0.get(&format!("/v1/sessions/{id}")))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        Ok(serde_json::from_value(v)?)
     }
     fn attach<'a>(
         &'a self,
         _id: &'a str,
         _req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
+        // A hyper upgrade of the attach route to a raw stream; next P3 slice.
         Box::pin(async { unimplemented!("Remote::attach (P3-a)") })
     }
     fn add_mcp_socket(
@@ -534,6 +572,14 @@ firms:
         assert_eq!(info.id(), id);
         assert_eq!(info.label("member"), Some("pat"));
         assert_eq!(info.label("firm"), Some("acme"));
+
+        // SessionInfo round-trips through JSON — what Remote relies on to read
+        // the API's responses over the socket (P3).
+        let json = serde_json::to_value(&info).unwrap();
+        let back: zapper_core::SessionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id(), id);
+        assert_eq!(back.label("member"), Some("pat"));
+        assert_eq!(back.profile(), info.profile());
 
         // attach(id): a terminal stream the worker's VM receives.
         let mut vm = shell_vm(&s);

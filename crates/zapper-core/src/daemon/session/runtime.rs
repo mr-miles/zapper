@@ -5,11 +5,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch, Semaphore};
 use zapper_policy::proto::HostMsg;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", content = "detail", rename_all = "lowercase")]
 pub enum Status {
     Starting,
