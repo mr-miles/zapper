@@ -17,7 +17,7 @@ use zapper_core::{
     ApprovalApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi, SessionInfo,
 };
 use zapper_policy::proto::ShellRequest;
-use zapper_policy::{AnyRule, NetRequest};
+use zapper_policy::{AnyRule, NetRequest, NetRule, Scope};
 
 /// What the office's firm logic needs from the daemon, so it reaches it
 /// through this interface rather than a `Core` directly. Implemented
@@ -50,6 +50,12 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
+    /// Promotes a standing approval's `rule` into the running config at
+    /// `scope`, under change note `what`, giving it a fresh `net-N` id; the
+    /// rule as added. Config mutation stays the operator's: `Local` changes
+    /// the daemon's config in process; `Remote` reaches the daemon's config
+    /// API (filled in with the standalone bin, P4-d).
+    fn promote_rule(&self, what: &str, scope: &Scope, rule: NetRule) -> Result<AnyRule>;
 
     // --- session surface (P1-b) --------------------------------------------
     // The office creates, drives, stops and forgets a worker's (or facility's)
@@ -164,6 +170,22 @@ impl OfficeClient for Local {
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
+    }
+    fn promote_rule(&self, what: &str, scope: &Scope, rule: NetRule) -> Result<AnyRule> {
+        <zapper_core::Core as zapper_core::ConfigApi>::change(&self.0, what, |c| {
+            let mut rule = AnyRule::Net(rule);
+            let taken = c.rule_ids();
+            rule.set_id(
+                (1..)
+                    .map(|n| format!("net-{n}"))
+                    .find(|i| !taken.contains(i))
+                    .unwrap(),
+            );
+            c.policy_mut(scope)
+                .ok_or_else(|| anyhow::anyhow!("no {scope}"))?
+                .insert(rule.clone(), Some(0));
+            Ok(rule)
+        })
     }
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         Box::pin(async move {
@@ -313,6 +335,11 @@ impl OfficeClient for Remote {
             .ok()
             .map_err(|(_, why)| anyhow::anyhow!(why))?;
         Ok(serde_json::from_value(v)?)
+    }
+    fn promote_rule(&self, _what: &str, _scope: &Scope, _rule: NetRule) -> Result<AnyRule> {
+        // Config mutation over the socket needs a daemon config route and is
+        // wired with the standalone bin (P4-d); co-hosted uses `Local`.
+        unimplemented!("promote a standing approval into config over the socket — P4-d")
     }
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         // The API takes its own `CreateSession` shape (rules, not a `Policy`;

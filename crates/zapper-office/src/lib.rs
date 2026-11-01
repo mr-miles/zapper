@@ -55,8 +55,10 @@ use tokio::sync::{Notify, Semaphore};
 use zapper_core::util::{now, random_id};
 use zapper_core::{Core, EventBody};
 
-/// The office's state in the core: its registry of runs.
-pub(crate) trait OfficeOf {
+/// The office's state in the core: its registry of runs. `pub` so the
+/// co-host mount (`zapper::office`) can hand the office's own state to
+/// [`routes`]; a standalone office (P4-d) builds its `Office` directly.
+pub trait OfficeOf {
     fn office(&self) -> Arc<Office>;
 }
 
@@ -71,10 +73,12 @@ use mail::{Draft, Kind};
 use zapper_core::Session;
 use zapper_core::SessionInfo;
 
-/// Every firm's current or last run.
+/// Every firm's current or last run. `pub` as the office's own HTTP state
+/// (the axum `State` the firm routes extract), replacing `Core`; its fields
+/// stay crate-private.
 #[derive(Default)]
-pub(crate) struct Office {
-    pub runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
+pub struct Office {
+    pub(crate) runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
     /// The daemon through the office's client interface, set once in `start`.
     /// In-process it wraps `Core`; once the office is a process of its own it
     /// is the socket client. How the office reaches the daemon from places
@@ -119,7 +123,7 @@ impl Office {
             .expect("the office's socket_dir is set in start()")
     }
 
-    pub fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
+    pub(crate) fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
         self.runs
             .read()
             .unwrap()
@@ -128,7 +132,7 @@ impl Office {
             .ok_or_else(|| anyhow!("no run of firm {firm}; start it with `zapper firm up {firm}`"))
     }
 
-    pub fn active(&self, firm: &str) -> Result<Arc<FirmRun>> {
+    pub(crate) fn active(&self, firm: &str) -> Result<Arc<FirmRun>> {
         let r = self.run(firm)?;
         if r.ended() {
             bail!("firm {firm} isn't running; start it with `zapper firm up {firm}`");
@@ -783,10 +787,10 @@ impl FirmRun {
 
 /// The office's API routes (firms, mail, security, the drive), for the API
 /// and the UI to serve.
-pub fn routes(d: &Core) -> axum::Router {
+pub fn routes(office: Arc<Office>) -> axum::Router {
     http::read_routes()
         .merge(http::board_routes())
-        .with_state(d.clone())
+        .with_state(office)
 }
 
 /// The office's page: the UI's front page.

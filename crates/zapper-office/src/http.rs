@@ -4,8 +4,8 @@
 
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use zapper_core::prelude::*;
 
 use crate::firm::BOARD;
 use axum::extract::{Path, Query, State};
@@ -17,29 +17,31 @@ use axum::{Json, Router};
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use zapper_policy::AnyRule;
 
 use super::{drive, security};
-use crate::OfficeOf;
+use crate::Office;
 use zapper_core::ApiError;
-use zapper_core::Core;
 
-type D = State<Core>;
+/// The office's own state: the handlers reach firms, runs and the running
+/// config through it (`run`, `active`, `firm_dir`, `client().config()`),
+/// never through a `Core`. Co-hosted it is `Core::office()`; a standalone
+/// office binds its own (P4-d).
+type S = State<Arc<Office>>;
 type R<T> = Result<T, ApiError>;
 
 /// A running firm resolved from the request's `{f}` path segment: the
 /// handler takes `Active(run)` instead of repeating
-/// `let run = d.office().active(&f)?;` after `State(d), Path(f)`. Errors the
+/// `let run = office.active(&f)?;` after `State(office), Path(f)`. Errors the
 /// same way that preamble did (no such firm, or not running). Handlers that
-/// still need the core keep `State(d)` alongside it.
-struct Active(std::sync::Arc<crate::FirmRun>);
+/// still need the office state keep `State(office)` alongside it.
+struct Active(Arc<crate::FirmRun>);
 
-impl axum::extract::FromRequestParts<Core> for Active {
+impl axum::extract::FromRequestParts<Arc<Office>> for Active {
     type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        state: &Core,
+        state: &Arc<Office>,
     ) -> Result<Self, ApiError> {
         let Path(params) =
             Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
@@ -48,7 +50,7 @@ impl axum::extract::FromRequestParts<Core> for Active {
         let f = params
             .get("f")
             .ok_or_else(|| bad("no firm in the request path"))?;
-        Ok(Active(state.office().active(f)?))
+        Ok(Active(state.active(f)?))
     }
 }
 
@@ -63,7 +65,7 @@ fn body(text: &str) -> R<Value> {
     serde_yaml::from_str(text).map_err(|e| bad(format!("body: {e}")))
 }
 
-pub fn read_routes() -> Router<Core> {
+pub fn read_routes() -> Router<Arc<Office>> {
     Router::new()
         .route("/firms", get(list))
         .route("/firms/{f}", get(status))
@@ -96,7 +98,7 @@ pub fn read_routes() -> Router<Core> {
 
 /// The board's writes, in the API and the UI: including deleting a past run
 /// and notes on runs.
-pub fn board_routes() -> Router<Core> {
+pub fn board_routes() -> Router<Arc<Office>> {
     Router::new()
         // The task's attachments ride in the body, base64 like an upload's.
         .route(
@@ -139,12 +141,12 @@ pub fn board_routes() -> Router<Core> {
         )
 }
 
-async fn list(State(d): D) -> Json<Value> {
-    let config = d.config();
+async fn list(State(office): S) -> Json<Value> {
+    let config = office.client().config();
     let out: Vec<Value> = crate::firm::all(&config)
         .iter()
         .map(|(name, f)| {
-            let run = d.office().run(name).ok();
+            let run = office.run(name).ok();
             json!({
                 "name": name, "description": f.description, "workers": f.workers.len(),
                 "run": run.as_ref().map(|r| r.id.clone()), "state": run.as_ref().map(|r| json!(*r.state.lock().unwrap())),
@@ -154,9 +156,9 @@ async fn list(State(d): D) -> Json<Value> {
     Json(json!(out))
 }
 
-async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let config = d.config();
-    let run = d.office().run(&f).ok();
+async fn status(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    let config = office.client().config();
+    let run = office.run(&f).ok();
     // A running firm's chart is its live one (the founders it booted with,
     // and its hires), whatever the config says now.
     let booted = run.as_ref().filter(|r| !r.ended()).map(|r| r.chart());
@@ -192,8 +194,8 @@ async fn status(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
 }
 
 /// The firm's scenarios as configured.
-async fn scenarios(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let config = d.config();
+async fn scenarios(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    let config = office.client().config();
     let firm = crate::firm::get(&config, &f).ok_or_else(|| anyhow::anyhow!("no firm {f}"))?;
     Ok(Json(json!(firm.scenarios)))
 }
@@ -228,8 +230,8 @@ fn start_terms(firm: &crate::firm::Firm, config: &zapper_policy::Config) -> Valu
 }
 
 /// Checks a run's record against the keeper's chains and signatures.
-async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    let dir = super::run_dir(&d.office(), &f, &run)?;
+async fn run_verify(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+    let dir = super::run_dir(&office, &f, &run)?;
     Ok(Json(
         tokio::task::spawn_blocking(move || zapper_core::record::verify_state_dir(&dir))
             .await
@@ -238,19 +240,15 @@ async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Js
 }
 
 /// The config a run started with (secret values hidden) and its skills.
-async fn run_config(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    Ok(Json(super::run_config(&super::run_dir(
-        &d.office(),
-        &f,
-        &run,
-    )?)))
+async fn run_config(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+    Ok(Json(super::run_config(&super::run_dir(&office, &f, &run)?)))
 }
 
-async fn runs(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    if !d.with_config(|c| c.firms.contains_key(&f)) && !d.office().firm_dir(&f).is_dir() {
+async fn runs(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    if !office.client().config().firms.contains_key(&f) && !office.firm_dir(&f).is_dir() {
         return Err(anyhow::anyhow!("no firm {f}").into());
     }
-    Ok(Json(json!(super::list_runs(&d.office(), &f))))
+    Ok(Json(json!(super::list_runs(&office, &f))))
 }
 
 #[derive(Deserialize, Default)]
@@ -324,20 +322,20 @@ fn tail(path: PathBuf, from: u64) -> impl Stream<Item = Result<SseEvent, Infalli
 }
 
 async fn journal(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<Follow>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d.office(), &f, &run)?;
+    let dir = super::run_dir(&office, &f, &run)?;
     lines(zapper_core::record::view(&dir.join("journal.jsonl")), q).await
 }
 
 async fn transcript(
-    State(d): D,
+    State(office): S,
     Path((f, run, worker)): Path<(String, String, String)>,
     Query(q): Query<Follow>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d.office(), &f, &run)?;
+    let dir = super::run_dir(&office, &f, &run)?;
     if !zapper_policy::valid_worker_name(&worker) {
         return Err(bad(format!("{worker:?} is not a worker name")));
     }
@@ -351,10 +349,10 @@ async fn transcript(
 /// A published file. Served as its own type with a sandboxing CSP, so a
 /// published page or SVG can't run script in the UI's origin.
 async fn drive_file(
-    State(d): D,
+    State(office): S,
     Path((f, run, artifact, version, path)): Path<(String, String, String, String, String)>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d.office(), &f, &run)?;
+    let dir = super::run_dir(&office, &f, &run)?;
     let version: u32 = version
         .trim_start_matches('v')
         .parse()
@@ -376,8 +374,8 @@ async fn drive_file(
         .into_response())
 }
 
-async fn git_log(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    let dir = super::run_dir(&d.office(), &f, &run)?;
+async fn git_log(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+    let dir = super::run_dir(&office, &f, &run)?;
     Ok(Json(super::facility::git_log(&dir).await))
 }
 
@@ -398,32 +396,30 @@ fn main_ref() -> String {
     "main".into()
 }
 
-async fn git_repos(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+async fn git_repos(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     Ok(Json(json!(super::git::repos(&super::run_dir(
-        &d.office(),
-        &f,
-        &run
+        &office, &f, &run
     )?))))
 }
 
 async fn git_branches(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::branches(&super::run_dir(&d.office(), &f, &run)?, q.repo.as_deref()).await?,
+        super::git::branches(&super::run_dir(&office, &f, &run)?, q.repo.as_deref()).await?,
     ))
 }
 
 async fn git_ref_log(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::log(
-            &super::run_dir(&d.office(), &f, &run)?,
+            &super::run_dir(&office, &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             q.limit.unwrap_or(200),
@@ -433,13 +429,13 @@ async fn git_ref_log(
 }
 
 async fn git_tree(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::tree(
-            &super::run_dir(&d.office(), &f, &run)?,
+            &super::run_dir(&office, &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             &q.path,
@@ -449,13 +445,13 @@ async fn git_tree(
 }
 
 async fn git_blob(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::blob(
-            &super::run_dir(&d.office(), &f, &run)?,
+            &super::run_dir(&office, &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             &q.path,
@@ -465,17 +461,12 @@ async fn git_blob(
 }
 
 async fn git_commit(
-    State(d): D,
+    State(office): S,
     Path((f, run, id)): Path<(String, String, String)>,
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::commit(
-            &super::run_dir(&d.office(), &f, &run)?,
-            q.repo.as_deref(),
-            &id,
-        )
-        .await?,
+        super::git::commit(&super::run_dir(&office, &f, &run)?, q.repo.as_deref(), &id).await?,
     ))
 }
 
@@ -487,23 +478,27 @@ struct InboxQuery {
     unread: bool,
 }
 
-async fn inbox(State(d): D, Path(f): Path<String>, Query(q): Query<InboxQuery>) -> R<Json<Value>> {
-    let run = d.office().run(&f)?;
+async fn inbox(
+    State(office): S,
+    Path(f): Path<String>,
+    Query(q): Query<InboxQuery>,
+) -> R<Json<Value>> {
+    let run = office.run(&f)?;
     let who = q.who.unwrap_or_else(|| BOARD.into());
     Ok(Json(json!(run
         .post
         .with(|po| po.inbox(&who, q.unread, 500)))))
 }
 
-async fn thread(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
-    let run = d.office().run(&f)?;
+async fn thread(State(office): S, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
+    let run = office.run(&f)?;
     Ok(Json(
         run.post.with(|po| po.thread(&run.journal, &id, BOARD))?,
     ))
 }
 
-async fn drive_list(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let run = d.office().run(&f)?;
+async fn drive_list(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    let run = office.run(&f)?;
     let list = run
         .drive
         .lock()
@@ -512,8 +507,8 @@ async fn drive_list(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
     Ok(Json(json!(list)))
 }
 
-async fn security_state(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let run = d.office().run(&f)?;
+async fn security_state(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    let run = office.run(&f)?;
     let screenings: Vec<Value> = run
         .security
         .lock()
@@ -529,13 +524,13 @@ async fn security_state(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
 
 /// Starts a run, with the board's parameters for it if given:
 /// `{company?, ceo?, seed?}`.
-async fn up(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn up(State(office): S, Path(f): Path<String>, text: String) -> R<Json<Value>> {
     let opts: super::StartOptions = if text.trim().is_empty() {
         Default::default()
     } else {
         serde_json::from_str(&text).map_err(|e| bad(format!("body: {e}")))?
     };
-    let run = super::up_with(&d.office(), &f, &opts).await?;
+    let run = super::up_with(&office, &f, &opts).await?;
     Ok(Json(run.status()))
 }
 
@@ -588,12 +583,12 @@ async fn credentials_state(Active(run): Active) -> R<Json<Value>> {
 
 /// The board decides a credential request: `{grant, level?, expires_in?, note}`.
 async fn credentials_decide(
-    State(d): D,
+    State(office): S,
     Path((f, id)): Path<(String, String)>,
     text: String,
 ) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
+    let run = office.active(&f)?;
     let grant = v["grant"]
         .as_bool()
         .ok_or_else(|| bad("grant: true or false"))?;
@@ -626,11 +621,11 @@ async fn credentials_grant(Active(run): Active, text: String) -> R<Json<Value>> 
 
 /// The board revokes a grant: `?reason=`.
 async fn credentials_revoke(
-    State(d): D,
+    State(office): S,
     Path((f, worker, resource)): Path<(String, String, String)>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> R<Json<Value>> {
-    let run = d.office().active(&f)?;
+    let run = office.active(&f)?;
     let reason = q
         .get("reason")
         .cloned()
@@ -641,12 +636,12 @@ async fn credentials_revoke(
 }
 
 async fn screening_decide(
-    State(d): D,
+    State(office): S,
     Path((f, id)): Path<(String, String)>,
     text: String,
 ) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
+    let run = office.active(&f)?;
     let clear = v["clear"]
         .as_bool()
         .ok_or_else(|| bad("clear: true or false"))?;
@@ -663,12 +658,12 @@ async fn screening_decide(
 /// The board approves or declines the CEO's budget request:
 /// `{approve: bool, note?}`.
 async fn budget_decide(
-    State(d): D,
+    State(office): S,
     Path((f, id)): Path<(String, String)>,
     text: String,
 ) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
+    let run = office.active(&f)?;
     let approve = v["approve"]
         .as_bool()
         .ok_or_else(|| bad("approve: true or false"))?;
@@ -697,9 +692,9 @@ async fn board_release(Active(run): Active, text: String) -> R<Json<Value>> {
     ))
 }
 
-async fn mark_read(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn mark_read(State(office): S, Path(f): Path<String>, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().run(&f)?;
+    let run = office.run(&f)?;
     let ids: Vec<String> = v["ids"]
         .as_array()
         .into_iter()
@@ -711,12 +706,12 @@ async fn mark_read(State(d): D, Path(f): Path<String>, text: String) -> R<Json<V
 }
 
 async fn decide(
-    State(d): D,
+    State(office): S,
     Path((f, id)): Path<(String, String)>,
     text: String,
 ) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
+    let run = office.active(&f)?;
     let strings = |k: &str| {
         v[k].as_array().map(|a| {
             a.iter()
@@ -740,8 +735,8 @@ async fn decide(
     Ok(Json(security::decide(&run, BOARD, &id, a)?))
 }
 
-async fn revoke(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
-    let run = d.office().active(&f)?;
+async fn revoke(State(office): S, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
+    let run = office.active(&f)?;
     Ok(Json(security::revoke(
         &run,
         BOARD,
@@ -752,25 +747,13 @@ async fn revoke(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<Va
 
 /// Copies a standing approval into the running config, at the profile of the
 /// role it applies to; `zapper config save` keeps it.
-async fn promote(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
-    let run = d.office().active(&f)?;
+async fn promote(State(office): S, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
+    let run = office.active(&f)?;
     let (scope, rule) = security::promote_target(&run, &id)?;
-    let added = d.change(
+    let added = office.client().promote_rule(
         &format!("approval {id} of firm {f} promoted to {scope}"),
-        |c| {
-            let mut rule = AnyRule::Net(rule);
-            let taken = c.rule_ids();
-            rule.set_id(
-                (1..)
-                    .map(|n| format!("net-{n}"))
-                    .find(|i| !taken.contains(i))
-                    .unwrap(),
-            );
-            c.policy_mut(&scope)
-                .ok_or_else(|| anyhow::anyhow!("no {scope}"))?
-                .insert(rule.clone(), Some(0));
-            Ok(rule)
-        },
+        &scope,
+        rule,
     )?;
     run.journal.append("access", json!({ "event": "promoted", "rule": id, "to": scope.to_string(), "config_rule": added.id() }));
     Ok(Json(
@@ -780,17 +763,17 @@ async fn promote(State(d): D, Path((f, id)): Path<(String, String)>) -> R<Json<V
 
 /// The board's note on a run: `{note}`, empty to remove it.
 async fn run_note(
-    State(d): D,
+    State(office): S,
     Path((f, run)): Path<(String, String)>,
     text: String,
 ) -> R<Json<Value>> {
     let v = body(&text)?;
     let note = v["note"].as_str().ok_or_else(|| bad("note: text"))?;
-    super::set_note(&d.office(), &f, &run, note)?;
+    super::set_note(&office, &f, &run, note)?;
     Ok(Json(json!({ "run": run, "note": note.trim() })))
 }
 
-async fn prune(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    super::prune(&d.office(), &f, &run)?;
+async fn prune(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
+    super::prune(&office, &f, &run)?;
     Ok(Json(json!({ "removed": run })))
 }

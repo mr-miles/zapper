@@ -267,8 +267,15 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       socket facilities shared), and `gateway` (the `Host`/`Origin`/cookie auth, parameterised by
       the UI marker). The workbench and the office both use the client + `serve_socket`; the
       workbench uses the gateway auth and the office will when it serves its own listener.
-      **Left:** relocate `http.rs` onto that listener (the office-state swap + a client `config`
-      + `promote`'s config-mutation), which is coupled to the bin (P4-d).
+      **Office-state swap done:** the firm routes (`http.rs`) now take `State<Arc<Office>>`, not
+      `State<Core>` — the `Active` extractor and every handler reach firms/runs/config through the
+      office (`run`/`active`/`firm_dir`/`client().config()`); `promote`'s running-config mutation
+      moved behind a new `OfficeClient::promote_rule` (Local changes the daemon's config; Remote
+      stubbed for P4-d). `routes()` takes `Arc<Office>`; the co-host mount passes
+      `OfficeOf::office(d)` (both now `pub` so `zapper` can build the office state). The only
+      `Core` the firm routes still name is `record::view`/`verify_state_dir` for reading run files
+      off disk (sourced elsewhere in P4-c). **Left:** bind the router on the office's own listener
+      — coupled to the bin (P4-d).
 - [~] **P4-b** The office holds its own `Office` (`FirmRun.office()`, `Office.state_dir`); firm
       logic and the disk helpers reach the registry/run files without `Core`. Run management now
       off `Core` too: `create_run`, `up_with`, `booter` and `check_resources` take `&Arc<Office>`
