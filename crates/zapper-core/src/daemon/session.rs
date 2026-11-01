@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use zapper_policy::proto::{Forward, Frame, GuestFile, ShellRequest, SHELL_PORT};
@@ -180,68 +180,10 @@ pub struct Session {
     ssh_opening: tokio::sync::Mutex<()>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub(crate) id: String,
-    pub(crate) profile: String,
-    #[serde(flatten)]
-    pub(crate) status: Status,
-    pub(crate) created: f64,
-    #[serde(default)]
-    pub(crate) expires: Option<f64>,
-    pub(crate) persistent: bool,
-    /// Whether the SSH gateway may open terminals in it.
-    pub(crate) ssh: bool,
-    /// For a persistent session: what its disks take on the host.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) disk_bytes: Option<u64>,
-    pub(crate) image: String,
-    pub(crate) vcpus: u8,
-    pub(crate) memory_mib: u32,
-    pub(crate) kernel: String,
-    /// `nic` or `vsock`.
-    pub(crate) network: zapper_policy::NetworkMode,
-    pub(crate) user: String,
-    pub(crate) root: bool,
-    pub(crate) workdir: String,
-    pub(crate) counters: serde_json::Value,
-    pub(crate) usage: Option<zapper_policy::proto::GuestEvent>,
-    pub(crate) rules: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) firm: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) member: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) labels: BTreeMap<String, String>,
-    /// The driver's state for a driven session; `"disabled"` with the
-    /// driver off (`daemon.driver: false`).
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub(crate) driver: serde_json::Value,
-}
-
-impl SessionInfo {
-    /// The session's id.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The value of label `key`, if the session has it. The office reads a
-    /// firm session's `firm`/`run`/`member` labels this way, over the client,
-    /// in place of reaching into the `Session`.
-    pub fn label(&self, key: &str) -> Option<&str> {
-        self.labels.get(key).map(String::as_str)
-    }
-
-    /// The profile the session runs.
-    pub fn profile(&self) -> &str {
-        &self.profile
-    }
-
-    /// The workload user the agent runs as (its home is `/home/<user>`).
-    pub fn user(&self) -> &str {
-        &self.user
-    }
-}
+/// A session as the API reports it. Its serialised shape is the API
+/// contract, so the type lives in `zapper-api-types` (the clients
+/// deserialise it); the core builds it in [`Session::info`].
+pub use zapper_api_types::SessionInfo;
 
 impl Session {
     pub(crate) fn info(&self) -> SessionInfo {
