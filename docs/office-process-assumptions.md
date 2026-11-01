@@ -108,6 +108,31 @@ The real conversion that remains (the bulk of step 4), from the `&Core` method s
   workbench has it), `zapper` stops linking the office, and `OFFICE=1` means "also run
   `zapper-office`". Validate with `make test-e2e-office` on a KVM host.
 
+### Recommended vehicle for the rest: an `OfficeClient` abstraction
+
+The conversion keeps wanting the office to reach the daemon from places that hold a
+`FirmRun` (e.g. `security.rs:952` add, `:1128` revoke) but not a `&Core`. Two dead-ends
+show the shape of the right answer:
+
+- storing a `Core` in `FirmRun` fails `#[derive(Debug)]` (`Core` isn't `Debug`) and makes a
+  `Daemon → Office → FirmRun → Core → Daemon` reference cycle; and
+- threading `&Core` through `decide`/`revoke` and their callers is wide, churny, and still
+  core-typed (no path to the separate process).
+
+So the clean move — a **design decision to confirm** — is a narrow trait, say
+`OfficeClient`, with the handful of daemon operations the office needs (create/stop/forget
+session, add/remove a session rule, `add_layer_rule`/`remove_layer_rule`, services, MCP,
+deciders, config, record), held by `FirmRun`/`Office` as `Arc<dyn OfficeClient>`. Two impls:
+one wrapping `Core` (in-process, now) and one over the `client::Zapper` socket (the separate
+process). Then the office's `&Core` sites convert to `self.client`/`run.client` calls one at
+a time, each behaviour-preserving and unit-testable, and `office()`'s 32 uses rehome to the
+office's own state. When the last `&Core` is gone, `zapper-core` leaves the prod deps.
+
+This is the crux of step 4 and sets the abstraction everything else hangs off, so it's worth
+deciding/reviewing attended rather than guessing its shape unattended. The core now has the
+pieces it needs (`named_layer`, the decider socket, `record_writable`, rule events); the
+`add_layer_rule`/`remove_layer_rule` methods are the small remaining core additions.
+
 ## §6 — the driver as its own crate
 
 - **Scope taken = the proposal's literal §6(a):** "the harnesses' conversation code and
