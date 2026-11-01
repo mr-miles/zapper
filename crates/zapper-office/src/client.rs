@@ -13,7 +13,7 @@ use serde_json::Value;
 // The socket client, shared with the workbench.
 use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
 pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
-use zapper_core::{ApprovalApi, RuleApi, ServiceApi, ServiceInfo, SessionApi};
+use zapper_core::{ApprovalApi, RuleApi, ServiceApi, SessionApi};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRequest, NetRule, Scope};
@@ -124,8 +124,9 @@ pub trait OfficeClient: Send + Sync {
         sessions: BTreeMap<String, String>,
         owner: &str,
     ) -> Result<u64>;
-    /// Removes a service or zone; what it was, if it was there.
-    fn remove_service(&self, id: u64) -> Option<ServiceInfo>;
+    /// Removes a service or zone (the office only needs it gone; it ignores
+    /// what it was).
+    fn remove_service(&self, id: u64);
 
     // --- a session's own rule layer and traffic (P4) -----------------------
     // The officers decide access by putting rules on a worker's (or the
@@ -256,8 +257,8 @@ impl OfficeClient for Local {
     ) -> Result<u64> {
         self.0.add_zone(domain, sessions, owner)
     }
-    fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
-        self.0.remove_service(id)
+    fn remove_service(&self, id: u64) {
+        self.0.remove_service(id);
     }
     fn requests(&self, id: &str) -> Vec<Value> {
         self.0.session(id).map(|s| s.requests()).unwrap_or_default()
@@ -509,14 +510,11 @@ impl OfficeClient for Remote {
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("no id for the zone"))
     }
-    fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
-        // The office ignores what it was (it only needs it gone), so this
-        // doesn't reconstruct the `ServiceInfo` from the response.
+    fn remove_service(&self, id: u64) {
         let _ = block(
             self.0
                 .call(Method::DELETE, &format!("/v1/services/{id}"), None),
         );
-        None
     }
     fn requests(&self, id: &str) -> Vec<Value> {
         block(self.0.get(&format!("/v1/sessions/{id}/requests")))
