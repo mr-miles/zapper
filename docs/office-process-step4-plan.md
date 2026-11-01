@@ -84,13 +84,31 @@ surface is the real load-bearing work; the file conversions are downstream of it
   register through `run.client`. Trait grew `add_mcp_socket`/`remove_mcp_server`/
   `add_decider_socket`/`remove_decider` (Local real, Remote stubbed for P3-a). Facility's own
   zone/git/cluster registration is a different shape and rides with facility logic in P2-b.
-- **Next: P2-b** — the logic/plumbing files (`contracts`, `access`, `scenario`, `workforce`,
-  **facility**) drop `d` for `run.client`, growing the trait (session ops like `requests`,
-  `remove_session_rule`, a guest-command run, `add_service`/`add_zone`/`remove_service`,
-  `resolve`/`layers_for`/`subscribe`) as each site needs — **lead adds trait methods**; the
-  per-file conversions can then fan out to worktree/fork subagents (disjoint files). **P2-c**
-  (the http extractor) is lead. The `WorkerRt` `Arc<Session>` field goes once P2-b's readers
-  (facility/security/drive) are off it.
+- **P2-b (facility services)** done: the firm's zone + git/cluster service registration
+  (`add_service`/`add_zone`/`remove_service` on the trait) and `facility::stop` are on
+  `run.client`; the register test uses a real `Local` client, no `ServiceApi` fake.
+
+### P2-b FINDING — the rest of "drop `d`" is gated on guest commands / the `Arc<Session>`
+The cleanly Arc-independent conversions are done (services). What's left divides by what it
+actually needs from `d`:
+- **Session *boot*** (`facility::start`'s `d.create_session` for the cluster; `boot_worker`'s
+  for workers) keeps `d` **by design, for now**: it populates the transitional `Arc<Session>`
+  store (`facility.cluster`, `WorkerRt.session`) that P1-c deliberately kept. These drop `d`
+  only when that Arc is removed — the **P4** end-state (the office holds no `Session`).
+- **Guest commands** (`facility::sh`/`drive::guest_command` → `start`'s k3s/kubectl deploys,
+  `cluster_access`'s RBAC + kubeconfig write) and **session reads** (`security`'s `s.requests()`,
+  `s.remove_rule()`) run **on the `Arc<Session>`**, not on `d`. To take them off the Arc the
+  trait needs new methods — a **`run_command(id, argv, stdin, cap)` guest-command runner**
+  (streaming today; would simplify to buffered bytes), plus `requests(id)` /
+  `remove_session_rule(id, rule)`. `access::cluster_access`/`scenario` etc. that *plumb* `d`
+  into these are gated on them.
+- So **most remaining P2-b "drop `d`" is coupled to either `run_command` (a sizeable new
+  streaming trait method) or the P4 Arc-removal** — it is not the clean mechanical fan-out the
+  earlier plan assumed. **Decision needed** (see below) before continuing: add `run_command`
+  now and push the guest-command migration through, or defer the Arc-bound paths to P4 and take
+  P2-b only as far as the Arc-independent conversions (e.g. workforce's `stop_session`/
+  `forget_session` by id, already on the trait) allow.
+- **P2-c** (the http extractor) is independent of all this and is a clean lead task.
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
