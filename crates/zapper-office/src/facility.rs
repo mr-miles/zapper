@@ -911,7 +911,6 @@ pub async fn stop(run: &Arc<FirmRun>) {
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
         let _ = run.client.stop_session(s.id(), "firm down").await;
-        let _ = run.client.forget_session(s.id());
     }
 }
 

@@ -715,7 +715,6 @@ async fn booter(
                         let client = run.client.clone();
                         tokio::spawn(async move {
                             let _ = client.stop_session(&id, "let go").await;
-                            let _ = client.forget_session(&id);
                         });
                     }
                 }
@@ -914,7 +913,6 @@ pub async fn down(run: &Arc<FirmRun>, reason: &str) {
             let client = run.client.clone();
             tasks.push(tokio::spawn(async move {
                 let _ = client.stop_session(&id, "firm down").await;
-                let _ = client.forget_session(&id);
             }));
         }
         run.set_state(&w, WorkerState::Off, None);

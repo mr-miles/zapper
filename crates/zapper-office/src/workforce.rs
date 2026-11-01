@@ -1514,7 +1514,6 @@ pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bo
             let client = run.client.clone();
             tokio::spawn(async move {
                 let _ = client.stop_session(&id, "let go").await;
-                let _ = client.forget_session(&id);
             });
         }
     }

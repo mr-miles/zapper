@@ -17,8 +17,7 @@ use serde_json::Value;
 use tokio::net::UnixStream;
 use zapper_core::driver::DriveStream;
 use zapper_core::{
-    ApprovalApi, ConfigApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi,
-    SessionInfo,
+    ApprovalApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi, SessionInfo,
 };
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRequest};
@@ -42,8 +41,6 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the record can be written now (the office takes no firm turn
     /// while it can't).
     fn record_writable(&self) -> bool;
-    /// The daemon's running config.
-    fn config(&self) -> zapper_policy::Config;
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
@@ -57,11 +54,10 @@ pub trait OfficeClient: Send + Sync {
     /// Starts a session; its info once the guest is ready (the office keeps
     /// the `id`).
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>>;
-    /// Stops session `id` (it stays listed, with its audit log); errors if
+    /// Stops session `id` and takes it off the list (the office always
+    /// discards a worker's or the cluster's session when done). Errors if
     /// there is no such session.
     fn stop_session<'a>(&'a self, id: &'a str, reason: &'a str) -> BoxFuture<'a, Result<()>>;
-    /// Takes a stopped session off the list.
-    fn forget_session(&self, id: &str) -> Result<()>;
     /// Session `id`'s info; errors if there is no such session.
     fn session(&self, id: &str) -> Result<SessionInfo>;
     /// Opens a terminal in session `id` and returns the stream to drive an
@@ -151,9 +147,6 @@ impl OfficeClient for Local {
     fn record_writable(&self) -> bool {
         self.0.record_writable()
     }
-    fn config(&self) -> zapper_policy::Config {
-        self.0.config()
-    }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
     }
@@ -167,11 +160,9 @@ impl OfficeClient for Local {
         Box::pin(async move {
             let s = self.0.session(id)?;
             self.0.stop_session(&s, reason).await;
+            let _ = self.0.forget_session(id);
             Ok(())
         })
-    }
-    fn forget_session(&self, id: &str) -> Result<()> {
-        self.0.forget_session(id)
     }
     fn session(&self, id: &str) -> Result<SessionInfo> {
         let s = self.0.session(id)?;
@@ -284,12 +275,6 @@ impl OfficeClient for Remote {
             .and_then(|a| a.body["healthy"].as_bool())
             .unwrap_or(false)
     }
-    fn config(&self) -> zapper_policy::Config {
-        block(self.0.get("/v1/config?format=json"))
-            .ok()
-            .and_then(|a| serde_json::from_value(a.body).ok())
-            .unwrap_or_default()
-    }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         let v = block(self.0.get(&format!("/v1/admit?profile={profile}")))?
             .ok()
@@ -323,24 +308,20 @@ impl OfficeClient for Remote {
         })
     }
     fn stop_session<'a>(&'a self, id: &'a str, _reason: &'a str) -> BoxFuture<'a, Result<()>> {
-        // The daemon records its own stop reason; the route takes none.
+        // Stop then forget; the daemon records its own stop reason (the stop
+        // route takes none).
         Box::pin(async move {
             self.0
                 .call(Method::POST, &format!("/v1/sessions/{id}/stop"), None)
                 .await?
                 .ok()
                 .map_err(|(_, why)| anyhow::anyhow!(why))?;
+            let _ = self
+                .0
+                .call(Method::DELETE, &format!("/v1/sessions/{id}"), None)
+                .await;
             Ok(())
         })
-    }
-    fn forget_session(&self, id: &str) -> Result<()> {
-        block(
-            self.0
-                .call(Method::DELETE, &format!("/v1/sessions/{id}"), None),
-        )?
-        .ok()
-        .map_err(|(_, why)| anyhow::anyhow!(why))?;
-        Ok(())
     }
     fn session(&self, id: &str) -> Result<SessionInfo> {
         let v = block(self.0.get(&format!("/v1/sessions/{id}")))?
