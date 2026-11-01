@@ -17,6 +17,16 @@ use zapper_policy::proto::{Frame, MAX_LINE};
 use crate::harness::{Conversation, Event, TurnEnd};
 use crate::read_frame;
 
+/// A terminal stream the driver runs an agent over: any `AsyncRead +
+/// AsyncWrite` the office can hand [`start`]. A combined trait so a call site
+/// that can't name the concrete type (the office's `attach`, whose stream is
+/// a local `UnixStream` in-process and an upgraded API connection over the
+/// socket) returns it as `Box<dyn DriveStream>`. The blanket impl covers
+/// every concrete stream, and `Box<dyn DriveStream>` is itself one (tokio's
+/// `AsyncRead`/`AsyncWrite` for `Box`), so it feeds straight into `start`.
+pub trait DriveStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DriveStream for T {}
+
 pub enum Out {
     /// A turn ended.
     End(TurnEnd),

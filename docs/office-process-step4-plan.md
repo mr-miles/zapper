@@ -63,8 +63,15 @@ surface is the real load-bearing work; the file conversions are downstream of it
   the listener/split (P4).
 - **P1-a** decided: `socket_dir` is plain office config (carried on `FirmRun`, assumed
   aligned with the daemon — no client method).
-- **Next task: P1-b** (session surface on the trait) → then **P1-c** (the `WorkerRt`/foreman
-  `attach` driving rework — the care point).
+- **P1-b** done: session surface on the trait — `create_session -> SessionInfo`, `stop_session`,
+  `forget_session`, `session -> SessionInfo`, `attach -> Box<dyn DriveStream>`. `Local` impls
+  them on `Core`; `Remote` is stubbed `unimplemented!("…P3-a")` (not wired into any running path
+  yet). The async methods return `BoxFuture` so the trait stays object-safe (`Arc<dyn>`).
+  `DriveStream` (combined `AsyncRead+AsyncWrite+Unpin+Send`, blanket impl) lives in
+  `zapper-driver`, re-exported as `zapper_core::driver::DriveStream`, modelled on the daemon's
+  `services::Io`. `SessionInfo` grew public `id()`/`label()`/`profile()` accessors (its fields
+  are `pub(crate)` to the core). Covered by `client::tests::local_session_surface` (fakes).
+- **Next task: P1-c** (the `WorkerRt`/foreman `attach` driving rework — the care point).
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
@@ -96,12 +103,13 @@ Do these first; the file conversions (P2) are downstream of them.
       coordination. Carry it on `FirmRun` (set at run creation: `d.socket_dir()` in-process,
       `office.yaml` for the separate bin). The registration leaves (P2-a) read `run.socket_dir`.
       (Decided; an earlier attempt to put it on the trait was backed out.)
-- [ ] **P1-b** Session surface on the trait (**async** methods — called from the foreman's
+- [x] **P1-b** Session surface on the trait (**async** methods — called from the foreman's
       async loop): `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
       `forget_session(id)`, `session(id) -> SessionInfo`, and `attach(id, ShellRequest) ->
       Result<Box<dyn DriveStream>>` (on 1.1's generic `start`; `DriveStream` = a combined
-      `AsyncRead+AsyncWrite+Unpin+Send` trait in `zapper-driver` with forwarding impls). `Local`
-      only; `Remote` in P3.
+      `AsyncRead+AsyncWrite+Unpin+Send` trait in `zapper-driver` with a blanket impl). `Local`
+      only; `Remote` stubbed for P3. Async methods return `BoxFuture` (no `async-trait` dep; the
+      trait is held as `Arc<dyn>`). `SessionInfo` gained `id()`/`label()`/`profile()`.
 - [ ] **P1-c** The session-handle rework — **the care point** (where fakes can hide a real
       driving bug; do with fresh focus). `WorkerRt.session: Arc<Session>` → id + `SessionInfo`;
       the foreman drives via `run.client.attach(id, req)` + `driver::start`; `foreman::start`

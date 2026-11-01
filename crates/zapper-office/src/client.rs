@@ -7,13 +7,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
-use zapper_core::ConfigApi;
+use zapper_core::driver::DriveStream;
+use zapper_core::{ConfigApi, NewSession, SessionApi, SessionInfo};
+use zapper_policy::proto::ShellRequest;
 use zapper_policy::AnyRule;
 
 /// What the office's firm logic needs from the daemon, so it reaches it
@@ -21,8 +24,11 @@ use zapper_policy::AnyRule;
 /// in-process by [`Local`] (wrapping `Core`) and, once the office is a
 /// process of its own, by [`Remote`] (over the API socket). It grows as the
 /// office's remaining `&Core` calls move onto it (proposal 13, step 4; see
-/// `docs/office-process-assumptions.md`). Synchronous, because the office's
-/// firm logic (`security::decide`, revocation) is.
+/// `docs/office-process-assumptions.md`). The firm-logic calls
+/// (`security::decide`, revocation) are synchronous; the session surface is
+/// `async` — it is driven from the foreman's async loop, and its `Remote`
+/// impl is network I/O. The async methods return a [`BoxFuture`] (not RPIT)
+/// so the trait stays object-safe: it is held as `Arc<dyn OfficeClient>`.
 pub trait OfficeClient: Send + Sync {
     /// Adds a rule, first, to a firm role's shared layer `name`; the rule
     /// (with the id the caller gave it).
@@ -37,6 +43,31 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
+
+    // --- session surface (P1-b) --------------------------------------------
+    // The office creates, drives, stops and forgets a worker's (or facility's)
+    // session through these, storing the id it gets back rather than an
+    // `Arc<Session>` (P1-c). `Local` calls `Core` directly; `Remote` is
+    // filled in over the API socket in P3-a.
+
+    /// Starts a session; its info once the guest is ready (the office keeps
+    /// the `id`).
+    fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>>;
+    /// Stops session `id` (it stays listed, with its audit log); errors if
+    /// there is no such session.
+    fn stop_session<'a>(&'a self, id: &'a str, reason: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Takes a stopped session off the list.
+    fn forget_session(&self, id: &str) -> Result<()>;
+    /// Session `id`'s info; errors if there is no such session.
+    fn session(&self, id: &str) -> Result<SessionInfo>;
+    /// Opens a terminal in session `id` and returns the stream to drive an
+    /// agent over it ([`zapper_core::driver::start`]). Local in-process; the
+    /// `Remote` impl upgrades the API connection to a raw stream (P3-a).
+    fn attach<'a>(
+        &'a self,
+        id: &'a str,
+        req: ShellRequest,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -57,6 +88,37 @@ impl OfficeClient for Local {
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
+    }
+    fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
+        Box::pin(async move {
+            let s = self.0.create_session(new).await?;
+            Ok(self.0.session_info(&s))
+        })
+    }
+    fn stop_session<'a>(&'a self, id: &'a str, reason: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let s = self.0.session(id)?;
+            self.0.stop_session(&s, reason).await;
+            Ok(())
+        })
+    }
+    fn forget_session(&self, id: &str) -> Result<()> {
+        self.0.forget_session(id)
+    }
+    fn session(&self, id: &str) -> Result<SessionInfo> {
+        let s = self.0.session(id)?;
+        Ok(self.0.session_info(&s))
+    }
+    fn attach<'a>(
+        &'a self,
+        id: &'a str,
+        req: ShellRequest,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
+        Box::pin(async move {
+            let s = self.0.session(id)?;
+            let opened = s.open_shell(req).await?;
+            Ok(Box::new(opened.stream) as Box<dyn DriveStream>)
+        })
     }
 }
 
@@ -98,6 +160,28 @@ impl OfficeClient for Remote {
             .ok()
             .map_err(|(_, why)| anyhow::anyhow!(why))?;
         Ok(serde_json::from_value(v)?)
+    }
+    // The session surface over the socket is P3-a: GET/POST for create / stop
+    // / forget / session, and a hyper upgrade for `attach`. The `zapper-office`
+    // binary does not drive firms until P4, so these are unreachable today.
+    fn create_session<'a>(&'a self, _new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
+        Box::pin(async { unimplemented!("Remote::create_session (P3-a)") })
+    }
+    fn stop_session<'a>(&'a self, _id: &'a str, _reason: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { unimplemented!("Remote::stop_session (P3-a)") })
+    }
+    fn forget_session(&self, _id: &str) -> Result<()> {
+        unimplemented!("Remote::forget_session (P3-a)")
+    }
+    fn session(&self, _id: &str) -> Result<SessionInfo> {
+        unimplemented!("Remote::session (P3-a)")
+    }
+    fn attach<'a>(
+        &'a self,
+        _id: &'a str,
+        _req: ShellRequest,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
+        Box::pin(async { unimplemented!("Remote::attach (P3-a)") })
     }
 }
 
@@ -189,5 +273,57 @@ impl Zapper {
     /// A GET, returning the JSON if zapper said yes.
     pub async fn get(&self, path: &str) -> Result<Answer> {
         self.call(Method::GET, path, None).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zapper_core::testing::shell_vm;
+    use zapper_policy::proto::ShellRequest;
+
+    use crate::{test_core, test_run};
+
+    const FIRM: &str = "
+profiles:
+  w: { agent: { kind: claude-code } }
+firms:
+  acme:
+    roles:
+      ceo: { profile: w, agent: ceo }
+      eng: { profile: w, agent: software-engineer }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: pat, role: eng, reports_to: ceo }
+";
+
+    // The office reads a worker's session back through its client, by id, and
+    // attaches a terminal the VM serves — the surface the foreman drives over
+    // once it holds the id rather than an `Arc<Session>` (P1-c).
+    #[tokio::test]
+    async fn local_session_surface() {
+        let t = test_core(FIRM);
+        let run = test_run(&t.core, "acme");
+        let s = run.rt("pat").unwrap().session().unwrap();
+        let id = s.id.clone();
+
+        // session(id): the info the office needs, read over the client.
+        let info = run.client.session(&id).unwrap();
+        assert_eq!(info.id(), id);
+        assert_eq!(info.label("member"), Some("pat"));
+        assert_eq!(info.label("firm"), Some("acme"));
+
+        // attach(id): a terminal stream the worker's VM receives.
+        let mut vm = shell_vm(&s);
+        let argv = vec!["claude".to_string(), "-p".to_string()];
+        let _stream = run
+            .client
+            .attach(&id, ShellRequest::exec(argv.clone()))
+            .await
+            .unwrap();
+        let shell = vm.recv().await.unwrap();
+        assert_eq!(shell.request.argv, argv);
+
+        // A session the office doesn't know: an error, not a panic.
+        assert!(run.client.session("no-such-session").is_err());
     }
 }

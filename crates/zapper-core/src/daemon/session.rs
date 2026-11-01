@@ -218,6 +218,25 @@ pub struct SessionInfo {
     pub(crate) driver: serde_json::Value,
 }
 
+impl SessionInfo {
+    /// The session's id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The value of label `key`, if the session has it. The office reads a
+    /// firm session's `firm`/`run`/`member` labels this way, over the client,
+    /// in place of reaching into the `Session`.
+    pub fn label(&self, key: &str) -> Option<&str> {
+        self.labels.get(key).map(String::as_str)
+    }
+
+    /// The profile the session runs.
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+}
+
 impl Session {
     pub(crate) fn info(&self) -> SessionInfo {
         SessionInfo {
