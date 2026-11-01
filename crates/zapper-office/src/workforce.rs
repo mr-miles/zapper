@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use zapper_policy::valid_worker_name;
 
 use super::mail::{Draft, Expects, Kind};
-use super::{now, FirmRun, Office, OfficeOf, WorkerRt, WorkerState};
+use super::{now, FirmRun, Office, WorkerRt, WorkerState};
 use zapper_core::Core;
 
 /// Longest budget plan or reason, in bytes.
@@ -1233,7 +1233,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     if a.brief.len() > super::mail::MAX_BODY || a.reason.len() > MAX_PLAN {
         bail!("the brief or the reason is too long");
     }
-    let config = room(&d.office(), &a.role, &role)?;
+    let config = room(&run.office(), &a.role, &role)?;
     let (name, firm, rt) = join(
         run,
         by,

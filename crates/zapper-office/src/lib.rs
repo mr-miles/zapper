@@ -309,6 +309,10 @@ pub(crate) struct FirmRun {
     /// does not reach into `Core` directly. In-process now (`client::Local`);
     /// over the API socket once the office is a process of its own.
     pub client: Arc<dyn crate::client::OfficeClient>,
+    /// Back to the office that holds this run, so firm logic reaches the
+    /// registry (the other runs) without a `Core` — the office owns its own
+    /// `Office`, not `d.office()`.
+    pub office: std::sync::Weak<Office>,
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
@@ -399,6 +403,14 @@ fn utc_day(ts: f64) -> i64 {
 }
 
 impl FirmRun {
+    /// The office that holds this run — for firm logic that needs the
+    /// registry (the other runs) without a `Core`.
+    pub fn office(&self) -> Arc<Office> {
+        self.office
+            .upgrade()
+            .expect("the office outlives the runs it holds")
+    }
+
     pub fn ended(&self) -> bool {
         matches!(
             *self.state.lock().unwrap(),

@@ -485,6 +485,7 @@ fn create_run(
         contracts: Mutex::new(contracts::Contracts::default()),
         access: Mutex::new(access::Access::default()),
         client: Arc::new(crate::client::Local(d.clone())),
+        office: Arc::downgrade(&d.office()),
         turns: Arc::new(Semaphore::new(firm.budget.max_concurrent as usize)),
         usage: Mutex::new(Usage {
             day: utc_day(started),

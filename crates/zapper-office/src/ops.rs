@@ -28,6 +28,9 @@ pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 /// call.
 struct Tools {
     d: Core,
+    /// The office registry, to resolve a caller's firm → its run without a
+    /// `Core` (the office owns its own `Office`, not `d.office()`).
+    office: Arc<crate::Office>,
 }
 
 impl Tools {
@@ -42,8 +45,7 @@ impl Tools {
         let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
         // A worker of another (ended) run of the firm is told it isn't running.
         let run = self
-            .d
-            .office()
+            .office
             .run(firm)
             .ok()
             .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
@@ -87,7 +89,10 @@ pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
     // gateway); only their registration and socket go through the client.
     // The listener is bound now and served once there is a runtime (always
     // in the daemon; not in a test that starts a firm without one).
-    let tools = Arc::new(Tools { d: d.clone() });
+    let tools = Arc::new(Tools {
+        d: d.clone(),
+        office: d.office(),
+    });
     let instructions = tools.instructions();
     let served_tools = tools.clone();
     let guard = crate::client::serve_facility(
@@ -766,7 +771,7 @@ static TOOLS: &[Tool] = &[
                     due: c.args.due("due")?,
                     name: c.args.opt("name"),
                 };
-                contracts::offer(c.d, c.run, c.me, a).await
+                contracts::offer(c.run, c.me, a).await
             })
         }),
     },
