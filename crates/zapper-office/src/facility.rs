@@ -387,7 +387,7 @@ pub fn network_follows_grant(
     // repository leaves the others' rules, and so the host, in place.
     let id = format!("credentials-{}", resource.replace(':', "-"));
     if level == super::access::Level::None {
-        s.remove_rule(&id);
+        run.client.remove_session_rule(&s.id, &id);
         return;
     }
     let (host, port) = if resource.starts_with("git:") {
@@ -395,19 +395,22 @@ pub fn network_follows_grant(
     } else {
         (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
     };
-    s.put_rule(zapper_policy::AnyRule::Net(zapper_policy::NetRule {
-        id: Some(id),
-        action: zapper_policy::Action::Allow,
-        host,
-        ports: vec![port],
-        methods: vec![],
-        path: None,
-        protocol: Default::default(),
-        secrets: vec![],
-        set_headers: Default::default(),
-        final_: false,
-        comment: Some(format!("credentials: {resource} {}", level.name())),
-    }));
+    run.client.put_session_rule(
+        &s.id,
+        zapper_policy::AnyRule::Net(zapper_policy::NetRule {
+            id: Some(id),
+            action: zapper_policy::Action::Allow,
+            host,
+            ports: vec![port],
+            methods: vec![],
+            path: None,
+            protocol: Default::default(),
+            secrets: vec![],
+            set_headers: Default::default(),
+            final_: false,
+            comment: Some(format!("credentials: {resource} {}", level.name())),
+        }),
+    );
 }
 
 /// A worker's access to the cluster, as their grant says: their own

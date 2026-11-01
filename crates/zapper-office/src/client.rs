@@ -111,6 +111,18 @@ pub trait OfficeClient: Send + Sync {
     ) -> Result<u64>;
     /// Removes a service or zone; what it was, if it was there.
     fn remove_service(&self, id: u64) -> Option<ServiceInfo>;
+
+    // --- a session's own rule layer and traffic (P4) -----------------------
+    // The officers decide access by putting rules on a worker's (or the
+    // cluster's) own session layer, and read its traffic; by session id, so
+    // the office needs no `Session`.
+
+    /// Session `id`'s captured requests (the officers' traffic view).
+    fn requests(&self, id: &str) -> Vec<Value>;
+    /// Adds `rule` to session `id`'s own layer (the rule carries its id).
+    fn put_session_rule(&self, id: &str, rule: AnyRule);
+    /// Removes rule `rule_id` from session `id`'s own layer; whether it went.
+    fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -196,6 +208,20 @@ impl OfficeClient for Local {
     }
     fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
         self.0.remove_service(id)
+    }
+    fn requests(&self, id: &str) -> Vec<Value> {
+        self.0.session(id).map(|s| s.requests()).unwrap_or_default()
+    }
+    fn put_session_rule(&self, id: &str, rule: AnyRule) {
+        if let Ok(s) = self.0.session(id) {
+            s.put_rule(rule);
+        }
+    }
+    fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool {
+        self.0
+            .session(id)
+            .map(|s| s.remove_rule(rule_id).is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -399,6 +425,25 @@ impl OfficeClient for Remote {
                 .call(Method::DELETE, &format!("/v1/services/{id}"), None),
         );
         None
+    }
+    fn requests(&self, id: &str) -> Vec<Value> {
+        block(self.0.get(&format!("/v1/sessions/{id}/requests")))
+            .ok()
+            .and_then(|a| a.body.as_array().cloned())
+            .unwrap_or_default()
+    }
+    fn put_session_rule(&self, id: &str, rule: AnyRule) {
+        let body = serde_json::json!({ "scope": format!("session:{id}"), "rule": rule });
+        let _ = block(self.0.call(Method::POST, "/v1/rules", Some(&body)));
+    }
+    fn remove_session_rule(&self, _id: &str, rule_id: &str) -> bool {
+        // The daemon finds the rule by its id across layers.
+        block(
+            self.0
+                .call(Method::DELETE, &format!("/v1/rules/{rule_id}"), None),
+        )
+        .map(|a| a.status.is_success())
+        .unwrap_or(false)
     }
 }
 
