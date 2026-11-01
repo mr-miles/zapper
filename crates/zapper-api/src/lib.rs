@@ -113,6 +113,9 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/services", post(add_service))
         .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/mcp", post(add_mcp))
+        .route("/deciders", post(add_decider))
+        .route("/deciders/{id}", axum::routing::delete(remove_decider))
+        .route("/zones", post(add_zone))
         .route(
             "/secrets/{name}",
             axum::routing::put(put_secret).delete(delete_secret),
@@ -1343,6 +1346,50 @@ async fn remove_mcp(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
     }
     d.remove_mcp_server(id);
     Ok(Json(m))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDecider {
+    /// Labels picking the sessions whose `ask`s it decides; every session
+    /// when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+    /// A file name in the daemon's `state/services/` directory.
+    socket: String,
+}
+
+/// Makes the decider a facility (the office's officers) serves on a socket
+/// decide the `ask`s of the sessions it picks, in the operator's place.
+async fn add_decider(State(d): D, body: String) -> R<Json<Value>> {
+    let n: NewDecider = parse_body(&body)?;
+    let id = d.add_decider_socket(n.sessions, &n.socket)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// Hands a decider's sessions' `ask`s back to the operator.
+async fn remove_decider(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
+    if !d.remove_decider(id) {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no decider {id}")));
+    }
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewZone {
+    domain: String,
+    /// Labels picking the sessions it is a zone for; every session when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+}
+
+/// Makes a domain a zone for the sessions it picks — its names resolve only
+/// to services, never on the host — as the operator's.
+async fn add_zone(State(d): D, body: String) -> R<Json<Value>> {
+    let n: NewZone = parse_body(&body)?;
+    let id = d.add_zone(&n.domain, n.sessions, OPERATOR)?;
+    Ok(Json(json!(d.service(id))))
 }
 
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {

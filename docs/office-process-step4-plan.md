@@ -88,12 +88,18 @@ surface is the real load-bearing work; the file conversions are downstream of it
   (`add_service`/`add_zone`/`remove_service`) and `facility::stop` on `run.client`; facility
   guest commands over `run.client.run_command` (built on `attach`).
 - **P2-c (started)**: `Active` extractor; 8 single-`{f}` firm handlers shed the preamble.
-- **P3-a (started)**: `Remote` session CRUD + `add_service`/`remove_service`/`add_mcp_socket`/
-  `remove_mcp_server` over the socket (`SessionInfo` gained `Deserialize`). Remaining Remote
-  methods (`attach`, `add_zone`, decider socket) await a hyper upgrade / P3-b routes.
-- **Git on a socket** (resolves the P3 handler-serialize finding): the office serves git on a
+- **Git on a socket** (resolved the P3 handler-serialize finding): the office serves git on a
   socket like its tools/decider (`serve_git` + `serve_facility`, a TLS `Socket` service), so
   `add_service` carries only serializable targets and a standalone office serves git unchanged.
+- **P3 complete**: every `Remote` method is implemented over the socket (session CRUD, service/
+  mcp/decider/zone registration, and `attach` via a hyper upgrade that's frame-transparent
+  through `pump_shell`); P3-b added the `/v1/deciders` and `/v1/zones` API routes. `Remote` is
+  not exercised end-to-end until the P4 binary — the serde round-trip and the API routes are the
+  testable parts; the socket transport is covered by the KVM office e2e.
+- **Next: P4** — own listener + the split (relocate `http.rs`, the office holds its own `Office`
+  state not `d.office()`, drop the `zapper-core` prod dep, `OFFICE=1` runs `zapper-office`),
+  ending at the operator's `make test-e2e-office` KVM gate. Also still open: the transitional
+  `Arc<Session>` removal (P4) and the remaining P2 `d`-plumbing it gates.
 
 ### P2-b FINDING — the rest of "drop `d`" is gated on guest commands / the `Arc<Session>`
 The cleanly Arc-independent conversions are done (services). What's left divides by what it
@@ -195,22 +201,20 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
       office state + client.
 
 ## P3 — `Remote` impls + API routes
-- [~] **P3-a** Flesh `Remote` for every trait method. **Done:** the session CRUD —
-      `create_session` (POST `/v1/sessions`, mapping `NewSession`→the API's `CreateSession`
-      shape), `stop_session` (POST `/v1/sessions/{id}/stop`), `forget_session` (DELETE), and
-      `session` (GET). The async methods `.await` directly; the sync ones use `block`. This
-      needed **`SessionInfo: Deserialize`** (+ `Status`; `GuestEvent`/`NetworkMode` already
-      had it) so `Remote` can read the API's responses — covered by a JSON round-trip in
-      `client::tests`. Also **done:** the registration methods with existing routes —
-      `add_service` (POST `/v1/services`, mapping `ServiceTarget`→the API's `to`),
-      `remove_service` (DELETE), `add_mcp_socket` (POST `/v1/mcp`), `remove_mcp_server` (DELETE).
-      **Left:** `attach` (hyper-upgrade the attach route to a raw stream); `add_decider_socket`/
-      `remove_decider` and `add_zone` (need P3-b routes — the API has none yet). **Not
-      unit-tested end-to-end** (no live socket until the P4 binary); the serde round-trip is the
-      testable part.
-- [ ] **P3-b** Add the missing `zapper-api` routes the remaining `Remote` methods call: a
-      decider-socket register/remove (`/v1/deciders`), and a zone POST (`add_zone` — `POST
-      /v1/services` has no zone variant). (`add_mcp_socket`/`add_service` already have routes.)
+- [x] **P3-a** `Remote` fleshed for **every** trait method (no stubs). Session CRUD:
+      `create_session` (POST `/v1/sessions`, mapping `NewSession`→the API's `CreateSession`),
+      `stop_session` (POST `…/stop`), `forget_session` (DELETE), `session` (GET) — needing
+      **`SessionInfo: Deserialize`** (+ `Status`) so `Remote` can read responses, covered by a
+      JSON round-trip in `client::tests`. Registration: `add_service`→`/v1/services`,
+      `remove_service`→DELETE, `add_mcp_socket`→`/v1/mcp`, `remove_mcp_server`→DELETE,
+      `add_decider_socket`/`remove_decider`→`/v1/deciders`, `add_zone`→`/v1/zones`. `attach`:
+      GET `…/attach` hyper-upgraded to a raw stream (new `Zapper::upgrade`), frame-transparent
+      through the daemon's `pump_shell`, so `driver::start` drives over it unchanged. The async
+      methods `.await`; the sync ones use `block`. **Not unit-tested end-to-end** (no live socket
+      until the P4 binary); the serde round-trip + the new API routes are the testable parts.
+- [x] **P3-b** Added the `zapper-api` routes the registration `Remote` methods call: `POST
+      /v1/deciders` + `DELETE /v1/deciders/{id}`, and `POST /v1/zones`, each as the operator's.
+      Covered by `tests::zones_and_socket_deciders_added_and_removed`.
 
 ### P3 FINDING — RESOLVED: git now served on a socket
 The gap was that `add_service` carried an in-process `Arc<dyn ServiceHandler>` (the firm's git

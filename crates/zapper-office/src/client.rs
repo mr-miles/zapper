@@ -292,11 +292,26 @@ impl OfficeClient for Remote {
     }
     fn attach<'a>(
         &'a self,
-        _id: &'a str,
-        _req: ShellRequest,
+        id: &'a str,
+        req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
-        // A hyper upgrade of the attach route to a raw stream; next P3 slice.
-        Box::pin(async { unimplemented!("Remote::attach (P3-a)") })
+        Box::pin(async move {
+            // The attach route takes the shell as query params and upgrades
+            // the connection to the guest terminal (frame-transparent through
+            // the daemon's `pump_shell`).
+            let mut q = vec![format!(
+                "argv={}",
+                url_encode(&serde_json::to_string(&req.argv)?)
+            )];
+            if req.system {
+                q.push("system=true".into());
+            }
+            if let Some((rows, cols)) = req.tty {
+                q.push(format!("tty={rows}x{cols}"));
+            }
+            let path = format!("/v1/sessions/{id}/attach?{}", q.join("&"));
+            Ok(Box::new(self.0.upgrade(&path).await?) as Box<dyn DriveStream>)
+        })
     }
     fn add_mcp_socket(
         &self,
@@ -322,16 +337,22 @@ impl OfficeClient for Remote {
             .map(|a| a.status.is_success())
             .unwrap_or(false)
     }
-    fn add_decider_socket(
-        &self,
-        _sessions: BTreeMap<String, String>,
-        _socket: &str,
-    ) -> Result<u64> {
-        // Needs a `/v1/deciders` route (P3-b): the API has none yet.
-        unimplemented!("Remote::add_decider_socket (needs the P3-b decider route)")
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64> {
+        let body = serde_json::json!({ "sessions": sessions, "socket": socket });
+        let v = block(self.0.call(Method::POST, "/v1/deciders", Some(&body)))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("no id for the decider"))
     }
-    fn remove_decider(&self, _id: u64) -> bool {
-        unimplemented!("Remote::remove_decider (needs the P3-b decider route)")
+    fn remove_decider(&self, id: u64) -> bool {
+        block(
+            self.0
+                .call(Method::DELETE, &format!("/v1/deciders/{id}"), None),
+        )
+        .map(|a| a.status.is_success())
+        .unwrap_or(false)
     }
     fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
         use zapper_core::ServiceTarget as T;
@@ -357,12 +378,18 @@ impl OfficeClient for Remote {
     }
     fn add_zone(
         &self,
-        _domain: &str,
-        _sessions: BTreeMap<String, String>,
+        domain: &str,
+        sessions: BTreeMap<String, String>,
         _owner: &str,
     ) -> Result<u64> {
-        // Needs a zone route (P3-b): `POST /v1/services` has no zone variant.
-        unimplemented!("Remote::add_zone (needs the P3-b zone route)")
+        // Owned by the operator the office authenticates as.
+        let body = serde_json::json!({ "domain": domain, "sessions": sessions });
+        let v = block(self.0.call(Method::POST, "/v1/zones", Some(&body)))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("no id for the zone"))
     }
     fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
         // The office ignores what it was (it only needs it gone), so this
@@ -495,6 +522,18 @@ fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
+/// `s` as a URL query value (percent-encoded), for the `attach` query.
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// Where zapper listens: `$ZAPPER_SOCKET`, else under `$XDG_RUNTIME_DIR`, as
 /// the `zapper` CLI finds it.
 pub fn socket_path() -> PathBuf {
@@ -577,6 +616,31 @@ impl Zapper {
     /// A GET, returning the JSON if zapper said yes.
     pub async fn get(&self, path: &str) -> Result<Answer> {
         self.call(Method::GET, path, None).await
+    }
+
+    /// `GET path` upgraded to a raw stream (a terminal): the daemon splices it
+    /// to the guest shell, so the office drives an agent over it exactly as a
+    /// local `open_shell` stream (the same frame protocol). Mirrors the
+    /// workbench's upgrade.
+    pub async fn upgrade(&self, path: &str) -> Result<TokioIo<hyper::upgrade::Upgraded>> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://zapper{path}"))
+            .header("host", "zapper")
+            .header(hyper::header::CONNECTION, "upgrade")
+            .header(hyper::header::UPGRADE, "zapper-shell")
+            .body(Full::new(Bytes::new()))?;
+        let resp = self.send(req).await?;
+        if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await?.to_bytes();
+            let why = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_string))
+                .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+            anyhow::bail!("{status}: {why}");
+        }
+        Ok(TokioIo::new(hyper::upgrade::on(resp).await?))
     }
 }
 
