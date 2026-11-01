@@ -3061,6 +3061,7 @@ dependencies = [
  "zapper-api",
  "zapper-client",
  "zapper-core",
+ "zapper-driver",
  "zapper-git",
  "zapper-github",
  "zapper-policy",

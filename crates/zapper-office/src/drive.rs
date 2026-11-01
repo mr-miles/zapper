@@ -15,7 +15,7 @@ use zapper_policy::parse_size;
 use zapper_policy::proto::{Frame, ShellRequest};
 
 use super::{now, FirmRun};
-use zapper_core::util::read_frame;
+use zapper_driver::read_frame;
 
 /// No `code`: code lives in the firm's git repository, shared as a branch.
 const KINDS: [&str; 5] = ["document", "report", "dataset", "deck", "board-pack"];

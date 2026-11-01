@@ -10,6 +10,7 @@ zapper-git = { path = "../zapper-git" }
 zapper-core = { path = "../zapper-core" }
 zapper-client = { path = "../zapper-client" }
 zapper-util = { path = "../zapper-util" }
+zapper-driver = { path = "../zapper-driver" }
 zapper-runs = { path = "../zapper-runs" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-github = { path = "../zapper-github" }

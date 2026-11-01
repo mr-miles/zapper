@@ -12,10 +12,10 @@ use hyper::Method;
 use serde_json::Value;
 // The socket client, shared with the workbench.
 pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
-use zapper_core::driver::DriveStream;
 use zapper_core::{
     ApprovalApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi, SessionInfo,
 };
+use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRequest, NetRule, Scope};
 
@@ -73,7 +73,7 @@ pub trait OfficeClient: Send + Sync {
     /// Session `id`'s info; errors if there is no such session.
     fn session(&self, id: &str) -> Result<SessionInfo>;
     /// Opens a terminal in session `id` and returns the stream to drive an
-    /// agent over it ([`zapper_core::driver::start`]). Local in-process; the
+    /// agent over it ([`zapper_driver::process::start`]). Local in-process; the
     /// `Remote` impl upgrades the API connection to a raw stream (P3-a).
     fn attach<'a>(
         &'a self,

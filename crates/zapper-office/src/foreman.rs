@@ -16,8 +16,8 @@ use zapper_policy::proto::ShellRequest;
 
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use zapper_core::driver::{self, Observer, Out, Proc};
-use zapper_core::harness::{self, Outcome};
+use zapper_driver::harness::{self, Outcome};
+use zapper_driver::process::{self as driver, Observer, Out, Proc};
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;

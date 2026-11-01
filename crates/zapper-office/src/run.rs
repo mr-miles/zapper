@@ -872,8 +872,8 @@ pub(crate) fn agent_overlay(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn zapper_core::harness::Headless> {
-    zapper_core::harness::headless(&profile.agent.kind)
+) -> Result<&'static dyn zapper_driver::harness::Headless> {
+    zapper_driver::harness::headless(&profile.agent.kind)
         .map_err(|e| anyhow!("profile {}: {e:#}", profile.name))
 }
 
