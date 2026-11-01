@@ -306,11 +306,14 @@ impl OfficeClient for Remote {
         .map(|a| a.status.is_success())
         .unwrap_or(false)
     }
-    fn reset_layer(&self, _name: &str) {
-        // A run starts with its role layers empty; over the socket the bin
-        // will clear them through a rules route (P3-b-style). Unreachable
-        // until the bin drives run creation (P4-d).
-        unimplemented!("Remote::reset_layer (needs a clear-role-layer route)")
+    fn reset_layer(&self, name: &str) {
+        // A run starts with its role layers empty; clear the named layer
+        // through the daemon's layer route.
+        let _ = block(self.0.call(
+            Method::DELETE,
+            &format!("/v1/layers/{}", url_encode(name)),
+            None,
+        ));
     }
     fn record_writable(&self) -> bool {
         block(self.0.get("/v1/record"))
@@ -336,10 +339,24 @@ impl OfficeClient for Remote {
             .map_err(|(_, why)| anyhow::anyhow!(why))?;
         Ok(serde_json::from_value(v)?)
     }
-    fn promote_rule(&self, _what: &str, _scope: &Scope, _rule: NetRule) -> Result<AnyRule> {
-        // Config mutation over the socket needs a daemon config route and is
-        // wired with the standalone bin (P4-d); co-hosted uses `Local`.
-        unimplemented!("promote a standing approval into config over the socket — P4-d")
+    fn promote_rule(&self, _what: &str, scope: &Scope, rule: NetRule) -> Result<AnyRule> {
+        // The daemon's `/v1/rules` route assigns the rule a fresh `net-N` id
+        // (from the rule's kind) and inserts it at `scope`, as `Local` does
+        // in process; its answer is the rule as added.
+        let body = serde_json::json!({
+            "scope": scope.to_string(),
+            "rule": AnyRule::Net(rule),
+            "position": 0,
+        });
+        let mut v = block(self.0.call(Method::POST, "/v1/rules", Some(&body)))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        // The route's answer is the rule with an added `scope` key; drop it so
+        // the rule deserializes (`NetRule` denies unknown fields).
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("scope");
+        }
+        Ok(serde_json::from_value(v)?)
     }
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         // The API takes its own `CreateSession` shape (rules, not a `Policy`;
@@ -740,7 +757,7 @@ firms:
     async fn remote_over_the_socket() {
         use std::collections::BTreeMap;
 
-        use zapper_core::{ServiceApi, ServiceSpec, ServiceTarget};
+        use zapper_core::{ConfigApi, ServiceApi, ServiceSpec, ServiceTarget};
 
         use super::OfficeClient;
 
@@ -825,6 +842,45 @@ firms:
             .unwrap();
         let shell = vm.recv().await.unwrap();
         assert_eq!(shell.request.argv, argv);
+
+        // reset_layer: a role's shared layer, added to over the socket, is
+        // then cleared over the socket (the clear-layer route).
+        let layer = "acme/eng";
+        let probe = zapper_policy::AnyRule::Net(
+            serde_json::from_value(serde_json::json!({
+                "id": "net-probe", "action": "allow", "host": "probe.test", "ports": [443]
+            }))
+            .unwrap(),
+        );
+        remote.add_layer_rule(layer, probe);
+        assert!(!t.core.named_layer(layer).read().unwrap().is_empty());
+        remote.reset_layer(layer);
+        assert!(t.core.named_layer(layer).read().unwrap().is_empty());
+
+        // promote_rule: a net rule promoted into a profile gets a fresh net-N
+        // id (from the `/v1/rules` route) and lands in the running config.
+        let rule = serde_json::from_value(serde_json::json!({
+            "action": "allow", "host": "promoted.test", "ports": [443]
+        }))
+        .unwrap();
+        let added = remote
+            .promote_rule(
+                "test promote",
+                &zapper_policy::Scope::Profile("w".into()),
+                rule,
+            )
+            .unwrap();
+        assert!(added.id().unwrap().starts_with("net-"));
+        assert!(t
+            .core
+            .config()
+            .profiles
+            .get("w")
+            .unwrap()
+            .policy
+            .rules()
+            .iter()
+            .any(|r| r.id() == added.id()));
 
         serving.abort();
         let _ = std::fs::remove_file(&sock);

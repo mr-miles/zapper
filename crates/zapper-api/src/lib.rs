@@ -105,6 +105,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/config/reload", post(reload))
         .route("/rules", post(add_rule))
         .route("/rules/{id}", axum::routing::delete(delete_rule))
+        .route("/layers/{name}", axum::routing::delete(clear_layer))
         .route(
             "/profiles/{name}",
             get(get_profile).put(put_profile).delete(delete_profile),
@@ -466,6 +467,14 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
         Ok(rule)
     })?;
     Ok(Json(rule_json(&scope, &added)))
+}
+
+/// Empties a firm role's shared layer (the office clears a role's standing
+/// approvals at the start of a run; the office running as its own process
+/// reaches it here rather than through the in-process `named_layer`).
+async fn clear_layer(State(d): D, Path(name): Path<String>) -> R<Json<Value>> {
+    *d.named_layer(&name).write().unwrap() = zapper_policy::Policy::default();
+    Ok(Json(json!({ "layer": name, "cleared": true })))
 }
 
 async fn delete_rule(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {

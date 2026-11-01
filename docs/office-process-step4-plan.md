@@ -284,8 +284,17 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       **Left:** `boot`/`lib::start` and the http read endpoints still take `&Core` in-process —
       they move to the bin in P4-d.
 - [ ] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
-- [ ] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
+- [~] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
       `zapper-office`.
+      **P4-d-1 done:** the last two stubbed `Remote` methods are real — `reset_layer` clears a
+      role layer through a new daemon route (`DELETE /v1/layers/{name}` → `clear_layer`), and
+      `promote_rule` posts to the existing `/v1/rules` (which assigns the `net-N` id and inserts
+      at the profile scope; the answer's extra `scope` key is stripped before the rule
+      deserializes). Both are exercised end-to-end in `remote_over_the_socket`, so `Remote` now
+      has no `unimplemented!`. **Left:** the bin builds an `Office` with a `Remote` client (state/
+      socket dirs from config, rule-follow over the API event stream, serve the firm routes +
+      office page + gateway), then `zapper serve` spawns it under `OFFICE=1` instead of running
+      the office in-process.
 - [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
 
 ## Parallelism & subagents
