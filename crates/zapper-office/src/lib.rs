@@ -29,6 +29,7 @@ pub(crate) mod workforce;
 
 mod history;
 mod run;
+pub mod standalone;
 
 pub(crate) use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
 #[cfg(test)]

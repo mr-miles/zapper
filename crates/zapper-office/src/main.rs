@@ -1,17 +1,15 @@
 //! `zapper-office`: the office as a process of its own, a client of the
 //! zapper daemon's API over its unix socket (proposal 13, step 4), the way
-//! `zapper-workbench` is.
+//! `zapper-workbench` is. It drives firms over the daemon's API (`Remote`
+//! `OfficeClient`) and serves its own dashboard; `zapper serve` spawns it
+//! under `OFFICE=1` (P4-d).
 //!
-//! WORK IN PROGRESS. This binary stands up the shell of the separate
-//! process — its own listener and its client of the daemon — but the firm
-//! run-loop is not yet ported off the in-process `Core`, so the office is
-//! still run in-process by `zapper serve` (feature `office`). The remaining
-//! conversion is tracked in `docs/office-process-assumptions.md` (step 4):
-//! each `&Core` call becomes a `client::Zapper` API call or the office's own
-//! state, and `named_layer`/`add_rule_keeper` (the in-process couplings) move
-//! onto the API's layer/rule routes.
+//! The office never crosses the VM boundary — it is a client of the daemon's
+//! API — so this path is validated by unit tests against a `TestCore`-backed
+//! API, not KVM. `make test-e2e-office` on a real host is the final gate.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -31,12 +29,20 @@ fn default_listen() -> SocketAddr {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the office's own dashboard and board actions, over the zapper
-    /// daemon's socket.
+    /// Serve the office's own dashboard and board actions, driving firms over
+    /// the zapper daemon's socket.
     Serve {
         /// Where to listen. Default: 127.0.0.1:8099.
         #[arg(long)]
         listen: Option<SocketAddr>,
+        /// The daemon's `state` directory (firms' runs live under
+        /// `state/firms/`). The office and daemon share it by convention.
+        #[arg(long)]
+        state_dir: PathBuf,
+        /// The daemon's `state/services` directory, where the office binds its
+        /// facilities' sockets.
+        #[arg(long)]
+        socket_dir: PathBuf,
     },
     /// Print the dashboard's address.
     Url {
@@ -55,11 +61,15 @@ async fn main() -> Result<()> {
             println!("http://{}", listen.unwrap_or_else(default_listen));
             Ok(())
         }
-        Cmd::Serve { listen } => serve(listen.unwrap_or_else(default_listen)).await,
+        Cmd::Serve {
+            listen,
+            state_dir,
+            socket_dir,
+        } => serve(listen.unwrap_or_else(default_listen), state_dir, socket_dir).await,
     }
 }
 
-async fn serve(listen: SocketAddr) -> Result<()> {
+async fn serve(listen: SocketAddr, state_dir: PathBuf, socket_dir: PathBuf) -> Result<()> {
     // Confirm the daemon is reachable over its socket before serving.
     let zapper = Zapper::new(socket_path());
     let answer = zapper
@@ -76,22 +86,12 @@ async fn serve(listen: SocketAddr) -> Result<()> {
         "zapper-office: connected to the daemon at {}",
         socket_path().display()
     );
-    eprintln!(
-        "zapper-office: WIP — the firm run-loop is not yet ported off the in-process Core; \
-         the office still runs in-process via `zapper serve`."
-    );
 
-    let app = axum::Router::new().route("/", axum::routing::get(root));
     let tcp = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
-    eprintln!("zapper-office: placeholder dashboard on http://{listen}");
-    axum::serve(tcp, app).await?;
-    Ok(())
-}
-
-async fn root() -> &'static str {
-    "zapper-office (client mode) — work in progress.\n\
-     The firm run-loop is still the in-process office run by `zapper serve`.\n\
-     See docs/office-process-assumptions.md (step 4).\n"
+    // Loopback listeners get the strict Host check; off-loopback loosens it,
+    // as the daemon's `daemon.ui` does.
+    let remote = !listen.ip().is_loopback();
+    zapper_office::standalone::serve(tcp, zapper, state_dir, socket_dir, remote).await
 }

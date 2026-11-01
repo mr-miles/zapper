@@ -291,10 +291,20 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       `promote_rule` posts to the existing `/v1/rules` (which assigns the `net-N` id and inserts
       at the profile scope; the answer's extra `scope` key is stripped before the rule
       deserializes). Both are exercised end-to-end in `remote_over_the_socket`, so `Remote` now
-      has no `unimplemented!`. **Left:** the bin builds an `Office` with a `Remote` client (state/
-      socket dirs from config, rule-follow over the API event stream, serve the firm routes +
-      office page + gateway), then `zapper serve` spawns it under `OFFICE=1` instead of running
-      the office in-process.
+      has no `unimplemented!`.
+      **P4-d-2 done (serve path):** new `office::standalone` builds the `Office` over a `Remote`
+      client (`bootstrap`) and serves the office page, its assets and the firm routes (nested at
+      `/api`, where the page's scripts call them) behind a UI gateway with a token of its own
+      (`zapper_client::gateway` for the `Host`/`Origin`/marker checks). The bin's `serve` binds
+      the listener and calls it with the daemon's `state_dir`/`socket_dir` (CLI args; shared by
+      convention, P1-a). Because office↔core is the daemon's API alone — no VM boundary — the
+      whole serve path is unit-tested without KVM: `standalone_app_serves_behind_the_gateway`
+      drives the real `zapper-api` router (TestCore) over a unix socket (gateway 401/redirect/403,
+      a firm read over `Remote`, asset serving). **Left:** rule-following over the daemon's
+      `/v1/events` SSE (co-host's `follow_rules`; a run starts without it, the record can only
+      drift on a mid-run operator edit) and proxying the page's daemon-backed session/VM reads.
+- [ ] **P4-d-3** `zapper serve` spawns `zapper-office` under `OFFICE=1` instead of running the
+      office in-process; `zapper` stops linking the office (depends on P4-c).
 - [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
 
 ## Parallelism & subagents
