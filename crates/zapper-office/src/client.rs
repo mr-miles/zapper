@@ -72,6 +72,14 @@ pub trait OfficeClient: Send + Sync {
         id: &'a str,
         req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
+    /// Opens a raw byte stream to port `port` of session `id`'s guest (over
+    /// vsock), for the office to proxy — the board's dashboard/product port.
+    /// `Remote` upgrades the API connection and the daemon splices it.
+    fn connect_port<'a>(
+        &'a self,
+        id: &'a str,
+        port: u32,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
 
     // --- facility registration (P2-a) --------------------------------------
     // The office serves a facility (its tools, the officers' decider) on a
@@ -173,6 +181,16 @@ impl OfficeClient for Local {
             let s = self.0.session(id)?;
             let opened = s.open_shell(req).await?;
             Ok(Box::new(opened.stream) as Box<dyn DriveStream>)
+        })
+    }
+    fn connect_port<'a>(
+        &'a self,
+        id: &'a str,
+        port: u32,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
+        Box::pin(async move {
+            let s = self.0.session(id)?;
+            Ok(Box::new(s.connect_port(port).await?) as Box<dyn DriveStream>)
         })
     }
     fn add_mcp_socket(
@@ -336,6 +354,16 @@ impl OfficeClient for Remote {
                 q.push(format!("tty={rows}x{cols}"));
             }
             let path = format!("/v1/sessions/{id}/attach?{}", q.join("&"));
+            Ok(Box::new(self.0.upgrade(&path).await?) as Box<dyn DriveStream>)
+        })
+    }
+    fn connect_port<'a>(
+        &'a self,
+        id: &'a str,
+        port: u32,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
+        Box::pin(async move {
+            let path = format!("/v1/sessions/{id}/connect?port={port}");
             Ok(Box::new(self.0.upgrade(&path).await?) as Box<dyn DriveStream>)
         })
     }

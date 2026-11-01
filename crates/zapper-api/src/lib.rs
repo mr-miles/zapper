@@ -126,6 +126,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
+        .route("/sessions/{id}/connect", get(connect_port))
         .route("/sessions/{id}/ssh", post(set_ssh))
         .route(
             "/sessions/{id}/terminals/{n}",
@@ -972,6 +973,37 @@ async fn attach(
         .header(header::CONNECTION, "upgrade")
         .header(header::UPGRADE, "zapper-shell")
         .header("x-zapper-terminal", shell_id.to_string())
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
+struct ConnectQuery {
+    port: u32,
+}
+
+/// Opens a raw byte stream to a guest port over vsock and splices the
+/// upgraded connection to it (the office's dashboard/product port proxy).
+/// Unlike `attach`, no terminal and no frames: plain bytes both ways.
+async fn connect_port(
+    State(d): D,
+    Path(id): Path<String>,
+    Query(q): Query<ConnectQuery>,
+    req: Request,
+) -> R<Response> {
+    let s = d.session(&id)?;
+    let mut guest = s.connect_port(q.port).await?;
+    let on_upgrade = hyper::upgrade::on(req);
+    tokio::spawn(async move {
+        if let Ok(up) = on_upgrade.await {
+            let mut up = TokioIo::new(up);
+            let _ = tokio::io::copy_bidirectional(&mut up, &mut guest).await;
+        }
+    });
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "zapper-shell")
         .body(Body::empty())
         .unwrap())
 }

@@ -16,7 +16,6 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 use zapper_policy::proto::{Forward, GuestFile};
 use zapper_policy::{Config, Policy};
@@ -75,11 +74,6 @@ impl Facilities {
             .then(|| self.cluster.lock().unwrap().clone())
             .flatten()
     }
-}
-
-/// Opens a host-initiated vsock connection to a port of a session's VM.
-pub async fn vsock_connect(s: &Session, port: u32) -> Result<UnixStream> {
-    s.connect_port(port).await
 }
 
 /// Reads the caller line the daemon sends first on a socket service's
@@ -717,11 +711,18 @@ async fn forward_port(
             };
             let run = run.clone();
             tokio::spawn(async move {
-                let Some(c) = run.facility.cluster.lock().unwrap().clone() else {
+                let Some(id) = run
+                    .facility
+                    .cluster
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.id.clone())
+                else {
                     return;
                 };
                 tracing::debug!(firm = %run.firm, "{what} port: connection from {peer}");
-                if let Ok(mut up) = vsock_connect(&c, port).await {
+                if let Ok(mut up) = run.client.connect_port(&id, port).await {
                     let _ = tokio::io::copy_bidirectional(&mut conn, &mut up).await;
                 }
             });
