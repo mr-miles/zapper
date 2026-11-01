@@ -34,6 +34,27 @@ Branch: `feat/office-process-step4` (on top of `feat/office-process`, merged to 
   loop + register, `Drop` = unregister + abort + unlink), and an http extractor for the ~24
   `d.office().active(firm)?` handler preambles.
 
+## ORDERING FINDING (revise the phases)
+
+The clean, standalone chunky wins are **done** (config, admit, record_writable, role-layer
+ops, generic `driver::start`). Converting the *rest* of Phase 2 is **not** cleanly ahead of
+Phase 3/5 — the dependencies interleave:
+
+- The **registration leaves** (`security`/`ops`/`facility` register) need the co-host office
+  to place a socket in the **daemon's** `state/services` dir → they need `socket_dir` as
+  office config (a Phase-5 bin concern), and each needs a `Remote` API route (Phase 4).
+- The **logic/plumbing files** (`contracts`, `access`, `scenario`, most of `workforce`) barely
+  touch `d` directly — they plumb it down to the **session ops** (`create_session`,
+  `stop_session`, …) which are the **Phase-3 session-handle rework**.
+
+So Phase 2 Local-first in isolation accumulates `Remote` stubs + `socket_dir` placeholders
+that only resolve in Phase 3/5. **Revised order:** do the prerequisites first —
+**(i)** `socket_dir` as office config (small slice of Phase 5), **(ii)** the Phase-3 session
+surface on the trait (`create_session→id`, `stop`, `forget`, `attach`) with the `WorkerRt`
+id rework — *then* the registration + logic-file conversions fall out cleanly, *then* flesh
+`Remote` + routes (Phase 4), *then* the listener relocation (rest of Phase 5). Sessions and
+`socket_dir` are the real load-bearing work; the file conversions are downstream of them.
+
 ## STATUS (update on each commit)
 - Phase 0 (foundation): **done** — see commits `39d6026`…`d76a7aa`.
 - 1.1 (`driver::start` generic): **done** (`9bbe94c`).
