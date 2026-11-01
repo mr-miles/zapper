@@ -65,6 +65,24 @@ listener). **Scaffold only — not a working separation yet:**
 - The **lib is untouched**, so the office still runs in-process via `zapper serve`
   (feature `office`). The binary does **not** yet run firms.
 
+Decision (you chose, unattended): **§5(a) — removal follows the core's `rule` event.**
+`zapper` without the office must still remove/action approvals, and in an office run the
+office drives its own layers (nobody goes round them). Built on this branch:
+
+- **`RuleKeeper` is retired.** The core owns the firm role layers (named layers):
+  `rule_layers()` lists them and `remove_rule()` takes a rule out of one and emits a `rule`
+  removed event. The trait, its registry, `add_rule_keeper`, and the office's `Keeper` are
+  gone.
+- **The office follows the event** (`follow_rules` → `security::forget_standing`) to drop
+  its own `Standing` record when a role rule is removed through the core, instead of the old
+  synchronous in-process callback.
+- **Behaviour change to confirm:** operator-revoke-while-the-office-runs is now
+  *eventually* consistent (the office reconciles off the event stream), where it used to be
+  synchronous. Enforcement (the rule leaving the layer) is still synchronous. The test
+  `an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke` now polls for the
+  office's reconciliation. In practice nobody revokes office rules out-of-band mid-run, so
+  this window is not a live concern — but confirm you're happy with it.
+
 The real conversion that remains (the bulk of step 4), from the `&Core` method survey
 (≈40 methods over 63 sites):
 
@@ -77,11 +95,13 @@ The real conversion that remains (the bulk of step 4), from the `&Core` method s
   `record_writable`, `layers_for`, `resolve`, `socket_dir`/`state_dir`/`startup_path`.
   Most already have HTTP routes; any that don't need one added.
 - **In-process couplings to replace before the split:**
-  - `named_layer()` returns a shared `Arc<RwLock<Policy>>` the office mutates — must become
-    API layer/rule routes (finish §5's RuleKeeper retirement: add/remove a named layer's
-    rules over the API). **This is the main blocker.**
-  - `add_rule_keeper(Arc<dyn RuleKeeper>)` — an in-process callback; replace with the office
-    following `rule` events (§2) and removing standing approvals via the rule routes.
+  - `add_rule_keeper` / `RuleKeeper` — **done** (retired; the office follows `rule` events,
+    see the §5(a) section above).
+  - `named_layer()` returns a shared `Arc<RwLock<Policy>>` the office still mutates for its
+    *own* add/remove (`run.roles` are the core's named-layer Arcs). Removal via the core is
+    done; the office's adds (`security.rs:952`) and its own revokes (`security.rs` →
+    `remove_rule`) must become `add_layer_rule` / `remove_layer_rule` API calls so the
+    office stops sharing the Arc. **This is now the main remaining coupling.**
   - `on_shutdown` — the office manages its own lifecycle in its process (§8).
   - `test_session` — test-only; the office's tests move to the API-over-socket pattern (§10).
 - Then `zapper-office` drops `zapper-core` from its production deps (dev-only, as the
