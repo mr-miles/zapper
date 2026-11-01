@@ -5,34 +5,18 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch, Semaphore};
 use zapper_policy::proto::HostMsg;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "detail", rename_all = "lowercase")]
-pub enum Status {
-    Starting,
-    Running,
-    /// Its stop is under way: the VM and disks are being torn down. Reached
-    /// once, by the caller that owns the stop; it becomes `Stopped` only when
-    /// teardown has finished everything.
-    Stopping(String),
-    Failed(String),
-    Stopped(String),
-}
+/// A session's lifecycle status. Its serialised shape is the API contract,
+/// so the type lives in `zapper-api-types` (the clients deserialise it); the
+/// live state machine that drives it is `GuestRuntime`, below.
+pub use zapper_api_types::Status;
 
 /// A session's guest connections handled at once (to the proxy, the
 /// gateway, through the NIC); one over is closed. The NIC's relays in the
 /// VMM's namespace keep to it too (`netns`).
 pub(crate) const MAX_GUEST_CONNECTIONS: usize = 256;
-
-impl Status {
-    /// Starting or running: its VM is being made, or runs.
-    pub fn is_live(&self) -> bool {
-        matches!(self, Status::Starting | Status::Running)
-    }
-}
 
 /// A session's live machinery: its lifecycle status, the Firecracker
 /// process, the control channel to the guest agent, and the counters that

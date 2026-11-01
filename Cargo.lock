@@ -2893,6 +2893,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-api-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zapper-policy",
+ "zapper-proto",
+]
+
+[[package]]
 name = "zapper-client"
 version = "0.1.0"
 dependencies = [
@@ -2939,6 +2949,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "zapper-api-types",
  "zapper-driver",
  "zapper-keeper",
  "zapper-policy",

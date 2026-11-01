@@ -1,0 +1,12 @@
+[package]
+name = "zapper-api-types"
+description = "The daemon's REST API contract: the request and response types the API, the core and the API's clients (The Office, the workbench) share, with no dependency on the core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zapper-policy = { path = "../zapper-policy" }
+zapper-proto = { path = "../zapper-proto" }
