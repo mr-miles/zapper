@@ -114,6 +114,50 @@ impl Core {
         self.d.named_layer(name)
     }
 
+    /// Adds `rule` first to the named layer `name` (created if new), and says
+    /// so with a `rule` added event. The caller gives the rule its id.
+    pub fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
+        let (id, kind) = (rule.id().map(str::to_string), rule.kind().to_string());
+        self.d
+            .named_layer(name)
+            .write()
+            .unwrap()
+            .insert(rule.clone(), Some(0));
+        if let Some(id) = id {
+            self.d.emit(
+                None,
+                EventBody::Rule {
+                    state: "added".into(),
+                    id,
+                    scope: Scope::Role(name.to_string()).to_string(),
+                    kind,
+                },
+            );
+        }
+        rule
+    }
+
+    /// Removes rule `id` from the named layer `name`, saying so if it was
+    /// there; whether it was.
+    pub fn remove_layer_rule(&self, name: &str, id: &str) -> bool {
+        let removed = self.d.named_layer(name).write().unwrap().remove(id);
+        match removed {
+            Some(rule) => {
+                self.d.emit(
+                    None,
+                    EventBody::Rule {
+                        state: "removed".into(),
+                        id: id.to_string(),
+                        scope: Scope::Role(name.to_string()).to_string(),
+                        kind: rule.kind().to_string(),
+                    },
+                );
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The token the UI's first request carries.
     pub fn ui_token(&self) -> &str {
         &self.d.ui_token

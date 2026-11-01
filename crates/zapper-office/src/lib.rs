@@ -51,7 +51,6 @@ use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_policy::Policy;
 
 use zapper_core::util::{now, random_id};
 use zapper_core::{Core, EventBody};
@@ -231,8 +230,11 @@ pub(crate) struct FirmRun {
     pub contracts: Mutex<contracts::Contracts>,
     /// Credential grants and requests.
     pub access: Mutex<access::Access>,
-    /// Officers' standing approvals per role.
-    pub roles: BTreeMap<String, Arc<RwLock<Policy>>>,
+    /// The daemon, through the office's client interface: how the office's
+    /// firm logic changes role layers (and, in time, everything else) so it
+    /// does not reach into `Core` directly. In-process now (`client::Local`);
+    /// over the API socket once the office is a process of its own.
+    pub client: Arc<dyn crate::client::OfficeClient>,
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,

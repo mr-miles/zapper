@@ -949,10 +949,8 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 let mut rl = rule.clone();
                 rl.id = Some(format!("a-net-{}", sec.rule_counter));
                 rule_id = rl.id.clone();
-                run.roles[&role]
-                    .write()
-                    .unwrap()
-                    .insert(AnyRule::Net(rl.clone()), Some(0));
+                run.client
+                    .add_layer_rule(&format!("{}/{}", run.firm, role), AnyRule::Net(rl.clone()));
                 sec.standing.insert(
                     rl.id.clone().unwrap(),
                     Standing {
@@ -1125,9 +1123,8 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
     };
     match st.scope.split_once(':') {
         Some(("role", role)) => {
-            if let Some(p) = run.roles.get(role) {
-                p.write().unwrap().remove(id);
-            }
+            run.client
+                .remove_layer_rule(&format!("{}/{}", run.firm, role), id);
         }
         Some((_, worker)) => {
             if let Some(s) = run

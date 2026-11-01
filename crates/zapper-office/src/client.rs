@@ -13,6 +13,34 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
+use zapper_policy::AnyRule;
+
+/// What the office's firm logic needs from the daemon, so it reaches it
+/// through this interface rather than a `Core` directly. Implemented
+/// in-process by [`Local`] (wrapping `Core`) and, once the office is a
+/// process of its own, by [`Remote`] (over the API socket). It grows as the
+/// office's remaining `&Core` calls move onto it (proposal 13, step 4; see
+/// `docs/office-process-assumptions.md`). Synchronous, because the office's
+/// firm logic (`security::decide`, revocation) is.
+pub trait OfficeClient: Send + Sync {
+    /// Adds a rule, first, to a firm role's shared layer `name`; the rule
+    /// (with the id the caller gave it).
+    fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule;
+    /// Removes rule `id` from role layer `name`; whether it was there.
+    fn remove_layer_rule(&self, name: &str, id: &str) -> bool;
+}
+
+/// The in-process office, linked into the daemon: calls `Core` directly.
+pub struct Local(pub zapper_core::Core);
+
+impl OfficeClient for Local {
+    fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
+        self.0.add_layer_rule(name, rule)
+    }
+    fn remove_layer_rule(&self, name: &str, id: &str) -> bool {
+        self.0.remove_layer_rule(name, id)
+    }
+}
 
 /// Where zapper listens: `$ZAPPER_SOCKET`, else under `$XDG_RUNTIME_DIR`, as
 /// the `zapper` CLI finds it.
