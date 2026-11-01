@@ -368,7 +368,6 @@ async fn a_ui_listening_on_the_network_end_to_end() {
     serve.start_kill().unwrap();
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn services_added_listed_and_removed() {
     let d = daemon(TestCore::new(CONFIG)).await;
