@@ -44,6 +44,9 @@ pub trait OfficeClient: Send + Sync {
     /// The daemon's running config — the firms' definitions and profiles the
     /// office validates a start against, and the UI reads.
     fn config(&self) -> zapper_policy::Config;
+    /// How many sessions are running now (the firm-level pre-flight: enough
+    /// room under `daemon.max_sessions` for the firm's workers).
+    fn session_count(&self) -> usize;
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
@@ -155,6 +158,9 @@ impl OfficeClient for Local {
     }
     fn config(&self) -> zapper_policy::Config {
         <zapper_core::Core as zapper_core::ConfigApi>::config(&self.0)
+    }
+    fn session_count(&self) -> usize {
+        self.0.sessions().iter().filter(|s| !s.ended()).count()
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
@@ -295,6 +301,12 @@ impl OfficeClient for Remote {
             .ok()
             .and_then(|a| serde_json::from_value(a.body).ok())
             .unwrap_or_default()
+    }
+    fn session_count(&self) -> usize {
+        block(self.0.get("/v1/sessions"))
+            .ok()
+            .and_then(|a| a.body.as_array().map(|s| s.len()))
+            .unwrap_or(0)
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         let v = block(self.0.get(&format!("/v1/admit?profile={profile}")))?

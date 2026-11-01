@@ -535,7 +535,7 @@ async fn up(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> 
     } else {
         serde_json::from_str(&text).map_err(|e| bad(format!("body: {e}")))?
     };
-    let run = super::up_with(&d, &f, &opts).await?;
+    let run = super::up_with(&d.office(), &f, &opts).await?;
     Ok(Json(run.status()))
 }
 

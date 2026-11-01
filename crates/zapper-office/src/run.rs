@@ -4,13 +4,16 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+#[cfg(test)]
 use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 use zapper_core::util::now;
-use zapper_core::{Core, NewSession};
+#[cfg(test)]
+use zapper_core::Core;
+use zapper_core::NewSession;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 
@@ -18,10 +21,11 @@ use crate::firm::{Firm, BOARD};
 use crate::history::RUN_CONFIG;
 use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
+#[cfg(test)]
+use crate::OfficeOf;
 use crate::{
     access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
-    security, skills, utc_day, workforce, FirmRun, Office, OfficeOf, RunState, Usage, WorkerRt,
-    WorkerState,
+    security, skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
 };
 
 /// Each profile's agent kind and model, by profile name.
@@ -105,7 +109,7 @@ pub(crate) fn mem_available_mib() -> Option<u64> {
 }
 
 /// Checks that the firm fits before booting anything.
-fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
+fn check_resources(office: &Office, config: &Config, firm: &Firm) -> Result<()> {
     let mut mib = 0u64;
     let mut count = 0usize;
     for w in &firm.workers {
@@ -117,7 +121,7 @@ fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
         mib += config.resolve(&f.profile)?.engine.memory_mib as u64;
         count += 1;
     }
-    let running = d.sessions().iter().filter(|s| !s.ended()).count();
+    let running = office.client().session_count();
     if running + count > config.daemon.max_sessions {
         bail!(
             "the firm needs {count} sessions and {running} are running; daemon.max_sessions is {}",
@@ -596,7 +600,11 @@ fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
     run
 }
 
-pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
+pub async fn up_with(
+    office: &Arc<Office>,
+    name: &str,
+    opts: &StartOptions,
+) -> Result<Arc<FirmRun>> {
     let task = opts.task.as_deref().and_then(task_parts);
     if let Some((_, body)) = &task {
         if body.len() > mail::MAX_BODY {
@@ -608,12 +616,12 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
     if !files.is_empty() && task.is_none() {
         bail!("attachments go with the board's task: give one");
     }
-    if let Ok(r) = d.office().run(name) {
+    if let Ok(r) = office.run(name) {
         if !r.ended() {
             bail!("firm {name} is already running (run {})", r.id);
         }
     }
-    let config = d.config();
+    let config = office.client().config();
     let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
@@ -622,13 +630,13 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         articles,
         scenario,
     } = with_options(name, firm, &config, opts)?;
-    check_resources(d, &config, &firm)?;
+    check_resources(office, &config, &firm)?;
     let firm = super::remote::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;
     }
     let (run, boot_rx) = create_run(
-        &d.office(),
+        office,
         name,
         &config,
         Started {
@@ -653,7 +661,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         tokio::spawn(foreman::run(run.clone(), w));
     }
     tokio::spawn(ticker(run.clone()));
-    tokio::spawn(booter(d.clone(), run.clone(), boot_rx));
+    tokio::spawn(booter(office.clone(), run.clone(), boot_rx));
     // The board's task, if it gave one: the CEO's first assignment.
     if let Some((subject, body)) = task {
         if let Err(e) = send_task(&run, &subject, &body, files) {
@@ -694,7 +702,7 @@ pub(crate) fn send_task(
 
 /// Boots the VMs of workers hired during the run, and starts their foremen.
 async fn booter(
-    d: Core,
+    office: Arc<Office>,
     run: Arc<FirmRun>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<WorkerRt>>,
 ) {
@@ -705,7 +713,7 @@ async fn booter(
         let Some(role) = run.config.roles.get(&w.role).cloned() else {
             continue;
         };
-        let config = d.config();
+        let config = office.client().config();
         let run = run.clone();
         tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);

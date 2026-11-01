@@ -270,9 +270,12 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       **Left:** relocate `http.rs` onto that listener (the office-state swap + a client `config`
       + `promote`'s config-mutation), which is coupled to the bin (P4-d).
 - [~] **P4-b** The office holds its own `Office` (`FirmRun.office()`, `Office.state_dir`); firm
-      logic and the disk helpers reach the registry/run files without `Core`. **Left:** the
-      run-management/startup (`create_run`/`up_with`/`boot`/`lib::start`) and the http read
-      endpoints still take `&Core` in-process — they move to the bin in P4-d.
+      logic and the disk helpers reach the registry/run files without `Core`. Run management now
+      off `Core` too: `create_run`, `up_with`, `booter` and `check_resources` take `&Arc<Office>`
+      and use `run.client` (`session_count` added to the trait) — the http `up` handler passes
+      `d.office()`, and only the `#[cfg(test)]` helpers still hold a `Core` (for `test_session`).
+      **Left:** `boot`/`lib::start` and the http read endpoints still take `&Core` in-process —
+      they move to the bin in P4-d.
 - [ ] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
 - [ ] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
       `zapper-office`.
