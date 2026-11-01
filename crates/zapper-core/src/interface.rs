@@ -24,7 +24,6 @@ use crate::daemon::{self, session, Daemon};
 pub use crate::daemon::builds::{
     BuildInfo, Follow, ImageBuild, Message as BuildMessage, Outcome as BuildOutcome,
 };
-pub use crate::daemon::clients::RuleKeeper;
 pub use crate::daemon::deciders::{Decider, Referral};
 pub use crate::daemon::gateway::McpServer;
 pub use crate::daemon::services::{
@@ -387,9 +386,6 @@ pub trait RuleApi {
         session: Option<&str>,
         profile: Option<&str>,
     ) -> Result<Vec<(Scope, Policy)>>;
-    /// Adds a client's own rules to the layers listed, and lets it remove
-    /// them itself.
-    fn add_rule_keeper(&self, keeper: Arc<dyn RuleKeeper>);
 }
 
 impl RuleApi for Core {
@@ -413,38 +409,43 @@ impl RuleApi for Core {
         for s in self.d.sessions.all() {
             layers.push((Scope::Session(s.id.clone()), s.own_policy()));
         }
-        for k in self.d.clients.rule_keepers.read().unwrap().iter() {
-            layers.extend(k.layers());
+        // A firm's role layers, which the core keeps by name (a session
+        // attaches one by its `firm-role` label); the office adds and removes
+        // their rules.
+        for (name, p) in self.d.named_layers.read().unwrap().iter() {
+            layers.push((Scope::Role(name.clone()), p.read().unwrap().clone()));
         }
         layers
     }
 
     fn remove_rule(&self, id: &str) -> Result<RuleRemoval> {
-        // A client's own rule (a firm officer's standing approval): removed
-        // through it, so its records agree.
-        let keepers = self.d.clients.rule_keepers.read().unwrap().clone();
-        for k in keepers {
-            let held = k.layers().into_iter().find_map(|(scope, p)| {
-                p.rules()
-                    .into_iter()
-                    .find(|r| r.id() == Some(id))
-                    .map(|r| (scope, r))
-            });
-            if let Some(r) = k.remove(id) {
-                r?;
-                if let Some((scope, rule)) = held {
-                    self.d.emit(
-                        None,
-                        EventBody::Rule {
-                            state: "removed".into(),
-                            id: id.to_string(),
-                            scope: scope.to_string(),
-                            kind: rule.kind().to_string(),
-                        },
-                    );
+        // A firm role's shared layer (a standing approval the office keeps a
+        // record of): removing one here — `zapper` without the office, or the
+        // operator — takes it out of the layer and says so with an event. In
+        // an office run the office drives its own layers, so this path is for
+        // when nothing else is tending them.
+        let hit = {
+            let named = self.d.named_layers.read().unwrap();
+            let mut found = None;
+            for (name, p) in named.iter() {
+                if let Some(rule) = p.write().unwrap().remove(id) {
+                    found = Some((name.clone(), rule.kind().to_string()));
+                    break;
                 }
-                return Ok(RuleRemoval::Revoked);
             }
+            found
+        };
+        if let Some((name, kind)) = hit {
+            self.d.emit(
+                None,
+                EventBody::Rule {
+                    state: "removed".into(),
+                    id: id.to_string(),
+                    scope: Scope::Role(name).to_string(),
+                    kind,
+                },
+            );
+            return Ok(RuleRemoval::Revoked);
         }
         // `s-` ids are session-layer rules (`Rules::add` mints them, with
         // the session's id); everything else lives in the config layers
@@ -500,10 +501,6 @@ impl RuleApi for Core {
             }
             (None, None) => vec![(Scope::Global, c.policy.clone())],
         })
-    }
-
-    fn add_rule_keeper(&self, keeper: Arc<dyn RuleKeeper>) {
-        self.d.clients.rule_keepers.write().unwrap().push(keeper);
     }
 }
 

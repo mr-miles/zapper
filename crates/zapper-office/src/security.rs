@@ -1104,6 +1104,21 @@ pub fn revoke(run: &FirmRun, by: &str, rule: &str, reason: &str) -> Result<Value
     Ok(json!({ "revoked": rule }))
 }
 
+/// The office's record-keeping when a role's standing approval is taken out
+/// of its layer through the core — the operator, or `zapper` without the
+/// office. The rule is already gone from the layer, so this only drops the
+/// standing record and journals it, keeping the office's records in step.
+/// Driven by the core's `rule` removed event (see `follow_rules`).
+pub fn forget_standing(run: &FirmRun, rule: &str) {
+    let st = run.security.lock().unwrap().standing.remove(rule);
+    if let Some(st) = st {
+        run.journal.append(
+            "access",
+            json!({ "event": "revoked", "rule": rule, "standing": st, "by": BOARD, "reason": "removed through the core" }),
+        );
+    }
+}
+
 fn remove_rule(run: &FirmRun, st: &Standing) {
     let Some(id) = st.rule.id.as_deref() else {
         return;

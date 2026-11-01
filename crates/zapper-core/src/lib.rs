@@ -29,9 +29,9 @@ pub use daemon::record;
 pub use interface::{
     ApprovalApi, BuildInfo, BuildMessage, BuildOutcome, BuildRequest, Catchup, ConfigApi, Core,
     Cursor, Decider, Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer,
-    NewSession, Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi,
-    ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi,
-    SessionInfo, ShellOpened, Status, TermChunk, TerminalInfo,
+    NewSession, Pending, Referral, Remember, RuleApi, RuleRemoval, ServiceApi, ServiceHandler,
+    ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi, SessionInfo,
+    ShellOpened, Status, TermChunk, TerminalInfo,
 };
 /// The subordinate-id range a session's Firecracker can take, for `check`
 /// (see [`subids::host_range`]).

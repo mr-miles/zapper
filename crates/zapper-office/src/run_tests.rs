@@ -616,8 +616,8 @@ fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
     );
 }
 
-#[test]
-fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
+#[tokio::test]
+async fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
     use super::security::{self, DecideArgs};
     let (t, run) = run();
     let req = zapper_policy::NetRequest {
@@ -655,12 +655,25 @@ fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
     };
     assert!(in_layers(&t), "listed with the role's layer");
 
+    // The operator (or `zapper` without the office) removes it through the
+    // core: gone from the layer at once (enforcement),
     assert!(matches!(
         t.core.remove_rule(&rule).unwrap(),
         zapper_core::RuleRemoval::Revoked
     ));
-    assert!(security::standing(&run).is_empty());
     assert!(!in_layers(&t));
+    // and the office, following the core's `rule` event, drops its own
+    // record of it so the two agree (eventually, across the stream).
+    for _ in 0..200 {
+        if security::standing(&run).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        security::standing(&run).is_empty(),
+        "the office forgot the standing approval"
+    );
     let revoked = journal(&run)
         .into_iter()
         .any(|e| e["type"] == "access" && e["event"] == "revoked" && e["rule"] == rule.as_str());

@@ -54,7 +54,7 @@ use tokio::sync::{Notify, Semaphore};
 use zapper_policy::Policy;
 
 use zapper_core::util::{now, random_id};
-use zapper_core::Core;
+use zapper_core::{Core, EventBody};
 
 /// The office's state in the core: its registry of runs.
 pub(crate) trait OfficeOf {
@@ -708,7 +708,7 @@ pub const ASSETS: &[(&str, &str)] = &[
 pub fn start(d: &Core) {
     d.add_config_check(firm::check);
     close_orphans(d.state_dir());
-    d.add_rule_keeper(Arc::new(Keeper(d.office())));
+    follow_rules(d);
     d.on_shutdown(|d| {
         Box::pin(async move {
             let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
@@ -719,31 +719,49 @@ pub fn start(d: &Core) {
     });
 }
 
-/// The firms' role layers, and their officers' standing approvals, which
-/// the operator removes through the officers' records.
-struct Keeper(Arc<Office>);
-
-impl zapper_core::RuleKeeper for Keeper {
-    fn layers(&self) -> Vec<(zapper_policy::Scope, Policy)> {
-        let mut layers = Vec::new();
-        for run in self.0.runs.read().unwrap().values() {
-            for (role, p) in &run.roles {
-                layers.push((
-                    zapper_policy::Scope::Role(format!("{}/{role}", run.firm)),
-                    p.read().unwrap().clone(),
-                ));
+/// Follows the core's `rule` events: when a role's standing approval is
+/// removed from its layer through the core — the operator, or `zapper`
+/// without the office — the office drops its own record of it, so the two
+/// agree. This is how the office keeps up once it is a process of its own;
+/// in-process it follows the same stream. The office's own revocations keep
+/// their records directly, so a `removed` event for a rule it no longer
+/// tracks is a no-op.
+fn follow_rules(d: &Core) {
+    let Ok(h) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut events = d.subscribe();
+    let office = d.office();
+    h.spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match events.recv().await {
+                Ok(e) => {
+                    let EventBody::Rule {
+                        state, id, scope, ..
+                    } = &e.body
+                    else {
+                        continue;
+                    };
+                    if state != "removed" {
+                        continue;
+                    }
+                    let Some(firm) = scope
+                        .strip_prefix("role:")
+                        .and_then(|r| r.split('/').next())
+                    else {
+                        continue;
+                    };
+                    let run = office.runs.read().unwrap().get(firm).cloned();
+                    if let Some(run) = run {
+                        security::forget_standing(&run, id);
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
             }
         }
-        layers
-    }
-
-    fn remove(&self, id: &str) -> Option<Result<()>> {
-        let runs: Vec<_> = self.0.runs.read().unwrap().values().cloned().collect();
-        let run = runs
-            .into_iter()
-            .find(|r| r.security.lock().unwrap().standing.contains_key(id))?;
-        Some(security::revoke(&run, BOARD, id, "removed by the operator").map(|_| ()))
-    }
+    });
 }
 
 /// A core without VMs with the office started on it, for tests.

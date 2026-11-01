@@ -8,16 +8,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 use futures_util::future::BoxFuture;
-use zapper_policy::{Config, Policy, Scope};
-
-/// Rules a client keeps in policy layers of its own (shared by its
-/// sessions), and removes itself so its records agree.
-pub trait RuleKeeper: Send + Sync {
-    /// Its layers, for listing rules.
-    fn layers(&self) -> Vec<(Scope, Policy)>;
-    /// Removes rule `id` if it is one of its own: `None` if it isn't.
-    fn remove(&self, id: &str) -> Option<Result<()>>;
-}
+use zapper_policy::Config;
 
 /// A check every config change must pass, besides the config's own.
 pub type ConfigCheck = Arc<dyn Fn(&Config) -> Result<()> + Send + Sync>;
@@ -29,7 +20,6 @@ pub type ShutdownHook = Arc<dyn Fn(crate::Core) -> BoxFuture<'static, ()> + Send
 pub struct Clients {
     state: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     pub config_checks: RwLock<Vec<ConfigCheck>>,
-    pub rule_keepers: RwLock<Vec<Arc<dyn RuleKeeper>>>,
     pub shutdown: RwLock<Vec<ShutdownHook>>,
 }
 
