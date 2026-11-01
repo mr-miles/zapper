@@ -101,14 +101,8 @@ impl ServiceHandler for GitServer {
     }
 }
 
-fn add_service(
-    d: &impl ServiceApi,
-    run: &FirmRun,
-    name: String,
-    port: u16,
-    target: ServiceTarget,
-) -> Result<()> {
-    let id = d.add_service(ServiceSpec {
+fn add_service(run: &FirmRun, name: String, port: u16, target: ServiceTarget) -> Result<()> {
+    let id = run.client.add_service(ServiceSpec {
         name,
         port,
         sessions: super::run_sessions(run),
@@ -121,8 +115,8 @@ fn add_service(
 
 /// The firm's domain, a zone of the run's sessions (its names are the
 /// firm's services, never looked up on the host), and its git server.
-pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
-    let id = d.add_zone(
+pub fn register(run: &Arc<FirmRun>) -> Result<()> {
+    let id = run.client.add_zone(
         &run.domain,
         super::run_sessions(run),
         &format!("firm {}", run.firm),
@@ -133,7 +127,6 @@ pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
             run: Arc::downgrade(run),
         });
         add_service(
-            d,
             run,
             format!("git.{}", run.domain),
             443,
@@ -146,29 +139,28 @@ pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
 /// For tests: `cluster` as the run's cluster, as `start` makes it once it
 /// has booted.
 #[cfg(test)]
-pub(crate) fn test_cluster(d: &Core, run: &FirmRun, cluster: &Arc<Session>) {
+pub(crate) fn test_cluster(run: &FirmRun, cluster: &Arc<Session>) {
     *run.facility.cluster.lock().unwrap() = Some(cluster.clone());
-    register_cluster(d, run, cluster).unwrap();
+    register_cluster(run, cluster).unwrap();
 }
 
 /// The cluster's API and the apps it serves, as services of the firm's
 /// domain on the cluster VM's ports.
-fn register_cluster(d: &impl ServiceApi, run: &FirmRun, cluster: &Session) -> Result<()> {
+fn register_cluster(run: &FirmRun, cluster: &Session) -> Result<()> {
     let dom = &run.domain;
     let to = |port: u32| ServiceTarget::Session {
         id: cluster.id.clone(),
         port,
     };
     add_service(
-        d,
         run,
         format!("{CLUSTER}.{dom}"),
         API_PORT as u16,
         to(API_PORT),
     )?;
     for name in [format!("apps.{dom}"), format!("*.apps.{dom}")] {
-        add_service(d, run, name.clone(), 80, to(HTTP_PORT))?;
-        add_service(d, run, name, 443, to(HTTPS_PORT))?;
+        add_service(run, name.clone(), 80, to(HTTP_PORT))?;
+        add_service(run, name, 443, to(HTTPS_PORT))?;
     }
     Ok(())
 }
@@ -555,7 +547,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     let _ = config;
     let s = d.create_session(new).await.context("booting the cluster")?;
     *run.facility.cluster.lock().unwrap() = Some(s.clone());
-    register_cluster(d, run, &s)?;
+    register_cluster(run, &s)?;
     run.journal.append(
         "facility",
         json!({ "name": name, "state": "starting", "session": s.id }),
@@ -840,7 +832,7 @@ async fn deploy_landing(run: &FirmRun, s: &Session, manifest: String) {
         .append("facility", json!({ "name": "landing", "state": "failed" }));
 }
 
-pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
+pub async fn stop(run: &Arc<FirmRun>) {
     for t in [
         run.facility.product.lock().unwrap().take(),
         run.facility.dashboard.lock().unwrap().take(),
@@ -852,12 +844,12 @@ pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
     }
     let services: Vec<u64> = run.facility.services.lock().unwrap().drain(..).collect();
     for id in services {
-        d.remove_service(id);
+        run.client.remove_service(id);
     }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
-        d.stop_session(&s, "firm down").await;
-        let _ = d.forget_session(&s.id);
+        let _ = run.client.stop_session(&s.id, "firm down").await;
+        let _ = run.client.forget_session(&s.id);
     }
 }
 
@@ -1054,63 +1046,6 @@ mod tests {
         );
     }
 
-    /// A fake `ServiceApi` recording what was registered — enough to test the
-    /// firm's service wiring without the daemon's real service registry.
-    #[derive(Default)]
-    struct FakeServices {
-        zones: std::sync::Mutex<Vec<String>>,
-        services: std::sync::Mutex<Vec<(String, u16)>>,
-    }
-
-    impl zapper_core::ServiceApi for FakeServices {
-        fn add_service(&self, spec: zapper_core::ServiceSpec) -> anyhow::Result<u64> {
-            self.services.lock().unwrap().push((spec.name, spec.port));
-            Ok(0)
-        }
-        fn add_zone(
-            &self,
-            domain: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _owner: &str,
-        ) -> anyhow::Result<u64> {
-            self.zones.lock().unwrap().push(domain.to_string());
-            Ok(0)
-        }
-        fn remove_service(&self, _id: u64) -> Option<zapper_core::ServiceInfo> {
-            None
-        }
-        fn services(&self) -> Vec<zapper_core::ServiceInfo> {
-            vec![]
-        }
-        fn service(&self, _: u64) -> Option<zapper_core::ServiceInfo> {
-            None
-        }
-        fn add_mcp_server(
-            &self,
-            _name: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _server: std::sync::Arc<dyn zapper_core::McpServer>,
-        ) -> anyhow::Result<u64> {
-            Ok(0)
-        }
-        fn add_mcp_socket(
-            &self,
-            _name: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _socket: &str,
-            _instructions: Option<String>,
-            _owner: &str,
-        ) -> anyhow::Result<u64> {
-            Ok(0)
-        }
-        fn mcp_servers(&self) -> Vec<serde_json::Value> {
-            vec![]
-        }
-        fn remove_mcp_server(&self, _id: u64) -> bool {
-            false
-        }
-    }
-
     const FIRM: &str = "
 profiles:
   w:
@@ -1124,29 +1059,27 @@ firms:
     git: { repos: [api] }
 ";
 
-    /// `register` depends only on `ServiceApi`: a fake stands in for the real
-    /// registry, and we check it wired up the firm's zone and git service.
+    /// Starting the run wires the firm's zone and git service through the
+    /// office's client; the daemon's registry holds them.
     #[tokio::test]
     async fn register_wires_the_firms_zone_and_git_service() {
+        use zapper_core::ServiceApi;
         let t = crate::test_core(FIRM);
         let run = crate::test_run(&t.core, "acme");
-        let fake = FakeServices::default();
-        super::register(&fake, &run).unwrap();
+        let services = t.core.services();
         assert!(
-            fake.zones.lock().unwrap().contains(&run.domain),
+            services.iter().any(|s| s.name == run.domain),
             "zone {} not registered: {:?}",
             run.domain,
-            fake.zones.lock().unwrap(),
+            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
         let git = format!("git.{}", run.domain);
         assert!(
-            fake.services
-                .lock()
-                .unwrap()
+            services
                 .iter()
-                .any(|(name, port)| *name == git && *port == 443),
+                .any(|s| s.name == git && s.port == Some(443)),
             "git service {git} missing: {:?}",
-            fake.services.lock().unwrap(),
+            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
     }
 }

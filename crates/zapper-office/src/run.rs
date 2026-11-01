@@ -528,7 +528,7 @@ fn create_run(
             &format!("[Automatic notice] firm {name}: {w}.\n"),
         );
     }
-    facility::register(d, &run)?;
+    facility::register(&run)?;
     security::register(&run)?;
     ops::register(d, &run)?;
     d.office()
@@ -921,7 +921,7 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
         let _ = t.await;
     }
     super::remote::finish(run).await;
-    facility::stop(d, run).await;
+    facility::stop(run).await;
     security::unregister(run);
     ops::unregister(run);
     *run.state.lock().unwrap() = RunState::Ended;

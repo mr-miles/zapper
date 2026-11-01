@@ -150,7 +150,7 @@ async fn the_clusters_api_is_its_vms_port() {
     new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
     echoing_vm(&cluster);
-    facility::test_cluster(&t.core, &run, &cluster);
+    facility::test_cluster(&run, &cluster);
 
     let pat = worker(&run, "pat");
     let host = format!("cluster.{}", run.domain);

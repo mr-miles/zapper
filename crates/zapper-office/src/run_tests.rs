@@ -272,7 +272,7 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
     new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
-    facility::test_cluster(&t.core, &run, &cluster);
+    facility::test_cluster(&run, &cluster);
     let pat = session_of(&run, "pat");
     let c = &cluster.id;
     assert_eq!(
@@ -289,7 +289,7 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     );
     assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 443), "unserved");
 
-    facility::stop(&t.core, &run).await;
+    facility::stop(&run).await;
     assert!(t.core.services().is_empty(), "{:?}", t.core.services());
     assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "host");
 }

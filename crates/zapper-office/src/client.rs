@@ -16,7 +16,10 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
 use zapper_core::driver::DriveStream;
-use zapper_core::{ApprovalApi, ConfigApi, NewSession, ServiceApi, SessionApi, SessionInfo};
+use zapper_core::{
+    ApprovalApi, ConfigApi, NewSession, ServiceApi, ServiceInfo, ServiceSpec, SessionApi,
+    SessionInfo,
+};
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::AnyRule;
 
@@ -94,6 +97,20 @@ pub trait OfficeClient: Send + Sync {
     fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64>;
     /// Hands a decider's sessions' `ask`s back to the operator.
     fn remove_decider(&self, id: u64) -> bool;
+
+    /// Registers a service of the firm (its git server, its cluster's ports);
+    /// its id.
+    fn add_service(&self, spec: ServiceSpec) -> Result<u64>;
+    /// Makes `domain` a zone for the sessions `sessions` picks: its names
+    /// resolve only to the firm's services, never on the host; its id.
+    fn add_zone(
+        &self,
+        domain: &str,
+        sessions: BTreeMap<String, String>,
+        owner: &str,
+    ) -> Result<u64>;
+    /// Removes a service or zone; what it was, if it was there.
+    fn remove_service(&self, id: u64) -> Option<ServiceInfo>;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -165,6 +182,20 @@ impl OfficeClient for Local {
     }
     fn remove_decider(&self, id: u64) -> bool {
         self.0.remove_decider(id)
+    }
+    fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
+        self.0.add_service(spec)
+    }
+    fn add_zone(
+        &self,
+        domain: &str,
+        sessions: BTreeMap<String, String>,
+        owner: &str,
+    ) -> Result<u64> {
+        self.0.add_zone(domain, sessions, owner)
+    }
+    fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
+        self.0.remove_service(id)
     }
 }
 
@@ -251,6 +282,20 @@ impl OfficeClient for Remote {
     }
     fn remove_decider(&self, _id: u64) -> bool {
         unimplemented!("Remote::remove_decider (P3-a)")
+    }
+    fn add_service(&self, _spec: ServiceSpec) -> Result<u64> {
+        unimplemented!("Remote::add_service (P3-a)")
+    }
+    fn add_zone(
+        &self,
+        _domain: &str,
+        _sessions: BTreeMap<String, String>,
+        _owner: &str,
+    ) -> Result<u64> {
+        unimplemented!("Remote::add_zone (P3-a)")
+    }
+    fn remove_service(&self, _id: u64) -> Option<ServiceInfo> {
+        unimplemented!("Remote::remove_service (P3-a)")
     }
 }
 
