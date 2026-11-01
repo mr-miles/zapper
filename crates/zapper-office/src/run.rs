@@ -516,9 +516,7 @@ fn create_run(
     // firms. Inline secret values are hidden, as in `zapper config startup`.
     zapper_util::write_private(
         &dir.join(RUN_CONFIG),
-        zapper_core::util::redact(config.clone())
-            .to_yaml()
-            .as_bytes(),
+        zapper_policy::redact(config.clone()).to_yaml().as_bytes(),
     )?;
     run.journal.append("run", json!({ "state": "starting", "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "chart": chart(name, &firm, &models, &agents), "budget": firm.budget }));
     workforce::seed(&run);

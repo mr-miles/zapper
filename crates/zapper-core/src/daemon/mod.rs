@@ -555,16 +555,10 @@ impl Daemon {
     }
 }
 
-pub const REDACTED: &str = "<redacted>";
-
-pub fn redact(mut c: Config) -> Config {
-    for s in c.secrets.values_mut() {
-        if let SecretSource::Value { value } = &mut s.source {
-            *value = REDACTED.into();
-        }
-    }
-    c
-}
+// Redacting inline secret values is pure config work, so it lives in
+// `zapper-policy`; re-exported here (and through `util`) for the core's
+// callers and the API clients.
+pub use zapper_policy::{redact, REDACTED};
 
 #[cfg(test)]
 mod limits_tests;
