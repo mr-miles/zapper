@@ -283,7 +283,33 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       `d.office()`, and only the `#[cfg(test)]` helpers still hold a `Core` (for `test_session`).
       **Left:** `boot`/`lib::start` and the http read endpoints still take `&Core` in-process —
       they move to the bin in P4-d.
-- [ ] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
+- [~] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
+      **Done — the relocation out of `zapper-core` (each a green commit, core re-exports so the
+      CLI/api are unchanged, the office repointed off core):**
+      - new bottom crate **`zapper-api-types`** holds the API DTOs: `Status`, `SessionInfo`,
+        `NewSession`, and a serializable `ServiceSpec`/`ServiceTarget` twin (core keeps its
+        internal `services::Target` with the in-process `Handler` variant + `From` conversions),
+        and `ApiError` + the `errors` module (`ErrorKind`/`kind_of`; the crate gains an `axum`
+        dep — the error IS an HTTP response). Deps: policy + proto + serde + axum, never core.
+      - new bottom crate **`zapper-util`** holds the generic host helpers (`random_id`, `now`,
+        `write_private`, `host_memory_mib`, `exposed_warning`, `ID_CHARS`); deps rand + anyhow.
+      - `redact`/`REDACTED` → **`zapper-policy`** (pure config work).
+      - the driving stack (`driver::{start, DriveStream, …}`, `harness`, `read_frame`) — the
+        office depends on **`zapper-driver`** directly (it already held them; core only re-exported).
+      - new crate **`zapper-record`** (the keeper-backed record: `view`/`verify_state_dir`/`Writer`).
+      - new crate **`zapper-mint`** (the host-command token cache: `resolve`/`peek`/`forget`/
+        `secret_value`; tokio+policy, no core). The office mints its own github tokens for its own
+        git calls; the daemon mints for secret injection; each process keeps its own `GLOBAL`.
+      - `OfficeClient::remove_service` returns `()` (dropped the last `ServiceInfo` use).
+      **Left (the office's ONLY remaining prod `zapper_core` use is the co-host adapter):**
+      gate `#[cfg(test)]` — in `client.rs`: `Local(Core)` + its impl + the trait imports it needs
+      (`ApprovalApi`/`RuleApi`/`ServiceApi`/`SessionApi`/`ConfigApi`); in `lib.rs`: `use
+      prelude::*`, `use {Core, EventBody}`, `start`, `follow_rules`, the `OfficeOf` trait + `impl
+      OfficeOf for Core`. (`facility.rs`/`run.rs` core uses are already `#[cfg(test)]`; `routes`/
+      `PAGE`/`ASSETS` stay prod — `standalone` uses them.) Then move `zapper-core` to
+      `[dev-dependencies]` in `crates/zapper-office/Cargo.toml` (keep `features = ["test-util"]`).
+      This can only land together with P4-d-3 (gating `start`/`Local` test-only breaks `zapper`'s
+      in-process office), so do them in one go.
 - [~] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
       `zapper-office`.
       **P4-d-1 done:** the last two stubbed `Remote` methods are real — `reset_layer` clears a
@@ -303,9 +329,36 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       a firm read over `Remote`, asset serving). **Left:** rule-following over the daemon's
       `/v1/events` SSE (co-host's `follow_rules`; a run starts without it, the record can only
       drift on a mid-run operator edit) and proxying the page's daemon-backed session/VM reads.
-- [ ] **P4-d-3** `zapper serve` spawns `zapper-office` under `OFFICE=1` instead of running the
-      office in-process; `zapper` stops linking the office (depends on P4-c).
+- [ ] **P4-d-3** The office becomes a standalone process the **user** runs (`zapper-office
+      serve`, like `zapper-workbench`); `zapper serve` does **not** start/spawn it. **Locked
+      decisions (operator):** (1) the `zapper firm/mail/drive` CLI moves to the `zapper-office`
+      binary — `zapper` drops those subcommands and stops linking `zapper-office` entirely;
+      (2) firm config is the office's own — the daemon stops validating `firms:`; (3) `OFFICE`/
+      the cargo feature governs only whether the `zapper-office` binary is **built/included**, no
+      runtime coupling. Concrete checklist:
+      - **Move the firm CLI:** `crates/zapper/src/firm_cli.rs` (1518 lines; uses only
+        `crate::client::Client` + `crate::util::now`, **no `zapper_office`**) → the `zapper-office`
+        crate, adapted to the office's client (`zapper_office::client::Zapper`/`zapper_client`)
+        and `zapper_util::now`; wire `Firm`/`Mail`/`Drive` subcommands into `zapper-office`'s
+        `main.rs` `Cli`.
+      - **Remove the office from `zapper`:** in `crates/zapper/src/main.rs` drop `office::start(&d)`
+        and `office::mount(&d)` from `serve` (the daemon no longer serves the office UI/routes),
+        drop `office::config`/`office::check` firm validation, and the `Firm/Mail/Drive` `Cmd`s;
+        delete/gut `crates/zapper/src/office.rs` and `firm_cli.rs`; remove the `office` feature and
+        the `zapper-office` dep from `crates/zapper/Cargo.toml`.
+      - **Finish P4-c (couples here):** gate the office's co-host adapter `#[cfg(test)]` (see P4-c
+        “Left”), move `zapper-core` to the office's `[dev-dependencies]`.
+      - Validate with `make lint && make test` (office↔core is API-only — no KVM needed for this).
 - [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
+
+### Continuation note (context may be cleared mid-step)
+Branch `feat/office-process-step4` (worktree `~/zapper/zapper-structure`); nothing pushed. The
+P4-c relocation is landed up to and including commit "remove_service returns ()" — `git log
+--oneline` shows the `office-process P4-*` sequence. New crates: `zapper-api-types`, `zapper-util`,
+`zapper-record`, `zapper-mint`. **Next:** execute the P4-d-3 checklist above (firm-CLI move →
+remove office from `zapper` → gate co-host test-only + core dev-dep), in green commits.
+**Disk gotcha:** `target/debug` fills the shared volume (~30G); when a build fails with "No space
+left on device", run `rm -rf target/debug` (release/`make lint` artifacts are separate) and rebuild.
 
 ## Parallelism & subagents
 Single crate (compiles as a whole) and the hard work is the P1 prerequisites, so parallelism
