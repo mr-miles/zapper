@@ -85,6 +85,9 @@ pub(crate) struct Office {
     /// (`state/firms/<firm>/runs/…`). Set in `start`; the read endpoints and
     /// history read run files by it, needing no `&Core`.
     state_dir: std::sync::OnceLock<PathBuf>,
+    /// The daemon's `state/services/` directory, where the office binds its
+    /// facilities' sockets (`FirmRun.socket_dir`). Set in `start`.
+    socket_dir: std::sync::OnceLock<PathBuf>,
 }
 
 impl Office {
@@ -106,6 +109,14 @@ impl Office {
     /// `state/firms/<firm>`.
     pub fn firm_dir(&self, firm: &str) -> PathBuf {
         self.state_dir().join("firms").join(firm)
+    }
+
+    /// The daemon's `state/services/` directory (set in `start`), where the
+    /// office binds its facilities' sockets.
+    pub fn socket_dir(&self) -> &std::path::Path {
+        self.socket_dir
+            .get()
+            .expect("the office's socket_dir is set in start()")
     }
 
     pub fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
@@ -811,6 +822,7 @@ pub fn start(d: &Core) {
     let office = d.office();
     let _ = office.client.set(Arc::new(client::Local(d.clone())));
     let _ = office.state_dir.set(d.state_dir().to_path_buf());
+    let _ = office.socket_dir.set(d.socket_dir());
     d.add_config_check(firm::check);
     close_orphans(d.state_dir());
     follow_rules(d);

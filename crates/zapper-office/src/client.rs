@@ -41,6 +41,9 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the record can be written now (the office takes no firm turn
     /// while it can't).
     fn record_writable(&self) -> bool;
+    /// The daemon's running config — the firms' definitions and profiles the
+    /// office validates a start against, and the UI reads.
+    fn config(&self) -> zapper_policy::Config;
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
@@ -149,6 +152,9 @@ impl OfficeClient for Local {
     }
     fn record_writable(&self) -> bool {
         self.0.record_writable()
+    }
+    fn config(&self) -> zapper_policy::Config {
+        <zapper_core::Core as zapper_core::ConfigApi>::config(&self.0)
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
@@ -283,6 +289,12 @@ impl OfficeClient for Remote {
             .ok()
             .and_then(|a| a.body["healthy"].as_bool())
             .unwrap_or(false)
+    }
+    fn config(&self) -> zapper_policy::Config {
+        block(self.0.get("/v1/config?format=json"))
+            .ok()
+            .and_then(|a| serde_json::from_value(a.body).ok())
+            .unwrap_or_default()
     }
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         let v = block(self.0.get(&format!("/v1/admit?profile={profile}")))?

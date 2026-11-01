@@ -20,7 +20,7 @@ use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
 use crate::{
     access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
-    security, skills, utc_day, workforce, FirmRun, OfficeOf, RunState, Usage, WorkerRt,
+    security, skills, utc_day, workforce, FirmRun, Office, OfficeOf, RunState, Usage, WorkerRt,
     WorkerState,
 };
 
@@ -424,7 +424,7 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
 /// Builds a firm's run: its directory, journal, post office, ledger, drive
 /// and grants, in the registry as starting. `up_with` then boots it.
 fn create_run(
-    d: &Core,
+    office: &Arc<Office>,
     name: &str,
     config: &Config,
     started: Started,
@@ -440,7 +440,7 @@ fn create_run(
         scenario,
     } = started;
     let id = run_id();
-    let dir = d.office().firm_dir(name).join("runs").join(&id);
+    let dir = office.firm_dir(name).join("runs").join(&id);
     for sub in ["transcripts", "drive", "skills", "empty"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
@@ -450,7 +450,7 @@ fn create_run(
     // workers attach it by their `firm-role` label, and the office changes it
     // through the client. Reset to empty for this run (the registry outlives a
     // run, which starts with no approvals).
-    let client: Arc<dyn crate::client::OfficeClient> = Arc::new(crate::client::Local(d.clone()));
+    let client = office.client().clone();
     for r in firm.roles.keys() {
         client.reset_layer(&format!("{name}/{r}"));
     }
@@ -469,7 +469,7 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
-        socket_dir: d.socket_dir(),
+        socket_dir: office.socket_dir().to_path_buf(),
         post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
@@ -486,7 +486,7 @@ fn create_run(
         contracts: Mutex::new(contracts::Contracts::default()),
         access: Mutex::new(access::Access::default()),
         client,
-        office: Arc::downgrade(&d.office()),
+        office: Arc::downgrade(office),
         turns: Arc::new(Semaphore::new(firm.budget.max_concurrent as usize)),
         usage: Mutex::new(Usage {
             day: utc_day(started),
@@ -533,7 +533,7 @@ fn create_run(
     facility::register(&run)?;
     security::register(&run)?;
     ops::register(&run)?;
-    d.office()
+    office
         .runs
         .write()
         .unwrap()
@@ -577,7 +577,7 @@ pub(crate) async fn test_run_remote(d: &Core, name: &str, repos: &[&str]) -> Arc
 #[cfg(test)]
 fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
     let config = d.config();
-    let (run, _boots) = create_run(d, name, &config, started).unwrap();
+    let (run, _boots) = create_run(&d.office(), name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
     for w in run.rts() {
         let profile = run
@@ -628,7 +628,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         harness_driver(&config.resolve(&r.profile)?)?;
     }
     let (run, boot_rx) = create_run(
-        d,
+        &d.office(),
         name,
         &config,
         Started {
