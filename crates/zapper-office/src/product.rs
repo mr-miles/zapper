@@ -121,7 +121,7 @@ async fn handle(run: &FirmRun, mut req: Request<Incoming>, port: u32) -> Respons
         .lock()
         .unwrap()
         .as_ref()
-        .map(|c| c.id.clone())
+        .map(|c| c.id().to_string())
     else {
         return text(StatusCode::BAD_GATEWAY, "the firm's cluster isn't running");
     };

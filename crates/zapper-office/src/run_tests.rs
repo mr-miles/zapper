@@ -42,7 +42,7 @@ fn run() -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -273,7 +273,7 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
     new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
-    facility::test_cluster(&run, &cluster);
+    facility::test_cluster(&t.core, &run, &cluster);
     let pat = session_of(&run, "pat");
     let c = &cluster.id;
     assert_eq!(

@@ -586,7 +586,9 @@ fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
         let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
         // The role's shared layer is attached by the `firm-role` label.
         new.labels = labels(&run.firm, &run.id, &w.name, &w.role, true);
-        *w.session.lock().unwrap() = Some(d.test_session(new, true).unwrap());
+        let s = d.test_session(new, true).unwrap();
+        w.set_session(d.session_info(&s), s.resolved.agent.kind.clone());
+        *w.session_arc.lock().unwrap() = Some(s);
         access::reapply(d, &run, &w.name);
     }
     run
@@ -640,7 +642,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         let msg = format!("{e:#}");
         run.journal
             .append("run", json!({ "state": "failed", "error": msg }));
-        down(d, &run, "boot failed").await;
+        down(&run, "boot failed").await;
         bail!("firm {name}: {msg}");
     }
     *run.state.lock().unwrap() = RunState::Running;
@@ -708,11 +710,11 @@ async fn booter(
             match boot_worker(&d, &run, &config, &w, &role).await {
                 // Let go while booting: stop the VM again.
                 Ok(()) if run.ended() || run.rt(&w.name).is_none() => {
-                    if let Some(s) = w.session.lock().unwrap().take() {
-                        let d = d.clone();
+                    if let Some(id) = w.take_session() {
+                        let client = run.client.clone();
                         tokio::spawn(async move {
-                            d.stop_session(&s, "let go").await;
-                            let _ = d.forget_session(&s.id);
+                            let _ = client.stop_session(&id, "let go").await;
+                            let _ = client.forget_session(&id);
                         });
                     }
                 }
@@ -733,7 +735,7 @@ async fn booter(
 
 async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let firm = &run.config;
-    facility::start(d, run, config).await?;
+    facility::start(run, config).await?;
     skills::prepare(run, config)?;
     let mut tasks = Vec::new();
     for w in run.rts() {
@@ -822,12 +824,12 @@ pub(crate) async fn boot_worker(
         accept_changed_image: false,
         ssh: false,
     };
-    let s = d.create_session(new).await?;
+    let info = run.client.create_session(new).await?;
     run.journal.append(
         "worker_session",
-        json!({ "worker": w.name, "session": s.id }),
+        json!({ "worker": w.name, "session": info.id() }),
     );
-    *w.session.lock().unwrap() = Some(s);
+    w.set_session(info, profile.agent.kind.clone());
     // Grants made before the VM was up: its network rules and kubeconfig.
     access::reapply(d, run, &w.name);
     Ok(())
@@ -894,7 +896,7 @@ async fn ticker(d: Core, run: Arc<FirmRun>) {
 }
 
 /// Stops a run: its workers' sessions, its facilities, its tasks.
-pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
+pub async fn down(run: &Arc<FirmRun>, reason: &str) {
     {
         let mut st = run.state.lock().unwrap();
         if matches!(*st, RunState::Ended) {
@@ -908,11 +910,11 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     }
     let mut tasks = Vec::new();
     for w in run.rts() {
-        if let Some(s) = w.session.lock().unwrap().take() {
-            let d = d.clone();
+        if let Some(id) = w.take_session() {
+            let client = run.client.clone();
             tasks.push(tokio::spawn(async move {
-                d.stop_session(&s, "firm down").await;
-                let _ = d.forget_session(&s.id);
+                let _ = client.stop_session(&id, "firm down").await;
+                let _ = client.forget_session(&id);
             }));
         }
         run.set_state(&w, WorkerState::Off, None);

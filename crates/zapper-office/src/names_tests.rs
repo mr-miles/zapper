@@ -62,7 +62,7 @@ async fn a_firms_names_are_answered_for_its_sessions_never_by_the_host() {
     let ceo = run
         .rt("ceo")
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -107,7 +107,7 @@ firms:
 fn worker(run: &FirmRun, name: &str) -> Arc<Session> {
     run.rt(name)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -150,7 +150,7 @@ async fn the_clusters_api_is_its_vms_port() {
     new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
     echoing_vm(&cluster);
-    facility::test_cluster(&run, &cluster);
+    facility::test_cluster(&t.core, &run, &cluster);
 
     let pat = worker(&run, "pat");
     let host = format!("cluster.{}", run.domain);

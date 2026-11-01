@@ -180,7 +180,7 @@ pub struct Session {
     ssh_opening: tokio::sync::Mutex<()>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub(crate) id: String,
     pub(crate) profile: String,

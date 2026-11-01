@@ -67,7 +67,9 @@ impl OfficeOf for Core {
 }
 use journal::Journal;
 use mail::{Draft, Kind};
+#[cfg(test)]
 use zapper_core::Session;
+use zapper_core::SessionInfo;
 
 /// Every firm's current or last run.
 #[derive(Default)]
@@ -139,7 +141,17 @@ pub(crate) struct WorkerRt {
     /// A security officer now: officers change during a run (see
     /// `FirmRun::set_officers`).
     officer: AtomicBool,
-    pub session: Mutex<Option<Arc<Session>>>,
+    /// The worker's session once its VM is up: its info (id, user, labels),
+    /// as the office's client gave it. The office holds no `Session` — it
+    /// reaches the guest/daemon over `run.client` by this id.
+    pub session: Mutex<Option<SessionInfo>>,
+    /// The real `Session`, kept only in tests so the helpers can drive the
+    /// fake VM (`shell_vm`, tools) by it; production holds just the info.
+    #[cfg(test)]
+    pub session_arc: Mutex<Option<Arc<Session>>>,
+    /// The harness kind the worker's agent runs (its profile's `agent.kind`),
+    /// for the foreman's driver. Set with the session at boot.
+    pub kind: Mutex<Option<String>>,
     pub state: Mutex<(WorkerState, Option<String>)>,
     /// Messages not yet shown to the worker.
     pub queue: Mutex<Vec<String>>,
@@ -164,6 +176,9 @@ impl WorkerRt {
             title: firm.title_of(&w.name),
             officer: AtomicBool::new(firm.is_officer(&w.name)),
             session: Mutex::new(None),
+            #[cfg(test)]
+            session_arc: Mutex::new(None),
+            kind: Mutex::new(None),
             state: Mutex::new((WorkerState::Off, None)),
             queue: Mutex::new(vec![]),
             notes: Mutex::new(vec![]),
@@ -183,25 +198,48 @@ impl WorkerRt {
         self.officer.load(Ordering::Relaxed)
     }
 
-    pub fn session(&self) -> Option<Arc<Session>> {
+    pub fn session(&self) -> Option<SessionInfo> {
         self.session.lock().unwrap().clone()
     }
 
-    /// What the foreman drives: the worker's session id and the harness kind
-    /// its agent runs, once its VM is up. The foreman goes through this (and
-    /// `run.client.attach`) rather than the `Arc<Session>`, so it holds no
-    /// session handle and reaches the guest over the client — the same path
-    /// in-process and, in time, over the socket.
-    ///
-    /// Derived from `session` while that `Arc<Session>` is still held for the
-    /// facility, security and drive readers; those move onto the client in
-    /// P2-b, after which this becomes stored state and the `Arc` goes.
-    pub fn driven(&self) -> Option<(String, String)> {
+    /// The worker's session id, if its VM is up.
+    pub fn session_id(&self) -> Option<String> {
         self.session
             .lock()
             .unwrap()
             .as_ref()
-            .map(|s| (s.id.clone(), s.resolved.agent.kind.clone()))
+            .map(|s| s.id().to_string())
+    }
+
+    /// Records the worker's session (its info and harness kind) once booted.
+    pub fn set_session(&self, info: SessionInfo, kind: String) {
+        *self.session.lock().unwrap() = Some(info);
+        *self.kind.lock().unwrap() = Some(kind);
+    }
+
+    /// Clears the worker's session when it is torn down; the id it had, to
+    /// stop and forget it.
+    pub fn take_session(&self) -> Option<String> {
+        *self.kind.lock().unwrap() = None;
+        self.session
+            .lock()
+            .unwrap()
+            .take()
+            .map(|s| s.id().to_string())
+    }
+
+    /// What the foreman drives: the worker's session id and the harness kind
+    /// its agent runs, once its VM is up. The foreman reaches the guest over
+    /// `run.client.attach` by this id — it holds no `Session`.
+    pub fn driven(&self) -> Option<(String, String)> {
+        let id = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.id().to_string())?;
+        let kind = self.kind.lock().unwrap().clone()?;
+        Some((id, kind))
     }
 }
 
@@ -685,7 +723,7 @@ impl FirmRun {
                 json!({
                     "name": w.name, "role": w.role, "title": w.title, "officer": w.officer(),
                     "state": state, "detail": detail,
-                    "session": w.session().map(|s| s.id.clone()),
+                    "session": w.session_id(),
                     "unread": unread,
                     "owed": desk.owed.len(), "waiting": desk.waiting.len(),
                     "queued": w.queue.lock().unwrap().len(),
@@ -753,7 +791,7 @@ pub fn start(d: &Core) {
         Box::pin(async move {
             let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
             for r in runs {
-                down(&d, &r, "daemon shutdown").await;
+                down(&r, "daemon shutdown").await;
             }
         })
     });

@@ -37,7 +37,7 @@ fn run_with(yaml: &str) -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()

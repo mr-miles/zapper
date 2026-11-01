@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
-use zapper_core::prelude::*;
 
 use crate::firm::{Firm, Worker, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
@@ -1527,12 +1526,11 @@ pub fn let_go(
     if let Some(rt) = rt {
         run.set_state(&rt, WorkerState::Off, None);
         rt.wake.notify_one();
-        let s = rt.session.lock().unwrap().take();
-        if let Some(s) = s {
-            let d = d.clone();
+        if let Some(id) = rt.take_session() {
+            let client = run.client.clone();
             tokio::spawn(async move {
-                d.stop_session(&s, "let go").await;
-                let _ = d.forget_session(&s.id);
+                let _ = client.stop_session(&id, "let go").await;
+                let _ = client.forget_session(&id);
             });
         }
     }

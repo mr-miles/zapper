@@ -744,7 +744,14 @@ firms:
     async fn local_session_surface() {
         let t = test_core(FIRM);
         let run = test_run(&t.core, "acme");
-        let s = run.rt("pat").unwrap().session().unwrap();
+        let s = run
+            .rt("pat")
+            .unwrap()
+            .session_arc
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
         let id = s.id.clone();
 
         // session(id): the info the office needs, read over the client.
@@ -790,7 +797,14 @@ firms:
 
         let t = test_core(FIRM);
         let run = test_run(&t.core, "acme");
-        let s = run.rt("pat").unwrap().session().unwrap();
+        let s = run
+            .rt("pat")
+            .unwrap()
+            .session_arc
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
         let id = s.id.clone();
 
         // Serve the API on a temp socket, exactly as the daemon does.

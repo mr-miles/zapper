@@ -8,7 +8,6 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
@@ -24,7 +23,9 @@ use super::prompts::Services;
 use super::FirmRun;
 use zapper_core::util::random_id;
 use zapper_core::Core;
-use zapper_core::{NewSession, ServiceSpec, ServiceTarget, Session};
+#[cfg(test)]
+use zapper_core::Session;
+use zapper_core::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -40,7 +41,9 @@ const MAX_GIT_BODY: usize = 512 << 20;
 
 #[derive(Default)]
 pub struct Facilities {
-    pub cluster: Mutex<Option<Arc<Session>>>,
+    /// The cluster's session info once it has booted; the office reaches it
+    /// over `run.client` by this id, holding no `Session`.
+    pub cluster: Mutex<Option<SessionInfo>>,
     pub kubeconfig: Mutex<Option<String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
@@ -62,14 +65,14 @@ pub struct Facilities {
 impl Facilities {
     pub fn status(&self) -> Value {
         json!({
-            "cluster": self.cluster.lock().unwrap().as_ref().map(|s| s.id.clone()),
+            "cluster": self.cluster.lock().unwrap().as_ref().map(|s| s.id().to_string()),
             "product": self.product.lock().unwrap().is_some(),
             "dashboard": self.dashboard.lock().unwrap().is_some(),
             "dashboard_token": self.dashboard_token.lock().unwrap().clone(),
         })
     }
 
-    pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
+    pub fn session_of(&self, name: &str) -> Option<SessionInfo> {
         (name == CLUSTER)
             .then(|| self.cluster.lock().unwrap().clone())
             .flatten()
@@ -183,17 +186,18 @@ pub fn register(run: &Arc<FirmRun>) -> Result<()> {
 /// For tests: `cluster` as the run's cluster, as `start` makes it once it
 /// has booted.
 #[cfg(test)]
-pub(crate) fn test_cluster(run: &FirmRun, cluster: &Arc<Session>) {
-    *run.facility.cluster.lock().unwrap() = Some(cluster.clone());
-    register_cluster(run, cluster).unwrap();
+pub(crate) fn test_cluster(core: &Core, run: &FirmRun, cluster: &Arc<Session>) {
+    use zapper_core::SessionApi;
+    *run.facility.cluster.lock().unwrap() = Some(core.session_info(cluster));
+    register_cluster(run, &cluster.id).unwrap();
 }
 
 /// The cluster's API and the apps it serves, as services of the firm's
 /// domain on the cluster VM's ports.
-fn register_cluster(run: &FirmRun, cluster: &Session) -> Result<()> {
+fn register_cluster(run: &FirmRun, cluster_id: &str) -> Result<()> {
     let dom = &run.domain;
     let to = |port: u32| ServiceTarget::Session {
-        id: cluster.id.clone(),
+        id: cluster_id.to_string(),
         port,
     };
     add_service(
@@ -381,7 +385,7 @@ pub fn network_follows_grant(
     // repository leaves the others' rules, and so the host, in place.
     let id = format!("credentials-{}", resource.replace(':', "-"));
     if level == super::access::Level::None {
-        run.client.remove_session_rule(&s.id, &id);
+        run.client.remove_session_rule(s.id(), &id);
         return;
     }
     let (host, port) = if resource.starts_with("git:") {
@@ -390,7 +394,7 @@ pub fn network_follows_grant(
         (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
     };
     run.client.put_session_rule(
-        &s.id,
+        s.id(),
         zapper_policy::AnyRule::Net(zapper_policy::NetRule {
             id: Some(id),
             action: zapper_policy::Action::Allow,
@@ -436,10 +440,10 @@ pub async fn cluster_access(
         script.push_str(&format!(
             "k3s kubectl -n {WORKER_NS} delete serviceaccount {sa} --ignore-not-found >/dev/null"
         ));
-        sh(run, &c.id, &script).await?;
+        sh(run, c.id(), &script).await?;
         if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
-            let home = format!("/home/{}", s.resolved.agent.user);
-            let _ = sh(run, &s.id, &format!("rm -f {home}/.kube/config")).await;
+            let home = format!("/home/{}", s.user());
+            let _ = sh(run, s.id(), &format!("rm -f {home}/.kube/config")).await;
         }
         return Ok(());
     }
@@ -457,7 +461,7 @@ pub async fn cluster_access(
     script.push_str(&format!(
         "k3s kubectl -n {WORKER_NS} create token {sa} --duration={secs}s"
     ));
-    let (code, out) = sh(run, &c.id, &script).await?;
+    let (code, out) = sh(run, c.id(), &script).await?;
     if code != 0 {
         bail!("RBAC for {worker}: {out}");
     }
@@ -481,10 +485,10 @@ pub async fn cluster_access(
         d = run.domain
     );
     if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
-        let home = format!("/home/{}", s.resolved.agent.user);
+        let home = format!("/home/{}", s.user());
         let (code, _out, err) = crate::client::run_command(
             run.client.as_ref(),
-            &s.id,
+            s.id(),
             vec!["sh".into(), "-c".into(), format!("mkdir -p {home}/.kube && cat > {home}/.kube/config && chmod 600 {home}/.kube/config && chown -R 1000:1000 {home}/.kube")],
             Some(kube.into_bytes()),
             1 << 16,
@@ -516,7 +520,7 @@ pub(super) async fn sh(run: &FirmRun, id: &str, script: &str) -> Result<(i32, St
     Ok((code, text))
 }
 
-pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let repos = run.config.git_repos();
     if run.config.git_remote().is_some() {
         // The repositories are the remote's, kept in git.dir across runs.
@@ -592,39 +596,44 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         ssh: false,
     };
     let _ = config;
-    let s = d.create_session(new).await.context("booting the cluster")?;
-    *run.facility.cluster.lock().unwrap() = Some(s.clone());
-    register_cluster(run, &s)?;
+    let s = run
+        .client
+        .create_session(new)
+        .await
+        .context("booting the cluster")?;
+    let cid = s.id().to_string();
+    *run.facility.cluster.lock().unwrap() = Some(s);
+    register_cluster(run, &cid)?;
     run.journal.append(
         "facility",
-        json!({ "name": name, "state": "starting", "session": s.id }),
+        json!({ "name": name, "state": "starting", "session": cid.clone() }),
     );
     let san = format!("{CLUSTER}.{}", run.domain);
     let script = format!(
         "mkdir -p /var/log && nohup k3s server --node-name {CLUSTER} --tls-san {san} --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &"
     );
-    let (code, out) = sh(run, &s.id, &script).await?;
+    let (code, out) = sh(run, &cid, &script).await?;
     if code != 0 {
         bail!("starting k3s: {out}");
     }
     // The API first; the workers' kubeconfig comes from it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     loop {
-        let (code, out) = sh(run, &s.id, "k3s kubectl get --raw=/readyz 2>&1")
+        let (code, out) = sh(run, &cid, "k3s kubectl get --raw=/readyz 2>&1")
             .await
             .unwrap_or((1, String::new()));
         if code == 0 && out.trim() == "ok" {
             break;
         }
         if tokio::time::Instant::now() > deadline {
-            let (_, log) = sh(run, &s.id, "tail -30 /var/log/k3s.log")
+            let (_, log) = sh(run, &cid, "tail -30 /var/log/k3s.log")
                 .await
                 .unwrap_or_default();
             bail!("k3s did not become ready in 5 minutes; its log ends:\n{log}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let (code, kube) = sh(run, &s.id, "cat /etc/rancher/k3s/k3s.yaml").await?;
+    let (code, kube) = sh(run, &cid, "cat /etc/rancher/k3s/k3s.yaml").await?;
     if code != 0 {
         bail!("reading the kubeconfig: {kube}");
     }
@@ -632,18 +641,18 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     *run.facility.kubeconfig.lock().unwrap() = Some(kube);
     // The firm's two namespaces (prod is what the ingress serves), and the
     // one that holds workers' service accounts.
-    let (code, out) = sh(run, &s.id, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
+    let (code, out) = sh(run, &cid, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
     if code != 0 {
         bail!("creating the namespaces: {out}");
     }
     run.journal.append(
         "facility",
-        json!({ "name": name, "state": "ready", "session": s.id }),
+        json!({ "name": name, "state": "ready", "session": cid.clone() }),
     );
     if let Some(l) = &run.config.landing {
         // In the background: Traefik comes up after the API.
         let manifest = landing_manifest(&l.display_name(&run.firm), &l.motto);
-        let (run, id) = (run.clone(), s.id.clone());
+        let (run, id) = (run.clone(), cid.clone());
         tokio::spawn(async move { deploy_landing(&run, &id, manifest).await });
     }
     if let Some(addr) = &run.config.product_port {
@@ -669,7 +678,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
             );
         }
         *run.facility.dashboard.lock().unwrap() = Some(task);
-        let (run, id) = (run.clone(), s.id.clone());
+        let (run, id) = (run.clone(), cid.clone());
         tokio::spawn(async move { deploy_dashboard(&run, &id).await });
     }
     Ok(())
@@ -717,7 +726,7 @@ async fn forward_port(
                     .lock()
                     .unwrap()
                     .as_ref()
-                    .map(|c| c.id.clone())
+                    .map(|c| c.id().to_string())
                 else {
                     return;
                 };
@@ -901,8 +910,8 @@ pub async fn stop(run: &Arc<FirmRun>) {
     }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
-        let _ = run.client.stop_session(&s.id, "firm down").await;
-        let _ = run.client.forget_session(&s.id);
+        let _ = run.client.stop_session(s.id(), "firm down").await;
+        let _ = run.client.forget_session(s.id());
     }
 }
 
@@ -1030,7 +1039,7 @@ pub async fn prod_has_workload(run: &FirmRun) -> Result<bool> {
         .ok_or_else(|| anyhow!("the cluster isn't running"))?;
     let (code, out) = sh(
         run,
-        &s.id,
+        s.id(),
         "k3s kubectl --request-timeout=10s -n prod get deploy,sts,ds -o name 2>&1",
     )
     .await?;
@@ -1057,7 +1066,7 @@ pub async fn break_cluster(run: &FirmRun, mode: &str) -> Result<String> {
         "api" => "for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -q '^k3s server' && kill -STOP ${d#/proc/}; done; echo frozen",
         other => bail!("break_cluster mode {other}: prod or api"),
     };
-    let (code, out) = sh(run, &s.id, script).await?;
+    let (code, out) = sh(run, s.id(), script).await?;
     if code != 0 {
         bail!("breaking the cluster: {out}");
     }

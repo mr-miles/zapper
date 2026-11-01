@@ -46,7 +46,7 @@ fn run() -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -97,8 +97,10 @@ async fn refused(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value
 fn give_vm(t: &TestCore, run: &FirmRun, worker: &str) {
     let mut new = NewSession::plain("w".into(), run.dir.join("empty"), Policy::default());
     new.labels = labels(&run.firm, &run.id, worker, "", true);
-    *run.rt(worker).unwrap().session.lock().unwrap() =
-        Some(t.core.test_session(new, true).unwrap());
+    let s = t.core.test_session(new, true).unwrap();
+    let w = run.rt(worker).unwrap();
+    w.set_session(t.core.session_info(&s), s.resolved.agent.kind.clone());
+    *w.session_arc.lock().unwrap() = Some(s);
 }
 
 fn journal(run: &FirmRun) -> Vec<Value> {

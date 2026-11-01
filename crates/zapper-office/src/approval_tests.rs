@@ -35,7 +35,7 @@ firms:
 fn worker(run: &FirmRun, name: &str) -> Arc<Session> {
     run.rt(name)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()

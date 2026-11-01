@@ -528,8 +528,8 @@ async fn up(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> 
     Ok(Json(run.status()))
 }
 
-async fn down(State(d): D, Active(run): Active) -> R<Json<Value>> {
-    super::down(&d, &run, "firm down").await;
+async fn down(Active(run): Active) -> R<Json<Value>> {
+    super::down(&run, "firm down").await;
     Ok(Json(
         json!({ "run": run.id, "state": "ended", "dir": run.dir }),
     ))
