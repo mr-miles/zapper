@@ -3059,6 +3059,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zapper-api",
+ "zapper-api-types",
  "zapper-client",
  "zapper-core",
  "zapper-driver",

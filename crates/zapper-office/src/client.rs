@@ -11,10 +11,9 @@ use futures_util::future::BoxFuture;
 use hyper::Method;
 use serde_json::Value;
 // The socket client, shared with the workbench.
+use zapper_api_types::{NewSession, SessionInfo};
 pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
-use zapper_core::{
-    ApprovalApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi, SessionInfo,
-};
+use zapper_core::{ApprovalApi, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRequest, NetRule, Scope};

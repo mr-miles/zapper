@@ -70,9 +70,9 @@ impl OfficeOf for Core {
 }
 use journal::Journal;
 use mail::{Draft, Kind};
+use zapper_api_types::SessionInfo;
 #[cfg(test)]
 use zapper_core::Session;
-use zapper_core::SessionInfo;
 
 /// Every firm's current or last run. `pub` as the office's own HTTP state
 /// (the axum `State` the firm routes extract), replacing `Core`; its fields

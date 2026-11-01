@@ -10,9 +10,9 @@ use zapper_core::prelude::*;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
+use zapper_api_types::NewSession;
 #[cfg(test)]
 use zapper_core::Core;
-use zapper_core::NewSession;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 use zapper_util::now;
