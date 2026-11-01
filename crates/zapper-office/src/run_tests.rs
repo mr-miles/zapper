@@ -498,7 +498,7 @@ async fn an_overlong_request_is_refused() {
 #[tokio::test]
 async fn once_the_firm_stops_its_tools_are_gone() {
     let (t, run) = run();
-    super::ops::unregister(&t.core, &run);
+    super::ops::unregister(&run);
     let r = office(&t, &session_of(&run, "pat"), r#"{"op":"desk"}"#).await;
     assert_eq!(r["error"], "no MCP server office for this session", "{r}");
 }

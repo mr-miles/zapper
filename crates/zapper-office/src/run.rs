@@ -468,6 +468,7 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
+        socket_dir: d.socket_dir(),
         post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
@@ -528,7 +529,7 @@ fn create_run(
         );
     }
     facility::register(d, &run)?;
-    security::register(d, &run)?;
+    security::register(&run)?;
     ops::register(d, &run)?;
     d.office()
         .runs
@@ -921,8 +922,8 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     }
     super::remote::finish(run).await;
     facility::stop(d, run).await;
-    security::unregister(d, run);
-    ops::unregister(d, run);
+    security::unregister(run);
+    ops::unregister(run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));

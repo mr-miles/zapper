@@ -219,6 +219,12 @@ pub(crate) struct FirmRun {
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
+    /// The daemon's `state/services/` directory, where the office binds the
+    /// sockets of the facilities it serves (its tools, the officers' decider).
+    /// Plain office config (P1-a): the office and daemon are configured to the
+    /// same path, assumed aligned — no coordination over the client. In-process
+    /// it is `d.socket_dir()`; a co-host office reads it from `office.yaml`.
+    pub socket_dir: PathBuf,
     /// The firm's config as the run started: roles, budgets, limits,
     /// services. The chart is in `chart`.
     pub config: Firm,
@@ -268,9 +274,9 @@ pub(crate) struct FirmRun {
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
-    /// The office's tools: their registration in the gateway, and the socket
-    /// that serves them.
-    pub tools: Mutex<Option<ops::Served>>,
+    /// The office's tools: their registration in the gateway and the socket
+    /// that serves them, undone when the guard drops.
+    pub tools: Mutex<Option<client::FacilityGuard>>,
     /// Staged plans a worker authored with `plan`, released stage by stage.
     pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,

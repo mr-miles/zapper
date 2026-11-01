@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use zapper_core::prelude::*;
 use zapper_core::Core;
 
 use crate::firm::{parse_duration, BOARD};
@@ -118,9 +117,10 @@ pub struct Security {
     next_officer: usize,
     /// Hosts seen so far, for "new hosts" in digests.
     seen_hosts: BTreeSet<String>,
-    /// The officers' registration as the run's sessions' decider: the id in
-    /// the core, and the socket the core refers `ask`s to.
-    decider: Option<DeciderServed>,
+    /// The officers' registration as the run's sessions' decider, undone
+    /// when the guard drops (the core registration, the serve task, the
+    /// socket the core refers `ask`s to).
+    decider: Option<crate::client::FacilityGuard>,
     /// Per session, the last request id put into a digest.
     digested: HashMap<String, u64>,
     pub last_digest: f64,
@@ -1144,15 +1144,6 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
 /// The firm's officers, deciding the `ask`s of the run's sessions: each is
 /// filed as an access request; an approval for once goes with the request
 /// it allows.
-/// The officers' decider, served on a socket in the daemon's
-/// `state/services/` directory: its id in the core, the task serving the
-/// socket, and the socket's path (removed on unregister).
-struct DeciderServed {
-    id: u64,
-    task: Option<tokio::task::AbortHandle>,
-    path: std::path::PathBuf,
-}
-
 /// Refers one `ask` to the officers: files the access request and returns
 /// where it went. The request is rebuilt from what the core sent, which the
 /// daemon named from the VM, never from what the guest sent.
@@ -1233,40 +1224,27 @@ async fn serve(run: Weak<FirmRun>, listener: std::os::unix::net::UnixListener) {
 /// Makes the officers the decider of the run's sessions' `ask`s, served on a
 /// socket as a facility in another process would (the office is on its way
 /// to being one).
-pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
+pub fn register(run: &Arc<FirmRun>) -> Result<()> {
     let sessions = super::run_sessions(run);
     let socket = format!("office-{}-decider.sock", run.firm);
-    let path = d.socket_dir().join(&socket);
-    let _ = std::fs::remove_file(&path);
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
-    let task = tokio::runtime::Handle::try_current()
-        .ok()
-        .map(|h| h.spawn(serve(Arc::downgrade(run), listener)).abort_handle());
-    let id = match d.add_decider_socket(sessions, &socket) {
-        Ok(id) => id,
-        Err(e) => {
-            if let Some(t) = task {
-                t.abort();
-            }
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
-        }
-    };
-    run.security.lock().unwrap().decider = Some(DeciderServed { id, task, path });
+    let weak = Arc::downgrade(run);
+    let guard = crate::client::serve_facility(
+        &run.client,
+        &run.socket_dir,
+        &socket,
+        crate::client::Registered::Decider,
+        move |listener| serve(weak, listener),
+        |socket| run.client.add_decider_socket(sessions, socket),
+    )?;
+    run.security.lock().unwrap().decider = Some(guard);
     Ok(())
 }
 
-/// Hands the run's sessions' `ask`s back, when the firm stops.
-pub fn unregister(d: &Core, run: &FirmRun) {
-    let served = run.security.lock().unwrap().decider.take();
-    if let Some(s) = served {
-        d.remove_decider(s.id);
-        if let Some(t) = s.task {
-            t.abort();
-        }
-        let _ = std::fs::remove_file(&s.path);
-    }
+/// Hands the run's sessions' `ask`s back, when the firm stops (the guard's
+/// drop removes the registration, aborts the serve task and unlinks the
+/// socket).
+pub fn unregister(run: &FirmRun) {
+    run.security.lock().unwrap().decider.take();
 }
 
 pub fn used(run: &FirmRun, rule: &str) {
@@ -1583,14 +1561,14 @@ firms:
     git: { repos: [api] }
 ";
 
-    /// `register` serves the officers' decider on a socket and keeps it on
-    /// the run; `unregister` hands it back to the core and drops the socket.
+    /// Starting the run serves the officers' decider on a socket and keeps
+    /// it on the run; `unregister` hands it back to the core and drops the
+    /// socket (the guard's RAII teardown).
     #[tokio::test]
     async fn register_serves_a_decider_that_unregister_removes() {
         let t = crate::test_core(FIRM);
         let run = crate::test_run(&t.core, "acme");
 
-        super::register(&t.core, &run).unwrap();
         let path = run
             .security
             .lock()
@@ -1598,11 +1576,11 @@ firms:
             .decider
             .as_ref()
             .expect("the decider is kept on the run")
-            .path
-            .clone();
+            .path()
+            .to_path_buf();
         assert!(path.exists(), "its socket is served");
 
-        super::unregister(&t.core, &run);
+        super::unregister(&run);
         assert!(
             run.security.lock().unwrap().decider.is_none(),
             "the run no longer holds a decider",

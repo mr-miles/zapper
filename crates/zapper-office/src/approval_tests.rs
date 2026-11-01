@@ -142,7 +142,7 @@ async fn a_session_of_no_firm_asks_the_operator() {
 async fn once_the_firm_stops_its_asks_are_the_operators_again() {
     let t = test_core(FIRM);
     let run = test_run(&t.core, "acme");
-    security::unregister(&t.core, &run);
+    security::unregister(&run);
     let pat = worker(&run, "pat");
     let _io = dial(&t, &pat, "api.example", 443);
     for _ in 0..200 {

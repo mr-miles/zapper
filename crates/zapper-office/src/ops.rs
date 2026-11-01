@@ -63,60 +63,44 @@ impl McpServer for Tools {
 /// The MCP server's name, as the workers' harnesses know it.
 pub const SERVER: &str = "office";
 
-/// The office's tools as served: their registration in the gateway, and the
-/// task serving their socket.
-pub struct Served {
-    id: u64,
-    task: Option<tokio::task::AbortHandle>,
-    path: std::path::PathBuf,
-}
-
 /// Serves the office's tools to the firm's workers, from a socket in the
 /// daemon's `state/services/` directory that the gateway asks for each
 /// tool list and call (naming the caller from the VM), as a facility in
 /// another process would. A worker of another run of the firm gets the
 /// tools too, and is told on each call that its firm isn't running.
 pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
-    let sessions = [("firm", run.firm.as_str()), ("office", "worker")]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let sessions: std::collections::BTreeMap<String, String> =
+        [("firm", run.firm.as_str()), ("office", "worker")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
     let socket = format!("office-{}.sock", run.firm);
-    let path = d.socket_dir().join(&socket);
-    let _ = std::fs::remove_file(&path);
-    // Bound now, served once there is a runtime to serve it on (always in
-    // the daemon; not in a test that starts a firm without one).
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
+    // The tools serve in-process (they reach the daemon's sessions and
+    // gateway); only their registration and socket go through the client.
+    // The listener is bound now and served once there is a runtime (always
+    // in the daemon; not in a test that starts a firm without one).
     let tools = Arc::new(Tools { d: d.clone() });
-    let task = tokio::runtime::Handle::try_current().ok().map(|h| {
-        h.spawn(serve(d.clone(), tools.clone(), listener))
-            .abort_handle()
-    });
-    let id = match d.add_mcp_socket(SERVER, sessions, &socket, tools.instructions(), "office") {
-        Ok(id) => id,
-        Err(e) => {
-            if let Some(t) = task {
-                t.abort();
-            }
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
-        }
-    };
-    *run.tools.lock().unwrap() = Some(Served { id, task, path });
+    let instructions = tools.instructions();
+    let (served_d, served_tools) = (d.clone(), tools.clone());
+    let guard = crate::client::serve_facility(
+        &run.client,
+        &run.socket_dir,
+        &socket,
+        crate::client::Registered::Mcp,
+        move |listener| serve(served_d, served_tools, listener),
+        |socket| {
+            run.client
+                .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
+        },
+    )?;
+    *run.tools.lock().unwrap() = Some(guard);
     Ok(())
 }
 
-/// Stops serving them, when the firm stops.
-pub fn unregister(d: &Core, run: &FirmRun) {
-    let served = run.tools.lock().unwrap().take();
-    if let Some(s) = served {
-        d.remove_mcp_server(s.id);
-        if let Some(t) = s.task {
-            t.abort();
-        }
-        let _ = std::fs::remove_file(&s.path);
-    }
+/// Stops serving them, when the firm stops (the guard's drop removes the
+/// registration, aborts the serve task and unlinks the socket).
+pub fn unregister(run: &FirmRun) {
+    run.tools.lock().unwrap().take();
 }
 
 /// Answers the gateway's requests on the tools' socket, one per

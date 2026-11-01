@@ -3,7 +3,8 @@
 //! share). Used by the `zapper-office` binary once the office runs as a
 //! process of its own, in place of the in-process `Core`.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -15,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
 use zapper_core::driver::DriveStream;
-use zapper_core::{ConfigApi, NewSession, SessionApi, SessionInfo};
+use zapper_core::{ApprovalApi, ConfigApi, NewSession, ServiceApi, SessionApi, SessionInfo};
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::AnyRule;
 
@@ -68,6 +69,31 @@ pub trait OfficeClient: Send + Sync {
         id: &'a str,
         req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
+
+    // --- facility registration (P2-a) --------------------------------------
+    // The office serves a facility (its tools, the officers' decider) on a
+    // socket in the daemon's `state/services/` directory (`run.socket_dir`,
+    // P1-a) and registers it here, so the gateway/core routes the run's
+    // sessions to it. `serve_facility` folds the bind + serve-loop + register
+    // + cleanup around these. Local calls `Core`; Remote is P3-a.
+
+    /// Serves the MCP server a facility serves on `socket` as `name` to the
+    /// sessions `sessions` picks; its id.
+    fn add_mcp_socket(
+        &self,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        socket: &str,
+        instructions: Option<String>,
+        owner: &str,
+    ) -> Result<u64>;
+    /// Stops serving a facility's MCP server.
+    fn remove_mcp_server(&self, id: u64) -> bool;
+    /// Makes the decider a facility serves on `socket` decide the `ask`s of
+    /// the sessions `sessions` picks; its id.
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64>;
+    /// Hands a decider's sessions' `ask`s back to the operator.
+    fn remove_decider(&self, id: u64) -> bool;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -119,6 +145,26 @@ impl OfficeClient for Local {
             let opened = s.open_shell(req).await?;
             Ok(Box::new(opened.stream) as Box<dyn DriveStream>)
         })
+    }
+    fn add_mcp_socket(
+        &self,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        socket: &str,
+        instructions: Option<String>,
+        owner: &str,
+    ) -> Result<u64> {
+        self.0
+            .add_mcp_socket(name, sessions, socket, instructions, owner)
+    }
+    fn remove_mcp_server(&self, id: u64) -> bool {
+        self.0.remove_mcp_server(id)
+    }
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64> {
+        self.0.add_decider_socket(sessions, socket)
+    }
+    fn remove_decider(&self, id: u64) -> bool {
+        self.0.remove_decider(id)
     }
 }
 
@@ -183,6 +229,118 @@ impl OfficeClient for Remote {
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
         Box::pin(async { unimplemented!("Remote::attach (P3-a)") })
     }
+    fn add_mcp_socket(
+        &self,
+        _name: &str,
+        _sessions: BTreeMap<String, String>,
+        _socket: &str,
+        _instructions: Option<String>,
+        _owner: &str,
+    ) -> Result<u64> {
+        unimplemented!("Remote::add_mcp_socket (P3-a)")
+    }
+    fn remove_mcp_server(&self, _id: u64) -> bool {
+        unimplemented!("Remote::remove_mcp_server (P3-a)")
+    }
+    fn add_decider_socket(
+        &self,
+        _sessions: BTreeMap<String, String>,
+        _socket: &str,
+    ) -> Result<u64> {
+        unimplemented!("Remote::add_decider_socket (P3-a)")
+    }
+    fn remove_decider(&self, _id: u64) -> bool {
+        unimplemented!("Remote::remove_decider (P3-a)")
+    }
+}
+
+/// What a [`FacilityGuard`] hands back to the core when it drops.
+#[derive(Clone, Copy)]
+pub(crate) enum Registered {
+    /// An MCP server (`remove_mcp_server`) — the office's tools.
+    Mcp,
+    /// A decider (`remove_decider`) — the officers.
+    Decider,
+}
+
+/// A facility the office serves on a socket, undone on drop (RAII): the
+/// core registration removed, the serve task aborted, the socket file
+/// unlinked. [`serve_facility`] makes one. Replaces the per-facility
+/// `Served`/`DeciderServed` structs, which repeated the teardown by hand.
+pub(crate) struct FacilityGuard {
+    client: std::sync::Arc<dyn OfficeClient>,
+    kind: Registered,
+    id: u64,
+    task: Option<tokio::task::AbortHandle>,
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl FacilityGuard {
+    /// The socket file the facility is served on.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for FacilityGuard {
+    fn drop(&mut self) {
+        match self.kind {
+            Registered::Mcp => {
+                self.client.remove_mcp_server(self.id);
+            }
+            Registered::Decider => {
+                self.client.remove_decider(self.id);
+            }
+        }
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Serves a facility on `socket` in `socket_dir` and registers it through
+/// `client`: binds the socket, spawns `serve` on it (if there is a runtime —
+/// a test may bind without one), then registers it with `register`, which
+/// returns the core id. On a registration error the task is aborted and the
+/// socket unlinked. The [`FacilityGuard`] undoes it all on drop.
+pub(crate) fn serve_facility<F, Fut>(
+    client: &std::sync::Arc<dyn OfficeClient>,
+    socket_dir: &Path,
+    socket: &str,
+    kind: Registered,
+    serve: F,
+    register: impl FnOnce(&str) -> Result<u64>,
+) -> Result<FacilityGuard>
+where
+    F: FnOnce(std::os::unix::net::UnixListener) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let path = socket_dir.join(socket);
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path)?;
+    listener.set_nonblocking(true)?;
+    let task = tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|h| h.spawn(serve(listener)).abort_handle());
+    let id = match register(socket) {
+        Ok(id) => id,
+        Err(e) => {
+            if let Some(t) = task {
+                t.abort();
+            }
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    Ok(FacilityGuard {
+        client: client.clone(),
+        kind,
+        id,
+        task,
+        path,
+    })
 }
 
 /// Runs a client call to completion from the office's synchronous firm

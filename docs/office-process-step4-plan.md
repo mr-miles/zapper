@@ -78,10 +78,19 @@ surface is the real load-bearing work; the file conversions are downstream of it
   drive) still use; `driven()` derives id+kind from it until P2-b migrates those onto the
   client, at which point the `Arc` is replaced by stored id+info. Foreman tests (full turns
   over `shell_vm`) pass through the client now.
-- **P1 is complete.** Next: **P2** downstream conversions, now unblocked. Start with **P2-a**
-  (registration leaves → a `serve_facility` RAII guard, reading `run.socket_dir` from P1-a) and
-  the **P2-b** logic/plumbing files, which can fan out (worktree/fork subagents, disjoint files)
-  once the trait additions each needs are settled. **P2-c** (the http extractor) is lead.
+- **P1 complete.**
+- **P2-a** done for the socket facilities: `FirmRun.socket_dir` field + a `serve_facility`
+  RAII guard (`client.rs`); `ops` (tools MCP socket) and `security` (officers' decider socket)
+  register through `run.client`. Trait grew `add_mcp_socket`/`remove_mcp_server`/
+  `add_decider_socket`/`remove_decider` (Local real, Remote stubbed for P3-a). Facility's own
+  zone/git/cluster registration is a different shape and rides with facility logic in P2-b.
+- **Next: P2-b** — the logic/plumbing files (`contracts`, `access`, `scenario`, `workforce`,
+  **facility**) drop `d` for `run.client`, growing the trait (session ops like `requests`,
+  `remove_session_rule`, a guest-command run, `add_service`/`add_zone`/`remove_service`,
+  `resolve`/`layers_for`/`subscribe`) as each site needs — **lead adds trait methods**; the
+  per-file conversions can then fan out to worktree/fork subagents (disjoint files). **P2-c**
+  (the http extractor) is lead. The `WorkerRt` `Arc<Session>` field goes once P2-b's readers
+  (facility/security/drive) are off it.
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
@@ -132,10 +141,18 @@ Do these first; the file conversions (P2) are downstream of them.
 ## P2 — downstream conversions (unblocked by P1; parallelisable — see map)
 Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_for`,
 `subscribe`, `add_session_rule`, `remove_rule`) as a site needs it; `Local` now, `Remote` in P3.
-- [ ] **P2-a** Registration leaves → `run.client`: `security`/`ops`/`facility` register +
-      their `unregister`s. Fold the bind + serve-loop + register + cleanup boilerplate into a
-      `serve_facility(...) -> FacilityGuard` (RAII: `Drop` = unregister + abort + unlink).
-      Needs P1-a.
+- [x] **P2-a** Registration leaves → `run.client` (the two **socket** facilities). Added
+      `FirmRun.socket_dir` (P1-a; `d.socket_dir()` at run creation) and a
+      `serve_facility(...) -> FacilityGuard` RAII helper (bind + serve-loop + register +
+      cleanup; `Drop` = remove registration + abort task + unlink). `ops::register` (the tools'
+      MCP socket) and `security::register` (the officers' decider socket) now register through
+      `run.client` (`add_mcp_socket`/`add_decider_socket` + `remove_*` on the trait, Local real
+      / Remote stubbed) and bind under `run.socket_dir`; their `Served`/`DeciderServed` structs
+      and hand-rolled teardown are gone, `unregister` just drops the guard. `ops::register`
+      keeps `&Core` only to build the in-process `Tools` serve loop (rehomed in P4).
+      **Facility's own registration** (the domain zone + git-service handler, and the cluster's
+      session-target services) is **not** this shape — it tracks service ids and bottoms out in
+      session ops (cluster stop/forget) — so it moves with the facility logic in **P2-b**.
 - [ ] **P2-b** Logic/plumbing files → drop `d`: `contracts`, `access`, `scenario`,
       `workforce`, `facility` logic. These bottom out in session ops, so need P1-b/c.
 - [ ] **P2-c** http handlers: an axum extractor resolving `Path<firm>` → `Arc<FirmRun>`, so the
