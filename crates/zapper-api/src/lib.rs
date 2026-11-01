@@ -432,6 +432,19 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
         let rule = d.add_session_rule(&s, rule, position);
         return Ok(Json(rule_json(&scope, &rule)));
     }
+    // A firm role's shared layer the core keeps by name (the office adds its
+    // officers' standing approvals here).
+    if let Scope::Role(name) = &scope {
+        if rule.id().is_none() {
+            rule.set_id(format!(
+                "{}-{}",
+                rule.kind(),
+                zapper_core::util::random_id(8)
+            ));
+        }
+        let rule = d.add_layer_rule(name, rule);
+        return Ok(Json(rule_json(&scope, &rule)));
+    }
     let added = d.change(&format!("rule added to {scope}"), |c| {
         if rule.id().is_none() {
             let taken = c.rule_ids();

@@ -42,6 +42,35 @@ impl OfficeClient for Local {
     }
 }
 
+/// The office as a process of its own (`zapper-office`), over the daemon's
+/// API socket. The office's firm logic is synchronous, so each call blocks
+/// on the current multi-threaded runtime — the binary's, not a test's or the
+/// in-process daemon's (that is `Local`).
+pub struct Remote(pub Zapper);
+
+impl OfficeClient for Remote {
+    fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
+        let body = serde_json::json!({ "scope": format!("role:{name}"), "rule": rule });
+        let _ = block(self.0.call(Method::POST, "/v1/rules", Some(&body)));
+        rule
+    }
+    fn remove_layer_rule(&self, _name: &str, id: &str) -> bool {
+        // `remove_rule` finds the rule by its (unique) id across role layers.
+        block(
+            self.0
+                .call(Method::DELETE, &format!("/v1/rules/{id}"), None),
+        )
+        .map(|a| a.status.is_success())
+        .unwrap_or(false)
+    }
+}
+
+/// Runs a client call to completion from the office's synchronous firm
+/// logic. Requires a multi-threaded runtime (the `zapper-office` binary's).
+fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+}
+
 /// Where zapper listens: `$ZAPPER_SOCKET`, else under `$XDG_RUNTIME_DIR`, as
 /// the `zapper` CLI finds it.
 pub fn socket_path() -> PathBuf {
