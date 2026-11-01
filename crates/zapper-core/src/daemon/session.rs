@@ -614,51 +614,10 @@ impl Session {
     }
 }
 
-pub struct NewSession {
-    pub profile: String,
-    pub workdir: PathBuf,
-    pub policy: Policy,
-    /// The session's labels (`Session::labels`).
-    pub labels: BTreeMap<String, String>,
-    /// Policy layers shared with other sessions (a firm role's), between the
-    /// session's own layer and its profile's (`Rules`).
-    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
-    /// Files written in the guest besides the profile's.
-    pub files: Vec<GuestFile>,
-    /// Disks besides the profile's mounts.
-    pub mounts: Vec<zapper_policy::Mount>,
-    /// Merged over the profile's `agent`.
-    pub agent_overlay: Option<serde_json::Value>,
-    pub forwards: Vec<Forward>,
-    /// Keep its disks when it stops, so it can be started again
-    /// (`Session::persistent`).
-    pub persistent: bool,
-    /// For a persistent session: make it from its image even if the image
-    /// changed since it was built, which is recorded.
-    pub accept_changed_image: bool,
-    /// Let the SSH gateway open terminals in it from the start
-    /// (`Session::set_ssh` turns it on and off later).
-    pub ssh: bool,
-}
-
-impl NewSession {
-    pub fn plain(profile: String, workdir: PathBuf, policy: Policy) -> Self {
-        NewSession {
-            profile,
-            workdir,
-            policy,
-            labels: BTreeMap::new(),
-            shared_layers: vec![],
-            files: vec![],
-            mounts: vec![],
-            agent_overlay: None,
-            forwards: vec![],
-            persistent: false,
-            accept_changed_image: false,
-            ssh: false,
-        }
-    }
-}
+/// What the core needs to create a session. Shared with the API's clients
+/// (The Office builds one and passes it to `create_session`), so it lives in
+/// `zapper-api-types`; the core re-exports it.
+pub use zapper_api_types::NewSession;
 
 /// What a persistent session is, kept in its `session.json`: enough to list
 /// it again after the daemon restarts and to start it from its disks. Its

@@ -9,8 +9,12 @@
 //! core re-exports these so its internal callers are unchanged.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
+use zapper_policy::proto::{Forward, GuestFile};
+use zapper_policy::{Mount, Policy, Scope};
 
 /// A session's lifecycle status, flattened into [`SessionInfo`] as
 /// `{state, detail}`. The live state machine that drives it lives in the
@@ -99,5 +103,57 @@ impl SessionInfo {
     /// The workload user the agent runs as (its home is `/home/<user>`).
     pub fn user(&self) -> &str {
         &self.user
+    }
+}
+
+/// What the core needs to create a session: the profile to resolve, the
+/// working directory, the session's own policy and labels, shared role
+/// layers, extra guest files, mounts, forwards and flags. The in-process
+/// create path (`Core::create_session`) takes it directly; a `Remote` client
+/// maps it to the API's `CreateSession` JSON, so it is not itself a wire type
+/// (it holds in-memory layer handles).
+pub struct NewSession {
+    pub profile: String,
+    pub workdir: PathBuf,
+    pub policy: Policy,
+    /// The session's labels (`Session::labels`).
+    pub labels: BTreeMap<String, String>,
+    /// Policy layers shared with other sessions (a firm role's), between the
+    /// session's own layer and its profile's (`Rules`).
+    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
+    /// Files written in the guest besides the profile's.
+    pub files: Vec<GuestFile>,
+    /// Disks besides the profile's mounts.
+    pub mounts: Vec<Mount>,
+    /// Merged over the profile's `agent`.
+    pub agent_overlay: Option<serde_json::Value>,
+    pub forwards: Vec<Forward>,
+    /// Keep its disks when it stops, so it can be started again
+    /// (`Session::persistent`).
+    pub persistent: bool,
+    /// For a persistent session: make it from its image even if the image
+    /// changed since it was built, which is recorded.
+    pub accept_changed_image: bool,
+    /// Let the SSH gateway open terminals in it from the start
+    /// (`Session::set_ssh` turns it on and off later).
+    pub ssh: bool,
+}
+
+impl NewSession {
+    pub fn plain(profile: String, workdir: PathBuf, policy: Policy) -> Self {
+        NewSession {
+            profile,
+            workdir,
+            policy,
+            labels: BTreeMap::new(),
+            shared_layers: vec![],
+            files: vec![],
+            mounts: vec![],
+            agent_overlay: None,
+            forwards: vec![],
+            persistent: false,
+            accept_changed_image: false,
+            ssh: false,
+        }
     }
 }
