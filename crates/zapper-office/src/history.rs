@@ -21,7 +21,7 @@ pub fn close_orphans(state: &std::path::Path) {
         };
         for run in runs.flatten() {
             let path = run.path().join(zapper_runs::JOURNAL);
-            let Ok(text) = std::fs::read(zapper_core::record::view(&path)) else {
+            let Ok(text) = std::fs::read(zapper_record::view(&path)) else {
                 continue;
             };
             let tail = &text[text.len().saturating_sub(64 * 1024)..];
@@ -56,7 +56,7 @@ pub fn list_runs(office: &Office, firm: &str) -> Vec<Value> {
                 return None;
             }
             let info: Value = std::fs::read(e.path().join(zapper_runs::INFO)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-            let journal = zapper_core::record::view(&e.path().join(zapper_runs::JOURNAL));
+            let journal = zapper_record::view(&e.path().join(zapper_runs::JOURNAL));
             let size = std::fs::metadata(&journal).map(|m| m.len()).unwrap_or(0);
             let sum = zapper_runs::Summary::read(&journal);
             let note = std::fs::read_to_string(e.path().join(RUN_NOTE)).ok();

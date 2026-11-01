@@ -21,7 +21,7 @@ pub use zapper_driver::harness;
 pub(crate) mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;
-pub mod record;
+pub use zapper_record as record;
 pub(crate) mod registry;
 pub(crate) mod secrets;
 pub(crate) mod services;

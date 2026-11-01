@@ -707,7 +707,7 @@ pub fn find_file(
     version: u32,
     path: &str,
 ) -> Result<(String, u64)> {
-    let text = std::fs::read_to_string(zapper_core::record::view(&run_dir.join("journal.jsonl")))?;
+    let text = std::fs::read_to_string(zapper_record::view(&run_dir.join("journal.jsonl")))?;
     for line in text.lines().rev() {
         if !line.contains("\"published\"") {
             continue;

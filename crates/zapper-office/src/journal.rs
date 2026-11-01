@@ -20,7 +20,7 @@ pub const MAX_LINE: usize = 256 * 1024;
 pub struct Journal {
     /// Where it is read from.
     path: PathBuf,
-    file: Mutex<zapper_core::record::Writer>,
+    file: Mutex<zapper_record::Writer>,
     offset: AtomicU64,
     seq: AtomicU64,
     /// Tests only: make every write fail, to stand in for a full disk.
@@ -46,9 +46,9 @@ impl At {
 
 impl Journal {
     pub fn create(path: &Path) -> Result<Journal> {
-        let file = zapper_core::record::Writer::open(path)
+        let file = zapper_record::Writer::open(path)
             .with_context(|| format!("creating {}", path.display()))?;
-        let path = zapper_core::record::view(path);
+        let path = zapper_record::view(path);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         // An existing journal continues its sequence.
         let last = std::fs::read(&path).ok().and_then(|b| {

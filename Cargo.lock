@@ -2955,6 +2955,7 @@ dependencies = [
  "zapper-driver",
  "zapper-keeper",
  "zapper-policy",
+ "zapper-record",
  "zapper-util",
 ]
 
@@ -3068,6 +3069,7 @@ dependencies = [
  "zapper-git",
  "zapper-github",
  "zapper-policy",
+ "zapper-record",
  "zapper-runs",
  "zapper-util",
 ]
@@ -3091,6 +3093,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "zapper-record"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tracing",
+ "zapper-keeper",
+ "zapper-policy",
 ]
 
 [[package]]

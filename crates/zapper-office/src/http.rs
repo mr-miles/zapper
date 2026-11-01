@@ -233,7 +233,7 @@ fn start_terms(firm: &crate::firm::Firm, config: &zapper_policy::Config) -> Valu
 async fn run_verify(State(office): S, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     let dir = super::run_dir(&office, &f, &run)?;
     Ok(Json(
-        tokio::task::spawn_blocking(move || zapper_core::record::verify_state_dir(&dir))
+        tokio::task::spawn_blocking(move || zapper_record::verify_state_dir(&dir))
             .await
             .map_err(|e| bad(e.to_string()))??,
     ))
@@ -327,7 +327,7 @@ async fn journal(
     Query(q): Query<Follow>,
 ) -> R<Response> {
     let dir = super::run_dir(&office, &f, &run)?;
-    lines(zapper_core::record::view(&dir.join("journal.jsonl")), q).await
+    lines(zapper_record::view(&dir.join("journal.jsonl")), q).await
 }
 
 async fn transcript(
@@ -340,7 +340,7 @@ async fn transcript(
         return Err(bad(format!("{worker:?} is not a worker name")));
     }
     lines(
-        zapper_core::record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
+        zapper_record::view(&dir.join("transcripts").join(format!("{worker}.jsonl"))),
         q,
     )
     .await
