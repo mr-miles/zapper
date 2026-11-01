@@ -108,7 +108,34 @@ The real conversion that remains (the bulk of step 4), from the `&Core` method s
   workbench has it), `zapper` stops linking the office, and `OFFICE=1` means "also run
   `zapper-office`". Validate with `make test-e2e-office` on a KVM host.
 
-### Recommended vehicle for the rest: an `OfficeClient` abstraction
+### The `OfficeClient` abstraction — started
+
+Decided (you approved: a trait with two implementations). Built on this branch:
+
+- `trait OfficeClient` in `office/src/client.rs`, with its first operations `add_layer_rule`
+  / `remove_layer_rule` (backed by new `Core` methods that emit `rule` events).
+- `Local(Core)` — in-process, delegates to `Core` (used now).
+- `Remote(Zapper)` — over the API socket (`POST /v1/rules` with a role scope, `DELETE
+  /v1/rules/{id}`); the office's sync firm logic blocks on the binary's multi-threaded
+  runtime. Not yet exercised (the binary doesn't run firms until the rest of the surface
+  moves onto the trait), but it compiles and the layer ops work over the socket.
+- `FirmRun` holds `Arc<dyn OfficeClient>` instead of the shared role-layer `Arc`s
+  (`run.roles` is gone); standing approvals and revocation go through `run.client`. The
+  office no longer shares policy memory with the core for role layers.
+
+**Note — reference cycle:** `Local` holds a `Core` (→ `Arc<Daemon>`), and the daemon reaches
+`FirmRun` (`Daemon → Office → runs → FirmRun → client → Core → Daemon`). Benign for the
+long-lived daemon; per-test it leaks a `Daemon` (tests are short-lived). The `Remote` path
+has no cycle (it holds a socket path). If the in-process leak ever matters, give `Local` a
+`Weak` core handle.
+
+**Remaining:** migrate the rest of the office's `&Core` surface onto `OfficeClient` one
+operation at a time (sessions, services, MCP, deciders, config, record, …), each
+behaviour-preserving and unit-tested; rehome `office()`'s 32 uses to the office's own state;
+then drop `zapper-core` from the office's prod deps and wire the binary to run firms through
+`Remote`. Validate the cutover with `make test-e2e-office` on a KVM host.
+
+### Original recommendation (kept for context)
 
 The conversion keeps wanting the office to reach the daemon from places that hold a
 `FirmRun` (e.g. `security.rs:952` add, `:1128` revoke) but not a `&Core`. Two dead-ends
