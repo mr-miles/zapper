@@ -2893,6 +2893,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-api-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "serde_json",
+ "zapper-policy",
+ "zapper-proto",
+]
+
+[[package]]
+name = "zapper-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "zapper-core"
 version = "0.1.0"
 dependencies = [
@@ -2925,9 +2951,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "zapper-api-types",
  "zapper-driver",
  "zapper-keeper",
  "zapper-policy",
+ "zapper-record",
+ "zapper-util",
 ]
 
 [[package]]
@@ -3014,10 +3043,12 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "clap",
  "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "rand 0.8.8",
  "ring",
  "rustls",
@@ -3029,11 +3060,18 @@ dependencies = [
  "tokio-rustls",
  "tower",
  "tracing",
+ "tracing-subscriber",
+ "zapper-api",
+ "zapper-api-types",
+ "zapper-client",
  "zapper-core",
+ "zapper-driver",
  "zapper-git",
  "zapper-github",
  "zapper-policy",
+ "zapper-record",
  "zapper-runs",
+ "zapper-util",
 ]
 
 [[package]]
@@ -3058,6 +3096,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-record"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tracing",
+ "zapper-keeper",
+ "zapper-policy",
+]
+
+[[package]]
 name = "zapper-runs"
 version = "0.1.0"
 dependencies = [
@@ -3074,6 +3123,14 @@ dependencies = [
  "tokio",
  "tracing",
  "zapper-proto",
+]
+
+[[package]]
+name = "zapper-util"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -3102,6 +3159,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zapper-api",
+ "zapper-client",
  "zapper-core",
  "zapper-git",
  "zapper-proto",

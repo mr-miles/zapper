@@ -318,6 +318,22 @@ pub enum SecretSource {
     },
 }
 
+/// The placeholder an inline secret's value is shown as, so values never
+/// leave the host in a config the API or CLI prints.
+pub const REDACTED: &str = "<redacted>";
+
+/// `c` with every inline secret value replaced by [`REDACTED`], for showing
+/// or diffing a config without leaking values. The core keeps the real
+/// values when a redacted config is written back (`keep_redacted`).
+pub fn redact(mut c: Config) -> Config {
+    for s in c.secrets.values_mut() {
+        if let SecretSource::Value { value } = &mut s.source {
+            *value = REDACTED.into();
+        }
+    }
+    c
+}
+
 impl SecretSource {
     pub fn resolve(&self) -> Result<String> {
         match self {

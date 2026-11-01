@@ -90,6 +90,31 @@ pub struct Spec {
     pub owner: String,
 }
 
+/// The API's serializable target becomes an internal one (its `Handler`
+/// variant is in-process only, so the API never produces it).
+impl From<zapper_api_types::ServiceTarget> for Target {
+    fn from(t: zapper_api_types::ServiceTarget) -> Target {
+        use zapper_api_types::ServiceTarget as T;
+        match t {
+            T::Addr(a) => Target::Addr(a),
+            T::Socket { name, tls } => Target::Socket { name, tls },
+            T::Session { id, port } => Target::Session { id, port },
+        }
+    }
+}
+
+impl From<zapper_api_types::ServiceSpec> for Spec {
+    fn from(s: zapper_api_types::ServiceSpec) -> Spec {
+        Spec {
+            name: s.name,
+            port: s.port,
+            sessions: s.sessions,
+            target: s.target.into(),
+            owner: s.owner,
+        }
+    }
+}
+
 /// A registered service or zone, for the list.
 #[derive(Debug, Clone, Serialize)]
 pub struct Info {

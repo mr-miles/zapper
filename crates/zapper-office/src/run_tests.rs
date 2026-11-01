@@ -42,7 +42,7 @@ fn run() -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -98,25 +98,25 @@ fn the_ceo_holds_every_repository_and_others_nothing() {
 
 #[test]
 fn a_git_grant_is_per_repository_with_its_own_network_rule() {
-    let (t, run) = run();
-    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
+    let (_t, run) = run();
+    access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
     assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
 
-    access::board_grant(&t.core, &run, "pat", "git:web", "read", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:web", "read", None, "test").unwrap();
     assert_eq!(
         ids(&credential_rules(&run, "pat")),
         ["credentials-git-api", "credentials-git-web"]
     );
 
     // Revoking one repository leaves the other's rule, and so its host.
-    access::revoke(&t.core, &run, BOARD, "pat", "git:api", "done").unwrap();
+    access::revoke(&run, BOARD, "pat", "git:api", "done").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-web"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
 
     // With two repositories, plain `git` names none of them.
-    let e = access::board_grant(&t.core, &run, "pat", "git", "read", None, "test")
+    let e = access::board_grant(&run, "pat", "git", "read", None, "test")
         .unwrap_err()
         .to_string();
     assert!(e.contains("name the repository"), "{e}");
@@ -153,7 +153,7 @@ fn git(
 
 #[test]
 fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
-    let (t, run) = run();
+    let (_t, run) = run();
     run.facility
         .git_passwords
         .lock()
@@ -175,7 +175,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "read", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "read", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
     let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
     assert_eq!(status, 403);
@@ -193,7 +193,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
         "asking to push is a push"
     );
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
 
     // Other repositories: their own grant; unknown ones aren't there.
@@ -221,7 +221,8 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
 fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
     use zapper_core::ServiceTarget as Target;
     match zapper_core::testing::route(&t.core, s, host, port) {
-        Some(Some(Target::Handler { tls: true, .. })) => "git server".into(),
+        // The git server is now a TLS socket service the office serves.
+        Some(Some(Target::Socket { tls: true, .. })) => "git server".into(),
         Some(Some(Target::Session { id, port })) => format!("session {id}:{port}"),
         Some(Some(_)) => "other".into(),
         Some(None) => "unserved".into(),
@@ -289,7 +290,7 @@ async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
     );
     assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 443), "unserved");
 
-    facility::stop(&t.core, &run).await;
+    facility::stop(&run).await;
     assert!(t.core.services().is_empty(), "{:?}", t.core.services());
     assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "host");
 }
@@ -498,7 +499,7 @@ async fn an_overlong_request_is_refused() {
 #[tokio::test]
 async fn once_the_firm_stops_its_tools_are_gone() {
     let (t, run) = run();
-    super::ops::unregister(&t.core, &run);
+    super::ops::unregister(&run);
     let r = office(&t, &session_of(&run, "pat"), r#"{"op":"desk"}"#).await;
     assert_eq!(r["error"], "no MCP server office for this session", "{r}");
 }
@@ -616,8 +617,8 @@ fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
     );
 }
 
-#[test]
-fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
+#[tokio::test]
+async fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
     use super::security::{self, DecideArgs};
     let (t, run) = run();
     let req = zapper_policy::NetRequest {
@@ -655,12 +656,25 @@ fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
     };
     assert!(in_layers(&t), "listed with the role's layer");
 
+    // The operator (or `zapper` without the office) removes it through the
+    // core: gone from the layer at once (enforcement),
     assert!(matches!(
         t.core.remove_rule(&rule).unwrap(),
         zapper_core::RuleRemoval::Revoked
     ));
-    assert!(security::standing(&run).is_empty());
     assert!(!in_layers(&t));
+    // and the office, following the core's `rule` event, drops its own
+    // record of it so the two agree (eventually, across the stream).
+    for _ in 0..200 {
+        if security::standing(&run).is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        security::standing(&run).is_empty(),
+        "the office forgot the standing approval"
+    );
     let revoked = journal(&run)
         .into_iter()
         .any(|e| e["type"] == "access" && e["event"] == "revoked" && e["rule"] == rule.as_str());

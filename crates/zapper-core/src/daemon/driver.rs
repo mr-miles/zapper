@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 
 use super::harness::{Conversation, Outcome};
 
-pub use zapper_driver::process::{start, Observer, Out, Proc};
+pub use zapper_driver::process::{start, DriveStream, Observer, Out, Proc};
 
 /// Largest prompt the driver takes.
 pub const MAX_PROMPT: usize = 64 << 10;

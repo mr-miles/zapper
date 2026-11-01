@@ -10,14 +10,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use zapper_policy::proto::{Frame, MAX_LINE};
 
 use crate::harness::{Conversation, Event, TurnEnd};
 use crate::read_frame;
+
+/// A terminal stream the driver runs an agent over: any `AsyncRead +
+/// AsyncWrite` the office can hand [`start`]. A combined trait so a call site
+/// that can't name the concrete type (the office's `attach`, whose stream is
+/// a local `UnixStream` in-process and an upgraded API connection over the
+/// socket) returns it as `Box<dyn DriveStream>`. The blanket impl covers
+/// every concrete stream, and `Box<dyn DriveStream>` is itself one (tokio's
+/// `AsyncRead`/`AsyncWrite` for `Box`), so it feeds straight into `start`.
+pub trait DriveStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DriveStream for T {}
 
 pub enum Out {
     /// A turn ended.
@@ -42,7 +50,7 @@ pub trait Observer: Send + Sync {
 }
 
 pub struct Proc {
-    stdin: OwnedWriteHalf,
+    stdin: Box<dyn AsyncWrite + Unpin + Send>,
     events: mpsc::Receiver<Out>,
     conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
@@ -104,11 +112,14 @@ impl Proc {
     }
 }
 
-pub fn start(stream: UnixStream, conv: Box<dyn Conversation>, observer: Arc<dyn Observer>) -> Proc {
+pub fn start<S>(stream: S, conv: Box<dyn Conversation>, observer: Arc<dyn Observer>) -> Proc
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let steers = conv.steers();
     let conv = Arc::new(std::sync::Mutex::new(conv));
     let reader = conv.clone();
-    let (mut r, stdin) = stream.into_split();
+    let (mut r, stdin) = tokio::io::split(stream);
     let (tx, events) = mpsc::channel(16);
     let reader_task = tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::new();
@@ -189,7 +200,7 @@ pub fn start(stream: UnixStream, conv: Box<dyn Conversation>, observer: Arc<dyn 
         let _ = tx.send(Out::Exit(code)).await;
     });
     Proc {
-        stdin,
+        stdin: Box::new(stdin),
         events,
         conv,
         steers,

@@ -4,7 +4,10 @@
 //! `zapper` binary is the CLI over it.
 
 mod daemon;
-pub(crate) mod errors;
+// Error kinds and the API error live in `zapper-api-types` (the API's
+// contract and its clients share them); re-exported so the core's callers
+// are unchanged.
+pub(crate) use zapper_api_types::errors;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;
 pub mod images;
@@ -17,7 +20,6 @@ pub mod testing;
 pub mod util;
 pub(crate) mod vmm;
 
-pub use daemon::api_error::ApiError;
 /// The driver: an agent's process over a terminal channel, and the queue
 /// of tasks a driven session works through.
 pub use daemon::driver;
@@ -29,15 +31,16 @@ pub use daemon::record;
 pub use interface::{
     ApprovalApi, BuildInfo, BuildMessage, BuildOutcome, BuildRequest, Catchup, ConfigApi, Core,
     Cursor, Decider, Event, EventApi, EventBody, Follow, ImageApi, ImageBuild, McpServer,
-    NewSession, Pending, Referral, Remember, RuleApi, RuleKeeper, RuleRemoval, ServiceApi,
-    ServiceHandler, ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi,
-    SessionInfo, ShellOpened, Status, TermChunk, TerminalInfo,
+    NewSession, Pending, Referral, Remember, RuleApi, RuleRemoval, ServiceApi, ServiceHandler,
+    ServiceInfo, ServiceIo, ServiceSpec, ServiceTarget, Session, SessionApi, SessionInfo,
+    ShellOpened, Status, TermChunk, TerminalInfo,
 };
 /// The subordinate-id range a session's Firecracker can take, for `check`
 /// (see [`subids::host_range`]).
 pub use subids::host_range as subids_host_range;
 /// The `zapper __vmm` re-exec, for the binary's `main` (see [`vmm::shim`]).
 pub use vmm::shim as vmm_shim;
+pub use zapper_api_types::ApiError;
 
 /// The `Core` API traits, so a consumer can `use zapper_core::prelude::*;`
 /// and call any of them on a `Core` (or depend on one narrow trait).

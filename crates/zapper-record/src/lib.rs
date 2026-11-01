@@ -36,7 +36,7 @@ static HEALTHY: AtomicBool = AtomicBool::new(true);
 
 /// Sets up the record at the daemon's start. With a keeper configured, it
 /// must answer: the daemon doesn't run without its record.
-pub(crate) fn init(state: &Path, keeper: Option<&zapper_policy::KeeperConfig>) -> Result<()> {
+pub fn init(state: &Path, keeper: Option<&zapper_policy::KeeperConfig>) -> Result<()> {
     let keeper = match keeper {
         None => None,
         Some(k) => {
@@ -149,7 +149,7 @@ impl Writer {
 }
 
 /// The record's status, for `zapper check`, the API and the UI.
-pub(crate) fn status() -> Value {
+pub fn status() -> Value {
     match records().and_then(|r| r.keeper.as_ref()) {
         None => {
             json!({ "keeper": false, "healthy": healthy(), "dir": records().map(|r| r.state.display().to_string()) })

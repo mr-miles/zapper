@@ -105,6 +105,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/config/reload", post(reload))
         .route("/rules", post(add_rule))
         .route("/rules/{id}", axum::routing::delete(delete_rule))
+        .route("/layers/{name}", axum::routing::delete(clear_layer))
         .route(
             "/profiles/{name}",
             get(get_profile).put(put_profile).delete(delete_profile),
@@ -113,6 +114,9 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/services", post(add_service))
         .route("/services/{id}", axum::routing::delete(remove_service))
         .route("/mcp", post(add_mcp))
+        .route("/deciders", post(add_decider))
+        .route("/deciders/{id}", axum::routing::delete(remove_decider))
+        .route("/zones", post(add_zone))
         .route(
             "/secrets/{name}",
             axum::routing::put(put_secret).delete(delete_secret),
@@ -123,6 +127,7 @@ pub fn api(core: Core, mount: &Mount) -> Router {
         .route("/sessions/{id}/start", post(start_session))
         .route("/sessions/{id}/prompt", post(prompt))
         .route("/sessions/{id}/attach", get(attach))
+        .route("/sessions/{id}/connect", get(connect_port))
         .route("/sessions/{id}/ssh", post(set_ssh))
         .route(
             "/sessions/{id}/terminals/{n}",
@@ -432,6 +437,19 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
         let rule = d.add_session_rule(&s, rule, position);
         return Ok(Json(rule_json(&scope, &rule)));
     }
+    // A firm role's shared layer the core keeps by name (the office adds its
+    // officers' standing approvals here).
+    if let Scope::Role(name) = &scope {
+        if rule.id().is_none() {
+            rule.set_id(format!(
+                "{}-{}",
+                rule.kind(),
+                zapper_core::util::random_id(8)
+            ));
+        }
+        let rule = d.add_layer_rule(name, rule);
+        return Ok(Json(rule_json(&scope, &rule)));
+    }
     let added = d.change(&format!("rule added to {scope}"), |c| {
         if rule.id().is_none() {
             let taken = c.rule_ids();
@@ -449,6 +467,14 @@ async fn add_rule(State(d): D, body: String) -> R<Json<Value>> {
         Ok(rule)
     })?;
     Ok(Json(rule_json(&scope, &added)))
+}
+
+/// Empties a firm role's shared layer (the office clears a role's standing
+/// approvals at the start of a run; the office running as its own process
+/// reaches it here rather than through the in-process `named_layer`).
+async fn clear_layer(State(d): D, Path(name): Path<String>) -> R<Json<Value>> {
+    *d.named_layer(&name).write().unwrap() = zapper_policy::Policy::default();
+    Ok(Json(json!({ "layer": name, "cleared": true })))
 }
 
 async fn delete_rule(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
@@ -961,6 +987,37 @@ async fn attach(
 }
 
 #[derive(Deserialize)]
+struct ConnectQuery {
+    port: u32,
+}
+
+/// Opens a raw byte stream to a guest port over vsock and splices the
+/// upgraded connection to it (the office's dashboard/product port proxy).
+/// Unlike `attach`, no terminal and no frames: plain bytes both ways.
+async fn connect_port(
+    State(d): D,
+    Path(id): Path<String>,
+    Query(q): Query<ConnectQuery>,
+    req: Request,
+) -> R<Response> {
+    let s = d.session(&id)?;
+    let mut guest = s.connect_port(q.port).await?;
+    let on_upgrade = hyper::upgrade::on(req);
+    tokio::spawn(async move {
+        if let Ok(up) = on_upgrade.await {
+            let mut up = TokioIo::new(up);
+            let _ = tokio::io::copy_bidirectional(&mut up, &mut guest).await;
+        }
+    });
+    Ok(Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "zapper-shell")
+        .body(Body::empty())
+        .unwrap())
+}
+
+#[derive(Deserialize)]
 struct Evaluate {
     session: Option<String>,
     profile: Option<String>,
@@ -1330,6 +1387,50 @@ async fn remove_mcp(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
     }
     d.remove_mcp_server(id);
     Ok(Json(m))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDecider {
+    /// Labels picking the sessions whose `ask`s it decides; every session
+    /// when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+    /// A file name in the daemon's `state/services/` directory.
+    socket: String,
+}
+
+/// Makes the decider a facility (the office's officers) serves on a socket
+/// decide the `ask`s of the sessions it picks, in the operator's place.
+async fn add_decider(State(d): D, body: String) -> R<Json<Value>> {
+    let n: NewDecider = parse_body(&body)?;
+    let id = d.add_decider_socket(n.sessions, &n.socket)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// Hands a decider's sessions' `ask`s back to the operator.
+async fn remove_decider(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {
+    if !d.remove_decider(id) {
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no decider {id}")));
+    }
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewZone {
+    domain: String,
+    /// Labels picking the sessions it is a zone for; every session when empty.
+    #[serde(default)]
+    sessions: BTreeMap<String, String>,
+}
+
+/// Makes a domain a zone for the sessions it picks — its names resolve only
+/// to services, never on the host — as the operator's.
+async fn add_zone(State(d): D, body: String) -> R<Json<Value>> {
+    let n: NewZone = parse_body(&body)?;
+    let id = d.add_zone(&n.domain, n.sessions, OPERATOR)?;
+    Ok(Json(json!(d.service(id))))
 }
 
 async fn remove_service(State(d): D, Path(id): Path<u64>) -> R<Json<Value>> {

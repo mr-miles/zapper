@@ -84,7 +84,7 @@ pub fn start(d: &zapper_core::Core) {
 pub fn mount(d: &zapper_core::Core) -> zapper_api::Mount {
     #[cfg(feature = "office")]
     return zapper_api::Mount {
-        routes: zapper_office::routes(d),
+        routes: zapper_office::routes(zapper_office::OfficeOf::office(d)),
         page: Some(zapper_office::PAGE),
         assets: zapper_office::ASSETS,
     };

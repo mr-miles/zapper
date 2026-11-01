@@ -62,7 +62,7 @@ async fn a_firms_names_are_answered_for_its_sessions_never_by_the_host() {
     let ceo = run
         .rt("ceo")
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -107,7 +107,7 @@ firms:
 fn worker(run: &FirmRun, name: &str) -> Arc<Session> {
     run.rt(name)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()

@@ -47,6 +47,7 @@ pub(crate) use adopt::restore;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use control::read_guest_line;
 pub(crate) use create::create;
+pub(crate) use create::has_room;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use create::register;
 pub(crate) use run::{start, stop};
@@ -179,43 +180,10 @@ pub struct Session {
     ssh_opening: tokio::sync::Mutex<()>,
 }
 
-#[derive(Serialize)]
-pub struct SessionInfo {
-    pub(crate) id: String,
-    pub(crate) profile: String,
-    #[serde(flatten)]
-    pub(crate) status: Status,
-    pub(crate) created: f64,
-    pub(crate) expires: Option<f64>,
-    pub(crate) persistent: bool,
-    /// Whether the SSH gateway may open terminals in it.
-    pub(crate) ssh: bool,
-    /// For a persistent session: what its disks take on the host.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) disk_bytes: Option<u64>,
-    pub(crate) image: String,
-    pub(crate) vcpus: u8,
-    pub(crate) memory_mib: u32,
-    pub(crate) kernel: String,
-    /// `nic` or `vsock`.
-    pub(crate) network: zapper_policy::NetworkMode,
-    pub(crate) user: String,
-    pub(crate) root: bool,
-    pub(crate) workdir: String,
-    pub(crate) counters: serde_json::Value,
-    pub(crate) usage: Option<zapper_policy::proto::GuestEvent>,
-    pub(crate) rules: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) firm: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) member: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) labels: BTreeMap<String, String>,
-    /// The driver's state for a driven session; `"disabled"` with the
-    /// driver off (`daemon.driver: false`).
-    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
-    pub(crate) driver: serde_json::Value,
-}
+/// A session as the API reports it. Its serialised shape is the API
+/// contract, so the type lives in `zapper-api-types` (the clients
+/// deserialise it); the core builds it in [`Session::info`].
+pub use zapper_api_types::SessionInfo;
 
 impl Session {
     pub(crate) fn info(&self) -> SessionInfo {
@@ -646,51 +614,10 @@ impl Session {
     }
 }
 
-pub struct NewSession {
-    pub profile: String,
-    pub workdir: PathBuf,
-    pub policy: Policy,
-    /// The session's labels (`Session::labels`).
-    pub labels: BTreeMap<String, String>,
-    /// Policy layers shared with other sessions (a firm role's), between the
-    /// session's own layer and its profile's (`Rules`).
-    pub shared_layers: Vec<(Scope, Arc<RwLock<Policy>>)>,
-    /// Files written in the guest besides the profile's.
-    pub files: Vec<GuestFile>,
-    /// Disks besides the profile's mounts.
-    pub mounts: Vec<zapper_policy::Mount>,
-    /// Merged over the profile's `agent`.
-    pub agent_overlay: Option<serde_json::Value>,
-    pub forwards: Vec<Forward>,
-    /// Keep its disks when it stops, so it can be started again
-    /// (`Session::persistent`).
-    pub persistent: bool,
-    /// For a persistent session: make it from its image even if the image
-    /// changed since it was built, which is recorded.
-    pub accept_changed_image: bool,
-    /// Let the SSH gateway open terminals in it from the start
-    /// (`Session::set_ssh` turns it on and off later).
-    pub ssh: bool,
-}
-
-impl NewSession {
-    pub fn plain(profile: String, workdir: PathBuf, policy: Policy) -> Self {
-        NewSession {
-            profile,
-            workdir,
-            policy,
-            labels: BTreeMap::new(),
-            shared_layers: vec![],
-            files: vec![],
-            mounts: vec![],
-            agent_overlay: None,
-            forwards: vec![],
-            persistent: false,
-            accept_changed_image: false,
-            ssh: false,
-        }
-    }
-}
+/// What the core needs to create a session. Shared with the API's clients
+/// (The Office builds one and passes it to `create_session`), so it lives in
+/// `zapper-api-types`; the core re-exports it.
+pub use zapper_api_types::NewSession;
 
 /// What a persistent session is, kept in its `session.json`: enough to list
 /// it again after the daemon restarts and to start it from its disks. Its

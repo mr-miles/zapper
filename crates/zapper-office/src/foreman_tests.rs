@@ -37,7 +37,7 @@ fn run_with(yaml: &str) -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -45,13 +45,9 @@ fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
 }
 
 /// Pat's VM, and pat's foreman started on it.
-fn pats_foreman(t: &TestCore, run: &Arc<FirmRun>) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
+fn pats_foreman(run: &Arc<FirmRun>) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
     let vm = shell_vm(&session_of(run, "pat"));
-    tokio::spawn(crate::foreman::run(
-        t.core.clone(),
-        run.clone(),
-        run.rt("pat").unwrap(),
-    ));
+    tokio::spawn(crate::foreman::run(run.clone(), run.rt("pat").unwrap()));
     vm
 }
 
@@ -157,7 +153,7 @@ async fn unread(t: &TestCore, run: &FirmRun) -> u64 {
 #[tokio::test]
 async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
     let (t, run) = run_with(FIRM);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     mail_pat(&t, &run, "The plan").await;
 
     let mut agent = next(&mut vm).await;
@@ -196,7 +192,7 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
 #[tokio::test]
 async fn the_desk_names_what_to_reply_to() {
     let (t, run) = run_with(FIRM);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     let sent = tool(
         &t,
         &session_of(&run, "ceo"),
@@ -217,7 +213,7 @@ async fn the_desk_names_what_to_reply_to() {
 #[tokio::test]
 async fn mail_that_comes_during_a_turn_goes_over_through_the_stop_hook() {
     let (t, run) = run_with(FIRM);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     mail_pat(&t, &run, "First").await;
     let mut agent = next(&mut vm).await;
     wake(&mut agent).await;
@@ -255,7 +251,7 @@ async fn mail_that_comes_during_a_turn_goes_over_through_the_stop_hook() {
 #[tokio::test]
 async fn an_agent_that_exits_mid_turn_is_restarted_with_its_mail_again() {
     let (t, run) = run_with(FIRM);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     mail_pat(&t, &run, "Keep this").await;
     let mut agent = next(&mut vm).await;
     wake(&mut agent).await;
@@ -275,7 +271,7 @@ async fn an_agent_that_exits_mid_turn_is_restarted_with_its_mail_again() {
 async fn a_turn_that_runs_too_long_is_cut_charged_and_noted() {
     let firm = FIRM.replace("  acme:\n", "  acme:\n    budget: { turn_timeout: 1s }\n");
     let (t, run) = run_with(&firm);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     mail_pat(&t, &run, "Slow work").await;
     let mut agent = next(&mut vm).await;
     wake(&mut agent).await;
@@ -292,7 +288,7 @@ async fn a_turn_that_runs_too_long_is_cut_charged_and_noted() {
 #[tokio::test]
 async fn a_rate_limited_turn_keeps_its_mail_for_later() {
     let (t, run) = run_with(FIRM);
-    let mut vm = pats_foreman(&t, &run);
+    let mut vm = pats_foreman(&run);
     mail_pat(&t, &run, "Later").await;
     let mut agent = next(&mut vm).await;
     wake(&mut agent).await;

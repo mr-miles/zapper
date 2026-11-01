@@ -34,7 +34,10 @@ async fn call(t: &TestCore, method: Method, uri: &str, body: &str) -> (StatusCod
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let r = crate::routes(&t.core).oneshot(req).await.unwrap();
+    let r = crate::routes(crate::OfficeOf::office(&t.core))
+        .oneshot(req)
+        .await
+        .unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await

@@ -1,0 +1,10 @@
+[package]
+name = "zapper-util"
+description = "Generic host helpers shared across zapper's crates: ids, time, atomic private writes, host memory, and the network-exposure warning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rand = "0.8"

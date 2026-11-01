@@ -5,7 +5,6 @@
 //! every call.
 
 use std::sync::Arc;
-use zapper_core::prelude::*;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -15,9 +14,8 @@ use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
-use crate::OfficeOf;
 use crate::{access, contracts, workforce};
-use zapper_core::{Core, McpServer, Session};
+use zapper_policy::facility::McpCall;
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
@@ -26,151 +24,121 @@ pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 /// Who calls is the session's member label; the role is checked on every
 /// call.
 struct Tools {
-    d: Core,
+    /// The office registry, to resolve a caller's firm → its run without a
+    /// `Core` (the office owns its own `Office`).
+    office: Arc<crate::Office>,
 }
 
-impl McpServer for Tools {
+impl Tools {
     fn instructions(&self) -> Option<String> {
         Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
     }
 
-    fn tools<'a>(&'a self, s: &'a Arc<Session>) -> BoxFuture<'a, Result<Value>> {
-        self.call(s, "tools", json!({}))
-    }
-
-    fn call<'a>(
-        &'a self,
-        s: &'a Arc<Session>,
-        op: &'a str,
-        args: Value,
-    ) -> BoxFuture<'a, Result<Value>> {
-        Box::pin(async move {
-            let run = super::run_of(&self.d.office(), s)
-                .ok_or_else(|| anyhow!("the firm isn't running"))?;
-            let member = s.label("member").unwrap_or_default();
-            dispatch(&self.d, &run, s, member, op, &args)
-                .await
-                .inspect_err(|e| {
-                    run.journal.append(
-                        "op_error",
-                        json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-                    );
-                })
-        })
+    /// Answers one call on the tools socket, for the caller the daemon named
+    /// (the `McpCall`'s session id and labels, from the VM): the firm's run,
+    /// the member, and the tool.
+    async fn handle(&self, call: &McpCall, op: &str, args: Value) -> Result<Value> {
+        let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
+        // A worker of another (ended) run of the firm is told it isn't running.
+        let run = self
+            .office
+            .run(firm)
+            .ok()
+            .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
+            .ok_or_else(|| anyhow!("the firm isn't running"))?;
+        let member = call.labels.get("member").map(String::as_str).unwrap_or("");
+        dispatch(&run, &call.session, member, op, &args)
+            .await
+            .inspect_err(|e| {
+                run.journal.append(
+                    "op_error",
+                    json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+                );
+            })
     }
 }
 
 /// The MCP server's name, as the workers' harnesses know it.
 pub const SERVER: &str = "office";
 
-/// The office's tools as served: their registration in the gateway, and the
-/// task serving their socket.
-pub struct Served {
-    id: u64,
-    task: Option<tokio::task::AbortHandle>,
-    path: std::path::PathBuf,
-}
-
 /// Serves the office's tools to the firm's workers, from a socket in the
 /// daemon's `state/services/` directory that the gateway asks for each
 /// tool list and call (naming the caller from the VM), as a facility in
 /// another process would. A worker of another run of the firm gets the
 /// tools too, and is told on each call that its firm isn't running.
-pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
-    let sessions = [("firm", run.firm.as_str()), ("office", "worker")]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+pub fn register(run: &FirmRun) -> Result<()> {
+    let sessions: std::collections::BTreeMap<String, String> =
+        [("firm", run.firm.as_str()), ("office", "worker")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
     let socket = format!("office-{}.sock", run.firm);
-    let path = d.socket_dir().join(&socket);
-    let _ = std::fs::remove_file(&path);
-    // Bound now, served once there is a runtime to serve it on (always in
-    // the daemon; not in a test that starts a firm without one).
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
-    let tools = Arc::new(Tools { d: d.clone() });
-    let task = tokio::runtime::Handle::try_current().ok().map(|h| {
-        h.spawn(serve(d.clone(), tools.clone(), listener))
-            .abort_handle()
+    // The tools reach the daemon and the registry over the client and the
+    // office's own `Office`; their registration and socket go through the
+    // client. The listener is bound now and served once there is a runtime
+    // (always in the daemon; not in a test that starts a firm without one).
+    let tools = Arc::new(Tools {
+        office: run.office(),
     });
-    let id = match d.add_mcp_socket(SERVER, sessions, &socket, tools.instructions(), "office") {
-        Ok(id) => id,
-        Err(e) => {
-            if let Some(t) = task {
-                t.abort();
-            }
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
-        }
-    };
-    *run.tools.lock().unwrap() = Some(Served { id, task, path });
+    let instructions = tools.instructions();
+    let served_tools = tools.clone();
+    let guard = crate::client::serve_facility(
+        &run.client,
+        &run.socket_dir,
+        &socket,
+        crate::client::Registered::Mcp,
+        move |listener| {
+            zapper_client::serve_socket(listener, move |line, stream| {
+                answer_mcp(served_tools.clone(), line, stream)
+            })
+        },
+        |socket| {
+            run.client
+                .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
+        },
+    )?;
+    *run.tools.lock().unwrap() = Some(guard);
     Ok(())
 }
 
-/// Stops serving them, when the firm stops.
-pub fn unregister(d: &Core, run: &FirmRun) {
-    let served = run.tools.lock().unwrap().take();
-    if let Some(s) = served {
-        d.remove_mcp_server(s.id);
-        if let Some(t) = s.task {
-            t.abort();
-        }
-        let _ = std::fs::remove_file(&s.path);
-    }
+/// Stops serving them, when the firm stops (the guard's drop removes the
+/// registration, aborts the serve task and unlinks the socket).
+pub fn unregister(run: &FirmRun) {
+    run.tools.lock().unwrap().take();
 }
 
-/// Answers the gateway's requests on the tools' socket, one per
-/// connection: the caller as the daemon names it, never as the guest says.
-async fn serve(d: Core, tools: Arc<Tools>, listener: std::os::unix::net::UnixListener) {
-    use zapper_policy::facility::{McpCall, McpMethod, McpReply};
-    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
-        return;
+/// Answers one request on the tools' socket: the caller is the `McpCall` as
+/// the daemon named it from the VM, never as the guest says.
+async fn answer_mcp(tools: Arc<Tools>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
+    use zapper_policy::facility::{McpMethod, McpReply};
+    let answer = async {
+        let call: McpCall = serde_json::from_slice(&line)?;
+        if call.server != SERVER {
+            bail!("this socket serves {SERVER}, not {}", call.server);
+        }
+        let (op, args) = match call.method {
+            McpMethod::ToolsList => ("tools".to_string(), json!({})),
+            McpMethod::ToolsCall => (
+                call.tool.clone().unwrap_or_default(),
+                call.arguments.clone().unwrap_or_else(|| json!({})),
+            ),
+        };
+        tools.handle(&call, &op, args).await
     };
-    while let Ok((stream, _)) = listener.accept().await {
-        let (d, tools) = (d.clone(), tools.clone());
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-            let (r, mut w) = stream.into_split();
-            let mut line = Vec::new();
-            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
-            if tokio::io::BufReader::new(r)
-                .take(max + 1)
-                .read_until(b'\n', &mut line)
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let answer = async {
-                let call: McpCall = serde_json::from_slice(&line)?;
-                if call.server != SERVER {
-                    bail!("this socket serves {SERVER}, not {}", call.server);
-                }
-                let s = d.session(&call.session)?;
-                match call.method {
-                    McpMethod::ToolsList => tools.tools(&s).await,
-                    McpMethod::ToolsCall => {
-                        let tool = call.tool.unwrap_or_default();
-                        let args = call.arguments.unwrap_or_else(|| json!({}));
-                        tools.call(&s, &tool, args).await
-                    }
-                }
-            };
-            let reply = match answer.await {
-                Ok(v) => McpReply {
-                    result: Some(v),
-                    error: None,
-                },
-                Err(e) => McpReply {
-                    result: None,
-                    error: Some(format!("{e:#}")),
-                },
-            };
-            if let Ok(mut b) = serde_json::to_vec(&reply) {
-                b.push(b'\n');
-                let _ = w.write_all(&b).await;
-            }
-        });
+    let reply = match answer.await {
+        Ok(v) => McpReply {
+            result: Some(v),
+            error: None,
+        },
+        Err(e) => McpReply {
+            result: None,
+            error: Some(format!("{e:#}")),
+        },
+    };
+    if let Ok(mut b) = serde_json::to_vec(&reply) {
+        b.push(b'\n');
+        let _ = stream.write_all(&b).await;
     }
 }
 
@@ -288,37 +256,35 @@ fn allowed_by(
     methods: Option<&[String]>,
     path: Option<&str>,
 ) -> Result<Option<String>> {
-    let layers = c.d.layers_for(Some(&c.s.id), None)?;
-    let layers: Vec<_> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     let methods: Vec<Option<String>> = match methods {
         Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
         _ => vec![None],
     };
     let mut rule = None;
     for method in methods {
-        // As the proxy would judge it: the worker's own request, so its
-        // `{session}` and `{label:…}` rules apply as they would there.
+        // As the proxy would judge it, over the client: the daemon applies the
+        // worker's `{session}`/`{label:…}` rewriting.
         let req = NetRequest {
             host: host.to_string(),
             port,
             method,
             path: path.map(str::to_string),
-            session: Some(c.s.id.clone()),
-            labels: c.s.labels.clone(),
+            session: None,
+            labels: Default::default(),
         };
-        let (d, _) = zapper_policy::evaluate_net(&layers, &req);
-        if d.action != zapper_policy::Action::Allow {
-            return Ok(None);
+        match c.run.client.allowed(c.sid, req) {
+            Some(r) => rule = Some(r),
+            None => return Ok(None),
         }
-        rule = d.rule.or(rule);
     }
     Ok(Some(rule.unwrap_or_else(|| "default".into())))
 }
 
 struct Call<'a> {
-    d: &'a Core,
     run: &'a Arc<FirmRun>,
-    s: &'a Arc<Session>,
+    /// The caller's session id, as the daemon named it from the VM (never from
+    /// the guest) — the office reaches the session over its client.
+    sid: &'a str,
     w: &'a Arc<WorkerRt>,
     me: &'a str,
     args: Args<'a>,
@@ -651,7 +617,8 @@ static TOOLS: &[Tool] = &[
                         .or_else(|| c.w.context.lock().unwrap().clone()),
                     changes: c.args.opt("changes").unwrap_or_default(),
                 };
-                drive::publish(c.run, c.me, c.s, a).await
+                let user = c.run.client.session(c.sid)?.user().to_string();
+                drive::publish(c.run, c.me, c.sid, &user, a).await
             })
         }),
     },
@@ -687,7 +654,8 @@ static TOOLS: &[Tool] = &[
             Box::pin(async move {
                 let artifact = c.args.req("artifact")?;
                 let dest = c.args.req("dest")?;
-                drive::fetch(c.run, c.me, c.s, &artifact, &dest).await
+                let user = c.run.client.session(c.sid)?.user().to_string();
+                drive::fetch(c.run, c.me, c.sid, &user, &artifact, &dest).await
             })
         }),
     },
@@ -740,7 +708,7 @@ static TOOLS: &[Tool] = &[
                     attachments: c.args.attachments()?,
                 };
                 check_attachments(c.run, c.me, &a.attachments)?;
-                workforce::hire(c.d, c.run, c.me, a).await
+                workforce::hire(c.run, c.me, a).await
             })
         }),
     },
@@ -765,7 +733,7 @@ static TOOLS: &[Tool] = &[
                     due: c.args.due("due")?,
                     name: c.args.opt("name"),
                 };
-                contracts::offer(c.d, c.run, c.me, a).await
+                contracts::offer(c.run, c.me, a).await
             })
         }),
     },
@@ -804,7 +772,6 @@ static TOOLS: &[Tool] = &[
         required: &["contract", "reason"],
         run: Run::Sync(|c| {
             contracts::withdraw(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -860,7 +827,6 @@ static TOOLS: &[Tool] = &[
         required: &["contract", "reason"],
         run: Run::Sync(|c| {
             contracts::decline(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -878,7 +844,6 @@ static TOOLS: &[Tool] = &[
             let att = c.args.attachments()?;
             check_attachments(c.run, c.me, &att)?;
             contracts::complete(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -921,7 +886,7 @@ static TOOLS: &[Tool] = &[
             Box::pin(async move {
                 let worker = c.args.req("worker")?;
                 let reason = c.args.req("reason")?;
-                workforce::release(c.d, c.run, c.me, &worker, &reason).await
+                workforce::release(c.run, c.me, &worker, &reason).await
             })
         }),
     },
@@ -1019,7 +984,6 @@ static TOOLS: &[Tool] = &[
             let level = c.args.opt("level");
             let grant = c.args.must_bool("grant", "grant: true or false")?;
             access::decide(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("request")?,
@@ -1053,7 +1017,6 @@ static TOOLS: &[Tool] = &[
         required: &["worker", "resource", "reason"],
         run: Run::Sync(|c| {
             access::revoke(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("worker")?,
@@ -1152,7 +1115,6 @@ static TOOLS: &[Tool] = &[
         required: &["screening", "clear"],
         run: Run::Sync(|c| {
             security::decide_screening(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("screening")?,
@@ -1376,9 +1338,8 @@ pub fn reply_from(from: &str, v: &Value, po: &PostOffice) -> Result<Draft> {
 }
 
 pub async fn dispatch(
-    d: &Core,
     run: &Arc<FirmRun>,
-    s: &Arc<Session>,
+    sid: &str,
     me: &str,
     op: &str,
     args: &Value,
@@ -1416,9 +1377,8 @@ pub async fn dispatch(
         ),
     };
     let c = Call {
-        d,
         run,
-        s,
+        sid,
         w: &w,
         me,
         args: Args(args),

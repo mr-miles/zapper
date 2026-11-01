@@ -9,8 +9,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use zapper_core::prelude::*;
-use zapper_core::Core;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -118,9 +116,10 @@ pub struct Security {
     next_officer: usize,
     /// Hosts seen so far, for "new hosts" in digests.
     seen_hosts: BTreeSet<String>,
-    /// The officers' registration as the run's sessions' decider: the id in
-    /// the core, and the socket the core refers `ask`s to.
-    decider: Option<DeciderServed>,
+    /// The officers' registration as the run's sessions' decider, undone
+    /// when the guard drops (the core registration, the serve task, the
+    /// socket the core refers `ask`s to).
+    decider: Option<crate::client::FacilityGuard>,
     /// Per session, the last request id put into a digest.
     digested: HashMap<String, u64>,
     pub last_digest: f64,
@@ -391,7 +390,6 @@ pub fn screening_pending(run: &FirmRun, worker: &str) -> bool {
 /// An officer (or the board) clears a new hire, or objects; an objection
 /// cancels the hire, and the hirer gets the budget back with the reason.
 pub fn decide_screening(
-    d: &Core,
     run: &std::sync::Arc<FirmRun>,
     by: &str,
     id: &str,
@@ -447,15 +445,14 @@ pub fn decide_screening(
     if clear {
         if let Some(w) = run.rt(&s.worker) {
             if run.config.roles.get(&w.role).is_some_and(|r| r.officer) {
-                appoint(d, run, &s.worker, by);
+                appoint(run, &s.worker, by);
             }
-            super::access::grant_at_clearance(d, run, by, &s.worker, id, &grants);
+            super::access::grant_at_clearance(run, by, &s.worker, id, &grants);
             w.wake.notify_one();
         }
     } else if run.rt(&s.worker).is_some() {
         super::scenario::release(run, &s.worker, "objected to at the background check");
         super::workforce::let_go(
-            d,
             run,
             &format!("{by} (background check)"),
             &s.worker,
@@ -647,9 +644,9 @@ pub fn requeue(run: &FirmRun, from: &str) {
 
 /// A hired security officer, cleared: they join the officers. While the
 /// CEO held security alone, it passes to the officer.
-pub fn appoint(d: &Core, run: &std::sync::Arc<FirmRun>, worker: &str, by: &str) {
+pub fn appoint(run: &std::sync::Arc<FirmRun>, worker: &str, by: &str) {
     // A policy owner now: admin on everything, for as long as they hold it.
-    super::access::owner_access(d, run, worker, by);
+    super::access::owner_access(run, worker, by);
     let chart = run.chart();
     let root = chart.root().map(str::to_string);
     let mut officers = chart.security.officers.clone();
@@ -832,7 +829,7 @@ fn recent_traffic(run: &FirmRun, worker: &str) -> String {
     let Some(s) = run.rt(worker).and_then(|w| w.session()) else {
         return "none".into();
     };
-    let list = s.requests();
+    let list = run.client.requests(s.id());
     let allowed = list.iter().filter(|r| r["action"] == "allow").count();
     let denied = list.len() - allowed;
     let mut hosts: Vec<String> = list
@@ -949,10 +946,8 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 let mut rl = rule.clone();
                 rl.id = Some(format!("a-net-{}", sec.rule_counter));
                 rule_id = rl.id.clone();
-                run.roles[&role]
-                    .write()
-                    .unwrap()
-                    .insert(AnyRule::Net(rl.clone()), Some(0));
+                run.client
+                    .add_layer_rule(&format!("{}/{}", run.firm, role), AnyRule::Net(rl.clone()));
                 sec.standing.insert(
                     rl.id.clone().unwrap(),
                     Standing {
@@ -976,7 +971,8 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 sec.rule_counter += 1;
                 let mut rl = rule.clone();
                 rl.id = Some(format!("a-net-{}", sec.rule_counter));
-                s.put_rule(AnyRule::Net(rl.clone()));
+                run.client
+                    .put_session_rule(s.id(), AnyRule::Net(rl.clone()));
                 rule_id = rl.id.clone();
                 let expires = if scope == "once" {
                     Some(now() + ONCE_SECS)
@@ -1104,15 +1100,29 @@ pub fn revoke(run: &FirmRun, by: &str, rule: &str, reason: &str) -> Result<Value
     Ok(json!({ "revoked": rule }))
 }
 
+/// The office's record-keeping when a role's standing approval is taken out
+/// of its layer through the core — the operator, or `zapper` without the
+/// office. The rule is already gone from the layer, so this only drops the
+/// standing record and journals it, keeping the office's records in step.
+/// Driven by the core's `rule` removed event (see `follow_rules`).
+pub fn forget_standing(run: &FirmRun, rule: &str) {
+    let st = run.security.lock().unwrap().standing.remove(rule);
+    if let Some(st) = st {
+        run.journal.append(
+            "access",
+            json!({ "event": "revoked", "rule": rule, "standing": st, "by": BOARD, "reason": "removed through the core" }),
+        );
+    }
+}
+
 fn remove_rule(run: &FirmRun, st: &Standing) {
     let Some(id) = st.rule.id.as_deref() else {
         return;
     };
     match st.scope.split_once(':') {
         Some(("role", role)) => {
-            if let Some(p) = run.roles.get(role) {
-                p.write().unwrap().remove(id);
-            }
+            run.client
+                .remove_layer_rule(&format!("{}/{}", run.firm, role), id);
         }
         Some((_, worker)) => {
             if let Some(s) = run
@@ -1120,7 +1130,7 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
                 .and_then(|w| w.session())
                 .or_else(|| run.facility.session_of(worker))
             {
-                s.remove_rule(id);
+                run.client.remove_session_rule(s.id(), id);
             }
         }
         None => {}
@@ -1132,15 +1142,6 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
 /// The firm's officers, deciding the `ask`s of the run's sessions: each is
 /// filed as an access request; an approval for once goes with the request
 /// it allows.
-/// The officers' decider, served on a socket in the daemon's
-/// `state/services/` directory: its id in the core, the task serving the
-/// socket, and the socket's path (removed on unregister).
-struct DeciderServed {
-    id: u64,
-    task: Option<tokio::task::AbortHandle>,
-    path: std::path::PathBuf,
-}
-
 /// Refers one `ask` to the officers: files the access request and returns
 /// where it went. The request is rebuilt from what the core sent, which the
 /// daemon named from the VM, never from what the guest sent.
@@ -1168,93 +1169,65 @@ fn refer(run: &Weak<FirmRun>, call: &AskCall) -> Result<Referral> {
 /// `ask` is referred to the officers; an `allowed` note uses up a once-only
 /// approval. The run is held weakly, so a stopped firm's socket refers
 /// nothing.
-async fn serve(run: Weak<FirmRun>, listener: std::os::unix::net::UnixListener) {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+async fn answer_ask(run: Weak<FirmRun>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
+    let Ok(call) = serde_json::from_slice::<AskCall>(&line) else {
         return;
     };
-    while let Ok((stream, _)) = listener.accept().await {
-        let run = run.clone();
-        tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
-            let mut line = Vec::new();
-            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
-            if tokio::io::BufReader::new(r)
-                .take(max + 1)
-                .read_until(b'\n', &mut line)
-                .await
-                .is_err()
-            {
-                return;
+    match call.method {
+        AskMethod::Allowed => {
+            if let (Some(run), Some(rule)) = (run.upgrade(), call.rule.as_deref()) {
+                used(&run, rule);
             }
-            let Ok(call) = serde_json::from_slice::<AskCall>(&line) else {
-                return;
+            // A note: nothing to answer.
+        }
+        AskMethod::Ask => {
+            let reply = match refer(&run, &call) {
+                Ok(r) => AskReply {
+                    referral: Some(r),
+                    error: None,
+                },
+                Err(e) => AskReply {
+                    referral: None,
+                    error: Some(format!("{e:#}")),
+                },
             };
-            match call.method {
-                AskMethod::Allowed => {
-                    if let (Some(run), Some(rule)) = (run.upgrade(), call.rule.as_deref()) {
-                        used(&run, rule);
-                    }
-                    // A note: nothing to answer.
-                }
-                AskMethod::Ask => {
-                    let reply = match refer(&run, &call) {
-                        Ok(r) => AskReply {
-                            referral: Some(r),
-                            error: None,
-                        },
-                        Err(e) => AskReply {
-                            referral: None,
-                            error: Some(format!("{e:#}")),
-                        },
-                    };
-                    if let Ok(mut b) = serde_json::to_vec(&reply) {
-                        b.push(b'\n');
-                        let _ = w.write_all(&b).await;
-                    }
-                }
+            if let Ok(mut b) = serde_json::to_vec(&reply) {
+                b.push(b'\n');
+                let _ = stream.write_all(&b).await;
             }
-        });
+        }
     }
 }
 
 /// Makes the officers the decider of the run's sessions' `ask`s, served on a
 /// socket as a facility in another process would (the office is on its way
 /// to being one).
-pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
+pub fn register(run: &Arc<FirmRun>) -> Result<()> {
     let sessions = super::run_sessions(run);
     let socket = format!("office-{}-decider.sock", run.firm);
-    let path = d.socket_dir().join(&socket);
-    let _ = std::fs::remove_file(&path);
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    listener.set_nonblocking(true)?;
-    let task = tokio::runtime::Handle::try_current()
-        .ok()
-        .map(|h| h.spawn(serve(Arc::downgrade(run), listener)).abort_handle());
-    let id = match d.add_decider_socket(sessions, &socket) {
-        Ok(id) => id,
-        Err(e) => {
-            if let Some(t) = task {
-                t.abort();
-            }
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
-        }
-    };
-    run.security.lock().unwrap().decider = Some(DeciderServed { id, task, path });
+    let weak = Arc::downgrade(run);
+    let guard = crate::client::serve_facility(
+        &run.client,
+        &run.socket_dir,
+        &socket,
+        crate::client::Registered::Decider,
+        move |listener| {
+            zapper_client::serve_socket(listener, move |line, stream| {
+                answer_ask(weak.clone(), line, stream)
+            })
+        },
+        |socket| run.client.add_decider_socket(sessions, socket),
+    )?;
+    run.security.lock().unwrap().decider = Some(guard);
     Ok(())
 }
 
-/// Hands the run's sessions' `ask`s back, when the firm stops.
-pub fn unregister(d: &Core, run: &FirmRun) {
-    let served = run.security.lock().unwrap().decider.take();
-    if let Some(s) = served {
-        d.remove_decider(s.id);
-        if let Some(t) = s.task {
-            t.abort();
-        }
-        let _ = std::fs::remove_file(&s.path);
-    }
+/// Hands the run's sessions' `ask`s back, when the firm stops (the guard's
+/// drop removes the registration, aborts the serve task and unlinks the
+/// socket).
+pub fn unregister(run: &FirmRun) {
+    run.security.lock().unwrap().decider.take();
 }
 
 pub fn used(run: &FirmRun, rule: &str) {
@@ -1279,7 +1252,7 @@ pub fn standing(run: &FirmRun) -> Vec<Value> {
     let mut uses: HashMap<String, u64> = HashMap::new();
     for w in run.rts() {
         if let Some(s) = w.session() {
-            for r in s.requests() {
+            for r in run.client.requests(s.id()) {
                 if let Some(id) = r["rule"].as_str() {
                     *uses.entry(id.to_string()).or_default() += 1;
                 }
@@ -1320,7 +1293,7 @@ pub fn traffic(
             continue;
         }
         let Some(s) = w.session() else { continue };
-        for mut r in s.requests() {
+        for mut r in run.client.requests(s.id()) {
             if since.is_some_and(|t| r["ts"].as_f64().unwrap_or(0.0) < t) {
                 continue;
             }
@@ -1358,9 +1331,9 @@ fn digest_text(run: &FirmRun) -> Option<String> {
     let mut uploads: Vec<(u64, String, String)> = Vec::new();
     for w in run.rts() {
         let Some(s) = w.session() else { continue };
-        let last = sec.digested.get(&s.id).copied().unwrap_or(0);
+        let last = sec.digested.get(s.id()).copied().unwrap_or(0);
         let mut max_id = last;
-        for r in s.requests() {
+        for r in run.client.requests(s.id()) {
             let rid = r["id"].as_u64().unwrap_or(0);
             if rid <= last {
                 continue;
@@ -1391,7 +1364,7 @@ fn digest_text(run: &FirmRun) -> Option<String> {
                 uploads.push((up, w.name.clone(), url));
             }
         }
-        sec.digested.insert(s.id.clone(), max_id);
+        sec.digested.insert(s.id().to_string(), max_id);
     }
     sec.seen_hosts.extend(new_hosts.keys().cloned());
     if total == 0 {
@@ -1513,8 +1486,9 @@ pub fn tick(run: &FirmRun, last_digest: &mut f64) {
             .iter()
             .filter_map(|w| w.session())
             .map(|s| {
-                let last = sec.digested.get(&s.id).copied().unwrap_or(0);
-                s.requests()
+                let last = sec.digested.get(s.id()).copied().unwrap_or(0);
+                run.client
+                    .requests(s.id())
                     .iter()
                     .filter(|r| r["id"].as_u64().unwrap_or(0) > last)
                     .count()
@@ -1571,14 +1545,14 @@ firms:
     git: { repos: [api] }
 ";
 
-    /// `register` serves the officers' decider on a socket and keeps it on
-    /// the run; `unregister` hands it back to the core and drops the socket.
+    /// Starting the run serves the officers' decider on a socket and keeps
+    /// it on the run; `unregister` hands it back to the core and drops the
+    /// socket (the guard's RAII teardown).
     #[tokio::test]
     async fn register_serves_a_decider_that_unregister_removes() {
         let t = crate::test_core(FIRM);
         let run = crate::test_run(&t.core, "acme");
 
-        super::register(&t.core, &run).unwrap();
         let path = run
             .security
             .lock()
@@ -1586,11 +1560,11 @@ firms:
             .decider
             .as_ref()
             .expect("the decider is kept on the run")
-            .path
-            .clone();
+            .path()
+            .to_path_buf();
         assert!(path.exists(), "its socket is served");
 
-        super::unregister(&t.core, &run);
+        super::unregister(&run);
         assert!(
             run.security.lock().unwrap().decider.is_none(),
             "the run no longer holds a decider",

@@ -19,7 +19,7 @@ pub(crate) fn random_id(len: usize) -> String {
 
 /// Reads one length-prefixed protocol frame from `r`, or `None` at a clean
 /// end of stream.
-pub(crate) async fn read_frame(
+pub async fn read_frame(
     r: &mut (impl tokio::io::AsyncRead + Unpin),
 ) -> std::io::Result<Option<zapper_policy::proto::Frame>> {
     use tokio::io::AsyncReadExt as _;

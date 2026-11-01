@@ -6,6 +6,7 @@
 //! `state/firms/<firm>/runs/<id>/` as it happens; the daemon keeps indexes.
 
 pub(crate) mod access;
+pub mod client;
 pub(crate) mod contracts;
 pub(crate) mod drive;
 pub(crate) mod facility;
@@ -28,6 +29,7 @@ pub(crate) mod workforce;
 
 mod history;
 mod run;
+pub mod standalone;
 
 pub(crate) use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
 #[cfg(test)]
@@ -37,7 +39,7 @@ pub(crate) use run::test_run_remote;
 pub(crate) use run::{
     board_send, default_company, down, effective_model, pause, up_with, Agents, StartOptions,
 };
-pub(crate) use run::{chart, mem_available_mib, pause_for, worker_json};
+pub(crate) use run::{chart, pause_for, worker_json};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -50,13 +52,14 @@ use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_policy::Policy;
 
-use zapper_core::util::{now, random_id};
-use zapper_core::Core;
+use zapper_core::{Core, EventBody};
+use zapper_util::{now, random_id};
 
-/// The office's state in the core: its registry of runs.
-pub(crate) trait OfficeOf {
+/// The office's state in the core: its registry of runs. `pub` so the
+/// co-host mount (`zapper::office`) can hand the office's own state to
+/// [`routes`]; a standalone office (P4-d) builds its `Office` directly.
+pub trait OfficeOf {
     fn office(&self) -> Arc<Office>;
 }
 
@@ -67,16 +70,61 @@ impl OfficeOf for Core {
 }
 use journal::Journal;
 use mail::{Draft, Kind};
+use zapper_api_types::SessionInfo;
+#[cfg(test)]
 use zapper_core::Session;
 
-/// Every firm's current or last run.
+/// Every firm's current or last run. `pub` as the office's own HTTP state
+/// (the axum `State` the firm routes extract), replacing `Core`; its fields
+/// stay crate-private.
 #[derive(Default)]
-pub(crate) struct Office {
-    pub runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
+pub struct Office {
+    pub(crate) runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
+    /// The daemon through the office's client interface, set once in `start`.
+    /// In-process it wraps `Core`; once the office is a process of its own it
+    /// is the socket client. How the office reaches the daemon from places
+    /// that have no `run` in hand (run creation, the read endpoints), so they
+    /// need no `&Core`.
+    client: std::sync::OnceLock<Arc<dyn client::OfficeClient>>,
+    /// The daemon's `state` directory, where firms' runs are kept on disk
+    /// (`state/firms/<firm>/runs/…`). Set in `start`; the read endpoints and
+    /// history read run files by it, needing no `&Core`.
+    state_dir: std::sync::OnceLock<PathBuf>,
+    /// The daemon's `state/services/` directory, where the office binds its
+    /// facilities' sockets (`FirmRun.socket_dir`). Set in `start`.
+    socket_dir: std::sync::OnceLock<PathBuf>,
 }
 
 impl Office {
-    pub fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
+    /// The office's client of the daemon (set in `start`).
+    pub fn client(&self) -> &Arc<dyn client::OfficeClient> {
+        self.client
+            .get()
+            .expect("the office's client is set in start()")
+    }
+
+    /// The daemon's `state` directory (set in `start`); firms' runs live
+    /// under `state/firms/`.
+    pub fn state_dir(&self) -> &std::path::Path {
+        self.state_dir
+            .get()
+            .expect("the office's state_dir is set in start()")
+    }
+
+    /// `state/firms/<firm>`.
+    pub fn firm_dir(&self, firm: &str) -> PathBuf {
+        self.state_dir().join("firms").join(firm)
+    }
+
+    /// The daemon's `state/services/` directory (set in `start`), where the
+    /// office binds its facilities' sockets.
+    pub fn socket_dir(&self) -> &std::path::Path {
+        self.socket_dir
+            .get()
+            .expect("the office's socket_dir is set in start()")
+    }
+
+    pub(crate) fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
         self.runs
             .read()
             .unwrap()
@@ -85,7 +133,7 @@ impl Office {
             .ok_or_else(|| anyhow!("no run of firm {firm}; start it with `zapper firm up {firm}`"))
     }
 
-    pub fn active(&self, firm: &str) -> Result<Arc<FirmRun>> {
+    pub(crate) fn active(&self, firm: &str) -> Result<Arc<FirmRun>> {
         let r = self.run(firm)?;
         if r.ended() {
             bail!("firm {firm} isn't running; start it with `zapper firm up {firm}`");
@@ -126,7 +174,17 @@ pub(crate) struct WorkerRt {
     /// A security officer now: officers change during a run (see
     /// `FirmRun::set_officers`).
     officer: AtomicBool,
-    pub session: Mutex<Option<Arc<Session>>>,
+    /// The worker's session once its VM is up: its info (id, user, labels),
+    /// as the office's client gave it. The office holds no `Session` — it
+    /// reaches the guest/daemon over `run.client` by this id.
+    pub session: Mutex<Option<SessionInfo>>,
+    /// The real `Session`, kept only in tests so the helpers can drive the
+    /// fake VM (`shell_vm`, tools) by it; production holds just the info.
+    #[cfg(test)]
+    pub session_arc: Mutex<Option<Arc<Session>>>,
+    /// The harness kind the worker's agent runs (its profile's `agent.kind`),
+    /// for the foreman's driver. Set with the session at boot.
+    pub kind: Mutex<Option<String>>,
     pub state: Mutex<(WorkerState, Option<String>)>,
     /// Messages not yet shown to the worker.
     pub queue: Mutex<Vec<String>>,
@@ -151,6 +209,9 @@ impl WorkerRt {
             title: firm.title_of(&w.name),
             officer: AtomicBool::new(firm.is_officer(&w.name)),
             session: Mutex::new(None),
+            #[cfg(test)]
+            session_arc: Mutex::new(None),
+            kind: Mutex::new(None),
             state: Mutex::new((WorkerState::Off, None)),
             queue: Mutex::new(vec![]),
             notes: Mutex::new(vec![]),
@@ -170,8 +231,48 @@ impl WorkerRt {
         self.officer.load(Ordering::Relaxed)
     }
 
-    pub fn session(&self) -> Option<Arc<Session>> {
+    pub fn session(&self) -> Option<SessionInfo> {
         self.session.lock().unwrap().clone()
+    }
+
+    /// The worker's session id, if its VM is up.
+    pub fn session_id(&self) -> Option<String> {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.id().to_string())
+    }
+
+    /// Records the worker's session (its info and harness kind) once booted.
+    pub fn set_session(&self, info: SessionInfo, kind: String) {
+        *self.session.lock().unwrap() = Some(info);
+        *self.kind.lock().unwrap() = Some(kind);
+    }
+
+    /// Clears the worker's session when it is torn down; the id it had, to
+    /// stop and forget it.
+    pub fn take_session(&self) -> Option<String> {
+        *self.kind.lock().unwrap() = None;
+        self.session
+            .lock()
+            .unwrap()
+            .take()
+            .map(|s| s.id().to_string())
+    }
+
+    /// What the foreman drives: the worker's session id and the harness kind
+    /// its agent runs, once its VM is up. The foreman reaches the guest over
+    /// `run.client.attach` by this id — it holds no `Session`.
+    pub fn driven(&self) -> Option<(String, String)> {
+        let id = self
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.id().to_string())?;
+        let kind = self.kind.lock().unwrap().clone()?;
+        Some((id, kind))
     }
 }
 
@@ -189,6 +290,12 @@ pub(crate) struct FirmRun {
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
+    /// The daemon's `state/services/` directory, where the office binds the
+    /// sockets of the facilities it serves (its tools, the officers' decider).
+    /// Plain office config (P1-a): the office and daemon are configured to the
+    /// same path, assumed aligned — no coordination over the client. In-process
+    /// it is `d.socket_dir()`; a co-host office reads it from `office.yaml`.
+    pub socket_dir: PathBuf,
     /// The firm's config as the run started: roles, budgets, limits,
     /// services. The chart is in `chart`.
     pub config: Firm,
@@ -230,14 +337,21 @@ pub(crate) struct FirmRun {
     pub contracts: Mutex<contracts::Contracts>,
     /// Credential grants and requests.
     pub access: Mutex<access::Access>,
-    /// Officers' standing approvals per role.
-    pub roles: BTreeMap<String, Arc<RwLock<Policy>>>,
+    /// The daemon, through the office's client interface: how the office's
+    /// firm logic changes role layers (and, in time, everything else) so it
+    /// does not reach into `Core` directly. In-process now (`client::Local`);
+    /// over the API socket once the office is a process of its own.
+    pub client: Arc<dyn crate::client::OfficeClient>,
+    /// Back to the office that holds this run, so firm logic reaches the
+    /// registry (the other runs) without a `Core` — the office owns its own
+    /// `Office`, not `d.office()`.
+    pub office: std::sync::Weak<Office>,
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
-    /// The office's tools: their registration in the gateway, and the socket
-    /// that serves them.
-    pub tools: Mutex<Option<ops::Served>>,
+    /// The office's tools: their registration in the gateway and the socket
+    /// that serves them, undone when the guard drops.
+    pub tools: Mutex<Option<client::FacilityGuard>>,
     /// Staged plans a worker authored with `plan`, released stage by stage.
     pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,
@@ -271,6 +385,7 @@ pub(crate) fn labels(
 
 /// The run a session belongs to, from its labels: the firm's run, if it is
 /// the one that started the session.
+#[cfg(test)]
 pub(crate) fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
     let run = office.runs.read().unwrap().get(s.label("firm")?)?.clone();
     (Some(run.id.as_str()) == s.label("run")).then_some(run)
@@ -298,9 +413,7 @@ pub(crate) fn is_run_id(s: &str) -> bool {
         && b[8] == b'-'
         && b[15] == b'-'
         && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
-        && b[16..]
-            .iter()
-            .all(|c| zapper_core::util::ID_CHARS.contains(c))
+        && b[16..].iter().all(|c| zapper_util::ID_CHARS.contains(c))
 }
 
 /// A run's sessions, by their labels: what the run registers services, its
@@ -312,15 +425,19 @@ pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub(crate) fn firm_dir(d: &Core, firm: &str) -> PathBuf {
-    d.state_dir().join("firms").join(firm)
-}
-
 fn utc_day(ts: f64) -> i64 {
     (ts / 86400.0).floor() as i64
 }
 
 impl FirmRun {
+    /// The office that holds this run — for firm logic that needs the
+    /// registry (the other runs) without a `Core`.
+    pub fn office(&self) -> Arc<Office> {
+        self.office
+            .upgrade()
+            .expect("the office outlives the runs it holds")
+    }
+
     pub fn ended(&self) -> bool {
         matches!(
             *self.state.lock().unwrap(),
@@ -645,7 +762,7 @@ impl FirmRun {
                 json!({
                     "name": w.name, "role": w.role, "title": w.title, "officer": w.officer(),
                     "state": state, "detail": detail,
-                    "session": w.session().map(|s| s.id.clone()),
+                    "session": w.session_id(),
                     "unread": unread,
                     "owed": desk.owed.len(), "waiting": desk.waiting.len(),
                     "queued": w.queue.lock().unwrap().len(),
@@ -669,10 +786,10 @@ impl FirmRun {
 
 /// The office's API routes (firms, mail, security, the drive), for the API
 /// and the UI to serve.
-pub fn routes(d: &Core) -> axum::Router {
+pub fn routes(office: Arc<Office>) -> axum::Router {
     http::read_routes()
         .merge(http::board_routes())
-        .with_state(d.clone())
+        .with_state(office)
 }
 
 /// The office's page: the UI's front page.
@@ -705,44 +822,66 @@ pub const ASSETS: &[(&str, &str)] = &[
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
 pub fn start(d: &Core) {
+    let office = d.office();
+    let _ = office.client.set(Arc::new(client::Local(d.clone())));
+    let _ = office.state_dir.set(d.state_dir().to_path_buf());
+    let _ = office.socket_dir.set(d.socket_dir());
     d.add_config_check(firm::check);
     close_orphans(d.state_dir());
-    d.add_rule_keeper(Arc::new(Keeper(d.office())));
+    follow_rules(d);
     d.on_shutdown(|d| {
         Box::pin(async move {
             let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
             for r in runs {
-                down(&d, &r, "daemon shutdown").await;
+                down(&r, "daemon shutdown").await;
             }
         })
     });
 }
 
-/// The firms' role layers, and their officers' standing approvals, which
-/// the operator removes through the officers' records.
-struct Keeper(Arc<Office>);
-
-impl zapper_core::RuleKeeper for Keeper {
-    fn layers(&self) -> Vec<(zapper_policy::Scope, Policy)> {
-        let mut layers = Vec::new();
-        for run in self.0.runs.read().unwrap().values() {
-            for (role, p) in &run.roles {
-                layers.push((
-                    zapper_policy::Scope::Role(format!("{}/{role}", run.firm)),
-                    p.read().unwrap().clone(),
-                ));
+/// Follows the core's `rule` events: when a role's standing approval is
+/// removed from its layer through the core — the operator, or `zapper`
+/// without the office — the office drops its own record of it, so the two
+/// agree. This is how the office keeps up once it is a process of its own;
+/// in-process it follows the same stream. The office's own revocations keep
+/// their records directly, so a `removed` event for a rule it no longer
+/// tracks is a no-op.
+fn follow_rules(d: &Core) {
+    let Ok(h) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut events = d.subscribe();
+    let office = d.office();
+    h.spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match events.recv().await {
+                Ok(e) => {
+                    let EventBody::Rule {
+                        state, id, scope, ..
+                    } = &e.body
+                    else {
+                        continue;
+                    };
+                    if state != "removed" {
+                        continue;
+                    }
+                    let Some(firm) = scope
+                        .strip_prefix("role:")
+                        .and_then(|r| r.split('/').next())
+                    else {
+                        continue;
+                    };
+                    let run = office.runs.read().unwrap().get(firm).cloned();
+                    if let Some(run) = run {
+                        security::forget_standing(&run, id);
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
             }
         }
-        layers
-    }
-
-    fn remove(&self, id: &str) -> Option<Result<()>> {
-        let runs: Vec<_> = self.0.runs.read().unwrap().values().cloned().collect();
-        let run = runs
-            .into_iter()
-            .find(|r| r.security.lock().unwrap().standing.contains_key(id))?;
-        Some(security::revoke(&run, BOARD, id, "removed by the operator").map(|_| ()))
-    }
+    });
 }
 
 /// A core without VMs with the office started on it, for tests.
