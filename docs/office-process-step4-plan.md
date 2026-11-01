@@ -234,6 +234,25 @@ serializable targets and `Remote::add_service` works; a standalone office (P4) s
 no code change.
 
 ## P4 — own listener + the split (D3 = A)
+
+### P4 PROGRESS — `Session`-method decoupling (the real prerequisite for dropping the core dep)
+All verifiable without KVM (office↔core only). Done so far:
+- **Remote verified** over a real socket (`remote_over_the_socket`).
+- **Firm logic off `Session` methods**: security (`requests`/rules), facility
+  (`network_follows_grant`), and drive (guest commands) all go through `run.client` by session
+  id (new trait methods `requests`/`put_session_rule`/`remove_session_rule`; drive's
+  `guest_command` runs over `attach`+`pump_command`, still streaming).
+
+**Remaining `Session` use before the `Arc<Session>` can go (and the core dep dropped):**
+- **ops MCP tools** — `Call<'a>` holds `&Core` + `&Arc<Session>` and drives every tool; the
+  serve loop does `d.session(&call.session)`. Needs `Call` to carry session id/user/labels
+  (from the `McpCall`/`SessionInfo`) + `run.client` instead. The biggest remaining piece.
+- **`facility::forward_port`** — `s.connect_port(port)` (the board's dashboard/product proxy);
+  needs a `connect_port(id, port)` client method + API route.
+- **Metadata reads** (`s.id`, `s.resolved.agent.user`/`kind`, `s.label`) and `run_of(&Session)`
+  — sourced from stored `SessionInfo` once the `Arc` fields (`WorkerRt.session`,
+  `facility.cluster`) are replaced; boot then uses `run.client.create_session`.
+
 - [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
       workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
 - [ ] **P4-b** The office holds its own `Office` state (its registry), not `d.office()`;
