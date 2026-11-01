@@ -221,7 +221,8 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
 fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
     use zapper_core::ServiceTarget as Target;
     match zapper_core::testing::route(&t.core, s, host, port) {
-        Some(Some(Target::Handler { tls: true, .. })) => "git server".into(),
+        // The git server is now a TLS socket service the office serves.
+        Some(Some(Target::Socket { tls: true, .. })) => "git server".into(),
         Some(Some(Target::Session { id, port })) => format!("session {id}:{port}"),
         Some(Some(_)) => "other".into(),
         Some(None) => "unserved".into(),

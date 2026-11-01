@@ -300,29 +300,60 @@ impl OfficeClient for Remote {
     }
     fn add_mcp_socket(
         &self,
-        _name: &str,
-        _sessions: BTreeMap<String, String>,
-        _socket: &str,
-        _instructions: Option<String>,
+        name: &str,
+        sessions: BTreeMap<String, String>,
+        socket: &str,
+        instructions: Option<String>,
         _owner: &str,
     ) -> Result<u64> {
-        unimplemented!("Remote::add_mcp_socket (P3-a)")
+        // Owned by the operator the office authenticates as.
+        let body = serde_json::json!({
+            "name": name, "sessions": sessions, "socket": socket, "instructions": instructions,
+        });
+        let v = block(self.0.call(Method::POST, "/v1/mcp", Some(&body)))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("no id for the MCP server"))
     }
-    fn remove_mcp_server(&self, _id: u64) -> bool {
-        unimplemented!("Remote::remove_mcp_server (P3-a)")
+    fn remove_mcp_server(&self, id: u64) -> bool {
+        block(self.0.call(Method::DELETE, &format!("/v1/mcp/{id}"), None))
+            .map(|a| a.status.is_success())
+            .unwrap_or(false)
     }
     fn add_decider_socket(
         &self,
         _sessions: BTreeMap<String, String>,
         _socket: &str,
     ) -> Result<u64> {
-        unimplemented!("Remote::add_decider_socket (P3-a)")
+        // Needs a `/v1/deciders` route (P3-b): the API has none yet.
+        unimplemented!("Remote::add_decider_socket (needs the P3-b decider route)")
     }
     fn remove_decider(&self, _id: u64) -> bool {
-        unimplemented!("Remote::remove_decider (P3-a)")
+        unimplemented!("Remote::remove_decider (needs the P3-b decider route)")
     }
-    fn add_service(&self, _spec: ServiceSpec) -> Result<u64> {
-        unimplemented!("Remote::add_service (P3-a)")
+    fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
+        use zapper_core::ServiceTarget as T;
+        let to = match spec.target {
+            T::Socket { name, tls } => serde_json::json!({ "socket": name, "tls": tls }),
+            T::Session { id, port } => serde_json::json!({ "session": id, "port": port }),
+            T::Addr(addr) => serde_json::json!({ "addr": addr }),
+            T::Handler { .. } => {
+                // An in-process handler can't cross the socket — the office
+                // serves such a facility (its git) on a socket instead.
+                return Err(anyhow::anyhow!(
+                    "a handler service cannot be registered over the socket"
+                ));
+            }
+        };
+        let body = serde_json::json!({ "name": spec.name, "port": spec.port, "sessions": spec.sessions, "to": to });
+        let v = block(self.0.call(Method::POST, "/v1/services", Some(&body)))?
+            .ok()
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("no id for the service"))
     }
     fn add_zone(
         &self,
@@ -330,10 +361,17 @@ impl OfficeClient for Remote {
         _sessions: BTreeMap<String, String>,
         _owner: &str,
     ) -> Result<u64> {
-        unimplemented!("Remote::add_zone (P3-a)")
+        // Needs a zone route (P3-b): `POST /v1/services` has no zone variant.
+        unimplemented!("Remote::add_zone (needs the P3-b zone route)")
     }
-    fn remove_service(&self, _id: u64) -> Option<ServiceInfo> {
-        unimplemented!("Remote::remove_service (P3-a)")
+    fn remove_service(&self, id: u64) -> Option<ServiceInfo> {
+        // The office ignores what it was (it only needs it gone), so this
+        // doesn't reconstruct the `ServiceInfo` from the response.
+        let _ = block(
+            self.0
+                .call(Method::DELETE, &format!("/v1/services/{id}"), None),
+        );
+        None
     }
 }
 
@@ -344,6 +382,8 @@ pub(crate) enum Registered {
     Mcp,
     /// A decider (`remove_decider`) — the officers.
     Decider,
+    /// A service (`remove_service`) — the firm's git server on a socket.
+    Service,
 }
 
 /// A facility the office serves on a socket, undone on drop (RAII): the
@@ -374,6 +414,9 @@ impl Drop for FacilityGuard {
             }
             Registered::Decider => {
                 self.client.remove_decider(self.id);
+            }
+            Registered::Service => {
+                self.client.remove_service(self.id);
             }
         }
         if let Some(t) = self.task.take() {

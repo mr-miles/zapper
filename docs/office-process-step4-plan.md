@@ -84,9 +84,16 @@ surface is the real load-bearing work; the file conversions are downstream of it
   register through `run.client`. Trait grew `add_mcp_socket`/`remove_mcp_server`/
   `add_decider_socket`/`remove_decider` (Local real, Remote stubbed for P3-a). Facility's own
   zone/git/cluster registration is a different shape and rides with facility logic in P2-b.
-- **P2-b (facility services)** done: the firm's zone + git/cluster service registration
-  (`add_service`/`add_zone`/`remove_service` on the trait) and `facility::stop` are on
-  `run.client`; the register test uses a real `Local` client, no `ServiceApi` fake.
+- **P2-b (facility services + guest commands)** done: zone/service registration
+  (`add_service`/`add_zone`/`remove_service`) and `facility::stop` on `run.client`; facility
+  guest commands over `run.client.run_command` (built on `attach`).
+- **P2-c (started)**: `Active` extractor; 8 single-`{f}` firm handlers shed the preamble.
+- **P3-a (started)**: `Remote` session CRUD + `add_service`/`remove_service`/`add_mcp_socket`/
+  `remove_mcp_server` over the socket (`SessionInfo` gained `Deserialize`). Remaining Remote
+  methods (`attach`, `add_zone`, decider socket) await a hyper upgrade / P3-b routes.
+- **Git on a socket** (resolves the P3 handler-serialize finding): the office serves git on a
+  socket like its tools/decider (`serve_git` + `serve_facility`, a TLS `Socket` service), so
+  `add_service` carries only serializable targets and a standalone office serves git unchanged.
 
 ### P2-b FINDING — the rest of "drop `d`" is gated on guest commands / the `Arc<Session>`
 The cleanly Arc-independent conversions are done (services). What's left divides by what it
@@ -194,20 +201,26 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
       `session` (GET). The async methods `.await` directly; the sync ones use `block`. This
       needed **`SessionInfo: Deserialize`** (+ `Status`; `GuestEvent`/`NetworkMode` already
       had it) so `Remote` can read the API's responses — covered by a JSON round-trip in
-      `client::tests`. **Left:** `attach` (hyper-upgrade the attach route to a raw stream),
-      and the registration methods (`add_mcp_socket`/`add_decider_socket`/`add_service`/
-      `add_zone`/`remove_*`) — see the FINDING below. **Not unit-tested end-to-end** (no live
-      socket until the P4 binary); the serde round-trip is the testable part.
-- [ ] **P3-b** Add the missing `zapper-api` routes (`/v1/deciders` for decider-socket register/
-      remove; a zone POST; the mcp-socket variant) the registration `Remote` methods call.
+      `client::tests`. Also **done:** the registration methods with existing routes —
+      `add_service` (POST `/v1/services`, mapping `ServiceTarget`→the API's `to`),
+      `remove_service` (DELETE), `add_mcp_socket` (POST `/v1/mcp`), `remove_mcp_server` (DELETE).
+      **Left:** `attach` (hyper-upgrade the attach route to a raw stream); `add_decider_socket`/
+      `remove_decider` and `add_zone` (need P3-b routes — the API has none yet). **Not
+      unit-tested end-to-end** (no live socket until the P4 binary); the serde round-trip is the
+      testable part.
+- [ ] **P3-b** Add the missing `zapper-api` routes the remaining `Remote` methods call: a
+      decider-socket register/remove (`/v1/deciders`), and a zone POST (`add_zone` — `POST
+      /v1/services` has no zone variant). (`add_mcp_socket`/`add_service` already have routes.)
 
-### P3 FINDING — remote facility registration needs restructuring (P4)
-`add_service` carries an in-process `Arc<dyn ServiceHandler>` (the firm's git server). That
-**cannot cross the socket** — a remote office cannot hand the daemon a handler. So a standalone
-office must serve git on a **socket** (as it already does its tools and decider via
-`serve_facility`), not via `add_service(Handler)`. That restructuring belongs with P4-b (the
-office holding its own state / serving its own facilities); the `Remote` registration methods
-are blocked on it, which is why P3-a did the session CRUD (no such gap) first.
+### P3 FINDING — RESOLVED: git now served on a socket
+The gap was that `add_service` carried an in-process `Arc<dyn ServiceHandler>` (the firm's git
+server), which cannot cross the socket. **Fixed:** the office now serves git on a socket, like
+its tools and decider — `serve_git` reads the daemon's caller line (the workbench's
+`serve_socket` pattern) and answers the guest's HTTP/1.1; it is registered as a TLS
+`ServiceTarget::Socket` via `serve_facility` (a `Registered::Service` guard, dropped in
+`facility::stop`). The `GitServer` handler is gone. So `add_service` now carries only
+serializable targets and `Remote::add_service` works; a standalone office (P4) serves git with
+no code change.
 
 ## P4 — own listener + the split (D3 = A)
 - [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
