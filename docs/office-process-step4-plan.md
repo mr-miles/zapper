@@ -243,15 +243,23 @@ All verifiable without KVM (office↔core only). Done so far:
   id (new trait methods `requests`/`put_session_rule`/`remove_session_rule`; drive's
   `guest_command` runs over `attach`+`pump_command`, still streaming).
 
-**Remaining `Session` use before the `Arc<Session>` can go (and the core dep dropped):**
-- **ops MCP tools** — `Call<'a>` holds `&Core` + `&Arc<Session>` and drives every tool; the
-  serve loop does `d.session(&call.session)`. Needs `Call` to carry session id/user/labels
-  (from the `McpCall`/`SessionInfo`) + `run.client` instead. The biggest remaining piece.
-- **`facility::forward_port`** — `s.connect_port(port)` (the board's dashboard/product proxy);
-  needs a `connect_port(id, port)` client method + API route.
-- **Metadata reads** (`s.id`, `s.resolved.agent.user`/`kind`, `s.label`) and `run_of(&Session)`
-  — sourced from stored `SessionInfo` once the `Arc` fields (`WorkerRt.session`,
-  `facility.cluster`) are replaced; boot then uses `run.client.create_session`.
+**`Session`-method decoupling is now essentially done.** ops MCP tools run from the `McpCall`
+(caller labels) + `run.client`, not `d.session()`/`&Session`; `run_of(&Session)` is test-only.
+The only `Session` *method* left in prod non-`Local` code is `facility::forward_port`'s
+`connect_port`.
+
+**Remaining before the `Arc<Session>` fields go (and the core dep dropped):**
+- **Metadata reads** — `WorkerRt.session`/`facility.cluster` are now read only for `.id`/`.user`/
+  `.kind`/`.labels` (security, facility, lib status, `driven()`). Replace the `Arc` fields with
+  a stored `SessionInfo` (+ harness kind); boot stores `run.client.create_session`'s result;
+  the ~12 reads use the stored info. Mechanical.
+- **`connect_port`** — `facility::forward_port` (board's dashboard/product proxy) needs a
+  `connect_port(id, port)` client method + an API route (open a guest port, upgraded).
+- **`c.d` cascade (P4-b/c)** — the ops `Call` still holds `&Core`, fanning out to
+  `workforce::hire`/`contracts::offer`/`access`/`layers_for`, bottoming out at **`d.office()`**.
+  So **P4-b (office holds its own `Office`)** is the keystone that lets `c.d` become `run.client`.
+- Then **P4-a** (relocate `http.rs` + shared gateway crate), **P4-c** (drop the `zapper-core`
+  prod dep; `Local` becomes dev-only), **P4-d** (`OFFICE=1`).
 
 - [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
       workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
