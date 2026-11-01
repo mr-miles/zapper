@@ -118,6 +118,31 @@ pub(super) fn admit<'a>(
     Ok((warning, admitting))
 }
 
+/// Whether the host has room for a session of `profile` now, and the running
+/// config if so: a guard-less pre-flight a client (the office, before hiring)
+/// uses, applying the same session-limit and memory checks as `admit`. It is
+/// inherently racy — the `admit` at create time, holding the admitting lock,
+/// is authoritative.
+pub(crate) fn has_room(daemon: &Daemon, profile: &str) -> Result<zapper_policy::Config> {
+    let config = daemon.config.read().unwrap().clone();
+    let resolved = config.resolve(profile)?;
+    let max = config.daemon.max_sessions;
+    let running = daemon.sessions.running();
+    if running >= max {
+        bail!("{running} sessions running; daemon.max_sessions is {max}");
+    }
+    memory_admission(
+        &Memory {
+            given: daemon.sessions.memory_mib(),
+            want: resolved.engine.memory_mib as u64,
+            total: crate::util::host_memory_mib("MemTotal"),
+            available: crate::util::host_memory_mib("MemAvailable"),
+        },
+        config.daemon.memory_overcommit,
+    )?;
+    Ok(config)
+}
+
 /// The host's memory against a new VM's, in MiB. `total` and `available`
 /// are unknown when `/proc/meminfo` can't be read.
 struct Memory {

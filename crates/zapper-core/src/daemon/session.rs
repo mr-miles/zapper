@@ -47,6 +47,7 @@ pub(crate) use adopt::restore;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use control::read_guest_line;
 pub(crate) use create::create;
+pub(crate) use create::has_room;
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) use create::register;
 pub(crate) use run::{start, stop};

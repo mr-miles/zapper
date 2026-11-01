@@ -37,8 +37,12 @@ Branch: `feat/office-process-step4` (on top of `feat/office-process`, merged to 
 ## STATUS (update on each commit)
 - Phase 0 (foundation): **done** — see commits `39d6026`…`d76a7aa`.
 - 1.1 (`driver::start` generic): **done** (`9bbe94c`).
-- **Suggested next: 1.4 (`admit`) then 1.5 (`serve_facility`)** — chunky, have current
-  callers, testable now, no session rework.
+- 1.4 (`admit`): **done** — `workforce::room` is now one `client.admit(profile)` call
+  (session-limit + memory on the daemon side); `session_count`/office memory pre-check gone.
+- 1.5 (`serve_facility`): folded into Phase 2 (the `ops`/`security` register trios convert
+  there; the RAII helper is office-internal polish, not a trait-shape change).
+- **Next: convert Phase 2 files sequentially, growing the trait per file** (fan-out needs a
+  locked complete trait, which emerges from conversion, so sequential is lower-risk here).
 - **1.2 (`attach`) is deferred into 3.2:** its shape (the `ShellRequest`, pulling the
   conversation/driver into the office) is only clear when wiring the foreman; defining it
   abstractly now would be revised there. 1.1 is the part that had to come first.
@@ -67,8 +71,8 @@ zapper-office` green, commit. `Remote` for these is Phase 4.
       = `session(id)?.open_shell(req).stream`. (No office call site yet; exercised in 3.2.)
 - [ ] **1.3** Session-by-id: `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
       `forget_session(id)`, `session(id) -> SessionInfo`. `Local` delegates to `Core`.
-- [ ] **1.4** `admit(role) -> Result<Config>` (groups config + session_count + memory room);
-      replace `workforce::room`. Validate: `room`/hire tests.
+- [x] **1.4** `admit(profile) -> Result<Config>` (core `has_room`: session-limit + memory in
+      one call); `workforce::room` now calls it. Done; office 147 + core session green.
 - [ ] **1.5** Registrations + `serve_facility(name, sessions, handler) -> FacilityGuard`
       (RAII). Convert `facility::register` (service+zone), `ops::register` (mcp socket),
       `security::register` (decider socket) + their `unregister`s.

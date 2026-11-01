@@ -13,7 +13,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
-use zapper_core::{ConfigApi, SessionApi};
+use zapper_core::ConfigApi;
 use zapper_policy::AnyRule;
 
 /// What the office's firm logic needs from the daemon, so it reaches it
@@ -34,8 +34,9 @@ pub trait OfficeClient: Send + Sync {
     fn record_writable(&self) -> bool;
     /// The daemon's running config.
     fn config(&self) -> zapper_policy::Config;
-    /// How many sessions the daemon is running now (for the host's limits).
-    fn session_count(&self) -> usize;
+    /// Whether the host has room for a session of `profile`, and the running
+    /// config if so (the host-room decision in one call: limit + memory).
+    fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -54,8 +55,8 @@ impl OfficeClient for Local {
     fn config(&self) -> zapper_policy::Config {
         self.0.config()
     }
-    fn session_count(&self) -> usize {
-        self.0.sessions().len()
+    fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
+        self.0.admit(profile)
     }
 }
 
@@ -92,11 +93,11 @@ impl OfficeClient for Remote {
             .and_then(|a| serde_json::from_value(a.body).ok())
             .unwrap_or_default()
     }
-    fn session_count(&self) -> usize {
-        block(self.0.get("/v1/sessions"))
+    fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
+        let v = block(self.0.get(&format!("/v1/admit?profile={profile}")))?
             .ok()
-            .and_then(|a| a.body.as_array().map(|s| s.len()))
-            .unwrap_or(0)
+            .map_err(|(_, why)| anyhow::anyhow!(why))?;
+        Ok(serde_json::from_value(v)?)
     }
 }
 

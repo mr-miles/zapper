@@ -1308,23 +1308,14 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     }))
 }
 
-/// Room on the host for one more VM of `role`: the config, or why not.
+/// Room on the host for one more VM of `role`: the config, or why not. The
+/// host-room decision (session limit + memory) is one call to the daemon.
 pub(super) fn room(
     office: &Office,
-    role_name: &str,
+    _role_name: &str,
     role: &crate::firm::Role,
 ) -> Result<zapper_policy::Config> {
-    let config = office.client().config();
-    let profile = config.resolve(&role.profile)?;
-    if let Some(avail) = super::mem_available_mib() {
-        if profile.engine.memory_mib as u64 > avail {
-            bail!("the host has {avail} MiB of memory available, and a {role_name} needs {} MiB; tell the board", profile.engine.memory_mib);
-        }
-    }
-    let running = office.client().session_count();
-    if running >= config.daemon.max_sessions {
-        bail!("the host runs {running} sessions, its limit; tell the board");
-    }
+    let config = office.client().admit(&role.profile)?;
     Ok(config)
 }
 

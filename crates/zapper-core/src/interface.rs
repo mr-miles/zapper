@@ -106,6 +106,13 @@ impl Core {
         daemon::record::healthy()
     }
 
+    /// Whether the host has room for a session of `profile`, and the running
+    /// config if so: a client's pre-flight (the office, before hiring),
+    /// applying the session-limit and memory checks in one call.
+    pub fn admit(&self, profile: &str) -> Result<Config> {
+        session::has_room(&self.d, profile)
+    }
+
     /// The shared policy layer named `name`: a handle a client keeps a set
     /// of rules in (a firm role's), which sessions attach by their
     /// `firm-role` label. Created empty if new; every session carrying the

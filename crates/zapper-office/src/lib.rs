@@ -38,7 +38,7 @@ pub(crate) use run::test_run_remote;
 pub(crate) use run::{
     board_send, default_company, down, effective_model, pause, up_with, Agents, StartOptions,
 };
-pub(crate) use run::{chart, mem_available_mib, pause_for, worker_json};
+pub(crate) use run::{chart, pause_for, worker_json};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
