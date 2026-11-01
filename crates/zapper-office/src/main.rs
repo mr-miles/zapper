@@ -16,9 +16,17 @@ use clap::{Parser, Subcommand};
 use hyper::Method;
 use zapper_office::client::{socket_path, Zapper};
 
+mod cli;
+mod firm_cli;
+
+use cli::Client;
+
 #[derive(Parser)]
 #[command(name = "zapper-office", about = "The Office as a process of its own")]
 struct Cli {
+    /// Print API responses as JSON.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -49,6 +57,21 @@ enum Cmd {
         #[arg(long)]
         listen: Option<SocketAddr>,
     },
+    /// Firms of workers: start, stop, watch, replay.
+    Firm {
+        #[command(subcommand)]
+        cmd: firm_cli::FirmCmd,
+    },
+    /// Mail as the board.
+    Mail {
+        #[command(subcommand)]
+        cmd: firm_cli::MailCmd,
+    },
+    /// A firm's shared drive.
+    Drive {
+        #[command(subcommand)]
+        cmd: firm_cli::DriveCmd,
+    },
 }
 
 #[tokio::main]
@@ -56,7 +79,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let json = cli.json;
+    match cli.cmd {
         Cmd::Url { listen } => {
             println!("http://{}", listen.unwrap_or_else(default_listen));
             Ok(())
@@ -66,6 +91,9 @@ async fn main() -> Result<()> {
             state_dir,
             socket_dir,
         } => serve(listen.unwrap_or_else(default_listen), state_dir, socket_dir).await,
+        Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
+        Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
+        Cmd::Drive { cmd } => std::process::exit(firm_cli::drive(&Client::new(), cmd, json).await?),
     }
 }
 
