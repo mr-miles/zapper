@@ -81,6 +81,10 @@ pub(crate) struct Office {
     /// that have no `run` in hand (run creation, the read endpoints), so they
     /// need no `&Core`.
     client: std::sync::OnceLock<Arc<dyn client::OfficeClient>>,
+    /// The daemon's `state` directory, where firms' runs are kept on disk
+    /// (`state/firms/<firm>/runs/…`). Set in `start`; the read endpoints and
+    /// history read run files by it, needing no `&Core`.
+    state_dir: std::sync::OnceLock<PathBuf>,
 }
 
 impl Office {
@@ -89,6 +93,19 @@ impl Office {
         self.client
             .get()
             .expect("the office's client is set in start()")
+    }
+
+    /// The daemon's `state` directory (set in `start`); firms' runs live
+    /// under `state/firms/`.
+    pub fn state_dir(&self) -> &std::path::Path {
+        self.state_dir
+            .get()
+            .expect("the office's state_dir is set in start()")
+    }
+
+    /// `state/firms/<firm>`.
+    pub fn firm_dir(&self, firm: &str) -> PathBuf {
+        self.state_dir().join("firms").join(firm)
     }
 
     pub fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
@@ -392,10 +409,6 @@ pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
-}
-
-pub(crate) fn firm_dir(d: &Core, firm: &str) -> PathBuf {
-    d.state_dir().join("firms").join(firm)
 }
 
 fn utc_day(ts: f64) -> i64 {
@@ -795,7 +808,9 @@ pub const ASSETS: &[(&str, &str)] = &[
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
 pub fn start(d: &Core) {
-    let _ = d.office().client.set(Arc::new(client::Local(d.clone())));
+    let office = d.office();
+    let _ = office.client.set(Arc::new(client::Local(d.clone())));
+    let _ = office.state_dir.set(d.state_dir().to_path_buf());
     d.add_config_check(firm::check);
     close_orphans(d.state_dir());
     follow_rules(d);

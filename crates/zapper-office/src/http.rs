@@ -229,7 +229,7 @@ fn start_terms(firm: &crate::firm::Firm, config: &zapper_policy::Config) -> Valu
 
 /// Checks a run's record against the keeper's chains and signatures.
 async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    let dir = super::run_dir(&d, &f, &run)?;
+    let dir = super::run_dir(&d.office(), &f, &run)?;
     Ok(Json(
         tokio::task::spawn_blocking(move || zapper_core::record::verify_state_dir(&dir))
             .await
@@ -239,14 +239,18 @@ async fn run_verify(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Js
 
 /// The config a run started with (secret values hidden) and its skills.
 async fn run_config(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    Ok(Json(super::run_config(&super::run_dir(&d, &f, &run)?)))
+    Ok(Json(super::run_config(&super::run_dir(
+        &d.office(),
+        &f,
+        &run,
+    )?)))
 }
 
 async fn runs(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    if !d.with_config(|c| c.firms.contains_key(&f)) && !super::firm_dir(&d, &f).is_dir() {
+    if !d.with_config(|c| c.firms.contains_key(&f)) && !d.office().firm_dir(&f).is_dir() {
         return Err(anyhow::anyhow!("no firm {f}").into());
     }
-    Ok(Json(json!(super::list_runs(&d, &f))))
+    Ok(Json(json!(super::list_runs(&d.office(), &f))))
 }
 
 #[derive(Deserialize, Default)]
@@ -324,7 +328,7 @@ async fn journal(
     Path((f, run)): Path<(String, String)>,
     Query(q): Query<Follow>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d, &f, &run)?;
+    let dir = super::run_dir(&d.office(), &f, &run)?;
     lines(zapper_core::record::view(&dir.join("journal.jsonl")), q).await
 }
 
@@ -333,7 +337,7 @@ async fn transcript(
     Path((f, run, worker)): Path<(String, String, String)>,
     Query(q): Query<Follow>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d, &f, &run)?;
+    let dir = super::run_dir(&d.office(), &f, &run)?;
     if !zapper_policy::valid_worker_name(&worker) {
         return Err(bad(format!("{worker:?} is not a worker name")));
     }
@@ -350,7 +354,7 @@ async fn drive_file(
     State(d): D,
     Path((f, run, artifact, version, path)): Path<(String, String, String, String, String)>,
 ) -> R<Response> {
-    let dir = super::run_dir(&d, &f, &run)?;
+    let dir = super::run_dir(&d.office(), &f, &run)?;
     let version: u32 = version
         .trim_start_matches('v')
         .parse()
@@ -373,7 +377,7 @@ async fn drive_file(
 }
 
 async fn git_log(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    let dir = super::run_dir(&d, &f, &run)?;
+    let dir = super::run_dir(&d.office(), &f, &run)?;
     Ok(Json(super::facility::git_log(&dir).await))
 }
 
@@ -396,7 +400,9 @@ fn main_ref() -> String {
 
 async fn git_repos(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
     Ok(Json(json!(super::git::repos(&super::run_dir(
-        &d, &f, &run
+        &d.office(),
+        &f,
+        &run
     )?))))
 }
 
@@ -406,7 +412,7 @@ async fn git_branches(
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::branches(&super::run_dir(&d, &f, &run)?, q.repo.as_deref()).await?,
+        super::git::branches(&super::run_dir(&d.office(), &f, &run)?, q.repo.as_deref()).await?,
     ))
 }
 
@@ -417,7 +423,7 @@ async fn git_ref_log(
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::log(
-            &super::run_dir(&d, &f, &run)?,
+            &super::run_dir(&d.office(), &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             q.limit.unwrap_or(200),
@@ -433,7 +439,7 @@ async fn git_tree(
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::tree(
-            &super::run_dir(&d, &f, &run)?,
+            &super::run_dir(&d.office(), &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             &q.path,
@@ -449,7 +455,7 @@ async fn git_blob(
 ) -> R<Json<Value>> {
     Ok(Json(
         super::git::blob(
-            &super::run_dir(&d, &f, &run)?,
+            &super::run_dir(&d.office(), &f, &run)?,
             q.repo.as_deref(),
             &q.r,
             &q.path,
@@ -464,7 +470,12 @@ async fn git_commit(
     Query(q): Query<GitQuery>,
 ) -> R<Json<Value>> {
     Ok(Json(
-        super::git::commit(&super::run_dir(&d, &f, &run)?, q.repo.as_deref(), &id).await?,
+        super::git::commit(
+            &super::run_dir(&d.office(), &f, &run)?,
+            q.repo.as_deref(),
+            &id,
+        )
+        .await?,
     ))
 }
 
@@ -775,11 +786,11 @@ async fn run_note(
 ) -> R<Json<Value>> {
     let v = body(&text)?;
     let note = v["note"].as_str().ok_or_else(|| bad("note: text"))?;
-    super::set_note(&d, &f, &run, note)?;
+    super::set_note(&d.office(), &f, &run, note)?;
     Ok(Json(json!({ "run": run, "note": note.trim() })))
 }
 
 async fn prune(State(d): D, Path((f, run)): Path<(String, String)>) -> R<Json<Value>> {
-    super::prune(&d, &f, &run)?;
+    super::prune(&d.office(), &f, &run)?;
     Ok(Json(json!({ "removed": run })))
 }

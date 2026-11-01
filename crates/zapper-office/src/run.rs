@@ -19,8 +19,8 @@ use crate::history::RUN_CONFIG;
 use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
 use crate::{
-    access, contracts, drive, facility, firm, firm_dir, foreman, labels, ops, prompts, run_id,
-    scenario, security, skills, utc_day, workforce, FirmRun, OfficeOf, RunState, Usage, WorkerRt,
+    access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
+    security, skills, utc_day, workforce, FirmRun, OfficeOf, RunState, Usage, WorkerRt,
     WorkerState,
 };
 
@@ -440,7 +440,7 @@ fn create_run(
         scenario,
     } = started;
     let id = run_id();
-    let dir = firm_dir(d, name).join("runs").join(&id);
+    let dir = d.office().firm_dir(name).join("runs").join(&id);
     for sub in ["transcripts", "drive", "skills", "empty"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }

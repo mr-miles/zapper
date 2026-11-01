@@ -5,10 +5,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use zapper_core::Core;
 
 use crate::journal::Journal;
-use crate::{firm_dir, is_run_id, OfficeOf};
+use crate::{is_run_id, Office};
 
 /// Ends the journals of runs a previous daemon left running: they can't be
 /// resumed, and a replay should say how they ended.
@@ -45,8 +44,8 @@ pub fn close_orphans(state: &std::path::Path) {
 }
 
 /// Past runs of a firm, newest first.
-pub fn list_runs(d: &Core, firm: &str) -> Vec<Value> {
-    let dir = firm_dir(d, firm).join("runs");
+pub fn list_runs(office: &Office, firm: &str) -> Vec<Value> {
+    let dir = office.firm_dir(firm).join("runs");
     let mut out: Vec<Value> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -68,7 +67,7 @@ pub fn list_runs(d: &Core, firm: &str) -> Vec<Value> {
         })
         .collect();
     out.sort_by(|a, b| b["run"].as_str().cmp(&a["run"].as_str()));
-    if let Ok(r) = d.office().run(firm) {
+    if let Ok(r) = office.run(firm) {
         for v in out.iter_mut() {
             if v["run"] == json!(r.id) {
                 v["state"] = json!(*r.state.lock().unwrap());
@@ -88,8 +87,8 @@ pub const RUN_NOTE: &str = "note.txt";
 const MAX_NOTE: usize = 4000;
 
 /// Sets the board's note on a run; empty removes it.
-pub fn set_note(d: &Core, firm: &str, run: &str, note: &str) -> Result<()> {
-    let dir = run_dir(d, firm, run)?;
+pub fn set_note(office: &Office, firm: &str, run: &str, note: &str) -> Result<()> {
+    let dir = run_dir(office, firm, run)?;
     let note = note.trim();
     if note.len() > MAX_NOTE {
         bail!("keep the note under {MAX_NOTE} bytes");
@@ -170,28 +169,28 @@ fn kickoff(mail: &Value) -> Value {
     json!({ "subject": mail["subject"], "preview": preview, "body": body, "to": mail["to"], "ts": mail["ts"] })
 }
 
-pub fn run_dir(d: &Core, firm: &str, run: &str) -> Result<PathBuf> {
+pub fn run_dir(office: &Office, firm: &str, run: &str) -> Result<PathBuf> {
     if !zapper_policy::valid_worker_name(firm) {
         bail!("{firm:?} is not a firm name");
     }
     let id = if run == "current" {
-        d.office().run(firm)?.id.clone()
+        office.run(firm)?.id.clone()
     } else {
         run.to_string()
     };
     if !is_run_id(&id) {
         bail!("{run:?} is not a run id");
     }
-    let dir = firm_dir(d, firm).join("runs").join(&id);
+    let dir = office.firm_dir(firm).join("runs").join(&id);
     if !dir.is_dir() {
         bail!("no run {id} of firm {firm}");
     }
     Ok(dir)
 }
 
-pub fn prune(d: &Core, firm: &str, run: &str) -> Result<()> {
-    let dir = run_dir(d, firm, run)?;
-    if let Ok(r) = d.office().run(firm) {
+pub fn prune(office: &Office, firm: &str, run: &str) -> Result<()> {
+    let dir = run_dir(office, firm, run)?;
+    if let Ok(r) = office.run(firm) {
         if r.dir == dir && !r.ended() {
             bail!("run {run} is running; stop the firm first");
         }
