@@ -93,6 +93,36 @@ Drop the `(d, run)` pair; use `run.client`. One file per task; green + commit ea
       for sessions/admit/registrations/resolve/layers_for; SSE for `subscribe`).
 - [ ] **4.2** Add any missing API routes in `zapper-api` the `Remote` methods call.
 
+## Parallelism & subagents
+
+It's a single crate (compiles as a whole) and the hard phases are design-bearing, so
+parallelism helps only in the wide mechanical middle. Isolate parallel work in git
+**worktrees** (`isolation: "worktree"`), each on disjoint files, merged by the lead.
+
+**One hand / sequential (lead does these — design-bearing or risky):**
+- 1.1 (`driver::start`), **all of Phase 1** (the trait is the keystone; one coherent shape),
+  2.5 (the http extractor — cross-cutting), **Phase 3** (driving path — the one place fakes
+  can hide a real bug), **Phase 5** (structural split). The trait surface is owned by the
+  lead; subagents must not add trait methods (flag a gap instead — avoids conflicts).
+
+**Parallelisable after Phase 1 is fixed — mechanical, disjoint files, mergeable:**
+- Phase 2 logic conversions: **2.1 `contracts.rs`, 2.2 `access.rs`, 2.3 `security.rs`,
+  2.4 `scenario.rs`/`workforce.rs`/`facility.rs`, 2.6 `run.rs`** — one worktree subagent per
+  file/cluster. Brief: "drop the `(d: &Core, run)` pair; use `run.client` for daemon ops;
+  keep `cargo test -p zapper-office` green; do **not** change `OfficeClient` — if a method is
+  missing, stop and report it." A **fork** (inherits this context/pattern) suits these better
+  than a fresh agent.
+
+**Parallelisable after the API routes exist (4.2):**
+- Phase 4 `Remote` impls by method-group — sessions / `admit` / registrations / `resolve` /
+  events — each a worktree subagent writing the `Remote` method + exercising its route.
+
+**Caveats:** worktrees multiply build cost (each recompiles deps); merges must stay on
+disjoint files; anything touching `client.rs` (the trait), `http.rs` (2.5), or the foreman
+(Phase 3) is lead-only. Net: parallelism is a ~2–4× fan-out on the Phase-2/4 middle, not on
+the hard ends — spawn it only when Phase 1 is locked, else the subagents thrash on a moving
+trait.
+
 ## Phase 5 — own listener + the split (D3 = A)
 - [ ] **5.1** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
       workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
