@@ -8,7 +8,6 @@
 //! startup file, and `GET /v1/config/diff` shows what save would change.
 
 pub(crate) mod addr;
-pub(crate) mod api_error;
 pub(crate) mod approvals;
 pub(crate) mod builds;
 pub(crate) mod clients;

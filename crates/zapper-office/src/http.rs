@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use super::{drive, security};
 use crate::Office;
-use zapper_core::ApiError;
+use zapper_api_types::ApiError;
 
 /// The office's own state: the handlers reach firms, runs and the running
 /// config through it (`run`, `active`, `firm_dir`, `client().config()`),
