@@ -21,12 +21,11 @@ use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::FirmRun;
-use zapper_api_types::{NewSession, SessionInfo};
+use zapper_api_types::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
 #[cfg(test)]
 use zapper_core::Core;
 #[cfg(test)]
 use zapper_core::Session;
-use zapper_core::{ServiceSpec, ServiceTarget};
 use zapper_util::random_id;
 
 /// Ports the cluster VM forwards from vsock to itself.

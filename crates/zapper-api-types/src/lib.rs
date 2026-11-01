@@ -9,6 +9,7 @@
 //! core re-exports these so its internal callers are unchanged.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -156,4 +157,33 @@ impl NewSession {
             ssh: false,
         }
     }
+}
+
+/// Where a service's connections go, as the API carries it — the
+/// serializable targets a client (The Office, the operator) can register.
+/// The core's own `services::Target` additionally has an in-process
+/// `Handler` variant, which never crosses the API; it converts from this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServiceTarget {
+    /// An address on the host's network, still subject to the address policy.
+    Addr(SocketAddr),
+    /// A unix socket in the daemon's `state/services/` directory, served by a
+    /// program on the host. With `tls`, the daemon terminates TLS.
+    Socket { name: String, tls: bool },
+    /// A port of another session's VM, over vsock.
+    Session { id: String, port: u32 },
+}
+
+/// A service to register through the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSpec {
+    /// The name sessions use; `*.` in front stands for any name under it.
+    pub name: String,
+    pub port: u16,
+    /// The sessions that may use it: those with all these labels; every
+    /// session when empty.
+    pub sessions: BTreeMap<String, String>,
+    pub target: ServiceTarget,
+    /// Who registered it, shown in the list.
+    pub owner: String,
 }

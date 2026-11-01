@@ -11,9 +11,9 @@ use futures_util::future::BoxFuture;
 use hyper::Method;
 use serde_json::Value;
 // The socket client, shared with the workbench.
-use zapper_api_types::{NewSession, SessionInfo};
+use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
 pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
-use zapper_core::{ApprovalApi, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi};
+use zapper_core::{ApprovalApi, RuleApi, ServiceApi, ServiceInfo, SessionApi};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRequest, NetRule, Scope};
@@ -246,7 +246,7 @@ impl OfficeClient for Local {
         self.0.remove_decider(id)
     }
     fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
-        self.0.add_service(spec)
+        self.0.add_service(spec.into())
     }
     fn add_zone(
         &self,
@@ -480,18 +480,11 @@ impl OfficeClient for Remote {
         .unwrap_or(false)
     }
     fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
-        use zapper_core::ServiceTarget as T;
+        use zapper_api_types::ServiceTarget as T;
         let to = match spec.target {
             T::Socket { name, tls } => serde_json::json!({ "socket": name, "tls": tls }),
             T::Session { id, port } => serde_json::json!({ "session": id, "port": port }),
             T::Addr(addr) => serde_json::json!({ "addr": addr }),
-            T::Handler { .. } => {
-                // An in-process handler can't cross the socket — the office
-                // serves such a facility (its git) on a socket instead.
-                return Err(anyhow::anyhow!(
-                    "a handler service cannot be registered over the socket"
-                ));
-            }
         };
         let body = serde_json::json!({ "name": spec.name, "port": spec.port, "sessions": spec.sessions, "to": to });
         let v = block(self.0.call(Method::POST, "/v1/services", Some(&body)))?
@@ -756,7 +749,8 @@ firms:
     async fn remote_over_the_socket() {
         use std::collections::BTreeMap;
 
-        use zapper_core::{ConfigApi, ServiceApi, ServiceSpec, ServiceTarget};
+        use zapper_api_types::{ServiceSpec, ServiceTarget};
+        use zapper_core::{ConfigApi, ServiceApi};
 
         use super::OfficeClient;
 
