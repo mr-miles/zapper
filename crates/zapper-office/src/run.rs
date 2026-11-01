@@ -645,7 +645,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
     *run.state.lock().unwrap() = RunState::Running;
     run.journal.append("run", json!({ "state": "running" }));
     for w in run.rts() {
-        tokio::spawn(foreman::run(d.clone(), run.clone(), w));
+        tokio::spawn(foreman::run(run.clone(), w));
     }
     tokio::spawn(ticker(d.clone(), run.clone()));
     tokio::spawn(booter(d.clone(), run.clone(), boot_rx));
@@ -716,7 +716,7 @@ async fn booter(
                     }
                 }
                 Ok(()) => {
-                    tokio::spawn(foreman::run(d.clone(), run.clone(), w));
+                    tokio::spawn(foreman::run(run.clone(), w));
                 }
                 Err(e) => {
                     run.set_state(&w, WorkerState::Error, Some(format!("{e:#}")));

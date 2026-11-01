@@ -18,7 +18,6 @@ use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
 use zapper_core::driver::{self, Observer, Out, Proc};
 use zapper_core::harness::{self, Headless, Outcome};
-use zapper_core::Core;
 use zapper_core::Session;
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
@@ -105,14 +104,13 @@ async fn nap(run: &FirmRun, w: &WorkerRt, secs: u64) {
 /// Why the worker can't take a turn now: the state to show, its detail,
 /// and how long to wait before looking again.
 fn blocked(
-    d: &Core,
     run: &FirmRun,
     w: &WorkerRt,
     backoff_until: f64,
 ) -> Option<(WorkerState, Option<String>, u64)> {
-    // Through the core's interface (`/v1/record`), not its internals, so the
-    // same gate holds once the office is a process of its own.
-    blocked_by(run, w, backoff_until, d.record_writable())
+    // Through the office's client, not the core's internals, so the same gate
+    // holds once the office is a process of its own.
+    blocked_by(run, w, backoff_until, run.client.record_writable())
 }
 
 /// As `blocked`, given whether the record can be written.
@@ -153,7 +151,7 @@ pub(crate) fn blocked_by(
     None
 }
 
-pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
+pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
     let transcript = match Journal::create(
         &run.dir
             .join("transcripts")
@@ -178,7 +176,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
             return;
         }
         let Some(session) = w.session() else { return };
-        if let Some((st, detail, secs)) = blocked(&d, &run, &w, backoff_until) {
+        if let Some((st, detail, secs)) = blocked(&run, &w, backoff_until) {
             run.set_state(&w, st, detail);
             nap(&run, &w, secs).await;
             continue;
@@ -193,7 +191,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 };
                 // Things change while queued (a pause, the budget, the
                 // record): the gates again, before the turn.
-                if let Some((st, detail, secs)) = blocked(&d, &run, &w, backoff_until) {
+                if let Some((st, detail, secs)) = blocked(&run, &w, backoff_until) {
                     drop(p);
                     run.set_state(&w, st, detail);
                     nap(&run, &w, secs).await;

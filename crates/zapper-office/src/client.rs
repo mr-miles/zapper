@@ -28,6 +28,9 @@ pub trait OfficeClient: Send + Sync {
     fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule;
     /// Removes rule `id` from role layer `name`; whether it was there.
     fn remove_layer_rule(&self, name: &str, id: &str) -> bool;
+    /// Whether the record can be written now (the office takes no firm turn
+    /// while it can't).
+    fn record_writable(&self) -> bool;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -39,6 +42,9 @@ impl OfficeClient for Local {
     }
     fn remove_layer_rule(&self, name: &str, id: &str) -> bool {
         self.0.remove_layer_rule(name, id)
+    }
+    fn record_writable(&self) -> bool {
+        self.0.record_writable()
     }
 }
 
@@ -62,6 +68,12 @@ impl OfficeClient for Remote {
         )
         .map(|a| a.status.is_success())
         .unwrap_or(false)
+    }
+    fn record_writable(&self) -> bool {
+        block(self.0.get("/v1/record"))
+            .ok()
+            .and_then(|a| a.body["healthy"].as_bool())
+            .unwrap_or(false)
     }
 }
 
