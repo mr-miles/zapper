@@ -71,7 +71,17 @@ surface is the real load-bearing work; the file conversions are downstream of it
   `zapper-driver`, re-exported as `zapper_core::driver::DriveStream`, modelled on the daemon's
   `services::Io`. `SessionInfo` grew public `id()`/`label()`/`profile()` accessors (its fields
   are `pub(crate)` to the core). Covered by `client::tests::local_session_surface` (fakes).
-- **Next task: P1-c** (the `WorkerRt`/foreman `attach` driving rework — the care point).
+- **P1-c** done: the foreman drives over `run.client.attach(id, req)` and holds no
+  `Arc<Session>` — `foreman::start` takes the session id + harness kind from
+  `WorkerRt::driven()`, `driver_of`/`use zapper_core::Session` are gone. The `Arc<Session>`
+  field stays on `WorkerRt` as the transitional store the other readers (facility/security/
+  drive) still use; `driven()` derives id+kind from it until P2-b migrates those onto the
+  client, at which point the `Arc` is replaced by stored id+info. Foreman tests (full turns
+  over `shell_vm`) pass through the client now.
+- **P1 is complete.** Next: **P2** downstream conversions, now unblocked. Start with **P2-a**
+  (registration leaves → a `serve_facility` RAII guard, reading `run.socket_dir` from P1-a) and
+  the **P2-b** logic/plumbing files, which can fan out (worktree/fork subagents, disjoint files)
+  once the trait additions each needs are settled. **P2-c** (the http extractor) is lead.
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
@@ -110,10 +120,14 @@ Do these first; the file conversions (P2) are downstream of them.
       `AsyncRead+AsyncWrite+Unpin+Send` trait in `zapper-driver` with a blanket impl). `Local`
       only; `Remote` stubbed for P3. Async methods return `BoxFuture` (no `async-trait` dep; the
       trait is held as `Arc<dyn>`). `SessionInfo` gained `id()`/`label()`/`profile()`.
-- [ ] **P1-c** The session-handle rework — **the care point** (where fakes can hide a real
-      driving bug; do with fresh focus). `WorkerRt.session: Arc<Session>` → id + `SessionInfo`;
-      the foreman drives via `run.client.attach(id, req)` + `driver::start`; `foreman::start`
-      no longer needs an `Arc<Session>`.
+- [x] **P1-c** The session-handle rework — **the care point**. The foreman drives via
+      `run.client.attach(id, req)` + `driver::start` and holds no `Arc<Session>`:
+      `foreman::start` takes the session id + harness kind (from `WorkerRt::driven()`), not a
+      `Session`; `driver_of` is gone (`harness::headless(kind)` inline). The `Arc<Session>`
+      field stays on `WorkerRt` as the transitional store for the facility/security/drive
+      readers (so `driven()` derives id+kind from it); those move onto the client in P2-b, after
+      which the field becomes stored id+info and the `Arc` goes. Driving correctness is covered
+      by the existing `foreman_tests` (full turns over `shell_vm`, now through the client).
 
 ## P2 — downstream conversions (unblocked by P1; parallelisable — see map)
 Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_for`,

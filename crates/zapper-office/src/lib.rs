@@ -186,6 +186,23 @@ impl WorkerRt {
     pub fn session(&self) -> Option<Arc<Session>> {
         self.session.lock().unwrap().clone()
     }
+
+    /// What the foreman drives: the worker's session id and the harness kind
+    /// its agent runs, once its VM is up. The foreman goes through this (and
+    /// `run.client.attach`) rather than the `Arc<Session>`, so it holds no
+    /// session handle and reaches the guest over the client — the same path
+    /// in-process and, in time, over the socket.
+    ///
+    /// Derived from `session` while that `Arc<Session>` is still held for the
+    /// facility, security and drive readers; those move onto the client in
+    /// P2-b, after which this becomes stored state and the `Arc` goes.
+    pub fn driven(&self) -> Option<(String, String)> {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| (s.id.clone(), s.resolved.agent.kind.clone()))
+    }
 }
 
 /// Turn and token use, reset at midnight UTC.

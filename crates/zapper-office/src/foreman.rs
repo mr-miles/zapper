@@ -17,8 +17,7 @@ use zapper_policy::proto::ShellRequest;
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
 use zapper_core::driver::{self, Observer, Out, Proc};
-use zapper_core::harness::{self, Headless, Outcome};
-use zapper_core::Session;
+use zapper_core::harness::{self, Outcome};
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;
@@ -59,17 +58,22 @@ impl Observer for Watch {
     }
 }
 
+/// Starts the worker's agent: a terminal opened in its VM over the office's
+/// client (`attach`), driven by its harness. The office reaches the guest
+/// through the client, so this holds no `Arc<Session>` — the same path works
+/// in-process and, once the office is its own process, over the socket.
 async fn start(
     run: &Arc<FirmRun>,
     w: &Arc<WorkerRt>,
-    s: &Arc<Session>,
+    id: &str,
+    kind: &str,
     transcript: Arc<Journal>,
     resume: Option<&str>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
-    let conv = driver_of(s)?.conversation(resume);
+    let conv = harness::headless(kind)?.conversation(resume);
     let req = ShellRequest::exec(conv.argv());
-    let stream = s.open_shell(req).await?.stream;
+    let stream = run.client.attach(id, req).await?;
     let watch = Watch {
         run: run.clone(),
         w: w.clone(),
@@ -77,11 +81,6 @@ async fn start(
         session_id,
     };
     Ok(driver::start(stream, conv, Arc::new(watch)))
-}
-
-/// The worker's harness driver, from its profile's `agent.kind`.
-fn driver_of(s: &Session) -> Result<&'static dyn Headless> {
-    harness::headless(&s.resolved.agent.kind)
 }
 
 fn idle_state(run: &FirmRun, w: &WorkerRt) -> WorkerState {
@@ -175,7 +174,7 @@ pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
         if run.ended() {
             return;
         }
-        let Some(session) = w.session() else { return };
+        let Some((id, kind)) = w.driven() else { return };
         if let Some((st, detail, secs)) = blocked(&run, &w, backoff_until) {
             run.set_state(&w, st, detail);
             nap(&run, &w, secs).await;
@@ -208,7 +207,8 @@ pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
             match start(
                 &run,
                 &w,
-                &session,
+                &id,
+                &kind,
                 transcript.clone(),
                 resume.as_deref(),
                 session_id.clone(),
