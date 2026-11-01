@@ -36,8 +36,13 @@ Branch: `feat/office-process-step4` (on top of `feat/office-process`, merged to 
 
 ## STATUS (update on each commit)
 - Phase 0 (foundation): **done** — see commits `39d6026`…`d76a7aa`.
-- 1.1 (`driver::start` generic): **done**.
-- **Next task: 1.2** (`OfficeClient::attach`, `Local`).
+- 1.1 (`driver::start` generic): **done** (`9bbe94c`).
+- **Suggested next: 1.4 (`admit`) then 1.5 (`serve_facility`)** — chunky, have current
+  callers, testable now, no session rework.
+- **1.2 (`attach`) is deferred into 3.2:** its shape (the `ShellRequest`, pulling the
+  conversation/driver into the office) is only clear when wiring the foreman; defining it
+  abstractly now would be revised there. 1.1 is the part that had to come first.
+- 1.3 (session-by-id) is entangled with Phase 3 (session storage) — do alongside 3.1.
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107` (write half `Proc.stdin: OwnedWriteHalf` at :45); foreman driving
