@@ -52,6 +52,42 @@ it before merge. The `target/` dir had filled the disk mid-session — cleared s
   layers natively (with §2 rule events); left as a later cleanup to keep the migration
   behaviour-preserving.
 
+## Step 4 — the `zapper-office` binary (scaffold only)
+
+On branch `feat/office-process-step4` (off `feat/office-process`). Follows the workbench's
+proven pattern (its own `main.rs`, a `Zapper` client over the daemon's unix socket, its own
+listener). **Scaffold only — not a working separation yet:**
+
+- Added `crates/zapper-office/src/client.rs` (the `Zapper` API client, same as the
+  workbench's — a candidate for a shared crate per §7) and `src/main.rs` + a `[[bin]]`
+  target. `zapper-office serve` connects to the daemon, confirms it, and serves a
+  placeholder dashboard on its own port; `zapper-office url` prints the address.
+- The **lib is untouched**, so the office still runs in-process via `zapper serve`
+  (feature `office`). The binary does **not** yet run firms.
+
+The real conversion that remains (the bulk of step 4), from the `&Core` method survey
+(≈40 methods over 63 sites):
+
+- **Office-own state — not a socket call:** `office()` (32 uses) returns the office's own
+  `Office` state; in a standalone process the office holds it directly. Rehome it off `Core`.
+- **Daemon operations → `client::Zapper` calls:** `create_session`, `stop_session`,
+  `forget_session`, `sessions`, `session`, `add_session_rule`, `remove_rule`, `services`,
+  `add_service`/`add_zone`, `add_mcp_socket`/`remove_mcp_server`, `add_decider_socket`/
+  `remove_decider`, `config`/`with_config`/`change`/`check_config`/`add_config_check`,
+  `record_writable`, `layers_for`, `resolve`, `socket_dir`/`state_dir`/`startup_path`.
+  Most already have HTTP routes; any that don't need one added.
+- **In-process couplings to replace before the split:**
+  - `named_layer()` returns a shared `Arc<RwLock<Policy>>` the office mutates — must become
+    API layer/rule routes (finish §5's RuleKeeper retirement: add/remove a named layer's
+    rules over the API). **This is the main blocker.**
+  - `add_rule_keeper(Arc<dyn RuleKeeper>)` — an in-process callback; replace with the office
+    following `rule` events (§2) and removing standing approvals via the rule routes.
+  - `on_shutdown` — the office manages its own lifecycle in its process (§8).
+  - `test_session` — test-only; the office's tests move to the API-over-socket pattern (§10).
+- Then `zapper-office` drops `zapper-core` from its production deps (dev-only, as the
+  workbench has it), `zapper` stops linking the office, and `OFFICE=1` means "also run
+  `zapper-office`". Validate with `make test-e2e-office` on a KVM host.
+
 ## §6 — the driver as its own crate
 
 - **Scope taken = the proposal's literal §6(a):** "the harnesses' conversation code and

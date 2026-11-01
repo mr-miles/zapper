@@ -20,13 +20,20 @@ base64 = "0.22"
 bytes = "1"
 futures-util = "0.3"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["server", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ring = "0.17"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+
+[[bin]]
+name = "zapper-office"
+path = "src/main.rs"
 
 [dev-dependencies]
 zapper-core = { path = "../zapper-core", features = ["test-util"] }
