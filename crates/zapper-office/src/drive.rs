@@ -125,10 +125,13 @@ pub fn guest_path(p: &str, home: &str) -> Result<String> {
     Ok(p.to_string())
 }
 
-/// Runs a command as root in the guest, feeding `input` to it and writing its
-/// output to `out`; returns its exit code and stderr.
+/// Runs a command as root in session `id`'s guest over the office's client,
+/// feeding `input` to it and streaming its output to `out`; returns its exit
+/// code and stderr. Over `attach`, so it works in-process and over the socket
+/// and streams rather than buffering (an artifact tar may be large).
 pub async fn guest_command<R, W>(
-    s: &Session,
+    client: &dyn crate::client::OfficeClient,
+    id: &str,
     argv: Vec<String>,
     input: Option<R>,
     out: W,
@@ -138,7 +141,7 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let stream = s.open_shell(ShellRequest::system(argv)).await?.stream;
+    let stream = client.attach(id, ShellRequest::system(argv)).await?;
     pump_command(stream, input, out, limit).await
 }
 
@@ -415,7 +418,8 @@ pub async fn publish(
         let archive = tmp.join("archive.tar");
         let file = tokio::fs::File::create(&archive).await?;
         let (code, err) = guest_command(
-            s,
+            run.client.as_ref(),
+            &s.id,
             argv,
             None::<tokio::io::Empty>,
             file,
@@ -676,7 +680,7 @@ pub async fn fetch(
             "mkdir -p '{dest}' && tar --no-same-owner -xf - -C '{dest}' && chown -R 1000:1000 '{dest}'",
             dest = dest.replace('\'', "")
         );
-        let (code, err) = guest_command(s, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
+        let (code, err) = guest_command(run.client.as_ref(), &s.id, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
         let _ = tar.wait().await;
         if code != 0 {
             bail!("writing into {dest} failed: {}", err.trim());
