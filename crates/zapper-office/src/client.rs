@@ -35,6 +35,9 @@ pub trait OfficeClient: Send + Sync {
     fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule;
     /// Removes rule `id` from role layer `name`; whether it was there.
     fn remove_layer_rule(&self, name: &str, id: &str) -> bool;
+    /// Empties a firm role's shared layer `name`, at the start of a run (the
+    /// layer registry outlives a run, which starts with no approvals).
+    fn reset_layer(&self, name: &str);
     /// Whether the record can be written now (the office takes no firm turn
     /// while it can't).
     fn record_writable(&self) -> bool;
@@ -140,6 +143,9 @@ impl OfficeClient for Local {
     }
     fn remove_layer_rule(&self, name: &str, id: &str) -> bool {
         self.0.remove_layer_rule(name, id)
+    }
+    fn reset_layer(&self, name: &str) {
+        *self.0.named_layer(name).write().unwrap() = zapper_policy::Policy::default();
     }
     fn record_writable(&self) -> bool {
         self.0.record_writable()
@@ -265,6 +271,12 @@ impl OfficeClient for Remote {
         )
         .map(|a| a.status.is_success())
         .unwrap_or(false)
+    }
+    fn reset_layer(&self, _name: &str) {
+        // A run starts with its role layers empty; over the socket the bin
+        // will clear them through a rules route (P3-b-style). Unreachable
+        // until the bin drives run creation (P4-d).
+        unimplemented!("Remote::reset_layer (needs a clear-role-layer route)")
     }
     fn record_writable(&self) -> bool {
         block(self.0.get("/v1/record"))

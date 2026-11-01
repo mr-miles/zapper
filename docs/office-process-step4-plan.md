@@ -262,10 +262,17 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
 - Then **P4-a** (relocate `http.rs` + shared gateway crate), **P4-c** (drop the `zapper-core`
   prod dep; `Local` becomes dev-only), **P4-d** (`OFFICE=1`).
 
-- [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
-      workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
-- [ ] **P4-b** The office holds its own `Office` state (its registry), not `d.office()`;
-      rehome the 32 `office()` uses; the bin configures its state/socket dirs.
+- [~] **P4-a** The shared crate is extracted — **`zapper-client`** holds the socket `Zapper`
+      client, `serve_socket` (the accept + read-the-daemon's-first-line loop the office's three
+      socket facilities shared), and `gateway` (the `Host`/`Origin`/cookie auth, parameterised by
+      the UI marker). The workbench and the office both use the client + `serve_socket`; the
+      workbench uses the gateway auth and the office will when it serves its own listener.
+      **Left:** relocate `http.rs` onto that listener (the office-state swap + a client `config`
+      + `promote`'s config-mutation), which is coupled to the bin (P4-d).
+- [~] **P4-b** The office holds its own `Office` (`FirmRun.office()`, `Office.state_dir`); firm
+      logic and the disk helpers reach the registry/run files without `Core`. **Left:** the
+      run-management/startup (`create_run`/`up_with`/`boot`/`lib::start`) and the http read
+      endpoints still take `&Core` in-process — they move to the bin in P4-d.
 - [ ] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
 - [ ] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
       `zapper-office`.

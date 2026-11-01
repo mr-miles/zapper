@@ -446,12 +446,13 @@ fn create_run(
     }
     let journal = Journal::create(&dir.join("journal.jsonl"))?;
     let domain = firm.domain(name);
-    // Each role's shared layer lives in the core, named `<firm>/<role>`;
+    // Each role's shared layer lives in the daemon, named `<firm>/<role>`;
     // workers attach it by their `firm-role` label, and the office changes it
-    // through `client`. Reset to empty for this run (the registry outlives a
+    // through the client. Reset to empty for this run (the registry outlives a
     // run, which starts with no approvals).
+    let client: Arc<dyn crate::client::OfficeClient> = Arc::new(crate::client::Local(d.clone()));
     for r in firm.roles.keys() {
-        *d.named_layer(&format!("{name}/{r}")).write().unwrap() = Policy::default();
+        client.reset_layer(&format!("{name}/{r}"));
     }
     let workers = firm
         .workers
@@ -484,7 +485,7 @@ fn create_run(
         security: Mutex::new(security::Security::default()),
         contracts: Mutex::new(contracts::Contracts::default()),
         access: Mutex::new(access::Access::default()),
-        client: Arc::new(crate::client::Local(d.clone())),
+        client,
         office: Arc::downgrade(&d.office()),
         turns: Arc::new(Semaphore::new(firm.budget.max_concurrent as usize)),
         usage: Mutex::new(Usage {
