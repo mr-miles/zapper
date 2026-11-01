@@ -81,53 +81,25 @@ impl Facilities {
 }
 
 /// Reads the caller line the daemon sends first on a socket service's
-/// connection — a byte at a time, so what follows (the guest's stream, TLS
-/// already terminated) stays unread — naming the session and its labels from
-/// the VM, never from the guest.
-async fn git_caller(
-    stream: &mut tokio::net::UnixStream,
-) -> Option<zapper_policy::facility::ServiceCaller> {
-    use tokio::io::AsyncReadExt;
-    let mut line = Vec::new();
-    let mut b = [0u8; 1];
-    while line.len() < 4096 {
-        match stream.read(&mut b).await {
-            Ok(1) if b[0] == b'\n' => return serde_json::from_slice(&line).ok(),
-            Ok(1) => line.push(b[0]),
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Serves the firm's git server on `listener`, a socket in the daemon's
-/// `state/services/`: for each connection the daemon names the caller in a
-/// first line (the member is its `member` label, from the VM), then the
-/// office answers the guest's HTTP/1.1 — the same server, now reachable
-/// whether the office runs in the daemon or as a process of its own.
-async fn serve_git(run: Weak<FirmRun>, listener: std::os::unix::net::UnixListener) {
-    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+/// Answers one git connection: the daemon's first line names the caller
+/// (`ServiceCaller`; the member is its `member` label, from the VM), then the
+/// office speaks the guest's HTTP/1.1 — the same server, reachable whether the
+/// office runs in the daemon or as a process of its own.
+async fn answer_git(run: Weak<FirmRun>, line: Vec<u8>, stream: tokio::net::UnixStream) {
+    let Ok(who) = serde_json::from_slice::<zapper_policy::facility::ServiceCaller>(&line) else {
         return;
     };
-    while let Ok((mut stream, _)) = listener.accept().await {
-        let run = run.clone();
-        tokio::spawn(async move {
-            let Some(who) = git_caller(&mut stream).await else {
-                return;
-            };
-            let Some(run) = run.upgrade() else {
-                return;
-            };
-            let member = who.labels.get("member").cloned().unwrap_or_default();
-            let svc = hyper::service::service_fn(move |req| {
-                let (run, member) = (run.clone(), member.clone());
-                async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
-            });
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), svc)
-                .await;
-        });
-    }
+    let Some(run) = run.upgrade() else {
+        return;
+    };
+    let member = who.labels.get("member").cloned().unwrap_or_default();
+    let svc = hyper::service::service_fn(move |req| {
+        let (run, member) = (run.clone(), member.clone());
+        async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
 }
 
 fn add_service(run: &FirmRun, name: String, port: u16, target: ServiceTarget) -> Result<()> {
@@ -165,7 +137,11 @@ pub fn register(run: &Arc<FirmRun>) -> Result<()> {
             &run.socket_dir,
             &socket,
             crate::client::Registered::Service,
-            move |listener| serve_git(weak, listener),
+            move |listener| {
+                zapper_client::serve_socket(listener, move |line, stream| {
+                    answer_git(weak.clone(), line, stream)
+                })
+            },
             |socket| {
                 run.client.add_service(ServiceSpec {
                     name,

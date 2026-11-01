@@ -154,6 +154,53 @@ impl Zapper {
     }
 }
 
+/// The largest first line a facility socket accepts from the daemon (the
+/// caller line / MCP or ask request). The daemon sizes what it sends; this is
+/// only a safety bound.
+const MAX_LINE: usize = 1 << 20;
+
+/// Reads the first line the daemon sends on a facility socket connection — a
+/// byte at a time, so whatever follows (a guest's TLS-terminated stream) stays
+/// in `stream` for the handler. `None` on a short or over-long line.
+pub async fn read_line(stream: &mut UnixStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while line.len() < MAX_LINE {
+        match stream.read(&mut b).await {
+            Ok(1) if b[0] == b'\n' => return Some(line),
+            Ok(1) => line.push(b[0]),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Serves a facility's socket (the office's tools, decider, git server; the
+/// workbench's facilities): for each connection, reads the daemon's first line
+/// (the caller line, or an MCP/ask request) and hands `(line, stream)` to
+/// `handler`, which parses the line and either replies on the stream or speaks
+/// HTTP over it. Folds the accept loop all facilities repeat. The listener is
+/// bound by the caller (under the daemon's `state/services/`); this converts
+/// and serves it.
+pub async fn serve_socket<H, Fut>(listener: std::os::unix::net::UnixListener, handler: H)
+where
+    H: Fn(Vec<u8>, UnixStream) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+        return;
+    };
+    while let Ok((mut stream, _)) = listener.accept().await {
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            if let Some(line) = read_line(&mut stream).await {
+                handler(line, stream).await;
+            }
+        });
+    }
+}
+
 /// `s` as a URL's query value (percent-encoded).
 pub fn url_encode(s: &str) -> String {
     s.bytes()

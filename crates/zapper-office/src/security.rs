@@ -1169,53 +1169,34 @@ fn refer(run: &Weak<FirmRun>, call: &AskCall) -> Result<Referral> {
 /// `ask` is referred to the officers; an `allowed` note uses up a once-only
 /// approval. The run is held weakly, so a stopped firm's socket refers
 /// nothing.
-async fn serve(run: Weak<FirmRun>, listener: std::os::unix::net::UnixListener) {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+async fn answer_ask(run: Weak<FirmRun>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
+    let Ok(call) = serde_json::from_slice::<AskCall>(&line) else {
         return;
     };
-    while let Ok((stream, _)) = listener.accept().await {
-        let run = run.clone();
-        tokio::spawn(async move {
-            let (r, mut w) = stream.into_split();
-            let mut line = Vec::new();
-            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
-            if tokio::io::BufReader::new(r)
-                .take(max + 1)
-                .read_until(b'\n', &mut line)
-                .await
-                .is_err()
-            {
-                return;
+    match call.method {
+        AskMethod::Allowed => {
+            if let (Some(run), Some(rule)) = (run.upgrade(), call.rule.as_deref()) {
+                used(&run, rule);
             }
-            let Ok(call) = serde_json::from_slice::<AskCall>(&line) else {
-                return;
+            // A note: nothing to answer.
+        }
+        AskMethod::Ask => {
+            let reply = match refer(&run, &call) {
+                Ok(r) => AskReply {
+                    referral: Some(r),
+                    error: None,
+                },
+                Err(e) => AskReply {
+                    referral: None,
+                    error: Some(format!("{e:#}")),
+                },
             };
-            match call.method {
-                AskMethod::Allowed => {
-                    if let (Some(run), Some(rule)) = (run.upgrade(), call.rule.as_deref()) {
-                        used(&run, rule);
-                    }
-                    // A note: nothing to answer.
-                }
-                AskMethod::Ask => {
-                    let reply = match refer(&run, &call) {
-                        Ok(r) => AskReply {
-                            referral: Some(r),
-                            error: None,
-                        },
-                        Err(e) => AskReply {
-                            referral: None,
-                            error: Some(format!("{e:#}")),
-                        },
-                    };
-                    if let Ok(mut b) = serde_json::to_vec(&reply) {
-                        b.push(b'\n');
-                        let _ = w.write_all(&b).await;
-                    }
-                }
+            if let Ok(mut b) = serde_json::to_vec(&reply) {
+                b.push(b'\n');
+                let _ = stream.write_all(&b).await;
             }
-        });
+        }
     }
 }
 
@@ -1231,7 +1212,11 @@ pub fn register(run: &Arc<FirmRun>) -> Result<()> {
         &run.socket_dir,
         &socket,
         crate::client::Registered::Decider,
-        move |listener| serve(weak, listener),
+        move |listener| {
+            zapper_client::serve_socket(listener, move |line, stream| {
+                answer_ask(weak.clone(), line, stream)
+            })
+        },
         |socket| run.client.add_decider_socket(sessions, socket),
     )?;
     run.security.lock().unwrap().decider = Some(guard);

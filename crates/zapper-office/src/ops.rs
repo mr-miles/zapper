@@ -87,7 +87,11 @@ pub fn register(run: &FirmRun) -> Result<()> {
         &run.socket_dir,
         &socket,
         crate::client::Registered::Mcp,
-        move |listener| serve(served_tools, listener),
+        move |listener| {
+            zapper_client::serve_socket(listener, move |line, stream| {
+                answer_mcp(served_tools.clone(), line, stream)
+            })
+        },
         |socket| {
             run.client
                 .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
@@ -103,61 +107,38 @@ pub fn unregister(run: &FirmRun) {
     run.tools.lock().unwrap().take();
 }
 
-/// Answers the gateway's requests on the tools' socket, one per
-/// connection: the caller as the daemon names it, never as the guest says.
-async fn serve(tools: Arc<Tools>, listener: std::os::unix::net::UnixListener) {
+/// Answers one request on the tools' socket: the caller is the `McpCall` as
+/// the daemon named it from the VM, never as the guest says.
+async fn answer_mcp(tools: Arc<Tools>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
+    use tokio::io::AsyncWriteExt;
     use zapper_policy::facility::{McpMethod, McpReply};
-    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
-        return;
+    let answer = async {
+        let call: McpCall = serde_json::from_slice(&line)?;
+        if call.server != SERVER {
+            bail!("this socket serves {SERVER}, not {}", call.server);
+        }
+        let (op, args) = match call.method {
+            McpMethod::ToolsList => ("tools".to_string(), json!({})),
+            McpMethod::ToolsCall => (
+                call.tool.clone().unwrap_or_default(),
+                call.arguments.clone().unwrap_or_else(|| json!({})),
+            ),
+        };
+        tools.handle(&call, &op, args).await
     };
-    while let Ok((stream, _)) = listener.accept().await {
-        let tools = tools.clone();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-            let (r, mut w) = stream.into_split();
-            let mut line = Vec::new();
-            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
-            if tokio::io::BufReader::new(r)
-                .take(max + 1)
-                .read_until(b'\n', &mut line)
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let answer = async {
-                let call: McpCall = serde_json::from_slice(&line)?;
-                if call.server != SERVER {
-                    bail!("this socket serves {SERVER}, not {}", call.server);
-                }
-                // The caller is as the daemon named it from the VM (the
-                // `McpCall`), not fetched back from the core: so the tools run
-                // the same whether the office is in the daemon or its own
-                // process.
-                let (op, args) = match call.method {
-                    McpMethod::ToolsList => ("tools".to_string(), json!({})),
-                    McpMethod::ToolsCall => (
-                        call.tool.clone().unwrap_or_default(),
-                        call.arguments.clone().unwrap_or_else(|| json!({})),
-                    ),
-                };
-                tools.handle(&call, &op, args).await
-            };
-            let reply = match answer.await {
-                Ok(v) => McpReply {
-                    result: Some(v),
-                    error: None,
-                },
-                Err(e) => McpReply {
-                    result: None,
-                    error: Some(format!("{e:#}")),
-                },
-            };
-            if let Ok(mut b) = serde_json::to_vec(&reply) {
-                b.push(b'\n');
-                let _ = w.write_all(&b).await;
-            }
-        });
+    let reply = match answer.await {
+        Ok(v) => McpReply {
+            result: Some(v),
+            error: None,
+        },
+        Err(e) => McpReply {
+            result: None,
+            error: Some(format!("{e:#}")),
+        },
+    };
+    if let Ok(mut b) = serde_json::to_vec(&reply) {
+        b.push(b'\n');
+        let _ = stream.write_all(&b).await;
     }
 }
 
