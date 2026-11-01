@@ -17,7 +17,6 @@ use super::mail::{Draft, Expects, Kind};
 use super::workforce::{fmt_tokens, join, let_go, room};
 use super::{now, prompts, FirmRun, WorkerState};
 use crate::firm::BOARD;
-use zapper_core::Core;
 
 /// Counter-offers before the hirer must accept or walk away.
 const MAX_ROUNDS: u32 = 3;
@@ -477,7 +476,6 @@ pub fn add(run: &FirmRun, by: &str, id: &str, worker: &str) -> Result<Value> {
 
 /// The contractor delivers: the report goes to the hirer, the contract ends.
 pub fn complete(
-    d: &Core,
     run: &Arc<FirmRun>,
     me: &str,
     id: &str,
@@ -513,14 +511,14 @@ pub fn complete(
     draft.close = true;
     draft.attachments = attachments;
     let sent = run.send(draft)?;
-    let out = end(d, run, id, "completed", "delivered");
+    let out = end(run, id, "completed", "delivered");
     Ok(
         json!({ "contract": id, "state": "completed", "report": sent.id, "returned": out["returned"] }),
     )
 }
 
 /// The candidate turns the offer down.
-pub fn decline(d: &Core, run: &Arc<FirmRun>, me: &str, id: &str, reason: &str) -> Result<Value> {
+pub fn decline(run: &Arc<FirmRun>, me: &str, id: &str, reason: &str) -> Result<Value> {
     let c = get(run, id)?;
     if c.worker != me {
         bail!("contract {id} isn't yours");
@@ -537,12 +535,12 @@ pub fn decline(d: &Core, run: &Arc<FirmRun>, me: &str, id: &str, reason: &str) -
     );
     draft.in_reply_to = last_in_thread(run, &c.thread);
     run.send(draft)?;
-    end(d, run, id, "declined", reason);
+    end(run, id, "declined", reason);
     Ok(json!({ "contract": id, "state": "declined" }))
 }
 
 /// The hirer walks away from an offer.
-pub fn withdraw(d: &Core, run: &Arc<FirmRun>, by: &str, id: &str, reason: &str) -> Result<Value> {
+pub fn withdraw(run: &Arc<FirmRun>, by: &str, id: &str, reason: &str) -> Result<Value> {
     let c = get(run, id)?;
     if c.by != by {
         bail!("contract {id} is {}'s", c.by);
@@ -558,13 +556,13 @@ pub fn withdraw(d: &Core, run: &Arc<FirmRun>, by: &str, id: &str, reason: &str) 
             }
         );
     }
-    end(d, run, id, "withdrawn", reason);
+    end(run, id, "withdrawn", reason);
     Ok(json!({ "contract": id, "state": "withdrawn" }))
 }
 
 /// A contract ends: the contractor's VM stops, and what is left of their
 /// budget returns to the hirer.
-fn end(d: &Core, run: &Arc<FirmRun>, id: &str, state: &str, reason: &str) -> Value {
+fn end(run: &Arc<FirmRun>, id: &str, state: &str, reason: &str) -> Value {
     let started = get(run, id).is_ok_and(|c| c.state == "active");
     let c = update(run, id, |c| {
         c.state = state.into();
@@ -578,7 +576,6 @@ fn end(d: &Core, run: &Arc<FirmRun>, id: &str, state: &str, reason: &str) -> Val
         super::scenario::release(run, &c.worker, &format!("contract {id} {state}"));
     }
     let out = let_go(
-        d,
         run,
         &format!("contract {id}"),
         &c.worker,
@@ -637,22 +634,22 @@ pub fn may_mail(run: &FirmRun, from: &str, recipients: &[String]) -> Result<()> 
 
 /// An active contract ends for want of budget or time. A contractor with a
 /// board line first gets a last turn to debrief the board.
-fn finish(d: &Core, run: &Arc<FirmRun>, c: &Contract, state: &'static str, reason: &'static str) {
+fn finish(run: &Arc<FirmRun>, c: &Contract, state: &'static str, reason: &'static str) {
     if !super::scenario::board_line(run, &c.worker) {
-        end(d, run, &c.id, state, reason);
+        end(run, &c.id, state, reason);
     } else if super::scenario::begin_debrief(run, &c.worker) {
-        let (d, run, c) = (d.clone(), run.clone(), c.clone());
+        let (run, c) = (run.clone(), c.clone());
         tokio::spawn(async move {
             super::scenario::debrief(&run, &c.worker, reason).await;
             if get(&run, &c.id).is_ok_and(|c| c.open()) {
-                end(&d, &run, &c.id, state, reason);
+                end(&run, &c.id, state, reason);
             }
         });
     }
 }
 
 /// Offers that went quiet lapse; due dates and spent budgets end contracts.
-pub fn tick(d: &Core, run: &Arc<FirmRun>) {
+pub fn tick(run: &Arc<FirmRun>) {
     let t = now();
     let list: Vec<Contract> = run
         .contracts
@@ -666,16 +663,16 @@ pub fn tick(d: &Core, run: &Arc<FirmRun>) {
     for c in list {
         if c.state != "active" {
             if t - c.updated > OFFER_TTL {
-                end(d, run, &c.id, "lapsed", "no answer within an hour");
+                end(run, &c.id, "lapsed", "no answer within an hour");
             }
             continue;
         }
         let spent = run.ledger.balance(&c.worker) <= 0;
         let due = c.agreed.as_ref().and_then(|a| a.due);
         if spent {
-            finish(d, run, &c, "ended", "its budget is spent");
+            finish(run, &c, "ended", "its budget is spent");
         } else if due.is_some_and(|due| t > due + GRACE) {
-            finish(d, run, &c, "ended", "the due date passed");
+            finish(run, &c, "ended", "the due date passed");
         } else if due.is_some_and(|due| t > due) && !c.due_told {
             update(run, &c.id, |c| c.due_told = true);
             run.notice(&c.worker, &format!("Contract {} is due", c.id), &format!("[Automatic notice] Contract {} was due at {}. Hand in what exists now with contract_complete: the contract ends in {} minutes either way.\n", c.id, prompts::when(due.unwrap()), (GRACE / 60.0) as u64));

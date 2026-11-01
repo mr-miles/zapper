@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use zapper_core::Core;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -391,7 +390,6 @@ pub fn screening_pending(run: &FirmRun, worker: &str) -> bool {
 /// An officer (or the board) clears a new hire, or objects; an objection
 /// cancels the hire, and the hirer gets the budget back with the reason.
 pub fn decide_screening(
-    d: &Core,
     run: &std::sync::Arc<FirmRun>,
     by: &str,
     id: &str,
@@ -447,15 +445,14 @@ pub fn decide_screening(
     if clear {
         if let Some(w) = run.rt(&s.worker) {
             if run.config.roles.get(&w.role).is_some_and(|r| r.officer) {
-                appoint(d, run, &s.worker, by);
+                appoint(run, &s.worker, by);
             }
-            super::access::grant_at_clearance(d, run, by, &s.worker, id, &grants);
+            super::access::grant_at_clearance(run, by, &s.worker, id, &grants);
             w.wake.notify_one();
         }
     } else if run.rt(&s.worker).is_some() {
         super::scenario::release(run, &s.worker, "objected to at the background check");
         super::workforce::let_go(
-            d,
             run,
             &format!("{by} (background check)"),
             &s.worker,
@@ -647,9 +644,9 @@ pub fn requeue(run: &FirmRun, from: &str) {
 
 /// A hired security officer, cleared: they join the officers. While the
 /// CEO held security alone, it passes to the officer.
-pub fn appoint(d: &Core, run: &std::sync::Arc<FirmRun>, worker: &str, by: &str) {
+pub fn appoint(run: &std::sync::Arc<FirmRun>, worker: &str, by: &str) {
     // A policy owner now: admin on everything, for as long as they hold it.
-    super::access::owner_access(d, run, worker, by);
+    super::access::owner_access(run, worker, by);
     let chart = run.chart();
     let root = chart.root().map(str::to_string);
     let mut officers = chart.security.officers.clone();

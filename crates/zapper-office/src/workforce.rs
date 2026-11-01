@@ -16,7 +16,6 @@ use zapper_policy::valid_worker_name;
 
 use super::mail::{Draft, Expects, Kind};
 use super::{now, FirmRun, Office, WorkerRt, WorkerState};
-use zapper_core::Core;
 
 /// Longest budget plan or reason, in bytes.
 const MAX_PLAN: usize = 20_000;
@@ -1187,7 +1186,7 @@ pub struct HireArgs {
 /// Hires a worker under `by`: checks the role, the money and the host,
 /// adds them to the chart, funds them, boots their VM, and sends them the
 /// brief as their first assignment.
-pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
+pub async fn hire(run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     let hirer = run.worker(by)?;
     let can = run
         .config
@@ -1290,7 +1289,6 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     // officer: its own check clears them at once.
     if role.officer && super::security::is_first_officer(run, &name) {
         let _ = super::security::decide_screening(
-            d,
             run,
             BOARD,
             &check,
@@ -1408,13 +1406,7 @@ pub(super) fn join(
 
 /// Lets a worker go: their VM stops, their reports and open work move to
 /// their manager, and so does their unspent budget.
-pub async fn release(
-    d: &Core,
-    run: &Arc<FirmRun>,
-    by: &str,
-    worker: &str,
-    reason: &str,
-) -> Result<Value> {
+pub async fn release(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str) -> Result<Value> {
     let chart = run.chart();
     if chart.worker(worker).is_none() {
         bail!("no worker {worker}");
@@ -1436,7 +1428,7 @@ pub async fn release(
     if super::scenario::begin_debrief(run, worker) {
         super::scenario::debrief(run, worker, reason.trim()).await;
     }
-    Ok(let_go(d, run, by, worker, reason, true))
+    Ok(let_go(run, by, worker, reason, true))
 }
 
 /// A worker leaves the firm: out of the chart, their VM stopped; their
@@ -1444,14 +1436,7 @@ pub async fn release(
 /// told when someone else (`by`) made the call and `tell` is set. So does
 /// what they overspent: letting someone go writes off nothing (the board
 /// alone, which keeps no balance, takes on its own reports' overspend).
-pub fn let_go(
-    d: &Core,
-    run: &Arc<FirmRun>,
-    by: &str,
-    worker: &str,
-    reason: &str,
-    tell: bool,
-) -> Value {
+pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bool) -> Value {
     let chart = run.chart();
     let manager = chart.manager_of(worker).unwrap_or(BOARD).to_string();
     {
@@ -1470,7 +1455,6 @@ pub fn let_go(
     super::contracts::left(run, worker, reason);
     // Offboarding: every grant goes.
     super::access::revoke_all(
-        d,
         run,
         worker,
         by,

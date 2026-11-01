@@ -5,7 +5,6 @@
 //! every call.
 
 use std::sync::Arc;
-use zapper_core::prelude::*;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -27,9 +26,8 @@ pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
 /// Who calls is the session's member label; the role is checked on every
 /// call.
 struct Tools {
-    d: Core,
     /// The office registry, to resolve a caller's firm → its run without a
-    /// `Core` (the office owns its own `Office`, not `d.office()`).
+    /// `Core` (the office owns its own `Office`).
     office: Arc<crate::Office>,
 }
 
@@ -51,22 +49,14 @@ impl Tools {
             .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
             .ok_or_else(|| anyhow!("the firm isn't running"))?;
         let member = call.labels.get("member").map(String::as_str).unwrap_or("");
-        dispatch(
-            &self.d,
-            &run,
-            &call.session,
-            &call.labels,
-            member,
-            op,
-            &args,
-        )
-        .await
-        .inspect_err(|e| {
-            run.journal.append(
-                "op_error",
-                json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-            );
-        })
+        dispatch(&run, &call.session, member, op, &args)
+            .await
+            .inspect_err(|e| {
+                run.journal.append(
+                    "op_error",
+                    json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+                );
+            })
     }
 }
 
@@ -89,10 +79,7 @@ pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
     // gateway); only their registration and socket go through the client.
     // The listener is bound now and served once there is a runtime (always
     // in the daemon; not in a test that starts a firm without one).
-    let tools = Arc::new(Tools {
-        d: d.clone(),
-        office: d.office(),
-    });
+    let tools = Arc::new(Tools { office: d.office() });
     let instructions = tools.instructions();
     let served_tools = tools.clone();
     let guard = crate::client::serve_facility(
@@ -288,41 +275,35 @@ fn allowed_by(
     methods: Option<&[String]>,
     path: Option<&str>,
 ) -> Result<Option<String>> {
-    let layers = c.d.layers_for(Some(c.sid), None)?;
-    let layers: Vec<_> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     let methods: Vec<Option<String>> = match methods {
         Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
         _ => vec![None],
     };
     let mut rule = None;
     for method in methods {
-        // As the proxy would judge it: the worker's own request, so its
-        // `{session}` and `{label:…}` rules apply as they would there.
+        // As the proxy would judge it, over the client: the daemon applies the
+        // worker's `{session}`/`{label:…}` rewriting.
         let req = NetRequest {
             host: host.to_string(),
             port,
             method,
             path: path.map(str::to_string),
-            session: Some(c.sid.to_string()),
-            labels: c.labels.clone(),
+            session: None,
+            labels: Default::default(),
         };
-        let (d, _) = zapper_policy::evaluate_net(&layers, &req);
-        if d.action != zapper_policy::Action::Allow {
-            return Ok(None);
+        match c.run.client.allowed(c.sid, req) {
+            Some(r) => rule = Some(r),
+            None => return Ok(None),
         }
-        rule = d.rule.or(rule);
     }
     Ok(Some(rule.unwrap_or_else(|| "default".into())))
 }
 
 struct Call<'a> {
-    d: &'a Core,
     run: &'a Arc<FirmRun>,
-    /// The caller's session id and labels, as the daemon named them from the
-    /// VM (never from the guest) — the office reaches the session over its
-    /// client, so it holds no `Session`.
+    /// The caller's session id, as the daemon named it from the VM (never from
+    /// the guest) — the office reaches the session over its client.
     sid: &'a str,
-    labels: &'a std::collections::BTreeMap<String, String>,
     w: &'a Arc<WorkerRt>,
     me: &'a str,
     args: Args<'a>,
@@ -746,7 +727,7 @@ static TOOLS: &[Tool] = &[
                     attachments: c.args.attachments()?,
                 };
                 check_attachments(c.run, c.me, &a.attachments)?;
-                workforce::hire(c.d, c.run, c.me, a).await
+                workforce::hire(c.run, c.me, a).await
             })
         }),
     },
@@ -810,7 +791,6 @@ static TOOLS: &[Tool] = &[
         required: &["contract", "reason"],
         run: Run::Sync(|c| {
             contracts::withdraw(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -866,7 +846,6 @@ static TOOLS: &[Tool] = &[
         required: &["contract", "reason"],
         run: Run::Sync(|c| {
             contracts::decline(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -884,7 +863,6 @@ static TOOLS: &[Tool] = &[
             let att = c.args.attachments()?;
             check_attachments(c.run, c.me, &att)?;
             contracts::complete(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("contract")?,
@@ -927,7 +905,7 @@ static TOOLS: &[Tool] = &[
             Box::pin(async move {
                 let worker = c.args.req("worker")?;
                 let reason = c.args.req("reason")?;
-                workforce::release(c.d, c.run, c.me, &worker, &reason).await
+                workforce::release(c.run, c.me, &worker, &reason).await
             })
         }),
     },
@@ -1025,7 +1003,6 @@ static TOOLS: &[Tool] = &[
             let level = c.args.opt("level");
             let grant = c.args.must_bool("grant", "grant: true or false")?;
             access::decide(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("request")?,
@@ -1059,7 +1036,6 @@ static TOOLS: &[Tool] = &[
         required: &["worker", "resource", "reason"],
         run: Run::Sync(|c| {
             access::revoke(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("worker")?,
@@ -1158,7 +1134,6 @@ static TOOLS: &[Tool] = &[
         required: &["screening", "clear"],
         run: Run::Sync(|c| {
             security::decide_screening(
-                c.d,
                 c.run,
                 c.me,
                 &c.args.req("screening")?,
@@ -1382,10 +1357,8 @@ pub fn reply_from(from: &str, v: &Value, po: &PostOffice) -> Result<Draft> {
 }
 
 pub async fn dispatch(
-    d: &Core,
     run: &Arc<FirmRun>,
     sid: &str,
-    labels: &std::collections::BTreeMap<String, String>,
     me: &str,
     op: &str,
     args: &Value,
@@ -1423,10 +1396,8 @@ pub async fn dispatch(
         ),
     };
     let c = Call {
-        d,
         run,
         sid,
-        labels,
         w: &w,
         me,
         args: Args(args),

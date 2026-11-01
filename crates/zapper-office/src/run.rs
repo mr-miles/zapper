@@ -520,7 +520,7 @@ fn create_run(
     // The policy owners (the CEO, any founding officers) hold admin on
     // everything; everyone else starts with nothing.
     for o in access::owners(&run) {
-        access::owner_access(d, &run, &o, BOARD);
+        access::owner_access(&run, &o, BOARD);
     }
     for w in run.config.warnings() {
         run.notice(
@@ -590,7 +590,7 @@ fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
         let s = d.test_session(new, true).unwrap();
         w.set_session(d.session_info(&s), s.resolved.agent.kind.clone());
         *w.session_arc.lock().unwrap() = Some(s);
-        access::reapply(d, &run, &w.name);
+        access::reapply(&run, &w.name);
     }
     run
 }
@@ -639,7 +639,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         },
     )?;
 
-    if let Err(e) = boot(d, &run, &config).await {
+    if let Err(e) = boot(&run, &config).await {
         let msg = format!("{e:#}");
         run.journal
             .append("run", json!({ "state": "failed", "error": msg }));
@@ -651,7 +651,7 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
     for w in run.rts() {
         tokio::spawn(foreman::run(run.clone(), w));
     }
-    tokio::spawn(ticker(d.clone(), run.clone()));
+    tokio::spawn(ticker(run.clone()));
     tokio::spawn(booter(d.clone(), run.clone(), boot_rx));
     // The board's task, if it gave one: the CEO's first assignment.
     if let Some((subject, body)) = task {
@@ -705,10 +705,10 @@ async fn booter(
             continue;
         };
         let config = d.config();
-        let (d, run) = (d.clone(), run.clone());
+        let run = run.clone();
         tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);
-            match boot_worker(&d, &run, &config, &w, &role).await {
+            match boot_worker(&run, &config, &w, &role).await {
                 // Let go while booting: stop the VM again.
                 Ok(()) if run.ended() || run.rt(&w.name).is_none() => {
                     if let Some(id) = w.take_session() {
@@ -734,18 +734,18 @@ async fn booter(
     }
 }
 
-async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+async fn boot(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let firm = &run.config;
     facility::start(run, config).await?;
     skills::prepare(run, config)?;
     let mut tasks = Vec::new();
     for w in run.rts() {
-        let (d, run) = (d.clone(), run.clone());
+        let run = run.clone();
         let role = firm.roles[&w.role].clone();
         let config = config.clone();
         tasks.push(tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);
-            let r = boot_worker(&d, &run, &config, &w, &role).await;
+            let r = boot_worker(&run, &config, &w, &role).await;
             if let Err(e) = &r {
                 run.set_state(&w, WorkerState::Error, Some(format!("{e:#}")));
             }
@@ -765,7 +765,6 @@ async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
 }
 
 pub(crate) async fn boot_worker(
-    d: &Core,
     run: &Arc<FirmRun>,
     config: &Config,
     w: &Arc<WorkerRt>,
@@ -832,7 +831,7 @@ pub(crate) async fn boot_worker(
     );
     w.set_session(info, profile.agent.kind.clone());
     // Grants made before the VM was up: its network rules and kubeconfig.
-    access::reapply(d, run, &w.name);
+    access::reapply(run, &w.name);
     Ok(())
 }
 
@@ -873,7 +872,7 @@ fn harness_driver(
 }
 
 /// Follow-ups, digests and expiries.
-async fn ticker(d: Core, run: Arc<FirmRun>) {
+async fn ticker(run: Arc<FirmRun>) {
     let mut last_digest = now();
     loop {
         tokio::select! {
@@ -888,11 +887,11 @@ async fn ticker(d: Core, run: Arc<FirmRun>) {
             run.deliver(s);
         }
         security::tick(&run, &mut last_digest);
-        contracts::tick(&d, &run);
-        access::tick(&d, &run);
+        contracts::tick(&run);
+        access::tick(&run);
         workforce::tick(&run);
         run.tell_close_waiter();
-        scenario::tick(&d, &run);
+        scenario::tick(&run);
     }
 }
 

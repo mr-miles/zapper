@@ -22,6 +22,7 @@ use zapper_policy::{Config, Policy};
 use super::prompts::Services;
 use super::FirmRun;
 use zapper_core::util::random_id;
+#[cfg(test)]
 use zapper_core::Core;
 #[cfg(test)]
 use zapper_core::Session;
@@ -416,7 +417,6 @@ pub fn network_follows_grant(
 /// dev; admin: also `admin` in prod), and a kubeconfig in their VM with its
 /// token. No grant: no account, no kubeconfig. Kubernetes enforces it.
 pub async fn cluster_access(
-    _d: &Core,
     run: &FirmRun,
     worker: &str,
     level: super::access::Level,

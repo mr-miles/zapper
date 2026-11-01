@@ -98,25 +98,25 @@ fn the_ceo_holds_every_repository_and_others_nothing() {
 
 #[test]
 fn a_git_grant_is_per_repository_with_its_own_network_rule() {
-    let (t, run) = run();
-    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
+    let (_t, run) = run();
+    access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
     assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
 
-    access::board_grant(&t.core, &run, "pat", "git:web", "read", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:web", "read", None, "test").unwrap();
     assert_eq!(
         ids(&credential_rules(&run, "pat")),
         ["credentials-git-api", "credentials-git-web"]
     );
 
     // Revoking one repository leaves the other's rule, and so its host.
-    access::revoke(&t.core, &run, BOARD, "pat", "git:api", "done").unwrap();
+    access::revoke(&run, BOARD, "pat", "git:api", "done").unwrap();
     assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-web"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
 
     // With two repositories, plain `git` names none of them.
-    let e = access::board_grant(&t.core, &run, "pat", "git", "read", None, "test")
+    let e = access::board_grant(&run, "pat", "git", "read", None, "test")
         .unwrap_err()
         .to_string();
     assert!(e.contains("name the repository"), "{e}");
@@ -153,7 +153,7 @@ fn git(
 
 #[test]
 fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
-    let (t, run) = run();
+    let (_t, run) = run();
     run.facility
         .git_passwords
         .lock()
@@ -175,7 +175,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "read", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "read", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
     let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
     assert_eq!(status, 403);
@@ -193,7 +193,7 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
         "asking to push is a push"
     );
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
     assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
 
     // Other repositories: their own grant; unknown ones aren't there.

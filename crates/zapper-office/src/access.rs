@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{now, FirmRun};
-use zapper_core::Core;
 
 /// How far a grant reaches. For git: read is fetch, write is push to
 /// branches, merge is read and merging someone else's branch into `main`
@@ -302,7 +301,6 @@ fn every_resource(run: &FirmRun) -> Vec<String> {
 /// Puts a grant in place: recorded, enforced, and the worker told.
 #[allow(clippy::too_many_arguments)]
 fn put(
-    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -334,7 +332,7 @@ fn put(
         .entry(worker.into())
         .or_default()
         .insert(resource.into(), g);
-    enforce(d, run, worker, resource);
+    enforce(run, worker, resource);
     if tell {
         let until = expires
             .map(|e| format!(", until {}", super::prompts::when(e)))
@@ -357,7 +355,6 @@ fn put(
 
 /// Takes a grant back.
 fn take(
-    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -377,7 +374,7 @@ fn take(
         return false;
     }
     run.journal.append("credentials", json!({ "event": "revoked", "worker": worker, "resource": resource, "by": by, "reason": reason.trim() }));
-    enforce(d, run, worker, resource);
+    enforce(run, worker, resource);
     if tell && run.rt(worker).is_some() {
         run.notice(worker, &format!("Access revoked: {resource}"), &format!("[Automatic notice] Your access to {resource} was revoked by {by}: {}. Ask again with credentials_request if your work needs it.\n", reason.trim()));
     }
@@ -387,12 +384,12 @@ fn take(
 /// Makes the platform match the grant: the cluster's RBAC and the worker's
 /// kubeconfig, and the network rules for git and the cluster. git and the
 /// drive are checked on every request, so they need nothing more here.
-fn enforce(d: &Core, run: &Arc<FirmRun>, worker: &str, resource: &str) {
+fn enforce(run: &Arc<FirmRun>, worker: &str, resource: &str) {
     if resource.starts_with("git:") || resource == "cluster" {
         super::facility::network_follows_grant(run, worker, resource, level(run, worker, resource));
     }
     if resource == "cluster" {
-        let (d, run, worker) = (d.clone(), run.clone(), worker.to_string());
+        let (run, worker) = (run.clone(), worker.to_string());
         tokio::spawn(async move {
             let lvl = level(&run, &worker, "cluster");
             let expires = run
@@ -403,7 +400,7 @@ fn enforce(d: &Core, run: &Arc<FirmRun>, worker: &str, resource: &str) {
                 .get(&worker)
                 .and_then(|g| g.get("cluster"))
                 .and_then(|g| g.expires);
-            if let Err(e) = super::facility::cluster_access(&d, &run, &worker, lvl, expires).await {
+            if let Err(e) = super::facility::cluster_access(&run, &worker, lvl, expires).await {
                 tracing::warn!(firm = %run.firm, %worker, "cluster access: {e:#}");
                 run.journal.append("credentials", json!({ "event": "enforce_failed", "worker": worker, "resource": "cluster", "error": format!("{e:#}") }));
             }
@@ -412,22 +409,21 @@ fn enforce(d: &Core, run: &Arc<FirmRun>, worker: &str, resource: &str) {
 }
 
 /// Puts a worker's grants in place again: their VM came up after them.
-pub fn reapply(d: &Core, run: &Arc<FirmRun>, worker: &str) {
+pub fn reapply(run: &Arc<FirmRun>, worker: &str) {
     let repos = run.config.git_resources();
     for r in repos.into_iter().chain(["cluster".to_string()]) {
         if level(run, worker, &r) > Level::None {
-            enforce(d, run, worker, &r);
+            enforce(run, worker, &r);
         }
     }
 }
 
 /// The policy owners' own access: admin on git and the cluster, write on
 /// every drive space, for as long as they hold the role.
-pub fn owner_access(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str) {
+pub fn owner_access(run: &Arc<FirmRun>, worker: &str, by: &str) {
     for r in every_resource(run) {
         let want = Want::of(max_level(&r));
         put(
-            d,
             run,
             worker,
             &r,
@@ -442,7 +438,7 @@ pub fn owner_access(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str) {
 }
 
 /// Everything a worker holds, revoked: they are leaving, or stepping down.
-pub fn revoke_all(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str, reason: &str) {
+pub fn revoke_all(run: &Arc<FirmRun>, worker: &str, by: &str, reason: &str) {
     let held: Vec<String> = run
         .access
         .lock()
@@ -452,7 +448,7 @@ pub fn revoke_all(d: &Core, run: &Arc<FirmRun>, worker: &str, by: &str, reason: 
         .map(|g| g.keys().cloned().collect())
         .unwrap_or_default();
     for r in held {
-        take(d, run, worker, &r, by, reason, false);
+        take(run, worker, &r, by, reason, false);
     }
     // Their own open requests lapse.
     let mut a = run.access.lock().unwrap();
@@ -640,7 +636,6 @@ pub fn request(
 /// The decider (or the CEO above them, or the board) grants or denies.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
-    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     id: &str,
@@ -698,7 +693,6 @@ pub fn decide(
     run.journal.append("credentials", json!({ "event": "decided", "id": id, "worker": q.worker, "resource": q.resource, "decision": decision }));
     if grant {
         put(
-            d,
             run,
             &q.worker,
             &q.resource,
@@ -767,7 +761,6 @@ pub fn escalate(run: &FirmRun, by: &str, id: &str, recommendation: &str) -> Resu
 
 /// A policy owner (or the board) takes a grant back.
 pub fn revoke(
-    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -784,7 +777,7 @@ pub fn revoke(
         bail!("{worker} is a policy owner; only the board changes their access");
     }
     let resource = self::resource(run, resource)?;
-    if !take(d, run, worker, &resource, by, reason, true) {
+    if !take(run, worker, &resource, by, reason, true) {
         bail!("{worker} has no grant on {resource}");
     }
     Ok(json!({ "worker": worker, "resource": resource, "revoked": true }))
@@ -842,7 +835,6 @@ pub fn check_clearance(
 
 /// Makes the grants of a background check, and tells the hire once.
 pub fn grant_at_clearance(
-    d: &Core,
     run: &Arc<FirmRun>,
     by: &str,
     worker: &str,
@@ -868,18 +860,7 @@ pub fn grant_at_clearance(
     }
     let note = format!("cleared with background check {screening}");
     for (r, want, expires) in &grants {
-        put(
-            d,
-            run,
-            worker,
-            r,
-            want,
-            by,
-            &note,
-            Some(*expires),
-            None,
-            false,
-        );
+        put(run, worker, r, want, by, &note, Some(*expires), None, false);
     }
     let lines: String = grants
         .iter()
@@ -900,7 +881,6 @@ pub fn grant_at_clearance(
 
 /// The board grants directly.
 pub fn board_grant(
-    d: &Core,
     run: &Arc<FirmRun>,
     worker: &str,
     resource: &str,
@@ -918,7 +898,6 @@ pub fn board_grant(
         .unwrap_or_else(|| run.config.credentials.expiry.clone());
     let expires = now() + parse_duration(&ttl)?.as_secs_f64();
     put(
-        d,
         run,
         worker,
         &resource,
@@ -1019,7 +998,7 @@ fn escalate_late(run: &FirmRun) {
 type Held = (String, String);
 
 /// Grants that lapse, and a warning before they do.
-pub fn tick(d: &Core, run: &Arc<FirmRun>) {
+pub fn tick(run: &Arc<FirmRun>) {
     escalate_late(run);
     let t = now();
     // (worker, resource) that lapsed; and those to warn, with their expiry.
@@ -1041,7 +1020,7 @@ pub fn tick(d: &Core, run: &Arc<FirmRun>) {
         (expired, warn)
     };
     for (w, r) in expired {
-        take(d, run, &w, &r, "office", "the grant expired", true);
+        take(run, &w, &r, "office", "the grant expired", true);
     }
     for ((w, r), e) in warn {
         run.notice(&w, &format!("Access to {r} expires soon"), &format!("[Automatic notice] Your access to {r} expires at {}. If your work still needs it, renew it now: credentials_request for the same resource and level, saying what is left to do.\n", super::prompts::when(e)));

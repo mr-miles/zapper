@@ -616,7 +616,7 @@ async fn nobody_decides_their_own_access_request() {
     )
     .await;
     let id = asked["requests"][0].as_str().unwrap().to_string();
-    let e = crate::access::decide(&t.core, &run, "pat", &id, true, None, None, "mine")
+    let e = crate::access::decide(&run, "pat", &id, true, None, None, "mine")
         .unwrap_err()
         .to_string();
     assert!(e.contains("your own"), "{e}");

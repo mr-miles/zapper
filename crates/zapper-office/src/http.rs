@@ -588,7 +588,6 @@ async fn credentials_decide(
         .ok_or_else(|| bad("grant: true or false"))?;
     let level = v["level"].as_str();
     Ok(Json(super::access::decide(
-        &d,
         &run,
         BOARD,
         &id,
@@ -600,12 +599,11 @@ async fn credentials_decide(
 }
 
 /// The board grants directly: `{worker, resource, level, expires_in?, note?}`.
-async fn credentials_grant(State(d): D, Active(run): Active, text: String) -> R<Json<Value>> {
+async fn credentials_grant(Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
     let s = |k: &str| v[k].as_str().ok_or_else(|| bad(format!("{k} is required")));
     let level = s("level")?;
     Ok(Json(super::access::board_grant(
-        &d,
         &run,
         s("worker")?,
         s("resource")?,
@@ -627,7 +625,7 @@ async fn credentials_revoke(
         .cloned()
         .unwrap_or_else(|| "revoked by the board".into());
     Ok(Json(super::access::revoke(
-        &d, &run, BOARD, &worker, &resource, &reason,
+        &run, BOARD, &worker, &resource, &reason,
     )?))
 }
 
@@ -642,7 +640,6 @@ async fn screening_decide(
         .as_bool()
         .ok_or_else(|| bad("clear: true or false"))?;
     Ok(Json(super::security::decide_screening(
-        &d,
         &run,
         BOARD,
         &id,
@@ -680,12 +677,12 @@ async fn board_fund(Active(run): Active, text: String) -> R<Json<Value>> {
 }
 
 /// The board lets a worker go: `{worker, reason}`.
-async fn board_release(State(d): D, Active(run): Active, text: String) -> R<Json<Value>> {
+async fn board_release(Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
     let worker = v["worker"].as_str().ok_or_else(|| bad("worker: a name"))?;
     let reason = v["reason"].as_str().unwrap_or("");
     Ok(Json(
-        super::workforce::release(&d, &run, BOARD, worker, reason).await?,
+        super::workforce::release(&run, BOARD, worker, reason).await?,
     ))
 }
 

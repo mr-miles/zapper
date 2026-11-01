@@ -17,11 +17,11 @@ use serde_json::Value;
 use tokio::net::UnixStream;
 use zapper_core::driver::DriveStream;
 use zapper_core::{
-    ApprovalApi, ConfigApi, NewSession, ServiceApi, ServiceInfo, ServiceSpec, SessionApi,
+    ApprovalApi, ConfigApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi,
     SessionInfo,
 };
 use zapper_policy::proto::ShellRequest;
-use zapper_policy::AnyRule;
+use zapper_policy::{AnyRule, NetRequest};
 
 /// What the office's firm logic needs from the daemon, so it reaches it
 /// through this interface rather than a `Core` directly. Implemented
@@ -131,6 +131,11 @@ pub trait OfficeClient: Send + Sync {
     fn put_session_rule(&self, id: &str, rule: AnyRule);
     /// Removes rule `rule_id` from session `id`'s own layer; whether it went.
     fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool;
+    /// Whether session `id`'s own policy allows `req` (as the proxy would
+    /// judge it, with the session's `{session}`/`{label}` rewriting), and the
+    /// rule that did — `None` if it would not be allowed. The officers' tools
+    /// use this to see if a host is already reachable before granting.
+    fn allowed(&self, id: &str, req: NetRequest) -> Option<String>;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -240,6 +245,15 @@ impl OfficeClient for Local {
             .session(id)
             .map(|s| s.remove_rule(rule_id).is_some())
             .unwrap_or(false)
+    }
+    fn allowed(&self, id: &str, req: NetRequest) -> Option<String> {
+        let s = self.0.session(id).ok()?;
+        let req = s.caller_of(&req);
+        let layers = self.0.layers_for(Some(id), None).ok()?;
+        let layers: Vec<_> = layers.iter().map(|(sc, p)| (sc.clone(), p)).collect();
+        let (d, _) = zapper_policy::evaluate_net(&layers, &req);
+        (d.action == zapper_policy::Action::Allow)
+            .then(|| d.rule.clone().unwrap_or_else(|| "default".into()))
     }
 }
 
@@ -472,6 +486,22 @@ impl OfficeClient for Remote {
         )
         .map(|a| a.status.is_success())
         .unwrap_or(false)
+    }
+    fn allowed(&self, id: &str, req: NetRequest) -> Option<String> {
+        let body = serde_json::json!({ "session": id, "net": req });
+        let v = block(self.0.call(Method::POST, "/v1/evaluate", Some(&body)))
+            .ok()?
+            .ok()
+            .ok()?;
+        if v["decision"]["action"] != "allow" {
+            return None;
+        }
+        Some(
+            v["decision"]["rule"]
+                .as_str()
+                .unwrap_or("default")
+                .to_string(),
+        )
     }
 }
 
