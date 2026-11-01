@@ -56,23 +56,19 @@ id rework — *then* the registration + logic-file conversions fall out cleanly,
 `socket_dir` are the real load-bearing work; the file conversions are downstream of them.
 
 ## STATUS (update on each commit)
-- Phase 0 (foundation): **done** — see commits `39d6026`…`d76a7aa`.
-- 1.1 (`driver::start` generic): **done** (`9bbe94c`).
-- 1.4 (`admit`): **done** — `workforce::room` is now one `client.admit(profile)` call
-  (session-limit + memory on the daemon side); `session_count`/office memory pre-check gone.
-- 1.5 (`serve_facility`): folded into Phase 2 (the `ops`/`security` register trios convert
-  there; the RAII helper is office-internal polish, not a trait-shape change).
-- **Next: convert Phase 2 files sequentially, growing the trait per file** (fan-out needs a
-  locked complete trait, which emerges from conversion, so sequential is lower-risk here).
-- **1.2 (`attach`) is deferred into 3.2:** its shape (the `ShellRequest`, pulling the
-  conversation/driver into the office) is only clear when wiring the foreman; defining it
-  abstractly now would be revised there. 1.1 is the part that had to come first.
-- 1.3 (session-by-id) is entangled with Phase 3 (session storage) — do alongside 3.1.
+- **P0 foundation** + **standalone chunky wins**: done. `OfficeClient` (`Local`/`Remote`) with
+  `add_layer_rule`/`remove_layer_rule`, `record_writable`, `config`, `admit`; `driver::start`
+  generic; role layers via the core; `Office` holds the client. (`39d6026`…`f871fb4`.)
+- Ordering corrected (above): the rest is **not** Phase-2-first. Load-bearing prerequisites
+  come next (P1), then the file conversions fall out (P2), then `Remote`+routes (P3), then
+  the listener/split (P4).
+- **Next task: P1-a** (`socket_dir` as office config) → then **P1-b** (session surface on the
+  trait) → **P1-c** (the `WorkerRt`/foreman `attach` driving rework — the care point).
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
-`driver/src/process.rs:107` (write half `Proc.stdin: OwnedWriteHalf` at :45); foreman driving
-at `office/src/foreman.rs:72` (`open_shell().stream` → `driver::start`); office client at
-`office/src/client.rs`; the 24 handlers in `office/src/http.rs`.
+`driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
+(`open_shell().stream` → `driver::start`); office client at `office/src/client.rs`; the 24
+handlers in `office/src/http.rs`; `Remote` struct at `office/src/client.rs:67`.
 
 ---
 
@@ -82,83 +78,81 @@ at `office/src/foreman.rs:72` (`open_shell().stream` → `driver::start`); offic
 - [x] `OfficeClient` trait + `Local`/`Remote`; `add_layer_rule`/`remove_layer_rule`,
       `record_writable`, `config`, `session_count`; `room` converted; `Office` holds the client.
 
-## Phase 1 — chunky trait surface + `Local` impls
-Each task: add to the trait + `Local`, convert the office call site(s), `cargo test -p
-zapper-office` green, commit. `Remote` for these is Phase 4.
-- [x] **1.1** Generalise `driver::start` to `start<S: AsyncRead+AsyncWrite+Unpin+Send+'static>`
-      (use `tokio::io::split`; box `Proc.stdin` as `Box<dyn AsyncWrite+Unpin+Send>`). Done;
-      driver/core/office build, driver tests + clippy green.
-- [ ] **1.2** `OfficeClient::attach(session_id, ShellRequest) -> Result<impl stream>`; `Local`
-      = `session(id)?.open_shell(req).stream`. (No office call site yet; exercised in 3.2.)
-- [ ] **1.3** Session-by-id: `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
-      `forget_session(id)`, `session(id) -> SessionInfo`. `Local` delegates to `Core`.
-- [x] **1.4** `admit(profile) -> Result<Config>` (core `has_room`: session-limit + memory in
-      one call); `workforce::room` now calls it. Done; office 147 + core session green.
-- [ ] **1.5** Registrations + `serve_facility(name, sessions, handler) -> FacilityGuard`
-      (RAII). Convert `facility::register` (service+zone), `ops::register` (mcp socket),
-      `security::register` (decider socket) + their `unregister`s.
-- [ ] **1.6** Remaining reads: `resolve(profile)`, `layers_for(...)`, `subscribe()` events,
-      `add_session_rule(id, rule)`, `remove_rule(id)`.
+## Standalone chunky wins (DONE, part of P0)
+- [x] **1.1** `driver::start<S: AsyncRead+AsyncWrite+Unpin+Send>` (box `Proc.stdin`) — unblocks
+      `attach` for both impls (`9bbe94c`).
+- [x] **1.4** `admit(profile) -> Config` (core `has_room`: limit + memory in one call);
+      `workforce::room` calls it (`f871fb4`).
+- [x] `config` on the trait; role layers via the core; `Office` holds the client.
 
-## Phase 2 — convert office logic off `&Core`
-Drop the `(d, run)` pair; use `run.client`. One file per task; green + commit each.
-- [ ] **2.1** `contracts.rs` (offer/decline/withdraw/end/finish/tick).
-- [ ] **2.2** `access.rs` (enforce/reapply/owner_access/revoke_all/tick).
-- [ ] **2.3** `security.rs` (appoint; register/unregister already socket-based).
-- [ ] **2.4** `scenario.rs` (play/tick), `workforce.rs` (hire), `facility.rs` logic.
-- [ ] **2.5** http handlers: an axum extractor resolving `Path<firm>` → `Arc<FirmRun>`, so the
-      ~24 handlers drop the `State(d)` + `office().active(f)?` preamble.
-- [ ] **2.6** `run.rs` run management (`up_with`/`boot`/`down`/`ticker`) + creation.
+These were the only conversions independent of the two prerequisites below. The rest reorders
+per the finding.
 
-## Phase 3 — session-handle rework
-- [ ] **3.1** `WorkerRt.session: Arc<Session>` → `session: Mutex<Option<SessionInfo>>` (id +
-      info). Update readers (`w.session()`), `start_worker_session` stores the id.
-- [ ] **3.2** Foreman drives via `run.client.attach(id, req)` + `driver::start` (uses 1.1/1.2);
-      `foreman::start` no longer needs an `Arc<Session>`.
-- [ ] **3.3** Other session-handle uses → by id over the client (drive file copies via a
-      `system` terminal, human/board terminal views).
+## P1 — load-bearing prerequisites (lead / sequential; fake-tested, no KVM)
+Do these first; the file conversions (P2) are downstream of them.
+- [ ] **P1-a** `socket_dir` as office config. `Office` captures `core.socket_dir()` in
+      `start()`; `Remote` carries it as a field the bin sets (a small Phase-5 slice pulled
+      forward). Unblocks the registration leaves, which must place their socket in the
+      *daemon's* `state/services`.
+- [ ] **P1-b** Session surface on the trait (**async** methods — called from the foreman's
+      async loop): `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
+      `forget_session(id)`, `session(id) -> SessionInfo`, and `attach(id, ShellRequest) ->
+      Result<Box<dyn DriveStream>>` (on 1.1's generic `start`; `DriveStream` = a combined
+      `AsyncRead+AsyncWrite+Unpin+Send` trait in `zapper-driver` with forwarding impls). `Local`
+      only; `Remote` in P3.
+- [ ] **P1-c** The session-handle rework — **the care point** (where fakes can hide a real
+      driving bug; do with fresh focus). `WorkerRt.session: Arc<Session>` → id + `SessionInfo`;
+      the foreman drives via `run.client.attach(id, req)` + `driver::start`; `foreman::start`
+      no longer needs an `Arc<Session>`.
 
-## Phase 4 — `Remote` impls + API routes
-- [ ] **4.1** Flesh out `Remote` for every Phase-1 method (hyper-upgrade for `attach`; GET/POST
-      for sessions/admit/registrations/resolve/layers_for; SSE for `subscribe`).
-- [ ] **4.2** Add any missing API routes in `zapper-api` the `Remote` methods call.
+## P2 — downstream conversions (unblocked by P1; parallelisable — see map)
+Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_for`,
+`subscribe`, `add_session_rule`, `remove_rule`) as a site needs it; `Local` now, `Remote` in P3.
+- [ ] **P2-a** Registration leaves → `run.client`: `security`/`ops`/`facility` register +
+      their `unregister`s. Fold the bind + serve-loop + register + cleanup boilerplate into a
+      `serve_facility(...) -> FacilityGuard` (RAII: `Drop` = unregister + abort + unlink).
+      Needs P1-a.
+- [ ] **P2-b** Logic/plumbing files → drop `d`: `contracts`, `access`, `scenario`,
+      `workforce`, `facility` logic. These bottom out in session ops, so need P1-b/c.
+- [ ] **P2-c** http handlers: an axum extractor resolving `Path<firm>` → `Arc<FirmRun>`, so the
+      ~24 handlers drop the `State(d)` + `office().active(f)?` preamble. (Cross-cutting — lead.)
+- [ ] **P2-d** `run.rs` run management (`up_with`/`boot`/`down`/`ticker`) + worker creation →
+      office state + client.
+
+## P3 — `Remote` impls + API routes
+- [ ] **P3-a** Flesh `Remote` for every trait method: hyper-upgrade for `attach`; GET/POST for
+      sessions / `admit` / registrations / `resolve`; SSE for `subscribe`. Set `Remote`'s
+      `socket_dir` field.
+- [ ] **P3-b** Add the missing `zapper-api` routes (`/v1/admit`, `/v1/deciders`, open-shell /
+      attach upgrade, …) the `Remote` methods call.
+
+## P4 — own listener + the split (D3 = A)
+- [ ] **P4-a** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
+      workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
+- [ ] **P4-b** The office holds its own `Office` state (its registry), not `d.office()`;
+      rehome the 32 `office()` uses; the bin configures its state/socket dirs.
+- [ ] **P4-c** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
+- [ ] **P4-d** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
+      `zapper-office`.
+- [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
 
 ## Parallelism & subagents
+Single crate (compiles as a whole) and the hard work is the P1 prerequisites, so parallelism
+helps only in the P2 middle and P3 `Remote` groups. Isolate parallel work in git **worktrees**
+(`isolation: "worktree"`), disjoint files, merged by the lead.
 
-It's a single crate (compiles as a whole) and the hard phases are design-bearing, so
-parallelism helps only in the wide mechanical middle. Isolate parallel work in git
-**worktrees** (`isolation: "worktree"`), each on disjoint files, merged by the lead.
-
-**One hand / sequential (lead does these — design-bearing or risky):**
-- 1.1 (`driver::start`), **all of Phase 1** (the trait is the keystone; one coherent shape),
-  2.5 (the http extractor — cross-cutting), **Phase 3** (driving path — the one place fakes
-  can hide a real bug), **Phase 5** (structural split). The trait surface is owned by the
-  lead; subagents must not add trait methods (flag a gap instead — avoids conflicts).
-
-**Parallelisable after Phase 1 is fixed — mechanical, disjoint files, mergeable:**
-- Phase 2 logic conversions: **2.1 `contracts.rs`, 2.2 `access.rs`, 2.3 `security.rs`,
-  2.4 `scenario.rs`/`workforce.rs`/`facility.rs`, 2.6 `run.rs`** — one worktree subagent per
-  file/cluster. Brief: "drop the `(d: &Core, run)` pair; use `run.client` for daemon ops;
-  keep `cargo test -p zapper-office` green; do **not** change `OfficeClient` — if a method is
-  missing, stop and report it." A **fork** (inherits this context/pattern) suits these better
-  than a fresh agent.
-
-**Parallelisable after the API routes exist (4.2):**
-- Phase 4 `Remote` impls by method-group — sessions / `admit` / registrations / `resolve` /
-  events — each a worktree subagent writing the `Remote` method + exercising its route.
-
-**Caveats:** worktrees multiply build cost (each recompiles deps); merges must stay on
-disjoint files; anything touching `client.rs` (the trait), `http.rs` (2.5), or the foreman
-(Phase 3) is lead-only. Net: parallelism is a ~2–4× fan-out on the Phase-2/4 middle, not on
-the hard ends — spawn it only when Phase 1 is locked, else the subagents thrash on a moving
-trait.
-
-## Phase 5 — own listener + the split (D3 = A)
-- [ ] **5.1** Relocate `http.rs` to the `zapper-office` binary's listener; extract the
-      workbench's gateway/auth (sign-in, cookie, `Host`/`Origin`) into a crate both use (§7).
-- [ ] **5.2** The office holds its own `Office` state (its own registry), not `d.office()`;
-      rehome the 32 `office()` uses.
-- [ ] **5.3** Drop `zapper-core` from the office's prod deps (dev-only, as the workbench).
-- [ ] **5.4** Wire the bin to run firms; `zapper` stops linking the office; `OFFICE=1` runs
-      `zapper-office`.
-- [ ] **5.5** Operator: `make test-e2e-office` on a KVM host — the final gate.
+- **Lead / sequential (design-bearing or cross-cutting):** all of **P1** (esp. P1-c, the
+  driving rework — the care point), **P2-c** (the http extractor), **P4** (the structural
+  split). The trait surface is the lead's; subagents must **not** add trait methods — flag a
+  gap and stop.
+- **Fan-out after P1 is locked (mechanical, disjoint files):** **P2-a** (registration leaves)
+  and **P2-b** per file (`contracts`, `access`, `scenario`, `workforce`) — one worktree
+  subagent each. Brief: "drop `(d: &Core, run)`; use `run.client`; keep `cargo test -p
+  zapper-office` green; don't touch `OfficeClient` — report a missing method." A **fork**
+  (inherits this context) suits these better than a fresh agent.
+- **Fan-out after P3-b routes exist:** **P3-a** `Remote` by method-group (sessions / `admit` /
+  registrations / `resolve` / events).
+- **Caveats:** worktrees multiply build cost; merges stay on disjoint files; anything touching
+  `client.rs`, `http.rs`, or the foreman is lead-only. Net ~2–4× fan-out on P2-b/P3, not on the
+  P1 prerequisites — spawn only once the trait is locked, else subagents thrash on a moving
+  trait.
