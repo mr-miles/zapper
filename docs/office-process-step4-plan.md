@@ -243,19 +243,20 @@ All verifiable without KVM (office↔core only). Done so far:
   id (new trait methods `requests`/`put_session_rule`/`remove_session_rule`; drive's
   `guest_command` runs over `attach`+`pump_command`, still streaming).
 
-**`Session`-method decoupling is now essentially done.** ops MCP tools run from the `McpCall`
-(caller labels) + `run.client`, not `d.session()`/`&Session`; `run_of(&Session)` is test-only.
-The only `Session` *method* left in prod non-`Local` code is `facility::forward_port`'s
-`connect_port`.
+**The office now holds no `Session` in production.** Done:
+- ops MCP tools run from the `McpCall` + `run.client` (no `d.session()`/`&Session`).
+- `connect_port` on the client (`facility::forward_port`, `product`) + the `/v1/sessions/{id}/
+  connect` route — the last `Session` *method* is gone.
+- **`Arc<Session>` removed**: `WorkerRt.session`/`facility.cluster` store a `SessionInfo` (+ a
+  worker's harness kind); boot/teardown go through `run.client` by id. A `#[cfg(test)]`
+  `WorkerRt.session_arc` keeps the real `Session` for the test helpers only. `facility::start`
+  and `down` dropped `&Core`; the http `down` handler dropped `State(d)`.
 
-**Remaining before the `Arc<Session>` fields go (and the core dep dropped):**
-- **Metadata reads** — `WorkerRt.session`/`facility.cluster` are now read only for `.id`/`.user`/
-  `.kind`/`.labels` (security, facility, lib status, `driven()`). Replace the `Arc` fields with
-  a stored `SessionInfo` (+ harness kind); boot stores `run.client.create_session`'s result;
-  the ~12 reads use the stored info. Mechanical.
-- **`connect_port`** — `facility::forward_port` (board's dashboard/product proxy) needs a
-  `connect_port(id, port)` client method + an API route (open a guest port, upgraded).
-- **`c.d` cascade (P4-b/c)** — the ops `Call` still holds `&Core`, fanning out to
+The only `Session` use left in office prod code is **`client::Local`** — the in-process adapter
+that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
+
+**Remaining (the structural split — `c.d`/`d.office()` is the live thread):**
+- **`c.d` cascade** — the ops `Call` still holds `&Core`, fanning out to
   `workforce::hire`/`contracts::offer`/`access`/`layers_for`, bottoming out at **`d.office()`**.
   So **P4-b (office holds its own `Office`)** is the keystone that lets `c.d` become `run.client`.
 - Then **P4-a** (relocate `http.rs` + shared gateway crate), **P4-c** (drop the `zapper-core`
