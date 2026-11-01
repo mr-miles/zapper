@@ -37,10 +37,6 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
-    /// The daemon's `state/services` directory, where the office places the
-    /// sockets of the facilities it serves (git, tools, decider). In-process
-    /// it is the core's; for a co-host office it is configured.
-    fn socket_dir(&self) -> std::path::PathBuf;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -62,16 +58,13 @@ impl OfficeClient for Local {
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config> {
         self.0.admit(profile)
     }
-    fn socket_dir(&self) -> std::path::PathBuf {
-        self.0.socket_dir()
-    }
 }
 
 /// The office as a process of its own (`zapper-office`), over the daemon's
 /// API socket. The office's firm logic is synchronous, so each call blocks
 /// on the current multi-threaded runtime — the binary's, not a test's or the
 /// in-process daemon's (that is `Local`).
-pub struct Remote(pub Zapper, pub std::path::PathBuf);
+pub struct Remote(pub Zapper);
 
 impl OfficeClient for Remote {
     fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
@@ -105,9 +98,6 @@ impl OfficeClient for Remote {
             .ok()
             .map_err(|(_, why)| anyhow::anyhow!(why))?;
         Ok(serde_json::from_value(v)?)
-    }
-    fn socket_dir(&self) -> std::path::PathBuf {
-        self.1.clone()
     }
 }
 

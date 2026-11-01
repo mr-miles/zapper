@@ -40,20 +40,19 @@ The clean, standalone chunky wins are **done** (config, admit, record_writable, 
 ops, generic `driver::start`). Converting the *rest* of Phase 2 is **not** cleanly ahead of
 Phase 3/5 — the dependencies interleave:
 
-- The **registration leaves** (`security`/`ops`/`facility` register) need the co-host office
-  to place a socket in the **daemon's** `state/services` dir → they need `socket_dir` as
-  office config (a Phase-5 bin concern), and each needs a `Remote` API route (Phase 4).
+- The **registration leaves** (`security`/`ops`/`facility` register) place a socket in the
+  `state/services` dir — that path is **plain office config** (`FirmRun.socket_dir`, assumed
+  aligned with the daemon; P1-a), not coordinated. Each also needs a `Remote` API route (P3).
 - The **logic/plumbing files** (`contracts`, `access`, `scenario`, most of `workforce`) barely
   touch `d` directly — they plumb it down to the **session ops** (`create_session`,
-  `stop_session`, …) which are the **Phase-3 session-handle rework**.
+  `stop_session`, …) which are the real **session-handle rework**.
 
-So Phase 2 Local-first in isolation accumulates `Remote` stubs + `socket_dir` placeholders
-that only resolve in Phase 3/5. **Revised order:** do the prerequisites first —
-**(i)** `socket_dir` as office config (small slice of Phase 5), **(ii)** the Phase-3 session
+So the file conversions are downstream of two prerequisites. **Revised order:** do them first
+— **(i)** `socket_dir` as config on `FirmRun` (P1-a, done/decided), **(ii)** the session
 surface on the trait (`create_session→id`, `stop`, `forget`, `attach`) with the `WorkerRt`
-id rework — *then* the registration + logic-file conversions fall out cleanly, *then* flesh
-`Remote` + routes (Phase 4), *then* the listener relocation (rest of Phase 5). Sessions and
-`socket_dir` are the real load-bearing work; the file conversions are downstream of them.
+id rework (P1-b/c) — *then* the registration + logic-file conversions fall out cleanly (P2),
+*then* flesh `Remote` + routes (P3), *then* the listener relocation + split (P4). The session
+surface is the real load-bearing work; the file conversions are downstream of it.
 
 ## STATUS (update on each commit)
 - **P0 foundation** + **standalone chunky wins**: done. `OfficeClient` (`Local`/`Remote`) with
@@ -62,8 +61,10 @@ id rework — *then* the registration + logic-file conversions fall out cleanly,
 - Ordering corrected (above): the rest is **not** Phase-2-first. Load-bearing prerequisites
   come next (P1), then the file conversions fall out (P2), then `Remote`+routes (P3), then
   the listener/split (P4).
-- **Next task: P1-b** (session surface on the trait) [P1-a done] → then **P1-c** (session surface on the
-  trait) → **P1-c** (the `WorkerRt`/foreman `attach` driving rework — the care point).
+- **P1-a** decided: `socket_dir` is plain office config (carried on `FirmRun`, assumed
+  aligned with the daemon — no client method).
+- **Next task: P1-b** (session surface on the trait) → then **P1-c** (the `WorkerRt`/foreman
+  `attach` driving rework — the care point).
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107`; foreman driving at `office/src/foreman.rs:72`
@@ -90,10 +91,11 @@ per the finding.
 
 ## P1 — load-bearing prerequisites (lead / sequential; fake-tested, no KVM)
 Do these first; the file conversions (P2) are downstream of them.
-- [x] **P1-a** `socket_dir` as office config. `Office` captures `core.socket_dir()` in
-      `start()`; `Remote` carries it as a field the bin sets (a small Phase-5 slice pulled
-      forward). Unblocks the registration leaves, which must place their socket in the
-      *daemon's* `state/services`.
+- [x] **P1-a** `socket_dir` is **plain office config**, not a client method. The office and
+      daemon are configured to the same `state/services` path — assume aligned, no
+      coordination. Carry it on `FirmRun` (set at run creation: `d.socket_dir()` in-process,
+      `office.yaml` for the separate bin). The registration leaves (P2-a) read `run.socket_dir`.
+      (Decided; an earlier attempt to put it on the trait was backed out.)
 - [ ] **P1-b** Session surface on the trait (**async** methods — called from the foreman's
       async loop): `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
       `forget_session(id)`, `session(id) -> SessionInfo`, and `attach(id, ShellRequest) ->
@@ -121,8 +123,7 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
 
 ## P3 — `Remote` impls + API routes
 - [ ] **P3-a** Flesh `Remote` for every trait method: hyper-upgrade for `attach`; GET/POST for
-      sessions / `admit` / registrations / `resolve`; SSE for `subscribe`. Set `Remote`'s
-      `socket_dir` field.
+      sessions / `admit` / registrations / `resolve`; SSE for `subscribe`.
 - [ ] **P3-b** Add the missing `zapper-api` routes (`/v1/admit`, `/v1/deciders`, open-shell /
       attach upgrade, …) the `Remote` methods call.
 
