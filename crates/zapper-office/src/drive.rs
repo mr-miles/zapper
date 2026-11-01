@@ -131,7 +131,7 @@ pub async fn guest_command<R, W>(
     s: &Session,
     argv: Vec<String>,
     input: Option<R>,
-    mut out: W,
+    out: W,
     limit: u64,
 ) -> Result<(i32, String)>
 where
@@ -139,7 +139,27 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let stream = s.open_shell(ShellRequest::system(argv)).await?.stream;
-    let (mut r, mut w) = stream.into_split();
+    pump_command(stream, input, out, limit).await
+}
+
+/// Drives a command over `stream`, a terminal already opened for it: feeds
+/// `input`, writes stdout to `out` (at most `limit` bytes), returns the exit
+/// code and stderr. The stream is a VM terminal in-process (from
+/// `Session::open_shell`) or an attached one over the office's client — the
+/// cluster, a sandbox and not an agent, is driven over it as a terminal
+/// user would. Each call runs one command (a shell script may bundle many).
+pub(crate) async fn pump_command<S, R, W>(
+    stream: S,
+    input: Option<R>,
+    mut out: W,
+    limit: u64,
+) -> Result<(i32, String)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let (mut r, mut w) = tokio::io::split(stream);
     let feeder = tokio::spawn(async move {
         if let Some(mut input) = input {
             let mut buf = vec![0u8; 60 * 1024];

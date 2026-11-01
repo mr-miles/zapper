@@ -388,6 +388,26 @@ where
     })
 }
 
+/// Runs one command in session `id` over the office's client and returns its
+/// exit code, stdout (capped at `limit`) and stderr. Built on [`attach`]: the
+/// office opens a terminal in the sandbox and drives the command over it (the
+/// firm's cluster is a sandbox, not an agent), so this works in-process and,
+/// in P3, over the socket, without a command-specific route. A shell script
+/// may bundle many steps into one call.
+pub(crate) async fn run_command(
+    client: &dyn OfficeClient,
+    id: &str,
+    argv: Vec<String>,
+    stdin: Option<Vec<u8>>,
+    limit: u64,
+) -> Result<(i32, Vec<u8>, String)> {
+    let stream = client.attach(id, ShellRequest::system(argv)).await?;
+    let input = stdin.map(std::io::Cursor::new);
+    let mut out = Vec::new();
+    let (code, err) = crate::drive::pump_command(stream, input, &mut out, limit).await?;
+    Ok((code, out, err))
+}
+
 /// Runs a client call to completion from the office's synchronous firm
 /// logic. Requires a multi-threaded runtime (the `zapper-office` binary's).
 fn block<T>(fut: impl std::future::Future<Output = T>) -> T {

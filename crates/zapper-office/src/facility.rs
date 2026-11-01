@@ -22,7 +22,7 @@ use zapper_policy::proto::{Forward, GuestFile};
 use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
-use super::{drive, FirmRun};
+use super::FirmRun;
 use zapper_core::util::random_id;
 use zapper_core::Core;
 use zapper_core::{NewSession, ServiceHandler, ServiceIo, ServiceSpec, ServiceTarget, Session};
@@ -389,10 +389,10 @@ pub async fn cluster_access(
         script.push_str(&format!(
             "k3s kubectl -n {WORKER_NS} delete serviceaccount {sa} --ignore-not-found >/dev/null"
         ));
-        sh(&c, &script).await?;
+        sh(run, &c.id, &script).await?;
         if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
             let home = format!("/home/{}", s.resolved.agent.user);
-            let _ = sh(&s, &format!("rm -f {home}/.kube/config")).await;
+            let _ = sh(run, &s.id, &format!("rm -f {home}/.kube/config")).await;
         }
         return Ok(());
     }
@@ -410,7 +410,7 @@ pub async fn cluster_access(
     script.push_str(&format!(
         "k3s kubectl -n {WORKER_NS} create token {sa} --duration={secs}s"
     ));
-    let (code, out) = sh(&c, &script).await?;
+    let (code, out) = sh(run, &c.id, &script).await?;
     if code != 0 {
         bail!("RBAC for {worker}: {out}");
     }
@@ -435,12 +435,11 @@ pub async fn cluster_access(
     );
     if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
         let home = format!("/home/{}", s.resolved.agent.user);
-        let mut out = Vec::new();
-        let (code, err) = drive::guest_command(
-            &s,
+        let (code, _out, err) = crate::client::run_command(
+            run.client.as_ref(),
+            &s.id,
             vec!["sh".into(), "-c".into(), format!("mkdir -p {home}/.kube && cat > {home}/.kube/config && chmod 600 {home}/.kube/config && chown -R 1000:1000 {home}/.kube")],
-            Some(std::io::Cursor::new(kube.into_bytes())),
-            &mut out,
+            Some(kube.into_bytes()),
             1 << 16,
         )
         .await?;
@@ -452,13 +451,14 @@ pub async fn cluster_access(
 }
 
 /// Runs a shell command as root in a session's VM; its stdout.
-pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
-    let mut out = Vec::new();
-    let (code, err) = drive::guest_command(
-        s,
+/// Runs a shell command in session `id` over the office's client; its exit
+/// code and output (stdout, then stderr if it failed).
+pub(super) async fn sh(run: &FirmRun, id: &str, script: &str) -> Result<(i32, String)> {
+    let (code, out, err) = crate::client::run_command(
+        run.client.as_ref(),
+        id,
         vec!["sh".into(), "-c".into(), script.into()],
-        None::<tokio::io::Empty>,
-        &mut out,
+        None,
         4 << 20,
     )
     .await?;
@@ -556,28 +556,28 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     let script = format!(
         "mkdir -p /var/log && nohup k3s server --node-name {CLUSTER} --tls-san {san} --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &"
     );
-    let (code, out) = sh(&s, &script).await?;
+    let (code, out) = sh(run, &s.id, &script).await?;
     if code != 0 {
         bail!("starting k3s: {out}");
     }
     // The API first; the workers' kubeconfig comes from it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     loop {
-        let (code, out) = sh(&s, "k3s kubectl get --raw=/readyz 2>&1")
+        let (code, out) = sh(run, &s.id, "k3s kubectl get --raw=/readyz 2>&1")
             .await
             .unwrap_or((1, String::new()));
         if code == 0 && out.trim() == "ok" {
             break;
         }
         if tokio::time::Instant::now() > deadline {
-            let (_, log) = sh(&s, "tail -30 /var/log/k3s.log")
+            let (_, log) = sh(run, &s.id, "tail -30 /var/log/k3s.log")
                 .await
                 .unwrap_or_default();
             bail!("k3s did not become ready in 5 minutes; its log ends:\n{log}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let (code, kube) = sh(&s, "cat /etc/rancher/k3s/k3s.yaml").await?;
+    let (code, kube) = sh(run, &s.id, "cat /etc/rancher/k3s/k3s.yaml").await?;
     if code != 0 {
         bail!("reading the kubeconfig: {kube}");
     }
@@ -585,7 +585,7 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     *run.facility.kubeconfig.lock().unwrap() = Some(kube);
     // The firm's two namespaces (prod is what the ingress serves), and the
     // one that holds workers' service accounts.
-    let (code, out) = sh(&s, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
+    let (code, out) = sh(run, &s.id, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
     if code != 0 {
         bail!("creating the namespaces: {out}");
     }
@@ -596,8 +596,8 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     if let Some(l) = &run.config.landing {
         // In the background: Traefik comes up after the API.
         let manifest = landing_manifest(&l.display_name(&run.firm), &l.motto);
-        let (run, s) = (run.clone(), s.clone());
-        tokio::spawn(async move { deploy_landing(&run, &s, manifest).await });
+        let (run, id) = (run.clone(), s.id.clone());
+        tokio::spawn(async move { deploy_landing(&run, &id, manifest).await });
     }
     if let Some(addr) = &run.config.product_port {
         let task = serve_product(run, addr).await?;
@@ -622,8 +622,8 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
             );
         }
         *run.facility.dashboard.lock().unwrap() = Some(task);
-        let (run, s) = (run.clone(), s.clone());
-        tokio::spawn(async move { deploy_dashboard(&run, &s).await });
+        let (run, id) = (run.clone(), s.id.clone());
+        tokio::spawn(async move { deploy_dashboard(&run, &id).await });
     }
     Ok(())
 }
@@ -701,27 +701,25 @@ fn dashboard_manifest() -> String {
     serde_json::to_string(&list).unwrap()
 }
 
-async fn deploy_dashboard(run: &FirmRun, s: &Session) {
+async fn deploy_dashboard(run: &FirmRun, cluster_id: &str) {
     let manifest = dashboard_manifest();
     for _ in 0..60 {
         if run.ended() {
             return;
         }
-        let mut out = Vec::new();
-        let input = std::io::Cursor::new(manifest.clone().into_bytes());
-        let applied = drive::guest_command(
-            s,
+        let applied = crate::client::run_command(
+            run.client.as_ref(),
+            cluster_id,
             vec![
                 "sh".into(),
                 "-c".into(),
                 "cat > /tmp/dashboard.json && k3s kubectl apply -f /tmp/dashboard.json".into(),
             ],
-            Some(input),
-            &mut out,
+            Some(manifest.clone().into_bytes()),
             1 << 20,
         )
         .await;
-        if let Ok((0, _)) = applied {
+        if let Ok((0, _, _)) = applied {
             break;
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -731,7 +729,7 @@ async fn deploy_dashboard(run: &FirmRun, s: &Session) {
         if run.ended() {
             return;
         }
-        if let Ok((0, t)) = sh(s, "k3s kubectl -n dashboard get secret board-token -o jsonpath='{.data.token}' | base64 -d").await {
+        if let Ok((0, t)) = sh(run, cluster_id, "k3s kubectl -n dashboard get secret board-token -o jsonpath='{.data.token}' | base64 -d").await {
             let t = t.trim().to_string();
             if t.len() > 20 {
                 *run.facility.dashboard_token.lock().unwrap() = Some(t);
@@ -800,26 +798,24 @@ pub fn landing_manifest(name: &str, motto: &str) -> String {
     serde_json::to_string(&list).unwrap()
 }
 
-async fn deploy_landing(run: &FirmRun, s: &Session, manifest: String) {
+async fn deploy_landing(run: &FirmRun, cluster_id: &str, manifest: String) {
     for _ in 0..40 {
         if run.ended() {
             return;
         }
-        let mut out = Vec::new();
-        let input = std::io::Cursor::new(manifest.clone().into_bytes());
-        let r = drive::guest_command(
-            s,
+        let r = crate::client::run_command(
+            run.client.as_ref(),
+            cluster_id,
             vec![
                 "sh".into(),
                 "-c".into(),
                 "cat > /tmp/landing.json && k3s kubectl apply -f /tmp/landing.json".into(),
             ],
-            Some(input),
-            &mut out,
+            Some(manifest.clone().into_bytes()),
             1 << 20,
         )
         .await;
-        if let Ok((0, _)) = r {
+        if let Ok((0, _, _)) = r {
             run.journal.append(
                 "facility",
                 json!({ "name": "landing", "state": "deployed" }),
@@ -976,7 +972,8 @@ pub async fn prod_has_workload(run: &FirmRun) -> Result<bool> {
         .clone()
         .ok_or_else(|| anyhow!("the cluster isn't running"))?;
     let (code, out) = sh(
-        &s,
+        run,
+        &s.id,
         "k3s kubectl --request-timeout=10s -n prod get deploy,sts,ds -o name 2>&1",
     )
     .await?;
@@ -1003,7 +1000,7 @@ pub async fn break_cluster(run: &FirmRun, mode: &str) -> Result<String> {
         "api" => "for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -q '^k3s server' && kill -STOP ${d#/proc/}; done; echo frozen",
         other => bail!("break_cluster mode {other}: prod or api"),
     };
-    let (code, out) = sh(&s, script).await?;
+    let (code, out) = sh(run, &s.id, script).await?;
     if code != 0 {
         bail!("breaking the cluster: {out}");
     }
