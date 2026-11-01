@@ -531,7 +531,7 @@ fn create_run(
     }
     facility::register(&run)?;
     security::register(&run)?;
-    ops::register(d, &run)?;
+    ops::register(&run)?;
     d.office()
         .runs
         .write()

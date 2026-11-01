@@ -14,9 +14,7 @@ use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
-use crate::OfficeOf;
 use crate::{access, contracts, workforce};
-use zapper_core::Core;
 use zapper_policy::facility::McpCall;
 
 /// Where the agent copies itself in every guest.
@@ -68,18 +66,20 @@ pub const SERVER: &str = "office";
 /// tool list and call (naming the caller from the VM), as a facility in
 /// another process would. A worker of another run of the firm gets the
 /// tools too, and is told on each call that its firm isn't running.
-pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
+pub fn register(run: &FirmRun) -> Result<()> {
     let sessions: std::collections::BTreeMap<String, String> =
         [("firm", run.firm.as_str()), ("office", "worker")]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
     let socket = format!("office-{}.sock", run.firm);
-    // The tools serve in-process (they reach the daemon's sessions and
-    // gateway); only their registration and socket go through the client.
-    // The listener is bound now and served once there is a runtime (always
-    // in the daemon; not in a test that starts a firm without one).
-    let tools = Arc::new(Tools { office: d.office() });
+    // The tools reach the daemon and the registry over the client and the
+    // office's own `Office`; their registration and socket go through the
+    // client. The listener is bound now and served once there is a runtime
+    // (always in the daemon; not in a test that starts a firm without one).
+    let tools = Arc::new(Tools {
+        office: run.office(),
+    });
     let instructions = tools.instructions();
     let served_tools = tools.clone();
     let guard = crate::client::serve_facility(
