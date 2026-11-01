@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
-use zapper_core::mint;
 use zapper_github::{GitHub, Token};
+use zapper_mint as mint;
 
 use super::FirmRun;
 use crate::firm::Firm;

@@ -99,7 +99,7 @@ pub async fn resolve(spec: &Spec) -> Result<String> {
 }
 
 /// A secret's value: minted for a `command` secret, read for the others.
-pub(crate) async fn secret_value(source: &SecretSource) -> Result<String> {
+pub async fn secret_value(source: &SecretSource) -> Result<String> {
     match source.mint_spec() {
         Some(spec) => resolve(&spec).await.context("minting the secret"),
         None => source.resolve(),

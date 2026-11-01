@@ -2954,6 +2954,7 @@ dependencies = [
  "zapper-api-types",
  "zapper-driver",
  "zapper-keeper",
+ "zapper-mint",
  "zapper-policy",
  "zapper-record",
  "zapper-util",
@@ -3036,6 +3037,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-mint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "zapper-policy",
+]
+
+[[package]]
 name = "zapper-office"
 version = "0.1.0"
 dependencies = [
@@ -3068,6 +3078,7 @@ dependencies = [
  "zapper-driver",
  "zapper-git",
  "zapper-github",
+ "zapper-mint",
  "zapper-policy",
  "zapper-record",
  "zapper-runs",

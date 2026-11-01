@@ -1,0 +1,14 @@
+[package]
+name = "zapper-mint"
+description = "Minting host credentials from a command and caching them until near expiry (process-wide); used by the daemon for secret injection and by The Office for its own git calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio = { version = "1", features = ["full"] }
+zapper-policy = { path = "../zapper-policy" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

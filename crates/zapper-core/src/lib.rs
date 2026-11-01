@@ -12,7 +12,7 @@ pub(crate) use zapper_api_types::errors;
 pub mod fuzz;
 pub mod images;
 mod interface;
-pub mod mint;
+pub use zapper_mint as mint;
 pub(crate) mod netns;
 pub(crate) mod subids;
 #[cfg(any(test, feature = "test-util"))]
