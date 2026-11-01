@@ -53,8 +53,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 
-use zapper_core::util::{now, random_id};
 use zapper_core::{Core, EventBody};
+use zapper_util::{now, random_id};
 
 /// The office's state in the core: its registry of runs. `pub` so the
 /// co-host mount (`zapper::office`) can hand the office's own state to
@@ -413,9 +413,7 @@ pub(crate) fn is_run_id(s: &str) -> bool {
         && b[8] == b'-'
         && b[15] == b'-'
         && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
-        && b[16..]
-            .iter()
-            .all(|c| zapper_core::util::ID_CHARS.contains(c))
+        && b[16..].iter().all(|c| zapper_util::ID_CHARS.contains(c))
 }
 
 /// A run's sessions, by their labels: what the run registers services, its

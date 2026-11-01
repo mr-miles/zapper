@@ -409,7 +409,7 @@ pub async fn publish(
     let tmp = run
         .dir
         .join("drive")
-        .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+        .join(format!("tmp-{}", zapper_util::random_id(8)));
     std::fs::create_dir_all(&tmp)?;
     let result = async {
         // The archive comes from the guest: it is parsed here, keeping only
@@ -575,7 +575,7 @@ pub fn publish_board(
             let tmp = run
                 .dir
                 .join("drive")
-                .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+                .join(format!("tmp-{}", zapper_util::random_id(8)));
             std::fs::write(&tmp, data)?;
             std::fs::rename(&tmp, &blob)?;
         }
@@ -663,7 +663,7 @@ pub async fn fetch(
     let tmp = run
         .dir
         .join("drive")
-        .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+        .join(format!("tmp-{}", zapper_util::random_id(8)));
     let result = async {
         for f in &files {
             let to = tmp.join(&f.path);
@@ -868,8 +868,7 @@ mod tests {
 
     #[test]
     fn untar_keeps_regular_files_only() {
-        let dir =
-            std::env::temp_dir().join(format!("zapper-untar-{}", zapper_core::util::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-untar-{}", zapper_util::random_id(6)));
         let src = dir.join("src");
         std::fs::create_dir_all(src.join("sub")).unwrap();
         std::fs::write(src.join("a.md"), "hello").unwrap();

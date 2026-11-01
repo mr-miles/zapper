@@ -1399,7 +1399,7 @@ pub(super) fn join(
             .git_passwords
             .lock()
             .unwrap()
-            .insert(name.clone(), zapper_core::util::random_id(24));
+            .insert(name.clone(), zapper_util::random_id(24));
     }
     Ok((name, firm, rt))
 }

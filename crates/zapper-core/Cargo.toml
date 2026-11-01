@@ -14,6 +14,7 @@ fuzz = []
 [dependencies]
 zapper-policy = { path = "../zapper-policy" }
 zapper-api-types = { path = "../zapper-api-types" }
+zapper-util = { path = "../zapper-util" }
 zapper-keeper = { path = "../zapper-keeper" }
 zapper-driver = { path = "../zapper-driver" }
 anyhow.workspace = true

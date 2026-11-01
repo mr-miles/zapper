@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use zapper_core::util::now;
+use zapper_util::now;
 
 /// Longest line kept; longer ones are cut and marked.
 pub const MAX_LINE: usize = 256 * 1024;
@@ -147,10 +147,8 @@ mod tests {
 
     #[test]
     fn append_and_read_back() {
-        let dir = std::env::temp_dir().join(format!(
-            "zapper-journal-{}",
-            zapper_core::util::random_id(6)
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-journal-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("j.jsonl")).unwrap();
         let a = j.append("mail", json!({ "subject": "hi" }));
@@ -180,10 +178,8 @@ mod tests {
     #[test]
     fn a_partial_write_does_not_desync_later_reads() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "zapper-journal-{}",
-            zapper_core::util::random_id(6)
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-journal-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("j.jsonl");
         let j = Journal::create(&path).unwrap();

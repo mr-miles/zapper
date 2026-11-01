@@ -2953,6 +2953,7 @@ dependencies = [
  "zapper-driver",
  "zapper-keeper",
  "zapper-policy",
+ "zapper-util",
 ]
 
 [[package]]
@@ -3064,6 +3065,7 @@ dependencies = [
  "zapper-github",
  "zapper-policy",
  "zapper-runs",
+ "zapper-util",
 ]
 
 [[package]]
@@ -3104,6 +3106,14 @@ dependencies = [
  "tokio",
  "tracing",
  "zapper-proto",
+]
+
+[[package]]
+name = "zapper-util"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.8",
 ]
 
 [[package]]

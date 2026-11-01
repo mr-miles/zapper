@@ -10,12 +10,12 @@ use zapper_core::prelude::*;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_core::util::now;
 #[cfg(test)]
 use zapper_core::Core;
 use zapper_core::NewSession;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
+use zapper_util::now;
 
 use crate::firm::{Firm, BOARD};
 use crate::history::RUN_CONFIG;
@@ -105,7 +105,7 @@ pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<Stri
 
 /// Memory still available on the host, in MiB.
 pub(crate) fn mem_available_mib() -> Option<u64> {
-    zapper_core::util::host_memory_mib("MemAvailable")
+    zapper_util::host_memory_mib("MemAvailable")
 }
 
 /// Checks that the firm fits before booting anything.
@@ -508,13 +508,13 @@ fn create_run(
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
-    zapper_core::util::write_private(
+    zapper_util::write_private(
         &dir.join("run.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
     )?;
     // The whole config the run started with, for replay: profiles, rules,
     // firms. Inline secret values are hidden, as in `zapper config startup`.
-    zapper_core::util::write_private(
+    zapper_util::write_private(
         &dir.join(RUN_CONFIG),
         zapper_core::util::redact(config.clone())
             .to_yaml()

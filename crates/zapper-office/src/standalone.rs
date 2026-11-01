@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
 use zapper_client::gateway;
-use zapper_core::util::random_id;
+use zapper_util::random_id;
 
 use crate::client::{self, Zapper};
 use crate::{Office, ASSETS, PAGE};

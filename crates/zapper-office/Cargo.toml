@@ -9,6 +9,7 @@ license.workspace = true
 zapper-git = { path = "../zapper-git" }
 zapper-core = { path = "../zapper-core" }
 zapper-client = { path = "../zapper-client" }
+zapper-util = { path = "../zapper-util" }
 zapper-runs = { path = "../zapper-runs" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-github = { path = "../zapper-github" }

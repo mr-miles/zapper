@@ -101,7 +101,7 @@ pub fn set_note(office: &Office, firm: &str, run: &str, note: &str) -> Result<()
         }
     }
     let tmp = dir.join(format!("{RUN_NOTE}.tmp"));
-    zapper_core::util::write_private(&tmp, note.as_bytes())?;
+    zapper_util::write_private(&tmp, note.as_bytes())?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -203,8 +203,7 @@ pub fn prune(office: &Office, firm: &str, run: &str) -> Result<()> {
 mod tests {
     #[test]
     fn run_summaries() {
-        let dir =
-            std::env::temp_dir().join(format!("zapper-runsum-{}", zapper_core::util::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-runsum-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = dir.join("journal.jsonl");
         std::fs::write(&j, concat!(

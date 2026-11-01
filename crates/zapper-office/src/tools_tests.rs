@@ -1198,7 +1198,7 @@ async fn a_manager_lets_their_hire_go_and_gets_the_budget_back() {
 
 /// A tar archive of `files` (name, text), as the VM's tar would write it.
 fn tar_of(files: &[(&str, &str)]) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("zapper-tar-{}", zapper_core::util::random_id(6)));
+    let dir = std::env::temp_dir().join(format!("zapper-tar-{}", zapper_util::random_id(6)));
     std::fs::create_dir_all(&dir).unwrap();
     let mut cmd = std::process::Command::new("tar");
     cmd.args(["-cf", "-", "-C"]).arg(&dir);
@@ -1294,8 +1294,7 @@ async fn work_is_published_from_one_vm_and_fetched_into_another() {
         }
     );
     assert!(fetched.get("error").is_none(), "{fetched}");
-    let out =
-        std::env::temp_dir().join(format!("zapper-untar-{}", zapper_core::util::random_id(6)));
+    let out = std::env::temp_dir().join(format!("zapper-untar-{}", zapper_util::random_id(6)));
     std::fs::create_dir_all(&out).unwrap();
     let mut untar = std::process::Command::new("tar")
         .args(["-xf", "-", "-C"])
