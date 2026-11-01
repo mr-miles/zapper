@@ -896,6 +896,9 @@ pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
 mod approval_tests;
 
 #[cfg(test)]
+mod examples_tests;
+
+#[cfg(test)]
 mod remote_tests;
 
 #[cfg(test)]

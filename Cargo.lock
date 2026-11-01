@@ -2854,7 +2854,6 @@ dependencies = [
  "zapper-core",
  "zapper-github",
  "zapper-keeper",
- "zapper-office",
  "zapper-policy",
  "zapper-ssh",
 ]
