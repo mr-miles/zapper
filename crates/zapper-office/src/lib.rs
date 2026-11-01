@@ -31,7 +31,9 @@ mod history;
 mod run;
 pub mod standalone;
 
-pub(crate) use history::{close_orphans, list_runs, prune, run_config, run_dir, set_note};
+#[cfg(test)]
+pub(crate) use history::close_orphans;
+pub(crate) use history::{list_runs, prune, run_config, run_dir, set_note};
 #[cfg(test)]
 pub(crate) use run::test_run;
 #[cfg(test)]
@@ -45,6 +47,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+#[cfg(test)]
 use zapper_core::prelude::*;
 
 use crate::firm::{Firm, BOARD};
@@ -53,16 +56,21 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 
+#[cfg(test)]
 use zapper_core::{Core, EventBody};
 use zapper_util::{now, random_id};
 
-/// The office's state in the core: its registry of runs. `pub` so the
-/// co-host mount (`zapper::office`) can hand the office's own state to
-/// [`routes`]; a standalone office (P4-d) builds its `Office` directly.
+/// The office's state in the core: its registry of runs. The co-host mount
+/// (`zapper::office`) used it to hand the office's own state to [`routes`];
+/// now the office is its own process (proposal 13, step 4) it builds its
+/// `Office` directly (`standalone::bootstrap`), so this is test-only — the
+/// office's unit tests reach the state a `TestCore` holds.
+#[cfg(test)]
 pub trait OfficeOf {
     fn office(&self) -> Arc<Office>;
 }
 
+#[cfg(test)]
 impl OfficeOf for Core {
     fn office(&self) -> Arc<Office> {
         self.client()
@@ -821,6 +829,12 @@ pub const ASSETS: &[(&str, &str)] = &[
 /// The office in a starting daemon: runs a previous daemon left running are
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
+///
+/// This is the in-process (co-host) entry. Now the office is its own process
+/// (proposal 13, step 4), `zapper serve` no longer calls it; a standalone
+/// office boots over a `Remote` client instead (`standalone::serve`). Kept for
+/// the office's unit tests, which start it on a `TestCore`.
+#[cfg(test)]
 pub fn start(d: &Core) {
     let office = d.office();
     let _ = office.client.set(Arc::new(client::Local(d.clone())));
@@ -846,6 +860,10 @@ pub fn start(d: &Core) {
 /// in-process it follows the same stream. The office's own revocations keep
 /// their records directly, so a `removed` event for a rule it no longer
 /// tracks is a no-op.
+///
+/// Co-host only (called by [`start`]); test-gated with it. A standalone office
+/// would follow the daemon's `/v1/events` SSE stream instead (P4-d, open).
+#[cfg(test)]
 fn follow_rules(d: &Core) {
     let Ok(h) = tokio::runtime::Handle::try_current() else {
         return;

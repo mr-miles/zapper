@@ -13,6 +13,7 @@ use serde_json::Value;
 // The socket client, shared with the workbench.
 use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
 pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
+#[cfg(test)]
 use zapper_core::{ApprovalApi, RuleApi, ServiceApi, SessionApi};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
@@ -147,8 +148,14 @@ pub trait OfficeClient: Send + Sync {
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
+/// Test-only now that the office is its own process (proposal 13, step 4):
+/// production uses [`Remote`] over the daemon's socket, and `zapper` no longer
+/// links the office in-process. The office's unit tests drive it against a
+/// `TestCore`.
+#[cfg(test)]
 pub struct Local(pub zapper_core::Core);
 
+#[cfg(test)]
 impl OfficeClient for Local {
     fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
         self.0.add_layer_rule(name, rule)

@@ -6,11 +6,15 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
+#[cfg(test)]
 use crate::journal::Journal;
 use crate::{is_run_id, Office};
 
 /// Ends the journals of runs a previous daemon left running: they can't be
-/// resumed, and a replay should say how they ended.
+/// resumed, and a replay should say how they ended. Called from the co-host
+/// `start` (test-gated now the office is its own process); a standalone office
+/// closes orphans on boot in a follow-up (P4-d).
+#[cfg(test)]
 pub fn close_orphans(state: &std::path::Path) {
     let Ok(firms) = std::fs::read_dir(state.join("firms")) else {
         return;

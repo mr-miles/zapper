@@ -7,7 +7,11 @@ license.workspace = true
 
 [dependencies]
 zapper-git = { path = "../zapper-git" }
-zapper-core = { path = "../zapper-core" }
+# zapper-core is a dev-dependency only: the office is a client of the daemon's
+# API (proposal 13, step 4), so production code reaches it through the socket
+# (client::Remote) and the serializable API types, never the in-process `Core`.
+# The in-process adapter (client::Local), the co-host `start`/`follow_rules`
+# and the `OfficeOf` trait are all `#[cfg(test)]`, exercised against a TestCore.
 zapper-client = { path = "../zapper-client" }
 zapper-util = { path = "../zapper-util" }
 zapper-driver = { path = "../zapper-driver" }
