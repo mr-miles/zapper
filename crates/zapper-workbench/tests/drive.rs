@@ -48,6 +48,7 @@ async fn bench() -> Bench {
         work: t.dir.join("work"),
         port: addr.port(),
         remote: false,
+        live: Default::default(),
     };
     for f in ctx.facilities.iter() {
         f.start(&ctx);

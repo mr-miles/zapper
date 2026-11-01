@@ -24,6 +24,10 @@ impl Harness for Pi {
         format!("{home}/.pi/agent")
     }
 
+    fn instructions_file(&self, home: &str) -> Option<String> {
+        Some(agents_md(&self.config_dir(home)))
+    }
+
     fn guest(
         &self,
         profile: &ResolvedProfile,
@@ -51,7 +55,7 @@ impl Headless for Pi {
         // per worker, reported once so a restart resumes it.
         let (session, told) = match resume {
             Some(id) => (id.to_string(), true),
-            None => (format!("w-{}", crate::daemon::random_id(12)), false),
+            None => (format!("w-{}", crate::random_id(12)), false),
         };
         Box::new(PiConversation {
             session,
@@ -206,6 +210,11 @@ impl Conversation for PiConversation {
 
 /// pi's files in its config directory: settings, instructions, MCP servers.
 /// Models and providers (`models.json`) are the profile's `config_files`.
+/// pi's instructions, in its config directory `dir`.
+fn agents_md(dir: &str) -> String {
+    format!("{dir}/AGENTS.md")
+}
+
 fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
     let agent = &profile.agent;
     // Quiet, and no project trust: a worker loads no `.pi/` from its work.
@@ -222,7 +231,7 @@ fn pi_files(profile: &ResolvedProfile, dir: &str) -> Vec<GuestFile> {
         pretty(&settings),
     )];
     if let Some(md) = &agent.instructions {
-        files.push(super::user_file(format!("{dir}/AGENTS.md"), md.clone()));
+        files.push(super::user_file(agents_md(dir), md.clone()));
     }
     // MCP tools are declared to the model directly: pi's default reaches
     // them only from codemode scripts, which the skills don't use.

@@ -10,12 +10,13 @@ use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use zapper_core::prelude::*;
-use zapper_core::{Core, Decider, Referral, Session};
+use zapper_core::Core;
 
 use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
+use zapper_policy::facility::{AskCall, AskMethod, AskReply, Referral};
 use zapper_policy::{Action, AnyRule, NetRequest, NetRule, Scope};
 
 use super::mail::{Draft, Kind};
@@ -117,8 +118,9 @@ pub struct Security {
     next_officer: usize,
     /// Hosts seen so far, for "new hosts" in digests.
     seen_hosts: BTreeSet<String>,
-    /// The officers' registration as the run's sessions' decider.
-    decider: Option<u64>,
+    /// The officers' registration as the run's sessions' decider: the id in
+    /// the core, and the socket the core refers `ask`s to.
+    decider: Option<DeciderServed>,
     /// Per session, the last request id put into a digest.
     digested: HashMap<String, u64>,
     pub last_digest: f64,
@@ -1130,47 +1132,128 @@ fn remove_rule(run: &FirmRun, st: &Standing) {
 /// The firm's officers, deciding the `ask`s of the run's sessions: each is
 /// filed as an access request; an approval for once goes with the request
 /// it allows.
-struct Officers {
-    run: Weak<FirmRun>,
+/// The officers' decider, served on a socket in the daemon's
+/// `state/services/` directory: its id in the core, the task serving the
+/// socket, and the socket's path (removed on unregister).
+struct DeciderServed {
+    id: u64,
+    task: Option<tokio::task::AbortHandle>,
+    path: std::path::PathBuf,
 }
 
-impl Decider for Officers {
-    fn ask(&self, s: &Session, req: &NetRequest) -> Result<Referral> {
-        let run = self
-            .run
-            .upgrade()
-            .ok_or_else(|| anyhow!("the firm isn't running"))?;
-        let member = s.label("member").unwrap_or_default();
-        Ok(Referral {
-            id: ask(&run, member, req, None, None, "")?,
-            to: "security".into(),
-            then: "you'll get mail with the decision, then retry".into(),
-        })
-    }
+/// Refers one `ask` to the officers: files the access request and returns
+/// where it went. The request is rebuilt from what the core sent, which the
+/// daemon named from the VM, never from what the guest sent.
+fn refer(run: &Weak<FirmRun>, call: &AskCall) -> Result<Referral> {
+    let run = run
+        .upgrade()
+        .ok_or_else(|| anyhow!("the firm isn't running"))?;
+    let member = call.labels.get("member").map(String::as_str).unwrap_or("");
+    let req = NetRequest {
+        host: call.host.clone(),
+        port: call.port,
+        method: call.http_method.clone(),
+        path: call.path.clone(),
+        session: Some(call.session.clone()),
+        labels: call.labels.clone(),
+    };
+    Ok(Referral {
+        id: ask(&run, member, &req, None, None, "")?,
+        to: "security".into(),
+        then: "you'll get mail with the decision, then retry".into(),
+    })
+}
 
-    fn allowed(&self, _s: &Session, rule: &str) {
-        if let Some(run) = self.run.upgrade() {
-            used(&run, rule);
+/// Answers the core's requests on the decider socket, one per connection: an
+/// `ask` is referred to the officers; an `allowed` note uses up a once-only
+/// approval. The run is held weakly, so a stopped firm's socket refers
+/// nothing.
+async fn serve(run: Weak<FirmRun>, listener: std::os::unix::net::UnixListener) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
+        return;
+    };
+    while let Ok((stream, _)) = listener.accept().await {
+        let run = run.clone();
+        tokio::spawn(async move {
+            let (r, mut w) = stream.into_split();
+            let mut line = Vec::new();
+            let max = zapper_policy::proto::MAX_MCP_LINE as u64;
+            if tokio::io::BufReader::new(r)
+                .take(max + 1)
+                .read_until(b'\n', &mut line)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let Ok(call) = serde_json::from_slice::<AskCall>(&line) else {
+                return;
+            };
+            match call.method {
+                AskMethod::Allowed => {
+                    if let (Some(run), Some(rule)) = (run.upgrade(), call.rule.as_deref()) {
+                        used(&run, rule);
+                    }
+                    // A note: nothing to answer.
+                }
+                AskMethod::Ask => {
+                    let reply = match refer(&run, &call) {
+                        Ok(r) => AskReply {
+                            referral: Some(r),
+                            error: None,
+                        },
+                        Err(e) => AskReply {
+                            referral: None,
+                            error: Some(format!("{e:#}")),
+                        },
+                    };
+                    if let Ok(mut b) = serde_json::to_vec(&reply) {
+                        b.push(b'\n');
+                        let _ = w.write_all(&b).await;
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Makes the officers the decider of the run's sessions' `ask`s, served on a
+/// socket as a facility in another process would (the office is on its way
+/// to being one).
+pub fn register(d: &Core, run: &Arc<FirmRun>) -> Result<()> {
+    let sessions = super::run_sessions(run);
+    let socket = format!("office-{}-decider.sock", run.firm);
+    let path = d.socket_dir().join(&socket);
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path)?;
+    listener.set_nonblocking(true)?;
+    let task = tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|h| h.spawn(serve(Arc::downgrade(run), listener)).abort_handle());
+    let id = match d.add_decider_socket(sessions, &socket) {
+        Ok(id) => id,
+        Err(e) => {
+            if let Some(t) = task {
+                t.abort();
+            }
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
         }
-    }
-}
-
-/// Makes the officers the decider of the run's sessions' `ask`s.
-pub fn register(d: &impl ApprovalApi, run: &Arc<FirmRun>) {
-    let id = d.add_decider(
-        super::run_sessions(run),
-        Arc::new(Officers {
-            run: Arc::downgrade(run),
-        }),
-    );
-    run.security.lock().unwrap().decider = Some(id);
+    };
+    run.security.lock().unwrap().decider = Some(DeciderServed { id, task, path });
+    Ok(())
 }
 
 /// Hands the run's sessions' `ask`s back, when the firm stops.
-pub fn unregister(d: &impl ApprovalApi, run: &FirmRun) {
-    let id = run.security.lock().unwrap().decider.take();
-    if let Some(id) = id {
-        d.remove_decider(id);
+pub fn unregister(d: &Core, run: &FirmRun) {
+    let served = run.security.lock().unwrap().decider.take();
+    if let Some(s) = served {
+        d.remove_decider(s.id);
+        if let Some(t) = s.task {
+            t.abort();
+        }
+        let _ = std::fs::remove_file(&s.path);
     }
 }
 
@@ -1475,9 +1558,6 @@ pub fn promote_target(run: &FirmRun, rule: &str) -> Result<(Scope, NetRule)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicU64;
-
     const FIRM: &str = "
 profiles:
   w:
@@ -1491,68 +1571,30 @@ firms:
     git: { repos: [api] }
 ";
 
-    /// A fake `ApprovalApi` recording the deciders added and removed — enough
-    /// to test the officers' registration without the daemon's real registry.
-    #[derive(Default)]
-    struct FakeApprovals {
-        next: AtomicU64,
-        added: std::sync::Mutex<Vec<u64>>,
-        removed: std::sync::Mutex<Vec<u64>>,
-    }
-
-    impl ApprovalApi for FakeApprovals {
-        fn add_decider(
-            &self,
-            _sessions: BTreeMap<String, String>,
-            _decider: Arc<dyn Decider>,
-        ) -> u64 {
-            let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
-            self.added.lock().unwrap().push(id);
-            id
-        }
-        fn remove_decider(&self, id: u64) -> bool {
-            self.removed.lock().unwrap().push(id);
-            true
-        }
-        fn approvals(&self) -> Vec<zapper_core::Pending> {
-            vec![]
-        }
-        fn answer(
-            &self,
-            _id: &str,
-            _allow: bool,
-            _remember: Option<zapper_core::Remember>,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// `register`/`unregister` depend only on `ApprovalApi`: a fake stands in
-    /// for the real decider registry, and we check they register the officers
-    /// as a decider (keeping its id on the run) and hand it back on stop.
+    /// `register` serves the officers' decider on a socket and keeps it on
+    /// the run; `unregister` hands it back to the core and drops the socket.
     #[tokio::test]
-    async fn register_wires_a_decider_that_unregister_removes() {
+    async fn register_serves_a_decider_that_unregister_removes() {
         let t = crate::test_core(FIRM);
         let run = crate::test_run(&t.core, "acme");
-        let fake = FakeApprovals::default();
 
-        super::register(&fake, &run);
-        assert_eq!(
-            run.security.lock().unwrap().decider,
-            Some(1),
-            "the decider's id is kept on the run",
-        );
-        assert_eq!(&*fake.added.lock().unwrap(), &[1], "one decider added");
+        super::register(&t.core, &run).unwrap();
+        let path = run
+            .security
+            .lock()
+            .unwrap()
+            .decider
+            .as_ref()
+            .expect("the decider is kept on the run")
+            .path
+            .clone();
+        assert!(path.exists(), "its socket is served");
 
-        super::unregister(&fake, &run);
-        assert_eq!(
-            &*fake.removed.lock().unwrap(),
-            &[1],
-            "the same decider is handed back",
-        );
+        super::unregister(&t.core, &run);
         assert!(
             run.security.lock().unwrap().decider.is_none(),
             "the run no longer holds a decider",
         );
+        assert!(!path.exists(), "its socket is gone");
     }
 }

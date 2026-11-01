@@ -27,7 +27,8 @@
     go("drive", "");
     parts.forEach((p, i) => go(p, parts.slice(0, i + 1).join("/")));
     let d;
-    try { d = await call("GET", "/files/" + enc(path)); } catch (e) { list.replaceChildren(el("span", e.message, "muted")); return; }
+    // The drive's top is /files, not /files/: the routes take no trailing slash.
+    try { d = await call("GET", path ? "/files/" + enc(path) : "/files"); } catch (e) { list.replaceChildren(el("span", e.message, "muted")); return; }
     list.replaceChildren();
     if (!d.entries.length) list.append(el("div", "Empty.", "muted"));
     for (const e of d.entries) {
@@ -66,7 +67,7 @@
       const text = usual.map(r => r.methods.join(",") + " " + r.path).join("\n");
       if (!confirm("Add these rules to zapper's global layer (for drive.zapper, which only the workbench's sessions resolve)?\n\n" + text)) return;
       const r = await call("POST", "/rules");
-      msg.textContent = r.added.length ? "Added " + r.added.join(", ") + " (running config; save it to keep)." : "They're there already.";
+      msg.textContent = r.added.length ? "Added " + r.added.join(", ") + " to the running config. An apply of the repository replaces it: to keep them, put them in its policy.yaml." : "They're there already.";
     } catch (x) { msg.textContent = x.message; }
   };
   const bar = el("div", null, "row");

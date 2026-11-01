@@ -1,0 +1,12 @@
+# The image the shop's sandboxes run: Claude Code and pi (pinned), git,
+# Node.js, Python, a headless browser (Playwright's Chromium, `browse`).
+# zapper's own recipe, as config/zapper.yaml has it.
+description: Claude Code and pi (pinned), git, kubectl, podman, Node.js, Python, a headless browser
+from: docker.io/library/ubuntu:26.04
+run:
+  - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git less procps ripgrep jq make xz-utils python3 python3-pip python3-venv podman buildah fuse-overlayfs uidmap && rm -rf /var/lib/apt/lists/*"
+  - "curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz && echo 'df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de  /tmp/node.tar.xz' | sha256sum -c && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE && rm /tmp/node.tar.xz && node --version"
+  - "curl -fsSL -o /usr/local/bin/kubectl https://dl.k8s.io/release/v1.36.5/bin/linux/amd64/kubectl && echo '33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e  /usr/local/bin/kubectl' | sha256sum -c && chmod 755 /usr/local/bin/kubectl"
+  - "curl -fsSL https://claude.ai/install.sh | bash -s 2.1.301 && cp -L /root/.local/bin/claude /usr/local/bin/claude && rm -rf /root/.local /root/.claude* && claude --version"
+  - "npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.3.0 && PI_OFFLINE=1 pi --version && rm -rf /root/.npm /root/.pi"
+  - "npm install -g --no-audit --no-fund playwright@1.64.1 && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright playwright install --with-deps chromium && chmod -R a+rX /opt/ms-playwright && rm -rf /var/lib/apt/lists/* /root/.npm"

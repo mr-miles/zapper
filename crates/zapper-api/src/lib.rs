@@ -70,6 +70,7 @@ fn read_routes() -> Router<Core> {
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/audit", get(get_audit))
+        .route("/sessions/{id}/config", get(session_config))
         .route("/sessions/{id}/verify", get(verify_session))
         .route("/sessions/{id}/terminals", get(list_terminals))
         .route("/sessions/{id}/requests", get(list_requests))
@@ -353,8 +354,21 @@ async fn get_diff(State(d): D) -> String {
     d.diff()
 }
 
-async fn put_config(State(d): D, body: String) -> R<Json<Value>> {
+#[derive(Deserialize)]
+struct PutConfig {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Replaces the running config, validated as a whole and applied
+/// atomically; with `dry_run`, checked the same way and not applied, the
+/// answer saying what would change.
+async fn put_config(State(d): D, Query(q): Query<PutConfig>, body: String) -> R<Json<Value>> {
     let config: Config = parse_body(&body)?;
+    if q.dry_run {
+        let diff = d.check_replace(config)?;
+        return Ok(Json(json!({ "ok": true, "applied": false, "diff": diff })));
+    }
     d.replace_config(config)?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -442,6 +456,31 @@ async fn delete_rule(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
         RuleRemoval::Revoked => json!({ "id": id, "revoked": true }),
         RuleRemoval::Removed(scope, rule) => rule_json(&scope, &rule),
     }))
+}
+
+/// What a session runs with: its profile as resolved when it was made
+/// (engine, agent, mounts, setup; secrets as their placeholders, never
+/// values), its labels, and the policy layers that decide its requests now,
+/// most specific first.
+async fn session_config(State(d): D, Path(id): Path<String>) -> R<Json<Value>> {
+    let s = d.session(&id)?;
+    let mut resolved = serde_json::to_value(&s.resolved).unwrap_or_default();
+    if let Some(m) = resolved.as_object_mut() {
+        // The layers as they are now, below, not as they were at creation.
+        m.remove("layers");
+    }
+    let layers: Vec<Value> = d
+        .layers_for(Some(&id), None)?
+        .into_iter()
+        .map(|(scope, policy)| json!({ "scope": scope.to_string(), "policy": policy }))
+        .collect();
+    Ok(Json(json!({
+        "id": s.id,
+        "profile": s.resolved.name,
+        "labels": s.labels,
+        "resolved": resolved,
+        "layers": layers,
+    })))
 }
 
 async fn list_profiles(State(d): D) -> Json<Value> {

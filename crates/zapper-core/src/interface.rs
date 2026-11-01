@@ -100,6 +100,21 @@ impl Core {
         daemon::record::status()
     }
 
+    /// Whether the record can be written now: a client gates its work on
+    /// this (the office takes no firm turn while it is false), through the
+    /// interface rather than reaching into the core.
+    pub fn record_writable(&self) -> bool {
+        daemon::record::healthy()
+    }
+
+    /// The shared policy layer named `name`: a handle a client keeps a set
+    /// of rules in (a firm role's), which sessions attach by their
+    /// `firm-role` label. Created empty if new; every session carrying the
+    /// label sees its rules.
+    pub fn named_layer(&self, name: &str) -> Arc<std::sync::RwLock<Policy>> {
+        self.d.named_layer(name)
+    }
+
     /// The token the UI's first request carries.
     pub fn ui_token(&self) -> &str {
         &self.d.ui_token
@@ -126,13 +141,17 @@ impl Core {
         for hook in hooks {
             hook(self.clone()).await;
         }
-        for s in self.sessions() {
+        // All at once: each waits for its guest to power off (up to a few
+        // seconds), so one after another would add those up.
+        let stops = self.sessions().into_iter().filter_map(|s| {
             if s.persistent && s.is_running() {
                 tracing::info!(session = %s.id, "left running for the next daemon");
-                continue;
+                return None;
             }
-            session::stop(&self.d, &s, "daemon shutdown").await;
-        }
+            let d = self.d.clone();
+            Some(async move { session::stop(&d, &s, "daemon shutdown").await })
+        });
+        futures_util::future::join_all(stops).await;
     }
 
     /// Emits a service-change event.
@@ -172,6 +191,9 @@ pub trait ConfigApi {
     fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T>;
     /// Replaces the running config wholesale (secrets left redacted kept).
     fn replace_config(&self, config: Config) -> Result<()>;
+    /// What replacing it with `config` would change, checked as
+    /// `replace_config` checks it, not applied: a diff, empty for nothing.
+    fn check_replace(&self, config: Config) -> Result<String>;
     /// Writes the running config to the startup file.
     fn save(&self) -> Result<()>;
     /// Drops running changes: the startup file again.
@@ -214,6 +236,10 @@ impl ConfigApi for Core {
 
     fn replace_config(&self, config: Config) -> Result<()> {
         self.d.replace_config(config)
+    }
+
+    fn check_replace(&self, config: Config) -> Result<String> {
+        self.d.check_replace(config)
     }
 
     fn save(&self) -> Result<()> {
@@ -492,6 +518,11 @@ pub trait ApprovalApi {
     /// are refused at once and referred to it. The earliest registered for
     /// a session decides. Its id, for removing it.
     fn add_decider(&self, sessions: BTreeMap<String, String>, decider: Arc<dyn Decider>) -> u64;
+    /// Makes the decider a client serves on socket `socket` (a file in the
+    /// daemon's `state/services/` directory) decide the `ask`s of the
+    /// sessions `sessions` picks: each is refused at once and the core asks
+    /// the socket to refer it, naming the caller from the VM. Its id.
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64>;
     /// Hands a decider's sessions' `ask`s back to the operator.
     fn remove_decider(&self, id: u64) -> bool;
 }
@@ -507,6 +538,18 @@ impl ApprovalApi for Core {
 
     fn add_decider(&self, sessions: BTreeMap<String, String>, decider: Arc<dyn Decider>) -> u64 {
         self.d.deciders.add(sessions, decider)
+    }
+
+    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64> {
+        crate::daemon::services::check_socket(socket)?;
+        let path = self
+            .d
+            .paths
+            .state
+            .join(crate::daemon::services::SOCKETS_DIR)
+            .join(socket);
+        let decider = Arc::new(crate::daemon::deciders::SocketDecider::new(path));
+        Ok(self.d.deciders.add(sessions, decider))
     }
 
     fn remove_decider(&self, id: u64) -> bool {

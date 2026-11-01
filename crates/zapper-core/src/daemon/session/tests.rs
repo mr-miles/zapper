@@ -750,3 +750,41 @@ async fn a_persistent_session_keeps_its_ssh_terminal() {
     let saved: Saved = serde_json::from_slice(&std::fs::read(s.dir.saved()).unwrap()).unwrap();
     assert_eq!(saved.ssh_terminal, Some(opened.request.id));
 }
+
+/// A named layer in the core (a firm role's) attaches to every session that
+/// carries its `firm-role` label, so one approval reaches all of them, and
+/// not sessions of another role. No VM: labels and policy evaluation only.
+#[test]
+fn sessions_of_a_role_share_its_named_layer_by_label() {
+    let t = TestCore::new(CONFIG);
+    // The office seeds the role's layer; workers of the role carry its label.
+    let layer = t.core.daemon().named_layer("acme/eng");
+    let worker = |role: &str| {
+        let mut new = NewSession::plain("web".into(), t.workdir(), Default::default());
+        new.labels = [("firm-role".to_string(), role.to_string())].into();
+        t.core.test_session(new, true).unwrap()
+    };
+    let a = worker("acme/eng");
+    let b = worker("acme/eng");
+    let other = worker("acme/sec");
+
+    // An approval added to the role layer is seen by every worker of it.
+    layer.write().unwrap().insert(
+        zapper_policy::AnyRule::Net(
+            serde_json::from_value(serde_json::json!({ "action": "allow", "host": "x.example" }))
+                .unwrap(),
+        ),
+        None,
+    );
+    let sees = |s: &Session| {
+        s.with_layers(t.core.daemon(), |ls| {
+            ls.iter().any(|(sc, p)| {
+                matches!(sc, Scope::Role(r) if r == "acme/eng")
+                    && p.net.iter().any(|r| r.host == "x.example")
+            })
+        })
+    };
+    assert!(sees(&a), "the role's worker sees the shared rule");
+    assert!(sees(&b), "and so does another worker of the role");
+    assert!(!sees(&other), "a worker of another role does not");
+}

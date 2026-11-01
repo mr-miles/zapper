@@ -652,6 +652,98 @@ async fn a_secret_is_set_and_removed_alone_and_validated() {
 }
 
 #[tokio::test]
+async fn a_config_is_checked_whole_without_being_applied() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let mut c = t.core.config();
+    let before = c.to_yaml();
+    c.profiles
+        .insert("extra".into(), serde_yaml::from_str("{}").unwrap());
+    let put = |yaml: String, dry: bool| {
+        let app = app.clone();
+        let uri = if dry {
+            "/v1/config?dry_run=true"
+        } else {
+            "/v1/config"
+        };
+        async move {
+            send(
+                &app,
+                Method::PUT,
+                uri,
+                &[("content-type", "application/yaml")],
+                &yaml,
+            )
+            .await
+        }
+    };
+    let r = put(c.to_yaml(), true).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["applied"], false);
+    assert!(
+        r.json()["diff"].as_str().unwrap().contains("+  extra"),
+        "{}",
+        r.body
+    );
+    assert_eq!(t.core.config().to_yaml(), before, "nothing applied");
+
+    // Refused as a real one would be.
+    let mut bad = t.core.config();
+    bad.secrets.insert(
+        "nohosts".into(),
+        serde_yaml::from_str("{ file: /tmp/x }").unwrap(),
+    );
+    let r = put(bad.to_yaml(), true).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+
+    // As it runs: nothing to change.
+    let r = put(t.core.config().to_yaml(), true).await;
+    assert_eq!(r.json()["diff"], "", "{}", r.body);
+    let r = put(c.to_yaml(), false).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(t.core.config().profiles.contains_key("extra"));
+}
+
+#[tokio::test]
+async fn a_sessions_config_is_what_it_was_made_with_and_its_layers_now() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+    let id = session(&t, "web", &[("team", "a")], true);
+    let rule = format!(
+        r#"{{"scope":"session:{id}","rule":{{"kind":"net","action":"allow","host":"own.example"}}}}"#
+    );
+    post(&app, "/v1/rules", &rule).await;
+    let c = get(&app, &format!("/v1/sessions/{id}/config")).await.json();
+    assert_eq!(c["profile"], "web");
+    assert_eq!(c["labels"]["team"], "a");
+    assert!(c["resolved"]["engine"]["image"].is_string(), "{c}");
+    assert!(
+        c["resolved"].get("layers").is_none(),
+        "the layers are now's, below"
+    );
+    let scopes: Vec<&str> = c["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["scope"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        scopes.first().copied(),
+        Some(format!("session:{id}").as_str()),
+        "most specific first: {scopes:?}"
+    );
+    assert_eq!(scopes.last().copied(), Some("global"));
+    assert!(
+        c["layers"][0]["policy"].to_string().contains("own.example"),
+        "{c}"
+    );
+    assert_eq!(
+        get(&app, "/v1/sessions/nosuch/config").await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn services_added_listed_and_removed() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());

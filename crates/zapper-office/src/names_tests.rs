@@ -147,7 +147,7 @@ async fn the_clusters_api_is_its_vms_port() {
     let t = test_core(FIRM);
     let run = test_run(&t.core, "acme");
     let mut new = NewSession::plain("w".into(), t.workdir(), Default::default());
-    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, false);
+    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();
     echoing_vm(&cluster);
     facility::test_cluster(&t.core, &run, &cluster);

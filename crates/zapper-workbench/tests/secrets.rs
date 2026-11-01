@@ -55,6 +55,7 @@ async fn bench() -> Bench {
         work: t.dir.join("work"),
         port: addr.port(),
         remote: false,
+        live: Default::default(),
     };
     tokio::spawn(async move { axum::serve(tcp, gateway::app(ctx)).await });
     let owner = tokens.owner().unwrap();

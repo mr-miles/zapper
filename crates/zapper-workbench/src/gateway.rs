@@ -41,7 +41,28 @@ pub struct Ctx {
     /// The port the UI is served on, and whether it listens beyond loopback.
     pub port: u16,
     pub remote: bool,
+    /// The repository's commit applied to zapper, which sessions it creates
+    /// are labelled with (`workbench-config`), to tell those an apply has
+    /// left behind.
+    pub live: Live,
 }
+
+/// The repository's commit applied to zapper, short; none until one is.
+#[derive(Clone, Default)]
+pub struct Live(std::sync::Arc<std::sync::RwLock<Option<String>>>);
+
+impl Live {
+    pub fn get(&self) -> Option<String> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub fn set(&self, commit: Option<String>) {
+        *self.0.write().unwrap() = commit;
+    }
+}
+
+/// The label naming the commit a session was made from.
+pub const CONFIG_LABEL: &str = "workbench-config";
 
 /// An error, as the gateway answers it: `{"error": …}` with its status.
 #[derive(Debug)]
@@ -270,6 +291,10 @@ async fn create_session(
             }
         }
     }
+    // The commit applied when it was made, to tell it apart once another is.
+    if let Some(commit) = ctx.live.get() {
+        labels.insert(CONFIG_LABEL.into(), commit);
+    }
     let dir = workdir(&ctx.work, new.workdir.as_deref())?;
     let body = json!({
         "profile": new.profile,
@@ -353,14 +378,14 @@ async fn remove_session(
 }
 
 /// A session's read-only views, as zapper has them: `audit`, `verify`,
-/// `requests`, `terminals`.
+/// `requests`, `terminals`, `config`.
 async fn session_view(
     State(ctx): State<Ctx>,
     Extension(g): Extension<Grant>,
     Path((id, view)): Path<(String, String)>,
 ) -> R<Response> {
     need(&g, Right::Read)?;
-    if !["audit", "verify", "requests", "terminals"].contains(&view.as_str()) {
+    if !["audit", "verify", "requests", "terminals", "config"].contains(&view.as_str()) {
         return Err(Error(StatusCode::NOT_FOUND, format!("no view {view}")));
     }
     reached(&ctx, &g, &id).await?;

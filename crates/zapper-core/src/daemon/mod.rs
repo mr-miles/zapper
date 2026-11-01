@@ -18,7 +18,7 @@ pub(crate) mod dns;
 pub mod driver;
 pub(crate) mod events;
 pub(crate) mod gateway;
-pub mod harness;
+pub use zapper_driver::harness;
 pub(crate) mod httplog;
 pub(crate) mod nic;
 pub(crate) mod proxy;
@@ -85,6 +85,11 @@ pub struct Daemon {
     pub(crate) deciders: deciders::Deciders,
     pub(crate) gateway: gateway::Gateway,
     pub(crate) builds: builds::Builds,
+    /// Shared policy layers by name: a session attaches one by a label (a
+    /// firm role, say), and a client adds and removes its rules, so every
+    /// session with that label sees them. The office's role layers.
+    pub(crate) named_layers:
+        RwLock<std::collections::BTreeMap<String, Arc<RwLock<zapper_policy::Policy>>>>,
 }
 
 /// One line from `io`, read a byte at a time so nothing after it is taken
@@ -243,9 +248,22 @@ impl Daemon {
             deciders: deciders::Deciders::default(),
             gateway: gateway::Gateway::default(),
             builds: builds::Builds::default(),
+            named_layers: RwLock::new(std::collections::BTreeMap::new()),
         });
         session::restore(&daemon);
         Ok(daemon)
+    }
+
+    /// The shared policy layer named `name`, created empty if new. A session
+    /// attaches it by a label (see `session::create`); a client adds and
+    /// removes its rules, and every session carrying that label sees them.
+    pub(crate) fn named_layer(&self, name: &str) -> Arc<RwLock<zapper_policy::Policy>> {
+        self.named_layers
+            .write()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .clone()
     }
 
     pub fn emit(&self, session: Option<&Session>, body: EventBody) {
@@ -265,18 +283,13 @@ impl Daemon {
     /// Applies a change to the running config if the result is valid.
     pub fn change<T>(&self, what: &str, f: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
         let _changing = self.changing.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = self.config.read().unwrap().clone();
-        let before = config_rules(&next);
-        let old_networks = next.daemon.private_networks.clone();
-        let out = f(&mut next)?;
-        next.normalize();
-        next.validate()?;
-        self.ensure_driver_toggle_ok(&next)?;
-        self.clients.check(&next)?;
+        let current = self.config.read().unwrap().clone();
+        let before = config_rules(&current);
+        let (next, out) = self.candidate(current.clone(), f)?;
         // Derived state: rebuild the address policy only when this change
         // touched the private networks (compared against the clone basis, not
         // a second lock read).
-        if next.daemon.private_networks != old_networks {
+        if next.daemon.private_networks != current.daemon.private_networks {
             *self.addrs.write().unwrap() = addr::AddressPolicy::new(&next.daemon.private_networks)?;
         }
         let after = config_rules(&next);
@@ -303,6 +316,23 @@ impl Daemon {
             }
         }
         Ok(out)
+    }
+
+    /// `f` applied to `config` (a copy of the running one), and checked as
+    /// every change is: normalised, validated as a whole, the driver toggle
+    /// and clients' checks passed, its private networks parsed. Not applied.
+    fn candidate<T>(
+        &self,
+        mut next: Config,
+        f: impl FnOnce(&mut Config) -> Result<T>,
+    ) -> Result<(Config, T)> {
+        let out = f(&mut next)?;
+        next.normalize();
+        next.validate()?;
+        self.ensure_driver_toggle_ok(&next)?;
+        self.clients.check(&next)?;
+        addr::AddressPolicy::new(&next.daemon.private_networks)?;
+        Ok((next, out))
     }
 
     /// Turning the driver off is refused while driven sessions are running.
@@ -335,21 +365,30 @@ impl Daemon {
     /// The values come from the config it replaces, in the same change.
     pub fn replace_config(&self, mut new: Config) -> Result<()> {
         self.change("config replaced", |old| {
-            for (name, s) in new.secrets.iter_mut() {
-                if let SecretSource::Value { value } = &mut s.source {
-                    if value == REDACTED {
-                        match old.secrets.get(name).map(|o| &o.source) {
-                            Some(SecretSource::Value { value: v }) => *value = v.clone(),
-                            _ => {
-                                bail!("secret {name}: value is redacted and there is no old value")
-                            }
-                        }
-                    }
-                }
-            }
+            keep_redacted(old, &mut new)?;
             *old = new;
             Ok(())
         })
+    }
+
+    /// What replacing the running config with `new` would change, checked
+    /// as `replace_config` checks it but not applied: a unified diff of the
+    /// two, values redacted (empty when nothing would).
+    pub fn check_replace(&self, mut new: Config) -> Result<String> {
+        let current = self.config.read().unwrap().clone();
+        let (next, ()) = self.candidate(current.clone(), |old| {
+            keep_redacted(old, &mut new)?;
+            *old = new;
+            Ok(())
+        })?;
+        let (was, would) = (redact(current).to_yaml(), redact(next).to_yaml());
+        if was == would {
+            return Ok(String::new());
+        }
+        Ok(similar::TextDiff::from_lines(&was, &would)
+            .unified_diff()
+            .header("running", "proposed")
+            .to_string())
     }
 
     fn running_yaml(&self) -> String {
@@ -529,6 +568,21 @@ pub fn redact(mut c: Config) -> Config {
 
 #[cfg(test)]
 mod limits_tests;
+
+/// Inline secret values `new` has redacted get the values `old` has.
+fn keep_redacted(old: &Config, new: &mut Config) -> Result<()> {
+    for (name, s) in new.secrets.iter_mut() {
+        if let SecretSource::Value { value } = &mut s.source {
+            if value == REDACTED {
+                match old.secrets.get(name).map(|o| &o.source) {
+                    Some(SecretSource::Value { value: v }) => *value = v.clone(),
+                    _ => bail!("secret {name}: value is redacted and there is no old value"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// The config's rules, by layer and id: each one's kind, and the rule as it
 /// is written, to tell one changed under its id.

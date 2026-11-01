@@ -284,6 +284,10 @@ async fn list(
             "workbench": mine,
             "has_value": !mine || store.path(name).is_file(),
             "used_by": used_by(name, &config, &rules),
+            "plaintext": e["plaintext"].as_bool().unwrap_or(false),
+            "user": e["user"],
+            "database": e["database"],
+            "mechanism": e["mechanism"],
         }));
     }
     Ok(Json(Value::Array(out)))

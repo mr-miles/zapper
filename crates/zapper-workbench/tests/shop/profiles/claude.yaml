@@ -1,0 +1,25 @@
+# Claude Code in a sandbox: the Claude API allowed with the token the host
+# adds, every other host asked about (you answer in the workbench). The
+# shop's other profiles extend it.
+engine:
+  image: office
+  kernel: vmlinux-6.1
+  vcpus: 2
+  memory_mib: 4096
+  disk: 16GiB
+  network: nic
+agent:
+  kind: claude-code
+  command: [claude]
+  user: agent
+  workdir: /work
+  env:
+    CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
+    PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+    NODE_PATH: /usr/local/lib/node_modules
+mounts:
+  - { host: "{workdir}", guest: /work, mode: rw }
+policy:
+  net:
+    - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+  defaults: { net: ask }

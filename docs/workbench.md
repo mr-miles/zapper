@@ -2,7 +2,7 @@
 
 # The workbench
 
-A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)), phase 6 (the [SSH connector](#ssh-keys)) and phase 7 (the [repository](#the-repository) served to sessions). Applying the repository to zapper's config (phase 3) and the wizard (phase 4) come later.
+A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)), phase 6 (the [SSH connector](#ssh-keys)), phase 7 (the [repository](#the-repository) served to sessions) and phase 3 (the repository [applied to zapper](#applying-the-repository)). The wizard (phase 4) comes later.
 
 ```
 zapper-workbench serve                 # the API (/w/v1) and the UI, on 127.0.0.1:7880; prints the UI's address
@@ -13,6 +13,16 @@ zapper-workbench token ls ; zapper-workbench token rm ci
 ```
 
 Run it as the same user as `zapper serve`: it finds zapper's socket the way the `zapper` CLI does (`$ZAPPER_SOCKET`, else under `$XDG_RUNTIME_DIR`).
+
+Its own config, `~/.config/zapper-workbench/workbench.yaml`, is what is the host's rather than the repository's (both keys optional):
+
+```yaml
+listen: 127.0.0.1:7880        # where serve listens and url says; --listen overrides it
+daemon:                       # zapper's daemon section, given to the repository's config
+  ui: 127.0.0.1:7878
+```
+
+Without `daemon`, an applied config keeps zapper's running daemon section as it is.
 
 ## Tokens
 
@@ -52,7 +62,7 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /sessions`, `GET /sessions/{id}` | [read] |
 | `POST /sessions` | `{profile, workdir?, labels?, persistent?, ssh?, rules?}` [create] |
 | `POST /sessions/{id}/stop`, `POST /sessions/{id}/start`, `DELETE /sessions/{id}` | [control] |
-| `GET /sessions/{id}/audit\|verify\|requests\|terminals`, `GET /sessions/{id}/requests/{n}`, `GET /sessions/{id}/terminals/{n}` (its output, server-sent events) | [read] |
+| `GET /sessions/{id}/audit\|verify\|requests\|terminals\|config`, `GET /sessions/{id}/requests/{n}`, `GET /sessions/{id}/terminals/{n}` (its output, server-sent events) | [read] |
 | `GET /sessions/{id}/rules`; `POST /sessions/{id}/rules` `{rule, position?}`, `DELETE /sessions/{id}/rules/{rule}` | [read]; [rules] |
 | `GET /sessions/{id}/attach?tty=RxC&argv=JSON&persist=bool&terminal=N` | upgrade to a terminal, frames as zapper's [terminal] |
 | `GET /approvals`; `POST /approvals/{id}` `{allow, remember?}` | [read]; [answer] |
@@ -62,7 +72,8 @@ Under `/w/v1`, each needing the right in brackets:
 | `GET /secrets`, `GET /secrets/presets`, `PUT /secrets/{name}`, `DELETE /secrets/{name}` | the [secrets](#secrets) facility [secrets] |
 | `GET /ssh/keys`, `PUT /ssh/keys/{name}` `{key, reach}`, `DELETE /ssh/keys/{name}`, `GET /ssh/config?host=USER@HOST` | the [SSH keys](#ssh-keys) (the owner's token only) |
 | `GET\|PUT\|DELETE /drive/files/{path}`; `GET /drive/rules/usual`, `POST /drive/rules` | the [drive](#the-drive)'s files, and its usual rules added (the owner's token only) |
-| `GET /git`; `GET /git/rules/usual`, `POST /git/rules` | the [repository](#the-repository): where to clone it, its branches; its usual rule added (the owner's token only) |
+| `GET /git`; `GET /git/rules/usual`, `POST /git/rules` | the [repository](#the-repository): where to clone it, its branches, what is applied (`config`: `live`, `main`, `builds`, `out_of_date`); its usual rule added (the owner's token only) |
+| `POST /git/check` `{ref?}`, `POST /git/apply` | [applying the repository](#applying-the-repository): a branch or commit checked (`{commit, subject, diff, images}`); `main` applied (`{commit, subject, diff, building}`) (the owner's token only) |
 | `/w/v1/<facility>/…` | each facility's own routes |
 
 ## Secrets
@@ -75,6 +86,7 @@ The first facility: credentials the workbench keeps for zapper, so they never si
 - **Only its own.** It changes and removes only secrets whose file is in its directory; one written in zapper's config by hand is listed, but stays the operator's (`409`).
 - **Nothing half done.** A value is written aside, and put in place only once zapper has taken the entry: a secret zapper refuses (a `proxy` secret with no hosts, say) leaves no file behind. A secret something still uses (a rule in the config, a profile, a session's own rule) isn't removed, and keeps its value.
 - **Running, not saved.** Changes go to zapper's running config. **Save zapper's running config…** (the owner's, `POST /w/v1/config/save`) shows the diff and writes it to zapper's startup file: everything running, the secrets' entries among it, never their values.
+- **With the repository**, a secret is named in its `secrets.yaml` (hosts and mode) and the facility sets its value; an entry made or changed here alone is replaced when the repository is next [applied](#applying-the-repository).
 
 Presets fill in the hosts and mode, and check what a value looks like (its form, not a call to the service):
 
@@ -118,6 +130,35 @@ The workbench's repository, `~/.local/share/zapper-workbench/git/config.git` (ba
 - **Sessions** (the workbench's, label `workbench=1`) reach it as a socket service, the drive's way: zapper terminates TLS, names the caller and decides each request against `net` rules; **Let workbench sessions use it…** adds the usual one to zapper's global layer: `{ id: git-config, kind: net, action: allow, host: git.zapper, ports: [443], methods: [GET, POST], path: "/config.git/**" }`. In a session: `git clone https://git.zapper/config.git`.
 - **Branches, never `main`.** A session's request is answered by `git http-backend` with the session as the pusher at the `write` level, and the repository's `pre-receive` hook (the office's, from `zapper-git`) lets it push branches and refuses `main`, `main/…` and tags, saying why. It records who pushed each commit (`zapper-pushed`), and commits a session pushed carry its id as the committer. A push on the host, with no level, is yours: the hook lets it through.
 - **The panel** lists the branches with their last commits (a session's proposals among them); merge one in your clone and push `main`.
+
+## Applying the repository
+
+The repository is zapper's configuration: you change it on a branch, merge it to `main`, and apply it. Nothing applies by itself.
+
+```
+policy.yaml                     zapper's global policy layer
+secrets.yaml                    each secret's hosts and mode; never a value
+images/NAME.yaml                zapper's image recipe NAME
+profiles/NAME.yaml              zapper's profile NAME
+agents/NAME/AGENT.md            an agent definition, and its own skills in agents/NAME/skills/
+skills/SKILL/SKILL.md           skills every profile gets
+```
+
+Every file is zapper's own format; `profiles/web.yaml` is what `profiles.web` would be in zapper's config. Rendering a commit (checked out under `git/live/COMMIT/`):
+
+- **A profile's agent**: `agent.definition: NAME`, the one key that isn't zapper's, is consumed: `agents/NAME/AGENT.md` without its front matter becomes the profile's `agent.instructions`, which zapper writes as the sandbox's `~/.claude/CLAUDE.md`, read-only. Not with `instructions` of its own.
+- **Skills, merged per profile**: `skills/` copied into a directory of the profile's own, its agent's `agents/NAME/skills/` laid over it (one of the same name replaces the shared one); that is the profile's `agent.skills`, mounted read-only. A profile doesn't give `agent.skills` itself.
+- **Paths**: one relative to the repository, in `mounts`, `config_mounts` and image arguments' `default`, becomes the checkout's; absolute ones, `~/…` and `{workdir}` stay as they are; none may lead out of the repository.
+- **Secrets**: an entry with no source gets the [secrets](#secrets) facility's file, whose value you set there; one with a `command`, `env` or `file` of its own keeps it; an inline `value` is refused.
+- **`daemon`** is `workbench.yaml`'s, else zapper's running one; the office's `firms`, which aren't the repository's, are kept as they run. Everything else is the repository's, wholesale: a profile, image, secret or rule not in it is gone once it is applied.
+
+**Check** (`POST /w/v1/git/check`, any branch or commit, a session's proposal among them) renders it and has zapper check it as a replacement without applying it (`PUT /v1/config?dry_run=true`): its diff against the running config, or why zapper refuses it, and which images it would build again. **Apply** (`main` only, one at a time) does the same, then puts it in place (`PUT /v1/config`) and saves it to zapper's startup file. A commit zapper refuses changes nothing.
+
+- **Images**: one whose recipe or the files its arguments name changed since it was last built is built again, one at a time, through zapper (`POST /v1/images/NAME/build`); the panel shows each build. One never recorded is built only if zapper doesn't have it.
+- **Sandboxes from before**: a session the workbench creates is labelled with the commit applied then (`workbench-config`); one from an older commit is listed as out of date, and left running. Its mounts (its CLAUDE.md, its skills) are what it booted with.
+- **Two checkouts are kept**, the live commit's and the one before.
+
+Since an apply replaces the config, what lives only in zapper's running config is gone at the next one: put the drive's and the repository's usual rules in `policy.yaml`, and each secret in `secrets.yaml` (the facility keeps its value).
 
 ## SSH keys
 

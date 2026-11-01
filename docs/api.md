@@ -61,7 +61,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `GET /v1/status` | ✓ | Version, session counts, unsaved changes, pending approvals, `epoch` (this daemon run's ID, which event ids start with), and `socket_dir`: where a facility puts the socket a socket service or MCP server names |
 | `GET /v1/record` | ✓ | Who keeps the record and whether it is being written |
 | `GET /v1/config[?format=json]` | ✓ | Running config, YAML by default, secret values redacted |
-| `PUT /v1/config` | | Replace the running config (validated; `<redacted>` keeps old values) |
+| `PUT /v1/config[?dry_run=true]` | | Replace the running config (validated as a whole, applied atomically; `<redacted>` keeps old values). With `dry_run`, checked exactly as a replacement is and not applied: `{ok, applied: false, diff}`, `diff` a unified diff of the running config and the proposed one, values redacted (empty when nothing would change) |
 | `GET /v1/config/startup` | ✓ | Startup file, normalised and redacted |
 | `GET /v1/config/diff` | ✓ | Unified diff, startup → running (text) |
 | `POST /v1/config/save` | | Write the running config to the startup file |
@@ -80,6 +80,7 @@ The layer workers run on: zapper's sessions, policy and config.
 | `DELETE /v1/sessions/{id}` | | Stop and forget; a persistent session's disks go too |
 | `GET /v1/sessions/{id}/verify` | ✓ | `{ok, chain, findings}`: the session's files against the keeper's chains (`chain.ok` null, with a `note`, without a keeper), and what its record shows of its disks, each finding with the event's `epoch` and `seq` ([security: persistent sessions](security.md#persistent-sessions)) |
 | `GET /v1/sessions/{id}/audit` | ✓ | Audit log (`application/x-ndjson`) |
+| `GET /v1/sessions/{id}/config` | ✓ | What the session runs with: `{id, profile, labels, resolved, layers}`, `resolved` its profile as resolved when it was made (engine, agent, mounts, setup; secrets as placeholders, never values), `layers` the policy layers that decide its requests now, most specific first (`[{scope, policy}]`) |
 | `GET /v1/sessions/{id}/requests` | ✓ | The session's requests and connections: `id`, `method`, `url`, `status`, `action`, `rule`, `type`, `req_size`, `resp_size`, `ttfb_ms`, `total_ms`, `inspected` |
 | `GET /v1/sessions/{id}/requests/{n}` | ✓ | One request with `request_headers`, `response_headers`, `request_body` and `response_body` (`text` or `base64`, `total`, `kept`, `truncated`, `encoding`); added secret values appear as `***` |
 | `GET /v1/sessions/{id}/terminals` | ✓ | The session's terminals: `id`, `argv`, `rows`, `cols`, `open`, `persistent`, `attached` |

@@ -2925,7 +2925,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "zapper-driver",
  "zapper-keeper",
+ "zapper-policy",
+]
+
+[[package]]
+name = "zapper-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tokio",
  "zapper-policy",
 ]
 
@@ -3081,9 +3094,11 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "zapper-api",

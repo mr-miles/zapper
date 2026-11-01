@@ -226,6 +226,7 @@ async fn keys_are_the_owners_to_manage() {
         work: h.t.dir.join("work"),
         port: addr.port(),
         remote: false,
+        live: Default::default(),
     };
     tokio::spawn(async move { axum::serve(tcp, gateway::app(ctx)).await });
     let call = |token: String, method: Method, path: &str, body: Option<Value>| {

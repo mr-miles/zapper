@@ -22,8 +22,7 @@ mod pi;
 use claude::ClaudeCode;
 use pi::Pi;
 
-#[cfg(test)]
-pub(crate) use claude::MANAGED_SETTINGS;
+pub use claude::MANAGED_SETTINGS;
 
 use std::collections::BTreeMap;
 
@@ -38,6 +37,12 @@ pub trait Harness: Send + Sync {
     /// Where the agent reads its configuration in the guest; the agent
     /// spec's `config_files` and `config_mounts` are relative to it.
     fn config_dir(&self, home: &str) -> String;
+    /// Where it reads the instructions it starts with (`agent.instructions`),
+    /// if it reads any: the file is written there, and kept read-only, so
+    /// the workload can't change what it was told.
+    fn instructions_file(&self, _home: &str) -> Option<String> {
+        None
+    }
     /// Where it reads skills (`<name>/SKILL.md` directories).
     fn skills_dir(&self, home: &str) -> String {
         format!("{}/skills", self.config_dir(home))

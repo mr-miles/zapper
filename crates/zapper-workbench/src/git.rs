@@ -46,6 +46,7 @@ pub fn usual_rules() -> [Value; 1] {
 
 pub struct Git {
     root: PathBuf,
+    applier: std::sync::Arc<crate::apply::Applier>,
 }
 
 fn git(args: &[&str], dir: &Path) -> anyhow::Result<String> {
@@ -68,7 +69,7 @@ fn git(args: &[&str], dir: &Path) -> anyhow::Result<String> {
 impl Git {
     /// The repository under `root`, made (bare, `main`, its hook) if it
     /// isn't there.
-    pub fn new(root: PathBuf) -> anyhow::Result<Git> {
+    pub fn new(root: PathBuf, settings: ApplySettings) -> anyhow::Result<Git> {
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -90,7 +91,15 @@ impl Git {
         std::fs::create_dir_all(repo.join("hooks"))?;
         std::fs::write(&hook, zapper_git::pre_receive_with_local_admin())?;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
-        Ok(Git { root })
+        let applier = std::sync::Arc::new(crate::apply::Applier::new(
+            repo,
+            root.join("live"),
+            settings.secrets,
+            settings.daemon,
+            root.join("state.json"),
+            settings.live,
+        )?);
+        Ok(Git { root, applier })
     }
 
     pub fn repo(&self) -> PathBuf {
@@ -152,11 +161,62 @@ fn owner(g: &Grant) -> Result<(), Error> {
 #[derive(Clone)]
 struct Repo(PathBuf);
 
+#[derive(Clone)]
+struct Applying(std::sync::Arc<crate::apply::Applier>);
+
+/// What applying the repository needs that isn't the repository's.
+pub struct ApplySettings {
+    /// Where the secrets facility keeps values: a secret with no source
+    /// takes its file from here.
+    pub secrets: PathBuf,
+    /// zapper's daemon section; none, the running one.
+    pub daemon: Option<Value>,
+    pub live: crate::gateway::Live,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CheckBody {
+    /// A branch or a commit; `main` when not given.
+    #[serde(rename = "ref")]
+    r: Option<String>,
+}
+
+fn refused(e: anyhow::Error) -> Error {
+    Error(StatusCode::BAD_REQUEST, format!("{e:#}"))
+}
+
+/// What applying a branch or a commit would change in zapper's config,
+/// checked by zapper and not applied.
+async fn check(
+    axum::extract::State(ctx): axum::extract::State<Ctx>,
+    Extension(g): Extension<Grant>,
+    Extension(a): Extension<Applying>,
+    body: Option<Json<CheckBody>>,
+) -> Result<Json<Value>, Error> {
+    owner(&g)?;
+    let r = body.and_then(|b| b.0.r).unwrap_or_else(|| "main".into());
+    Ok(Json(a.0.check(&ctx, &r).await.map_err(refused)?))
+}
+
+/// Applies `main` to zapper: its whole config, checked, put in place and
+/// saved; changed images built again.
+async fn apply(
+    axum::extract::State(ctx): axum::extract::State<Ctx>,
+    Extension(g): Extension<Grant>,
+    Extension(a): Extension<Applying>,
+) -> Result<Json<Value>, Error> {
+    owner(&g)?;
+    Ok(Json(a.0.apply(&ctx).await.map_err(refused)?))
+}
+
 /// The repository as the user sees it: where to clone it from, and its
 /// branches with their last commits (a session's proposals among them).
 async fn overview(
+    axum::extract::State(ctx): axum::extract::State<Ctx>,
     Extension(g): Extension<Grant>,
     Extension(r): Extension<Repo>,
+    Extension(a): Extension<Applying>,
 ) -> Result<Json<Value>, Error> {
     owner(&g)?;
     let out = git(
@@ -176,6 +236,7 @@ async fn overview(
         "clone": format!("git clone {}", r.0.display()),
         "guests": format!("https://{NAME}/{REPO}"),
         "branches": branches,
+        "config": a.0.status(&ctx).await,
     })))
 }
 
@@ -200,11 +261,14 @@ impl Facility for Git {
         Router::new()
             .route("/", get(overview))
             .route("/rules", post(add_rules))
+            .route("/check", post(check))
+            .route("/apply", post(apply))
             .route(
                 "/rules/usual",
                 get(|| async { Json(Value::Array(usual_rules().to_vec())) }),
             )
             .layer(Extension(Repo(self.repo())))
+            .layer(Extension(Applying(self.applier.clone())))
     }
 
     fn panel(&self) -> Option<Panel> {

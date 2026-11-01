@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{anyhow, Context, Result};
 use zapper_policy::proto::{GuestDisk, GuestFile, GuestSpec};
 use zapper_policy::{
-    placeholder, render, secret_refs, Config, FsRule, ResolvedProfile, SecretMode,
+    placeholder, render, secret_refs, Config, FsAccess, FsRule, ResolvedProfile, SecretMode,
 };
 
 const CA_PATH: &str = "/usr/local/share/ca-certificates/zapper.crt";
@@ -158,6 +158,17 @@ pub fn build(
         fs.extend(p.fs.iter().cloned());
     }
     fs.extend(config.policy.fs.iter().cloned());
+    // What the agent was told it can read, not change.
+    if agent.instructions.is_some() {
+        if let Some(path) = harness.instructions_file(&home) {
+            fs.push(FsRule {
+                id: None,
+                path,
+                access: FsAccess::Ro,
+                comment: Some("the agent's instructions".into()),
+            });
+        }
+    }
     Ok(GuestSpec {
         session: session.into(),
         nic,
@@ -201,6 +212,47 @@ mod tests {
         let id = zapper_policy::aws_key_id("aws");
         assert_eq!(spec.env["AWS_ACCESS_KEY_ID"], id);
         assert_eq!(spec.env["AWS_SECRET_ACCESS_KEY"], id);
+    }
+
+    #[test]
+    fn an_agents_instructions_are_written_and_kept_read_only() {
+        let config = Config::from_yaml(
+            "profiles:\n  c: { agent: { kind: claude-code, instructions: Be brief. } }\n  p: { agent: { kind: pi, instructions: Be brief. } }\n  none: { agent: { kind: claude-code } }\n",
+        )
+        .unwrap();
+        let spec = |name: &str| {
+            let profile = config.resolve(name).unwrap();
+            build(
+                &config,
+                &HashMap::new(),
+                &profile,
+                "s",
+                "",
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap()
+        };
+        for (name, path) in [
+            ("c", "/home/agent/.claude/CLAUDE.md"),
+            ("p", "/home/agent/.pi/agent/AGENTS.md"),
+        ] {
+            let s = spec(name);
+            assert!(
+                s.files
+                    .iter()
+                    .any(|f| f.path == path && f.content == "Be brief."),
+                "{name}: written"
+            );
+            assert!(
+                s.fs.iter()
+                    .any(|r| r.path == path && r.access == FsAccess::Ro),
+                "{name}: read-only: {:?}",
+                s.fs
+            );
+        }
+        assert!(spec("none").fs.is_empty(), "no instructions, no rule");
     }
 
     #[test]
