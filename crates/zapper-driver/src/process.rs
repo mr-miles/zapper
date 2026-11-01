@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use zapper_policy::proto::{Frame, MAX_LINE};
 
@@ -42,7 +40,7 @@ pub trait Observer: Send + Sync {
 }
 
 pub struct Proc {
-    stdin: OwnedWriteHalf,
+    stdin: Box<dyn AsyncWrite + Unpin + Send>,
     events: mpsc::Receiver<Out>,
     conv: Arc<std::sync::Mutex<Box<dyn Conversation>>>,
     /// The harness takes messages while the agent works.
@@ -104,11 +102,14 @@ impl Proc {
     }
 }
 
-pub fn start(stream: UnixStream, conv: Box<dyn Conversation>, observer: Arc<dyn Observer>) -> Proc {
+pub fn start<S>(stream: S, conv: Box<dyn Conversation>, observer: Arc<dyn Observer>) -> Proc
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let steers = conv.steers();
     let conv = Arc::new(std::sync::Mutex::new(conv));
     let reader = conv.clone();
-    let (mut r, stdin) = stream.into_split();
+    let (mut r, stdin) = tokio::io::split(stream);
     let (tx, events) = mpsc::channel(16);
     let reader_task = tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::new();
@@ -189,7 +190,7 @@ pub fn start(stream: UnixStream, conv: Box<dyn Conversation>, observer: Arc<dyn 
         let _ = tx.send(Out::Exit(code)).await;
     });
     Proc {
-        stdin,
+        stdin: Box::new(stdin),
         events,
         conv,
         steers,

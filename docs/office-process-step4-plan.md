@@ -36,8 +36,8 @@ Branch: `feat/office-process-step4` (on top of `feat/office-process`, merged to 
 
 ## STATUS (update on each commit)
 - Phase 0 (foundation): **done** — see commits `39d6026`…`d76a7aa`.
-- **Next task: 1.1** (generalise `driver::start`).
-- Nothing else started.
+- 1.1 (`driver::start` generic): **done**.
+- **Next task: 1.2** (`OfficeClient::attach`, `Local`).
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
 `driver/src/process.rs:107` (write half `Proc.stdin: OwnedWriteHalf` at :45); foreman driving
@@ -55,9 +55,9 @@ at `office/src/foreman.rs:72` (`open_shell().stream` → `driver::start`); offic
 ## Phase 1 — chunky trait surface + `Local` impls
 Each task: add to the trait + `Local`, convert the office call site(s), `cargo test -p
 zapper-office` green, commit. `Remote` for these is Phase 4.
-- [ ] **1.1** Generalise `driver::start` to `start<S: AsyncRead+AsyncWrite+Unpin+Send+'static>`
-      (use `tokio::io::split`; box `Proc.stdin` as `Box<dyn AsyncWrite+Unpin+Send>`). Validate:
-      `cargo test -p zapper-driver`.
+- [x] **1.1** Generalise `driver::start` to `start<S: AsyncRead+AsyncWrite+Unpin+Send+'static>`
+      (use `tokio::io::split`; box `Proc.stdin` as `Box<dyn AsyncWrite+Unpin+Send>`). Done;
+      driver/core/office build, driver tests + clippy green.
 - [ ] **1.2** `OfficeClient::attach(session_id, ShellRequest) -> Result<impl stream>`; `Local`
       = `session(id)?.open_shell(req).stream`. (No office call site yet; exercised in 3.2.)
 - [ ] **1.3** Session-by-id: `create_session(NewSession) -> SessionInfo`, `stop_session(id)`,
