@@ -16,7 +16,6 @@ use zapper_policy::proto::{Frame, ShellRequest};
 
 use super::{now, FirmRun};
 use zapper_core::util::read_frame;
-use zapper_core::Session;
 
 /// No `code`: code lives in the firm's git repository, shared as a branch.
 const KINDS: [&str; 5] = ["document", "report", "dataset", "deck", "board-pack"];
@@ -333,7 +332,8 @@ impl Drive {
 pub async fn publish(
     run: &Arc<FirmRun>,
     worker: &str,
-    s: &Session,
+    sid: &str,
+    user: &str,
     a: PublishArgs,
 ) -> Result<Value> {
     if a.kind == "code" {
@@ -393,7 +393,7 @@ pub async fn publish(
             );
         }
     }
-    let home = format!("/home/{}", s.resolved.agent.user);
+    let home = format!("/home/{user}");
     let mut argv = vec!["tar".to_string(), "-cf".into(), "-".into()];
     let mut names = std::collections::BTreeSet::new();
     for p in &a.paths {
@@ -419,7 +419,7 @@ pub async fn publish(
         let file = tokio::fs::File::create(&archive).await?;
         let (code, err) = guest_command(
             run.client.as_ref(),
-            &s.id,
+            sid,
             argv,
             None::<tokio::io::Empty>,
             file,
@@ -646,11 +646,12 @@ fn hex(b: &[u8]) -> String {
 pub async fn fetch(
     run: &Arc<FirmRun>,
     worker: &str,
-    s: &Session,
+    sid: &str,
+    user: &str,
     r: &str,
     dest: &str,
 ) -> Result<Value> {
-    let home = format!("/home/{}", s.resolved.agent.user);
+    let home = format!("/home/{user}");
     let dest = guest_path(dest, &home)?;
     let (id, version, files) = {
         let d = run.drive.lock().unwrap();
@@ -680,7 +681,7 @@ pub async fn fetch(
             "mkdir -p '{dest}' && tar --no-same-owner -xf - -C '{dest}' && chown -R 1000:1000 '{dest}'",
             dest = dest.replace('\'', "")
         );
-        let (code, err) = guest_command(run.client.as_ref(), &s.id, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
+        let (code, err) = guest_command(run.client.as_ref(), sid, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
         let _ = tar.wait().await;
         if code != 0 {
             bail!("writing into {dest} failed: {}", err.trim());

@@ -310,6 +310,7 @@ pub(crate) fn labels(
 
 /// The run a session belongs to, from its labels: the firm's run, if it is
 /// the one that started the session.
+#[cfg(test)]
 pub(crate) fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
     let run = office.runs.read().unwrap().get(s.label("firm")?)?.clone();
     (Some(run.id.as_str()) == s.label("run")).then_some(run)

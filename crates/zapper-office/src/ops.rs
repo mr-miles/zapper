@@ -17,7 +17,8 @@ use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
 use crate::OfficeOf;
 use crate::{access, contracts, workforce};
-use zapper_core::{Core, McpServer, Session};
+use zapper_core::Core;
+use zapper_policy::facility::McpCall;
 
 /// Where the agent copies itself in every guest.
 pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
@@ -29,33 +30,40 @@ struct Tools {
     d: Core,
 }
 
-impl McpServer for Tools {
+impl Tools {
     fn instructions(&self) -> Option<String> {
         Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
     }
 
-    fn tools<'a>(&'a self, s: &'a Arc<Session>) -> BoxFuture<'a, Result<Value>> {
-        self.call(s, "tools", json!({}))
-    }
-
-    fn call<'a>(
-        &'a self,
-        s: &'a Arc<Session>,
-        op: &'a str,
-        args: Value,
-    ) -> BoxFuture<'a, Result<Value>> {
-        Box::pin(async move {
-            let run = super::run_of(&self.d.office(), s)
-                .ok_or_else(|| anyhow!("the firm isn't running"))?;
-            let member = s.label("member").unwrap_or_default();
-            dispatch(&self.d, &run, s, member, op, &args)
-                .await
-                .inspect_err(|e| {
-                    run.journal.append(
-                        "op_error",
-                        json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-                    );
-                })
+    /// Answers one call on the tools socket, for the caller the daemon named
+    /// (the `McpCall`'s session id and labels, from the VM): the firm's run,
+    /// the member, and the tool.
+    async fn handle(&self, call: &McpCall, op: &str, args: Value) -> Result<Value> {
+        let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
+        // A worker of another (ended) run of the firm is told it isn't running.
+        let run = self
+            .d
+            .office()
+            .run(firm)
+            .ok()
+            .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
+            .ok_or_else(|| anyhow!("the firm isn't running"))?;
+        let member = call.labels.get("member").map(String::as_str).unwrap_or("");
+        dispatch(
+            &self.d,
+            &run,
+            &call.session,
+            &call.labels,
+            member,
+            op,
+            &args,
+        )
+        .await
+        .inspect_err(|e| {
+            run.journal.append(
+                "op_error",
+                json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+            );
         })
     }
 }
@@ -81,13 +89,13 @@ pub fn register(d: &Core, run: &FirmRun) -> Result<()> {
     // in the daemon; not in a test that starts a firm without one).
     let tools = Arc::new(Tools { d: d.clone() });
     let instructions = tools.instructions();
-    let (served_d, served_tools) = (d.clone(), tools.clone());
+    let served_tools = tools.clone();
     let guard = crate::client::serve_facility(
         &run.client,
         &run.socket_dir,
         &socket,
         crate::client::Registered::Mcp,
-        move |listener| serve(served_d, served_tools, listener),
+        move |listener| serve(served_tools, listener),
         |socket| {
             run.client
                 .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
@@ -105,13 +113,13 @@ pub fn unregister(run: &FirmRun) {
 
 /// Answers the gateway's requests on the tools' socket, one per
 /// connection: the caller as the daemon names it, never as the guest says.
-async fn serve(d: Core, tools: Arc<Tools>, listener: std::os::unix::net::UnixListener) {
-    use zapper_policy::facility::{McpCall, McpMethod, McpReply};
+async fn serve(tools: Arc<Tools>, listener: std::os::unix::net::UnixListener) {
+    use zapper_policy::facility::{McpMethod, McpReply};
     let Ok(listener) = tokio::net::UnixListener::from_std(listener) else {
         return;
     };
     while let Ok((stream, _)) = listener.accept().await {
-        let (d, tools) = (d.clone(), tools.clone());
+        let tools = tools.clone();
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
             let (r, mut w) = stream.into_split();
@@ -130,15 +138,18 @@ async fn serve(d: Core, tools: Arc<Tools>, listener: std::os::unix::net::UnixLis
                 if call.server != SERVER {
                     bail!("this socket serves {SERVER}, not {}", call.server);
                 }
-                let s = d.session(&call.session)?;
-                match call.method {
-                    McpMethod::ToolsList => tools.tools(&s).await,
-                    McpMethod::ToolsCall => {
-                        let tool = call.tool.unwrap_or_default();
-                        let args = call.arguments.unwrap_or_else(|| json!({}));
-                        tools.call(&s, &tool, args).await
-                    }
-                }
+                // The caller is as the daemon named it from the VM (the
+                // `McpCall`), not fetched back from the core: so the tools run
+                // the same whether the office is in the daemon or its own
+                // process.
+                let (op, args) = match call.method {
+                    McpMethod::ToolsList => ("tools".to_string(), json!({})),
+                    McpMethod::ToolsCall => (
+                        call.tool.clone().unwrap_or_default(),
+                        call.arguments.clone().unwrap_or_else(|| json!({})),
+                    ),
+                };
+                tools.handle(&call, &op, args).await
             };
             let reply = match answer.await {
                 Ok(v) => McpReply {
@@ -272,7 +283,7 @@ fn allowed_by(
     methods: Option<&[String]>,
     path: Option<&str>,
 ) -> Result<Option<String>> {
-    let layers = c.d.layers_for(Some(&c.s.id), None)?;
+    let layers = c.d.layers_for(Some(c.sid), None)?;
     let layers: Vec<_> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
     let methods: Vec<Option<String>> = match methods {
         Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
@@ -287,8 +298,8 @@ fn allowed_by(
             port,
             method,
             path: path.map(str::to_string),
-            session: Some(c.s.id.clone()),
-            labels: c.s.labels.clone(),
+            session: Some(c.sid.to_string()),
+            labels: c.labels.clone(),
         };
         let (d, _) = zapper_policy::evaluate_net(&layers, &req);
         if d.action != zapper_policy::Action::Allow {
@@ -302,7 +313,11 @@ fn allowed_by(
 struct Call<'a> {
     d: &'a Core,
     run: &'a Arc<FirmRun>,
-    s: &'a Arc<Session>,
+    /// The caller's session id and labels, as the daemon named them from the
+    /// VM (never from the guest) — the office reaches the session over its
+    /// client, so it holds no `Session`.
+    sid: &'a str,
+    labels: &'a std::collections::BTreeMap<String, String>,
     w: &'a Arc<WorkerRt>,
     me: &'a str,
     args: Args<'a>,
@@ -635,7 +650,8 @@ static TOOLS: &[Tool] = &[
                         .or_else(|| c.w.context.lock().unwrap().clone()),
                     changes: c.args.opt("changes").unwrap_or_default(),
                 };
-                drive::publish(c.run, c.me, c.s, a).await
+                let user = c.run.client.session(c.sid)?.user().to_string();
+                drive::publish(c.run, c.me, c.sid, &user, a).await
             })
         }),
     },
@@ -671,7 +687,8 @@ static TOOLS: &[Tool] = &[
             Box::pin(async move {
                 let artifact = c.args.req("artifact")?;
                 let dest = c.args.req("dest")?;
-                drive::fetch(c.run, c.me, c.s, &artifact, &dest).await
+                let user = c.run.client.session(c.sid)?.user().to_string();
+                drive::fetch(c.run, c.me, c.sid, &user, &artifact, &dest).await
             })
         }),
     },
@@ -1362,7 +1379,8 @@ pub fn reply_from(from: &str, v: &Value, po: &PostOffice) -> Result<Draft> {
 pub async fn dispatch(
     d: &Core,
     run: &Arc<FirmRun>,
-    s: &Arc<Session>,
+    sid: &str,
+    labels: &std::collections::BTreeMap<String, String>,
     me: &str,
     op: &str,
     args: &Value,
@@ -1402,7 +1420,8 @@ pub async fn dispatch(
     let c = Call {
         d,
         run,
-        s,
+        sid,
+        labels,
         w: &w,
         me,
         args: Args(args),

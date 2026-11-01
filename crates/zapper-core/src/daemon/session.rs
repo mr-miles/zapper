@@ -236,6 +236,11 @@ impl SessionInfo {
     pub fn profile(&self) -> &str {
         &self.profile
     }
+
+    /// The workload user the agent runs as (its home is `/home/<user>`).
+    pub fn user(&self) -> &str {
+        &self.user
+    }
 }
 
 impl Session {
