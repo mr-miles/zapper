@@ -62,7 +62,7 @@ id rework — *then* the registration + logic-file conversions fall out cleanly,
 - Ordering corrected (above): the rest is **not** Phase-2-first. Load-bearing prerequisites
   come next (P1), then the file conversions fall out (P2), then `Remote`+routes (P3), then
   the listener/split (P4).
-- **Next task: P1-a** (`socket_dir` as office config) → then **P1-b** (session surface on the
+- **Next task: P1-b** (session surface on the trait) [P1-a done] → then **P1-c** (session surface on the
   trait) → **P1-c** (the `WorkerRt`/foreman `attach` driving rework — the care point).
 
 Anchors: `WorkerRt.session: Arc<Session>` at `office/src/lib.rs:142`; `driver::start` at
@@ -90,7 +90,7 @@ per the finding.
 
 ## P1 — load-bearing prerequisites (lead / sequential; fake-tested, no KVM)
 Do these first; the file conversions (P2) are downstream of them.
-- [ ] **P1-a** `socket_dir` as office config. `Office` captures `core.socket_dir()` in
+- [x] **P1-a** `socket_dir` as office config. `Office` captures `core.socket_dir()` in
       `start()`; `Remote` carries it as a field the bin sets (a small Phase-5 slice pulled
       forward). Unblocks the registration leaves, which must place their socket in the
       *daemon's* `state/services`.
