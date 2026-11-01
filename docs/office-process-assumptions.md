@@ -112,8 +112,10 @@ The real conversion that remains (the bulk of step 4), from the `&Core` method s
 
 Decided (you approved: a trait with two implementations). Built on this branch:
 
-- `trait OfficeClient` in `office/src/client.rs`, with its first operations `add_layer_rule`
-  / `remove_layer_rule` (backed by new `Core` methods that emit `rule` events).
+- `trait OfficeClient` in `office/src/client.rs`, with its operations so far: `add_layer_rule`
+  / `remove_layer_rule` (backed by new `Core` methods that emit `rule` events) and
+  `record_writable` (the foreman's turn gate; `Local → Core`, `Remote → GET /v1/record`). The
+  foreman no longer holds a `Core`.
 - `Local(Core)` — in-process, delegates to `Core` (used now).
 - `Remote(Zapper)` — over the API socket (`POST /v1/rules` with a role scope, `DELETE
   /v1/rules/{id}`); the office's sync firm logic blocks on the binary's multi-threaded
@@ -129,11 +131,22 @@ long-lived daemon; per-test it leaks a `Daemon` (tests are short-lived). The `Re
 has no cycle (it holds a socket path). If the in-process leak ever matters, give `Local` a
 `Weak` core handle.
 
-**Remaining:** migrate the rest of the office's `&Core` surface onto `OfficeClient` one
-operation at a time (sessions, services, MCP, deciders, config, record, …), each
-behaviour-preserving and unit-tested; rehome `office()`'s 32 uses to the office's own state;
-then drop `zapper-core` from the office's prod deps and wire the binary to run firms through
-`Remote`. Validate the cutover with `make test-e2e-office` on a KVM host.
+**Remaining, in two buckets:**
+
+1. *Handle-free* methods (small, like the three done): config reads, and the id-returning
+   registrations (`add_service`/`add_zone`, `add_mcp_socket`/`remove_mcp_server`,
+   `add_decider_socket`/`remove_decider`, config checks). These extend the trait the same way
+   but are called from `facility.rs`/`ops.rs` with a `&Core`, so each needs the client
+   threaded to its site.
+2. *The session-handle rework* (the bulk, **e2e-gated, attended**): `create_session`,
+   `session`, `stop_session`, `forget_session` return `Arc<Session>`, which the foreman,
+   terminals and driver hold throughout. These can't cross a socket; the office must move to
+   **session ids + API calls** (and the driver crate, §6, over `attach`). This is the large,
+   behaviour-sensitive change that touches worker driving and terminals — do it with
+   `make test-e2e-office` on a KVM host, not unattended.
+
+Then rehome `office()`'s 32 uses to the office's own state, drop `zapper-core` from the
+office's prod deps, and wire the binary to run firms through `Remote`.
 
 ### Original recommendation (kept for context)
 
