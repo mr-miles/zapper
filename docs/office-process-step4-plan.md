@@ -215,6 +215,13 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
 - [x] **P3-b** Added the `zapper-api` routes the registration `Remote` methods call: `POST
       /v1/deciders` + `DELETE /v1/deciders/{id}`, and `POST /v1/zones`, each as the operator's.
       Covered by `tests::zones_and_socket_deciders_added_and_removed`.
+- [x] **P3 verified without KVM**: `client::tests::remote_over_the_socket` serves the real
+      `zapper-api` router on a unix socket (as the daemon does, via `axum::serve`) backed by a
+      `TestCore`, and drives `Remote` end to end — `session`, `add_zone`/`add_service` (Socket
+      target)/`add_mcp_socket`/`add_decider_socket` + their removes, and `attach` (the hyper
+      upgrade reaching the guest shell via `shell_vm`). Only `create_session` is left to the KVM
+      e2e (it boots a VM at the daemon). `zapper-api` is an office dev-dep (no cycle; it mounts
+      the office's routes, never depends on it).
 
 ### P3 FINDING — RESOLVED: git now served on a socket
 The gap was that `add_service` carried an in-process `Arc<dyn ServiceHandler>` (the firm's git

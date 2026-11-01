@@ -37,6 +37,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 zapper-core = { path = "../zapper-core", features = ["test-util"] }
+zapper-api = { path = "../zapper-api" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

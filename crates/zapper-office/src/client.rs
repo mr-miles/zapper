@@ -702,4 +702,95 @@ firms:
         // A session the office doesn't know: an error, not a panic.
         assert!(run.client.session("no-such-session").is_err());
     }
+
+    // The `Remote` client against the real API router, served on a unix socket
+    // as the daemon serves it — the office↔core path a standalone office takes,
+    // end to end without a VM (the one exception, `create_session`, boots a VM
+    // at the daemon and so needs KVM; everything else does not).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_over_the_socket() {
+        use std::collections::BTreeMap;
+
+        use zapper_core::{ServiceApi, ServiceSpec, ServiceTarget};
+
+        use super::OfficeClient;
+
+        let t = test_core(FIRM);
+        let run = test_run(&t.core, "acme");
+        let s = run.rt("pat").unwrap().session().unwrap();
+        let id = s.id.clone();
+
+        // Serve the API on a temp socket, exactly as the daemon does.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock =
+            std::env::temp_dir().join(format!("zo-remote-{}-{nonce}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let app = zapper_api::api(t.core.clone(), &zapper_api::Mount::default());
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let serving = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let remote = super::Remote(super::Zapper::new(sock.clone()));
+
+        // session(id) over the socket.
+        let info = remote.session(&id).unwrap();
+        assert_eq!(info.id(), id);
+        assert_eq!(info.label("member"), Some("pat"));
+        assert!(remote.session("no-such-session").is_err());
+
+        // A zone and a socket service: registered in the daemon's registry.
+        let zone = remote
+            .add_zone("acme.test", BTreeMap::new(), "firm acme")
+            .unwrap();
+        assert_eq!(t.core.service(zone).map(|s| s.kind), Some("zone"));
+        let svc = remote
+            .add_service(ServiceSpec {
+                name: "git.acme.test".into(),
+                port: 443,
+                sessions: BTreeMap::new(),
+                target: ServiceTarget::Socket {
+                    name: "office-acme-git.sock".into(),
+                    tls: true,
+                },
+                owner: "firm acme".into(),
+            })
+            .unwrap();
+        assert!(t.core.service(svc).is_some());
+        remote.remove_service(svc);
+        assert!(t.core.service(svc).is_none());
+        remote.remove_service(zone);
+
+        // An MCP socket and a decider socket: added and removed.
+        let mcp = remote
+            .add_mcp_socket(
+                "office",
+                BTreeMap::new(),
+                "office-acme.sock",
+                None,
+                "firm acme",
+            )
+            .unwrap();
+        assert!(t.core.mcp_servers().iter().any(|m| m["id"] == mcp));
+        assert!(remote.remove_mcp_server(mcp));
+        let dec = remote
+            .add_decider_socket(BTreeMap::new(), "office-acme-decider.sock")
+            .unwrap();
+        assert!(remote.remove_decider(dec));
+
+        // attach(id): the upgrade reaches the guest shell, which gets the argv.
+        let mut vm = shell_vm(&s);
+        let argv = vec!["claude".to_string(), "-p".to_string()];
+        let _stream = remote
+            .attach(&id, ShellRequest::exec(argv.clone()))
+            .await
+            .unwrap();
+        let shell = vm.recv().await.unwrap();
+        assert_eq!(shell.request.argv, argv);
+
+        serving.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
 }
