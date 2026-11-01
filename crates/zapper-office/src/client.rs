@@ -13,6 +13,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
+use zapper_core::{ConfigApi, SessionApi};
 use zapper_policy::AnyRule;
 
 /// What the office's firm logic needs from the daemon, so it reaches it
@@ -31,6 +32,10 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the record can be written now (the office takes no firm turn
     /// while it can't).
     fn record_writable(&self) -> bool;
+    /// The daemon's running config.
+    fn config(&self) -> zapper_policy::Config;
+    /// How many sessions the daemon is running now (for the host's limits).
+    fn session_count(&self) -> usize;
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.
@@ -45,6 +50,12 @@ impl OfficeClient for Local {
     }
     fn record_writable(&self) -> bool {
         self.0.record_writable()
+    }
+    fn config(&self) -> zapper_policy::Config {
+        self.0.config()
+    }
+    fn session_count(&self) -> usize {
+        self.0.sessions().len()
     }
 }
 
@@ -74,6 +85,18 @@ impl OfficeClient for Remote {
             .ok()
             .and_then(|a| a.body["healthy"].as_bool())
             .unwrap_or(false)
+    }
+    fn config(&self) -> zapper_policy::Config {
+        block(self.0.get("/v1/config?format=json"))
+            .ok()
+            .and_then(|a| serde_json::from_value(a.body).ok())
+            .unwrap_or_default()
+    }
+    fn session_count(&self) -> usize {
+        block(self.0.get("/v1/sessions"))
+            .ok()
+            .and_then(|a| a.body.as_array().map(|s| s.len()))
+            .unwrap_or(0)
     }
 }
 

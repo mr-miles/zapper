@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use super::mail::{Draft, Expects, Kind};
 use super::workforce::{fmt_tokens, join, let_go, room};
-use super::{now, prompts, FirmRun, WorkerState};
+use super::{now, prompts, FirmRun, OfficeOf, WorkerState};
 use crate::firm::BOARD;
 use zapper_core::Core;
 
@@ -234,7 +234,7 @@ pub async fn offer(d: &Core, run: &Arc<FirmRun>, by: &str, a: OfferArgs) -> Resu
             fmt_tokens(balance)
         );
     }
-    let config = room(d, &a.role, &role)?;
+    let config = room(&d.office(), &a.role, &role)?;
     let id = {
         let mut cs = run.contracts.lock().unwrap();
         cs.counter += 1;

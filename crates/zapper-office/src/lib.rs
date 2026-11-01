@@ -73,9 +73,22 @@ use zapper_core::Session;
 #[derive(Default)]
 pub(crate) struct Office {
     pub runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
+    /// The daemon through the office's client interface, set once in `start`.
+    /// In-process it wraps `Core`; once the office is a process of its own it
+    /// is the socket client. How the office reaches the daemon from places
+    /// that have no `run` in hand (run creation, the read endpoints), so they
+    /// need no `&Core`.
+    client: std::sync::OnceLock<Arc<dyn client::OfficeClient>>,
 }
 
 impl Office {
+    /// The office's client of the daemon (set in `start`).
+    pub fn client(&self) -> &Arc<dyn client::OfficeClient> {
+        self.client
+            .get()
+            .expect("the office's client is set in start()")
+    }
+
     pub fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
         self.runs
             .read()
@@ -708,6 +721,7 @@ pub const ASSETS: &[(&str, &str)] = &[
 /// ended; the firms' role layers and their officers' standing approvals are
 /// rules the office keeps; the daemon stopping stops the firms.
 pub fn start(d: &Core) {
+    let _ = d.office().client.set(Arc::new(client::Local(d.clone())));
     d.add_config_check(firm::check);
     close_orphans(d.state_dir());
     follow_rules(d);

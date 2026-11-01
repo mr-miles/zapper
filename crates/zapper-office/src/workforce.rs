@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use zapper_policy::valid_worker_name;
 
 use super::mail::{Draft, Expects, Kind};
-use super::{now, FirmRun, WorkerRt, WorkerState};
+use super::{now, FirmRun, Office, OfficeOf, WorkerRt, WorkerState};
 use zapper_core::Core;
 
 /// Longest budget plan or reason, in bytes.
@@ -1234,7 +1234,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     if a.brief.len() > super::mail::MAX_BODY || a.reason.len() > MAX_PLAN {
         bail!("the brief or the reason is too long");
     }
-    let config = room(d, &a.role, &role)?;
+    let config = room(&d.office(), &a.role, &role)?;
     let (name, firm, rt) = join(
         run,
         by,
@@ -1310,18 +1310,18 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
 
 /// Room on the host for one more VM of `role`: the config, or why not.
 pub(super) fn room(
-    d: &Core,
+    office: &Office,
     role_name: &str,
     role: &crate::firm::Role,
 ) -> Result<zapper_policy::Config> {
-    let config = d.config();
+    let config = office.client().config();
     let profile = config.resolve(&role.profile)?;
     if let Some(avail) = super::mem_available_mib() {
         if profile.engine.memory_mib as u64 > avail {
             bail!("the host has {avail} MiB of memory available, and a {role_name} needs {} MiB; tell the board", profile.engine.memory_mib);
         }
     }
-    let running = d.sessions().len();
+    let running = office.client().session_count();
     if running >= config.daemon.max_sessions {
         bail!("the host runs {running} sessions, its limit; tell the board");
     }
