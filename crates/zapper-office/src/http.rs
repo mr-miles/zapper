@@ -27,6 +27,31 @@ use zapper_core::Core;
 type D = State<Core>;
 type R<T> = Result<T, ApiError>;
 
+/// A running firm resolved from the request's `{f}` path segment: the
+/// handler takes `Active(run)` instead of repeating
+/// `let run = d.office().active(&f)?;` after `State(d), Path(f)`. Errors the
+/// same way that preamble did (no such firm, or not running). Handlers that
+/// still need the core keep `State(d)` alongside it.
+struct Active(std::sync::Arc<crate::FirmRun>);
+
+impl axum::extract::FromRequestParts<Core> for Active {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Core,
+    ) -> Result<Self, ApiError> {
+        let Path(params) =
+            Path::<std::collections::HashMap<String, String>>::from_request_parts(parts, state)
+                .await
+                .map_err(|e| bad(e.to_string()))?;
+        let f = params
+            .get("f")
+            .ok_or_else(|| bad("no firm in the request path"))?;
+        Ok(Active(state.office().active(f)?))
+    }
+}
+
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
@@ -503,24 +528,21 @@ async fn up(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> 
     Ok(Json(run.status()))
 }
 
-async fn down(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let run = d.office().active(&f)?;
+async fn down(State(d): D, Active(run): Active) -> R<Json<Value>> {
     super::down(&d, &run, "firm down").await;
     Ok(Json(
         json!({ "run": run.id, "state": "ended", "dir": run.dir }),
     ))
 }
 
-async fn pause(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn pause(Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
     super::pause(&run, v["paused"].as_bool().unwrap_or(true))?;
     Ok(Json(json!({ "state": *run.state.lock().unwrap() })))
 }
 
-async fn send(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn send(Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
     let sent = super::board_send(&run, &v)?;
     Ok(Json(json!(sent)))
 }
@@ -528,10 +550,9 @@ async fn send(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>
 /// Files from the board's own computer, stored as a shared drive artifact
 /// by the board to attach to mail: `{title?, thread?, files: [{name, data}]}`
 /// with `data` in base64.
-async fn upload(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn upload(Active(run): Active, text: String) -> R<Json<Value>> {
     use base64::Engine;
     let v: Value = serde_json::from_str(&text).map_err(|e| bad(format!("body: {e}")))?;
-    let run = d.office().active(&f)?;
     let mut files = Vec::new();
     for x in v["files"].as_array().into_iter().flatten() {
         let name = x["name"]
@@ -550,8 +571,7 @@ async fn upload(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Valu
 
 /// The board clears a new hire or objects: `{clear: bool, note?}`.
 /// Every grant and credential request of the running firm.
-async fn credentials_state(State(d): D, Path(f): Path<String>) -> R<Json<Value>> {
-    let run = d.office().active(&f)?;
+async fn credentials_state(Active(run): Active) -> R<Json<Value>> {
     Ok(Json(super::access::all(&run)))
 }
 
@@ -580,9 +600,8 @@ async fn credentials_decide(
 }
 
 /// The board grants directly: `{worker, resource, level, expires_in?, note?}`.
-async fn credentials_grant(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn credentials_grant(State(d): D, Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
     let s = |k: &str| v[k].as_str().ok_or_else(|| bad(format!("{k} is required")));
     let level = s("level")?;
     Ok(Json(super::access::board_grant(
@@ -650,9 +669,8 @@ async fn budget_decide(
 }
 
 /// The board gives a worker tokens: `{worker, tokens, reason}`.
-async fn board_fund(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn board_fund(Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
     let worker = v["worker"].as_str().ok_or_else(|| bad("worker: a name"))?;
     let tokens = super::workforce::tokens_arg(&v["tokens"], "tokens")?;
     let reason = v["reason"].as_str().unwrap_or("");
@@ -662,9 +680,8 @@ async fn board_fund(State(d): D, Path(f): Path<String>, text: String) -> R<Json<
 }
 
 /// The board lets a worker go: `{worker, reason}`.
-async fn board_release(State(d): D, Path(f): Path<String>, text: String) -> R<Json<Value>> {
+async fn board_release(State(d): D, Active(run): Active, text: String) -> R<Json<Value>> {
     let v = body(&text)?;
-    let run = d.office().active(&f)?;
     let worker = v["worker"].as_str().ok_or_else(|| bad("worker: a name"))?;
     let reason = v["reason"].as_str().unwrap_or("");
     Ok(Json(

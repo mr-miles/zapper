@@ -171,10 +171,19 @@ Drop the `(d, run)` pair; use `run.client`. Grow the trait (`resolve`, `layers_f
       **Facility's own registration** (the domain zone + git-service handler, and the cluster's
       session-target services) is **not** this shape — it tracks service ids and bottoms out in
       session ops (cluster stop/forget) — so it moves with the facility logic in **P2-b**.
-- [ ] **P2-b** Logic/plumbing files → drop `d`: `contracts`, `access`, `scenario`,
-      `workforce`, `facility` logic. These bottom out in session ops, so need P1-b/c.
-- [ ] **P2-c** http handlers: an axum extractor resolving `Path<firm>` → `Arc<FirmRun>`, so the
-      ~24 handlers drop the `State(d)` + `office().active(f)?` preamble. (Cross-cutting — lead.)
+- [~] **P2-b** Logic/plumbing files → drop `d`. **Done:** facility service registration (P2-a
+      note) and facility **guest commands** (`sh`/`cluster_access`/deploy over
+      `run.client.run_command`, built on `attach` — the cluster is a sandbox terminal, not an
+      agent). **Left:** session *boot* keeps `d` until the transitional `Arc<Session>` goes
+      (P4); the `access`/`contracts`/`workforce`/`scenario` `d`-plumbing drop is coupled to the
+      http handlers (P2-c) that pass `d`, and to the Arc removal.
+- [~] **P2-c** http handlers: an `Active` axum extractor resolving `{f}` → `Arc<FirmRun>`
+      (running firm), so handlers drop the `State(d)` + `office().active(f)?` preamble. **Done:**
+      the 8 single-`{f}` `active` write handlers (`down`, `pause`, `send`, `upload`,
+      `credentials_state`/`_grant`, `board_fund`/`_release`); those not needing the core also
+      dropped `State(d)`. **Left:** multi-path-param handlers (keep `Path((f,id))` to avoid
+      double-`Path` extraction) and the `office().run(&f)` (not-necessarily-running) handlers,
+      which want a sibling extractor.
 - [ ] **P2-d** `run.rs` run management (`up_with`/`boot`/`down`/`ticker`) + worker creation →
       office state + client.
 
