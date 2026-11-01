@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 zapper-git = { path = "../zapper-git" }
 zapper-core = { path = "../zapper-core" }
+zapper-client = { path = "../zapper-client" }
 zapper-runs = { path = "../zapper-runs" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-github = { path = "../zapper-github" }

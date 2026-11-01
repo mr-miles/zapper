@@ -2893,6 +2893,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "zapper-core"
 version = "0.1.0"
 dependencies = [
@@ -3033,6 +3047,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zapper-api",
+ "zapper-client",
  "zapper-core",
  "zapper-git",
  "zapper-github",
@@ -3106,6 +3121,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zapper-api",
+ "zapper-client",
  "zapper-core",
  "zapper-git",
  "zapper-proto",

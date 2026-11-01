@@ -1,20 +1,17 @@
-//! zapper's API, on its unix socket: the office is its operator. The same
-//! client the workbench uses (proposal 13, §7 — a candidate for a crate both
-//! share). Used by the `zapper-office` binary once the office runs as a
-//! process of its own, in place of the in-process `Core`.
+//! What the office's firm logic needs from the daemon, behind the
+//! `OfficeClient` trait: `Local` (in-process `Core`) and `Remote` (over the
+//! API socket). The socket client itself is shared with the workbench in
+//! `zapper-client` and re-exported here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use bytes::Bytes;
+use anyhow::Result;
 use futures_util::future::BoxFuture;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper::Method;
 use serde_json::Value;
-use tokio::net::UnixStream;
+// The socket client, shared with the workbench.
+pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
 use zapper_core::driver::DriveStream;
 use zapper_core::{
     ApprovalApi, NewSession, RuleApi, ServiceApi, ServiceInfo, ServiceSpec, SessionApi, SessionInfo,
@@ -349,7 +346,7 @@ impl OfficeClient for Remote {
                 q.push(format!("tty={rows}x{cols}"));
             }
             let path = format!("/v1/sessions/{id}/attach?{}", q.join("&"));
-            Ok(Box::new(self.0.upgrade(&path).await?) as Box<dyn DriveStream>)
+            Ok(Box::new(self.0.upgrade(&path).await?.0) as Box<dyn DriveStream>)
         })
     }
     fn connect_port<'a>(
@@ -359,7 +356,7 @@ impl OfficeClient for Remote {
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
         Box::pin(async move {
             let path = format!("/v1/sessions/{id}/connect?port={port}");
-            Ok(Box::new(self.0.upgrade(&path).await?) as Box<dyn DriveStream>)
+            Ok(Box::new(self.0.upgrade(&path).await?.0) as Box<dyn DriveStream>)
         })
     }
     fn add_mcp_socket(
@@ -604,128 +601,6 @@ pub(crate) async fn run_command(
 /// logic. Requires a multi-threaded runtime (the `zapper-office` binary's).
 fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
-}
-
-/// `s` as a URL query value (percent-encoded), for the `attach` query.
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            b => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-/// Where zapper listens: `$ZAPPER_SOCKET`, else under `$XDG_RUNTIME_DIR`, as
-/// the `zapper` CLI finds it.
-pub fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ZAPPER_SOCKET") {
-        return p.into();
-    }
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/zapper-{}", unsafe { libc::getuid() })));
-    base.join("zapper").join("api.sock")
-}
-
-/// A client of zapper's API over its unix socket.
-#[derive(Debug, Clone)]
-pub struct Zapper {
-    socket: PathBuf,
-}
-
-/// What zapper answered: its status and its JSON (`null` for none).
-pub struct Answer {
-    pub status: StatusCode,
-    pub body: Value,
-}
-
-impl Answer {
-    /// The JSON, if zapper said yes; its error, with its status, if not.
-    pub fn ok(self) -> std::result::Result<Value, (StatusCode, String)> {
-        if self.status.is_success() {
-            return Ok(self.body);
-        }
-        let why = self.body["error"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| self.body.to_string());
-        Err((self.status, why))
-    }
-}
-
-impl Zapper {
-    pub fn new(socket: PathBuf) -> Self {
-        Zapper { socket }
-    }
-
-    async fn send(&self, req: Request<Full<Bytes>>) -> Result<Response<Incoming>> {
-        let stream = UnixStream::connect(&self.socket).await.with_context(|| {
-            format!(
-                "zapper at {} (is `zapper serve` running?)",
-                self.socket.display()
-            )
-        })?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        tokio::spawn(conn.with_upgrades());
-        Ok(sender.send_request(req).await?)
-    }
-
-    /// `method path` with an optional JSON body, and what zapper answered.
-    pub async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Answer> {
-        let bytes = match body {
-            Some(v) => Bytes::from(serde_json::to_vec(v)?),
-            None => Bytes::new(),
-        };
-        let req = Request::builder()
-            .method(method)
-            .uri(format!("http://zapper{path}"))
-            .header("host", "zapper")
-            .header("content-type", "application/json")
-            .body(Full::new(bytes))?;
-        let resp = self.send(req).await?;
-        let status = resp.status();
-        let collected = resp.into_body().collect().await?.to_bytes();
-        let body = if collected.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&collected).unwrap_or(Value::Null)
-        };
-        Ok(Answer { status, body })
-    }
-
-    /// A GET, returning the JSON if zapper said yes.
-    pub async fn get(&self, path: &str) -> Result<Answer> {
-        self.call(Method::GET, path, None).await
-    }
-
-    /// `GET path` upgraded to a raw stream (a terminal): the daemon splices it
-    /// to the guest shell, so the office drives an agent over it exactly as a
-    /// local `open_shell` stream (the same frame protocol). Mirrors the
-    /// workbench's upgrade.
-    pub async fn upgrade(&self, path: &str) -> Result<TokioIo<hyper::upgrade::Upgraded>> {
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri(format!("http://zapper{path}"))
-            .header("host", "zapper")
-            .header(hyper::header::CONNECTION, "upgrade")
-            .header(hyper::header::UPGRADE, "zapper-shell")
-            .body(Full::new(Bytes::new()))?;
-        let resp = self.send(req).await?;
-        if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
-            let status = resp.status();
-            let bytes = resp.into_body().collect().await?.to_bytes();
-            let why = serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_string))
-                .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
-            anyhow::bail!("{status}: {why}");
-        }
-        Ok(TokioIo::new(hyper::upgrade::on(resp).await?))
-    }
 }
 
 #[cfg(test)]
