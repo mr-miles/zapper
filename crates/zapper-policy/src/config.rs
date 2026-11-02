@@ -22,11 +22,6 @@ pub struct Config {
     pub policy: Policy,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-    /// Org charts of workers run by the office (`zapper-office`), as
-    /// written: the office parses and checks them, with the rest of each
-    /// change.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub firms: BTreeMap<String, serde_yaml::Value>,
     /// Image recipes, by the image's name: what `zapper image build NAME`
     /// builds. (`daemon.images` is where the built images go.)
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -6,9 +6,10 @@
 //! `docs/office.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use zapper_policy::{parse_size, valid_worker_name, Action, Config};
@@ -1180,40 +1181,98 @@ pub fn title_case(s: &str) -> String {
         .join(" ")
 }
 
-/// The config's firms, parsed. Those of the running config always parse:
-/// `check` keeps the rest out of it.
-pub fn all(c: &Config) -> BTreeMap<String, Firm> {
-    c.firms
-        .iter()
-        .filter_map(|(name, v)| Some((name.clone(), serde_yaml::from_value(v.clone()).ok()?)))
-        .collect()
+/// The office's own config file (`office.yaml`): the firms it runs. Its own,
+/// because the daemon neither validates nor uses firms (proposal 13 decision
+/// 2); `profiles:` stays the daemon's and is read through the client.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OfficeConfig {
+    firms: BTreeMap<String, serde_yaml::Value>,
 }
 
-/// The config's firm `name`, parsed.
-pub fn get(c: &Config, name: &str) -> Option<Firm> {
-    serde_yaml::from_value(c.firms.get(name)?.clone()).ok()
-}
-
-/// The office's check of a config: its firms parse and add up with the
-/// profiles they name, and the driver is on. Wired into the co-host daemon's
-/// config checks by `start` (test-gated now the office is its own process); a
-/// standalone office that owns its firm config validates on load (P4-d-2/E).
-#[cfg(test)]
-pub fn check(c: &Config) -> Result<()> {
-    let mut errors = Vec::new();
-    for (name, v) in &c.firms {
-        match serde_yaml::from_value::<Firm>(v.clone()) {
-            Ok(f) => errors.extend(f.validate(name, c)),
-            Err(e) => errors.push(format!("firm {name}: {e}")),
-        }
+/// Reads the office's firms from `office.yaml`. A missing file means no firms.
+/// A firm that does not parse is an error (the office owns this file, unlike
+/// the lenient [`all`] over the daemon's config); cross-checks against the
+/// daemon's profiles are [`validate_firms`].
+pub fn load(path: &Path) -> Result<BTreeMap<String, Firm>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
     }
-    if !c.daemon.driver && !c.firms.is_empty() {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    load_str(&text).with_context(|| format!("loading {}", path.display()))
+}
+
+/// Parses an `office.yaml`'s text into its firms (a firm that does not parse is
+/// an error).
+fn load_str(text: &str) -> Result<BTreeMap<String, Firm>> {
+    let oc: OfficeConfig = serde_yaml::from_str(text)?;
+    let mut firms = BTreeMap::new();
+    for (name, v) in oc.firms {
+        let f: Firm = serde_yaml::from_value(v).with_context(|| format!("firm {name}"))?;
+        firms.insert(name, f);
+    }
+    Ok(firms)
+}
+
+/// Splits a combined test config into the daemon YAML and an `office.yaml`
+/// body, so a test can write firms where the office reads them (the daemon's
+/// `Config` no longer holds firms). Returns the firm-less daemon YAML and, if
+/// there were firms, the `office.yaml` text (a `firms:` document).
+#[cfg(test)]
+pub(crate) fn split_office_yaml(yaml: &str) -> (String, Option<String>) {
+    let mut v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    let firms = v
+        .as_mapping_mut()
+        .and_then(|m| m.remove(serde_yaml::Value::from("firms")));
+    let office = firms.map(|f| {
+        let mut m = serde_yaml::Mapping::new();
+        m.insert(serde_yaml::Value::from("firms"), f);
+        serde_yaml::to_string(&serde_yaml::Value::Mapping(m)).unwrap()
+    });
+    (serde_yaml::to_string(&v).unwrap(), office)
+}
+
+/// The firms parsed out of a combined test config's `firms:` block (structural
+/// parse only; semantic checks are [`validate_firms`]).
+#[cfg(test)]
+pub(crate) fn test_firms(yaml: &str) -> BTreeMap<String, Firm> {
+    load_str(&split_office_yaml(yaml).1.expect("the yaml has firms")).unwrap()
+}
+
+/// Firm `name` parsed out of a combined test config's `firms:` block, for the
+/// tests that build one `Firm` directly from YAML.
+#[cfg(test)]
+pub(crate) fn test_firm(yaml: &str, name: &str) -> Firm {
+    test_firms(yaml)
+        .remove(name)
+        .unwrap_or_else(|| panic!("no firm {name}"))
+}
+
+/// The daemon `Config` from a combined test config, with its `firms:` stripped
+/// (the daemon's `Config` no longer holds firms) — for the tests that need the
+/// profiles alongside a [`test_firm`].
+#[cfg(test)]
+pub(crate) fn test_config(yaml: &str) -> Config {
+    Config::from_yaml(&split_office_yaml(yaml).0).unwrap()
+}
+
+/// The office's check of its firms: each adds up with the profiles it names
+/// (read from the daemon's `config`), and the driver is on. The standalone
+/// office validates on load and reload; the co-host test office validates
+/// what `test_core` splits out of its YAML.
+pub fn validate_firms(firms: &BTreeMap<String, Firm>, config: &Config) -> Result<()> {
+    let mut errors = Vec::new();
+    for (name, f) in firms {
+        errors.extend(f.validate(name, config));
+    }
+    if !config.daemon.driver && !firms.is_empty() {
         errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
     }
     if errors.is_empty() {
         Ok(())
     } else {
-        bail!("invalid config:\n  {}", errors.join("\n  "))
+        bail!("invalid office config:\n  {}", errors.join("\n  "))
     }
 }
 
@@ -1264,21 +1323,28 @@ firms:
     security: { officers: [] }
 ";
 
-    fn firm(yaml: &str) -> Result<Config> {
-        Config::from_yaml(yaml).and_then(|c| check(&c).map(|_| c))
+    /// Parses a combined test config, validates its firms against the daemon
+    /// profiles, and returns the `acme` firm — firms are the office's own
+    /// config (`office.yaml`) now, split out of the daemon's `Config`.
+    fn firm(yaml: &str) -> Result<Firm> {
+        let (daemon, office) = split_office_yaml(yaml);
+        let c = Config::from_yaml(&daemon)?;
+        let firms = load_str(&office.unwrap_or_default())?;
+        validate_firms(&firms, &c)?;
+        firms
+            .get("acme")
+            .cloned()
+            .ok_or_else(|| anyhow!("no firm acme"))
     }
 
     #[test]
     fn git_repos() {
         let c = firm(BASE).unwrap();
-        assert!(
-            get(&c, "acme").unwrap().git_repos().is_empty(),
-            "no git, no repos"
-        );
+        assert!(c.git_repos().is_empty(), "no git, no repos");
         let c = firm(&format!("{BASE}    git: {{}}\n")).unwrap();
-        assert_eq!(get(&c, "acme").unwrap().git_repos(), ["product"]);
+        assert_eq!(c.git_repos(), ["product"]);
         let c = firm(&format!("{BASE}    git: {{ repos: [api, web] }}\n")).unwrap();
-        assert_eq!(get(&c, "acme").unwrap().git_repos(), ["api", "web"]);
+        assert_eq!(c.git_repos(), ["api", "web"]);
         let e = firm(&format!("{BASE}    git: {{ repos: [api, api] }}\n")).unwrap_err();
         assert!(format!("{e:#}").contains("git.repos"), "{e:#}");
         assert!(firm(&format!("{BASE}    git: {{ repos: [Api] }}\n")).is_err());
@@ -1288,8 +1354,7 @@ firms:
 
     #[test]
     fn a_firm_with_a_remote() {
-        let c = firm(&format!("{BASE}{GH}")).unwrap();
-        let f = get(&c, "acme").unwrap();
+        let f = firm(&format!("{BASE}{GH}")).unwrap();
         assert!(f.git_internal(), "agents use the firm's own server");
         assert_eq!(f.git_remote().unwrap().config, "acme.yaml");
         assert!(
@@ -1298,6 +1363,11 @@ firms:
         );
         assert!(f.main_is_local("kb") && f.main_is_local("KB"));
         assert!(!f.main_is_local("api"), "every other main is the remote's");
+        // The firm round-trips through YAML (as `office.yaml` stores it).
+        assert_eq!(
+            serde_yaml::from_str::<Firm>(&serde_yaml::to_string(&f).unwrap()).unwrap(),
+            f
+        );
         let mut f = f.clone();
         let g = f.git.as_mut().unwrap();
         (g.owner, g.found) = ("Acme".into(), vec!["api".into(), "kb".into()]);
@@ -1306,9 +1376,7 @@ firms:
         assert_eq!(f.git_resources(), ["git:api", "git:kb"]);
         // Without a remote, every main is local, as today.
         let plain = firm(&format!("{BASE}    git: {{}}\n")).unwrap();
-        assert!(get(&plain, "acme").unwrap().main_is_local("product"));
-        // It round-trips.
-        assert_eq!(firm(&c.to_yaml()).unwrap(), c);
+        assert!(plain.main_is_local("product"));
     }
 
     #[test]
@@ -1362,29 +1430,20 @@ firms:
         );
         assert!(e.contains("one of git.repos"), "{e}");
         let c = firm(&format!("{BASE}    git: {{ repos: [product, kb] }}\n")).unwrap();
-        assert_eq!(
-            get(&c, "acme").unwrap().knowledge_base().as_deref(),
-            Some("kb"),
-            "kb by default"
-        );
+        assert_eq!(c.knowledge_base().as_deref(), Some("kb"), "kb by default");
         let c = firm(&format!("{BASE}    git: {{ repos: [product] }}\n")).unwrap();
-        assert_eq!(get(&c, "acme").unwrap().knowledge_base(), None);
+        assert_eq!(c.knowledge_base(), None);
     }
 
     #[test]
     fn scenarios() {
         let with = |sc: &str| firm(&format!("{BASE}    scenarios:\n{sc}"));
         let ok = with("      rt:\n        hires: [{ role: eng, count: 2, contract: true, board_line: true, prompt: be sneaky }]\n        script:\n          - { after: 30m, kill: { role: eng, reason: quit } }\n          - { spent: 0.5, mail: { to: ceo, subject: Pivot, body: Change it } }\n").unwrap();
-        let sc = &get(&ok, "acme").unwrap().scenarios["rt"];
+        let sc = &ok.scenarios["rt"];
         assert_eq!(sc.hires[0].count, 2);
         // A slot may put its hires on another agent.
         let pi = with("      p:\n        hires: [{ role: eng, prompt: p, profile: p }]\n").unwrap();
-        assert_eq!(
-            get(&pi, "acme").unwrap().scenarios["p"].hires[0]
-                .profile
-                .as_deref(),
-            Some("p")
-        );
+        assert_eq!(pi.scenarios["p"].hires[0].profile.as_deref(), Some("p"));
         // So may a role's contractors.
         let f = firm(&BASE.replace(
             "eng: { profile: w,",
@@ -1465,7 +1524,7 @@ firms:
     #[test]
     fn chart() {
         let c = firm(BASE).unwrap();
-        let f = &get(&c, "acme").unwrap();
+        let f = &c;
         assert_eq!(f.root(), Some("ceo"));
         assert_eq!(f.manager_of("ada"), Some("cto"));
         assert_eq!(f.reports_of("ceo"), vec!["cto"]);
@@ -1552,9 +1611,9 @@ firms:
         assert!(e.contains("need a run budget"), "{e}");
         let ok = with(", hires: [eng]").replace("    security: { officers: [] }", "    security: { officers: [] }\n    budget: { seed: 2000000 }\n    names: [grace, ken]");
         let c = firm(&ok).unwrap();
-        assert_eq!(get(&c, "acme").unwrap().roles["eng"].hires, vec!["eng"]);
-        assert_eq!(get(&c, "acme").unwrap().budget.security_share, 0.2);
-        assert_eq!(get(&c, "acme").unwrap().budget.reserve(), 200_000);
+        assert_eq!(c.roles["eng"].hires, vec!["eng"]);
+        assert_eq!(c.budget.security_share, 0.2);
+        assert_eq!(c.budget.reserve(), 200_000);
         // The CEO's reserve is kept from the seed, so it must be below it.
         let e = firm(&ok.replace("seed: 2000000", "seed: 2000000, ceo_reserve: 2000000"))
             .unwrap_err()

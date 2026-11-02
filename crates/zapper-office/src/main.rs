@@ -142,5 +142,7 @@ async fn serve(listen: SocketAddr, state_dir: PathBuf, socket_dir: PathBuf) -> R
     // Loopback listeners get the strict Host check; off-loopback loosens it,
     // as the daemon's `daemon.ui` does.
     let remote = !listen.ip().is_loopback();
-    zapper_office::standalone::serve(tcp, zapper, state_dir, socket_dir, remote).await
+    let office_config = cli::office_config_path();
+    zapper_office::standalone::serve(tcp, zapper, state_dir, socket_dir, office_config, remote)
+        .await
 }

@@ -101,6 +101,10 @@ pub struct Office {
     /// The daemon's `state/services/` directory, where the office binds its
     /// facilities' sockets (`FirmRun.socket_dir`). Set in `start`.
     socket_dir: std::sync::OnceLock<PathBuf>,
+    /// The firms the office runs, its own config (`office.yaml`), parsed and
+    /// validated. Loaded at boot and swapped on reload; the daemon no longer
+    /// carries firm data (proposal 13 decision 2). Read through `firm`/`firms`.
+    firms: RwLock<BTreeMap<String, Firm>>,
 }
 
 impl Office {
@@ -149,24 +153,29 @@ impl Office {
         Ok(r)
     }
 
-    // --- firm definitions (E1 choke point) ---------------------------------
-    // The one place the office reads firm definitions. Today it parses them
-    // out of the daemon's config (fetched over the client); E flips these to
-    // an office-owned `office.yaml` holder without touching the call sites.
+    // --- firm definitions (office.yaml holder) -----------------------------
+    // The one place the office reads firm definitions: its own config, loaded
+    // from `office.yaml` at boot and swapped on reload. The daemon no longer
+    // carries firm data.
 
-    /// Firm `name`'s definition as the office reads it, parsed.
+    /// Replaces the office's firms (boot or reload); validate first.
+    pub(crate) fn load_firms(&self, firms: BTreeMap<String, Firm>) {
+        *self.firms.write().unwrap() = firms;
+    }
+
+    /// Firm `name`'s definition, parsed.
     pub(crate) fn firm(&self, name: &str) -> Option<Firm> {
-        crate::firm::get(&self.client().config(), name)
+        self.firms.read().unwrap().get(name).cloned()
     }
 
     /// Every configured firm, by name, parsed.
     pub(crate) fn firms(&self) -> BTreeMap<String, Firm> {
-        crate::firm::all(&self.client().config())
+        self.firms.read().unwrap().clone()
     }
 
     /// Whether firm `name` is configured.
     pub(crate) fn has_firm(&self, name: &str) -> bool {
-        self.client().config().firms.contains_key(name)
+        self.firms.read().unwrap().contains_key(name)
     }
 }
 
@@ -860,7 +869,13 @@ pub fn start(d: &Core) {
     let _ = office.client.set(Arc::new(client::Local(d.clone())));
     let _ = office.state_dir.set(d.state_dir().to_path_buf());
     let _ = office.socket_dir.set(d.socket_dir());
-    d.add_config_check(firm::check);
+    // Firms are the office's own config: load them from `office.yaml` beside
+    // the daemon's config, as `standalone::serve` does in production (tests
+    // write it there — see `test_core`). A restart reloads it the same way.
+    let office_yaml = d.startup_path().with_file_name("office.yaml");
+    let firms = firm::load(&office_yaml).expect("loading the test office.yaml");
+    firm::validate_firms(&firms, &d.config()).expect("the test firms validate");
+    office.load_firms(firms);
     close_orphans(d.state_dir());
     follow_rules(d);
     d.on_shutdown(|d| {
@@ -932,10 +947,23 @@ fn follow_rules(d: &Core) {
     });
 }
 
-/// A core without VMs with the office started on it, for tests.
+/// A core without VMs with the office started on it, for tests. Firms are the
+/// office's own config now, so `firms:` is split out of the combined test YAML
+/// (the daemon's `Config` no longer carries it) and written to `office.yaml`
+/// beside the daemon config, where `start` loads it — as production does.
 #[cfg(test)]
 pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
-    let t = zapper_core::testing::TestCore::new(yaml);
+    test_core_daemon("", yaml)
+}
+
+/// `test_core` with extra `daemon:` lines (as `TestCore::with_daemon`).
+#[cfg(test)]
+pub(crate) fn test_core_daemon(daemon: &str, yaml: &str) -> zapper_core::testing::TestCore {
+    let (daemon_yaml, office_yaml) = crate::firm::split_office_yaml(yaml);
+    let t = zapper_core::testing::TestCore::with_daemon(daemon, &daemon_yaml);
+    if let Some(office_yaml) = office_yaml {
+        std::fs::write(t.startup().with_file_name("office.yaml"), office_yaml).unwrap();
+    }
     start(&t.core);
     t
 }
