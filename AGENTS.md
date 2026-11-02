@@ -64,6 +64,8 @@ make image IMAGE=k3s && make kernel KERNEL=k8s   # the firm's cluster and its ke
 
 The red-team scenario's contractor runs on pi with DeepSeek through OpenRouter, and so do the other `office-*` profiles on pi. If the user wants them, they create a key at https://openrouter.ai/settings/keys (`sk-or-v1-…`; credits, or `:free` models only; if the key is limited to some models, it must allow the ones those profiles name), and store it like the Claude token: `(umask 077; read -rsp 'OpenRouter key: ' t; printf '%s' "$t" > ~/.config/zapper/openrouter-token); echo`.
 
+The Office runs as its own process beside the daemon (like the workbench): with `zapper serve` running, start `zapper-office serve` (no arguments — it reads the same config to find the daemon's socket and `state` directory, connects, and prints the office's URL and its CLI socket). It serves the office UI (org chart, messages, security, drive, VMs, replay) and the `zapper-office firm/mail/drive` commands. Firms are its own config, `config/office.yaml` (`zapper-office init` writes a starter one outside a checkout); `zapper-office config reload` applies edits to a running office.
+
 With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper-office firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper-office mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper-office firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
 
 ### A remote host

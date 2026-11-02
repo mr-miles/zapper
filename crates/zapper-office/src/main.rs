@@ -49,12 +49,14 @@ enum Cmd {
         listen: Option<SocketAddr>,
         /// The daemon's `state` directory (firms' runs live under
         /// `state/firms/`). The office and daemon share it by convention.
+        /// Default: the `daemon.state` of the config (`config/zapper.yaml`,
+        /// else `~/.config/zapper/zapper.yaml`; `$ZAPPER_CONFIG` overrides).
         #[arg(long)]
-        state_dir: PathBuf,
+        state_dir: Option<PathBuf>,
         /// The daemon's `state/services` directory, where the office binds its
-        /// facilities' sockets.
+        /// facilities' sockets. Default: `<state_dir>/services`.
         #[arg(long)]
-        socket_dir: PathBuf,
+        socket_dir: Option<PathBuf>,
     },
     /// Print the dashboard's address.
     Url {
@@ -132,7 +134,17 @@ async fn main() -> Result<()> {
             listen,
             state_dir,
             socket_dir,
-        } => serve(listen.unwrap_or_else(default_listen), state_dir, socket_dir).await,
+        } => {
+            // Default to the daemon's config: its `state` dir, and `services`
+            // under it — so `zapper-office serve` needs no args beside the same
+            // config the daemon reads.
+            let state_dir = match state_dir {
+                Some(d) => d,
+                None => cli::daemon_state_dir()?,
+            };
+            let socket_dir = socket_dir.unwrap_or_else(|| state_dir.join("services"));
+            serve(listen.unwrap_or_else(default_listen), state_dir, socket_dir).await
+        }
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
         Cmd::Drive { cmd } => std::process::exit(firm_cli::drive(&Client::new(), cmd, json).await?),

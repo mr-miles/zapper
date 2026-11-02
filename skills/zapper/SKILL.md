@@ -88,6 +88,8 @@ make image IMAGE=k3s ; make kernel KERNEL=k8s             # the firm's cluster
 
 A firm is an org chart of AI workers, each Claude Code (or pi) in its own session ([docs/office.md](../../docs/office.md)). You act as the board.
 
+The Office is its own process beside the daemon: with `zapper serve` running, start `zapper-office serve` (no args — it reads the same config to reach the daemon and the `state` directory). The `zapper-office` commands below reach it over its socket, so if they can't connect, the office isn't running — start it with a log (`zapper-office serve > /tmp/zapper-office.log 2>&1 &`). Firms are the office's own config, `config/office.yaml`; `zapper-office config reload` applies edits to a running office.
+
 ```
 zapper-office firm ls ; zapper-office firm status acme          # before anything: is a run going, what are workers doing
 zapper-office firm up acme                               # a fresh, idle run (the cluster first, if the firm has one)

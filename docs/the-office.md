@@ -62,9 +62,10 @@ make kernel KERNEL=k8s        # the cluster's kernel, built in a container
 claude setup-token            # anywhere with a browser; store the token as configuration.md#model-credentials-claude-and-openrouter says
 zapper check                  # each line "ok", or the command that fixes it
 zapper serve                  # the daemon; prints the UI URL
+zapper-office serve           # The Office, in another terminal; no args (reads the same config); prints the office URL
 ```
 
-In another terminal:
+Firms are the office's own config, `config/office.yaml`. With both running, in another terminal:
 
 ```
 zapper-office firm up acme           # boots the cluster, then the CEO, idle

@@ -75,7 +75,13 @@ zapper: UI at http://127.0.0.1:7878/?token=3evtji2k5mntwur2ijmc5xm2
 zapper: API on /run/user/1000/zapper/api.sock
 ```
 
-Open that URL: the UI shows the firm, still off. Leave the daemon running.
+The daemon's UI (7878) is the sessions view (sessions, network, terminals, approvals). The Office runs as its own process; in another terminal start it (no arguments — it reads the same config), and open the office URL it prints for the firm view (org chart, messages, security, drive, VMs, replay):
+
+```
+zapper-office serve
+```
+
+Leave both running.
 
 ## 7. Check a session
 
