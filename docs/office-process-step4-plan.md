@@ -333,9 +333,21 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       convention, P1-a). Because office↔core is the daemon's API alone — no VM boundary — the
       whole serve path is unit-tested without KVM: `standalone_app_serves_behind_the_gateway`
       drives the real `zapper-api` router (TestCore) over a unix socket (gateway 401/redirect/403,
-      a firm read over `Remote`, asset serving). **Left:** rule-following over the daemon's
-      `/v1/events` SSE (co-host's `follow_rules`; a run starts without it, the record can only
-      drift on a mid-run operator edit) and proxying the page's daemon-backed session/VM reads.
+      a firm read over `Remote`, a proxied daemon read, asset serving).
+      **P4-d-2 leftovers done (follow-up commit):**
+      - **Rule-following** — `standalone::follow_rules` follows the daemon's `/v1/events` SSE and
+        drops a firm's standing approval when its role-layer rule is removed through the daemon,
+        through the same `forget_removed_role_rule` helper the co-host `follow_rules` now uses
+        (shared prod logic; `security::forget_standing` un-gated). Reconnects resuming after the
+        last event (`?after=EPOCH:SEQ`) so a mid-run operator edit is not missed.
+      - **Daemon-backed reads** — `standalone::proxy_routes` proxies the reads the office page
+        needs but the office does not serve (`/sessions`, `/sessions/{id}/terminals`,
+        `/sessions/{id}/requests`) to the daemon over the socket, nested at `/api` behind the
+        gateway alongside `routes()`. Reads only.
+      **Still a small UI follow-up:** the page's terminal/VM *deep links* (`window.open('/terminal…')`,
+      the `/sessions` link) target the daemon UI's own pages, which the office listener does not
+      serve; the tabs' data populates, but those click-throughs need the daemon UI's URL (the office
+      already resolves it for `firm replay`).
 - [x] **P4-d-3** The office becomes a standalone process the **user** runs (`zapper-office
       serve`, like `zapper-workbench`); `zapper serve` does **not** start/spawn it. **Done** (three
       green commits: firm-CLI move → remove office from `zapper` → P4-c gating + core dev-dep);
@@ -397,9 +409,11 @@ co-host adapter test-only; zapper-core dev-only`). `make lint && make test` pass
 longer built into `zapper`; `zapper-office` carries the firm CLI and runs the firms. A follow-up
 commit (operator-approved) then settled the CLI transport — the office serves the firm routes on
 its own unix socket for `zapper-office firm/mail/drive`, with no gateway — and re-added
-`zapper-office firm verify` and `zapper-office init`. `make lint && make test` still pass. **Next:**
+`zapper-office firm verify` and `zapper-office init`. A further commit settled P4-d-2's two leftovers — SSE rule-following
+(`standalone::follow_rules`) and proxying the page's daemon-backed reads
+(`standalone::proxy_routes`). `make lint && make test` still pass. **Next:**
 **P4-e** (operator's KVM `make test-e2e-office`); the `zapper … → zapper-office …` doc sweep
-(now unblocked); and P4-d-2's SSE rule-following and daemon-backed-read proxying.
+(now unblocked); and the small UI follow-up for the page's daemon-UI deep links.
 **Disk gotcha:** `target/debug` fills the shared volume (~30G); when a build fails with "No space
 left on device", run `rm -rf target/debug` (release/`make lint` artifacts are separate) and rebuild.
 

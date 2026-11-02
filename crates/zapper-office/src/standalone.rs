@@ -9,27 +9,37 @@
 //! API alone — so this serve path is unit-tested against a real `zapper-api`
 //! router backed by a `TestCore` over a unix socket (see `tests` below and
 //! `client::remote_over_the_socket`), not KVM. `make test-e2e-office` on a
-//! real host stays the final pre-merge gate (P4-e). Two things this build
-//! does not yet do, tracked in `docs/office-process-step4-plan.md`:
-//!   - **Rule-following:** the co-host office follows the core's `rule`
-//!     events (`lib::follow_rules`) to keep its record of officers' standing
-//!     approvals in step with the operator's edits; standalone it would
-//!     follow the daemon's `/v1/events` SSE stream. A run starts correctly
-//!     without it; the two can drift only on an operator edit mid-run.
-//!   - **Daemon-backed reads:** the office page's VM/session views read the
-//!     daemon's session routes, which this listener does not serve; they are
-//!     proxied to the daemon in a follow-up.
+//! real host stays the final pre-merge gate (P4-e).
+//!
+//! Two things the co-host office did in process this build now does over the
+//! daemon's API:
+//!   - **Rule-following** ([`follow_rules`]): follows the daemon's
+//!     `/v1/events` SSE stream and drops a firm's standing approval when its
+//!     role-layer rule is removed through the daemon (the operator, or
+//!     `zapper` without the office), through the same
+//!     [`crate::forget_removed_role_rule`] the co-host `follow_rules` uses.
+//!   - **Daemon-backed reads** ([`proxy_routes`]): the office page's VMs view
+//!     and the officers' traffic view read the daemon's session routes, which
+//!     the office does not serve itself; it proxies the handful of reads they
+//!     need to the daemon over the socket.
+//!
+//! Terminal/VM deep links in the page still point at the daemon UI's own
+//! pages (`/terminal`, `/sessions`), which this listener does not serve — the
+//! VMs tab lists and the security tab reads populate, but those click-throughs
+//! need the daemon UI's URL; a small follow-up tracked in the plan.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::extract::{Path, RawQuery, Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
 use zapper_client::gateway;
 use zapper_util::random_id;
 
@@ -96,12 +106,55 @@ fn bootstrap(zapper: Zapper, state_dir: PathBuf, socket_dir: PathBuf) -> Arc<Off
     office
 }
 
-/// The office's own web app: its page and assets, the firm routes nested at
-/// `/api` (where the page's scripts call them), all behind the UI gateway
-/// (`token`, `Host`/`Origin` and the `X-Zapper-UI` marker). `remote`: the
-/// listener is not loopback (served to a network), which loosens the `Host`
-/// check as `daemon.ui` does.
-pub fn app(office: Arc<Office>, token: String, port: u16, remote: bool) -> Router {
+/// Forwards a GET to the daemon over the socket and returns its answer as the
+/// office's own response (status and JSON preserved). The office page's VM and
+/// security views read the daemon's session routes, which the office does not
+/// serve itself; it proxies the handful it needs (reads only) to the daemon.
+async fn forward(zapper: &Zapper, path: &str) -> Response {
+    match zapper.get(path).await {
+        Ok(answer) => (answer.status, Json(answer.body)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn proxy_sessions(State(zapper): State<Zapper>, RawQuery(query): RawQuery) -> Response {
+    let path = match query.filter(|q| !q.is_empty()) {
+        Some(q) => format!("/v1/sessions?{q}"),
+        None => "/v1/sessions".to_string(),
+    };
+    forward(&zapper, &path).await
+}
+
+async fn proxy_terminals(State(zapper): State<Zapper>, Path(id): Path<String>) -> Response {
+    forward(&zapper, &format!("/v1/sessions/{id}/terminals")).await
+}
+
+async fn proxy_requests(State(zapper): State<Zapper>, Path(id): Path<String>) -> Response {
+    forward(&zapper, &format!("/v1/sessions/{id}/requests")).await
+}
+
+/// The daemon-backed reads the office page needs but the office does not serve
+/// itself: the VM list and a session's terminals (the VMs view) and a
+/// session's captured requests (the officers' traffic view). Reads only, over
+/// the daemon's socket; the office's own firm routes are `crate::routes`.
+fn proxy_routes(zapper: Zapper) -> Router {
+    Router::new()
+        .route("/sessions", get(proxy_sessions))
+        .route("/sessions/{id}/terminals", get(proxy_terminals))
+        .route("/sessions/{id}/requests", get(proxy_requests))
+        .with_state(zapper)
+}
+
+/// The office's own web app: its page and assets, the firm routes and the
+/// proxied daemon reads nested at `/api` (where the page's scripts call them),
+/// all behind the UI gateway (`token`, `Host`/`Origin` and the `X-Zapper-UI`
+/// marker). `remote`: the listener is not loopback (served to a network),
+/// which loosens the `Host` check as `daemon.ui` does.
+pub fn app(office: Arc<Office>, zapper: Zapper, token: String, port: u16, remote: bool) -> Router {
     let mut page = Router::new()
         .route("/", get(serve_page))
         .route("/favicon.ico", get(serve_favicon));
@@ -111,11 +164,77 @@ pub fn app(office: Arc<Office>, token: String, port: u16, remote: bool) -> Route
             get(move || serve_asset(name, body)),
         );
     }
-    page.nest("/api", crate::routes(office))
+    page.nest("/api", crate::routes(office).merge(proxy_routes(zapper)))
         .layer(middleware::from_fn_with_state(
             (token, port, remote),
             ui_guard,
         ))
+}
+
+/// Follows the daemon's `/v1/events` SSE stream and keeps the office's record
+/// of officers' standing approvals in step with the operator's edits: a rule
+/// removed from a role's layer through the daemon (the operator, or `zapper`
+/// without the office) is dropped from the firm's run
+/// ([`crate::forget_removed_role_rule`]). This is the standalone counterpart
+/// of the co-host `follow_rules`, which reads the same events in process.
+/// Reconnects if the stream drops, resuming after the last event it saw so an
+/// edit is not missed.
+async fn follow_rules(zapper: Zapper, office: Arc<Office>) {
+    let mut after: Option<String> = None;
+    loop {
+        if let Err(e) = follow_once(&zapper, &office, &mut after).await {
+            tracing::debug!("office rule-follower: {e}; reconnecting");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// One connection to `/v1/events`: applies rule events until the stream ends,
+/// advancing `after` to the last event seen so a reconnect resumes after it.
+/// `Err` only means the connection dropped (the caller reconnects).
+async fn follow_once(
+    zapper: &Zapper,
+    office: &Arc<Office>,
+    after: &mut Option<String>,
+) -> Result<()> {
+    let path = match after.as_deref() {
+        Some(c) => format!("/v1/events?after={c}"),
+        None => "/v1/events".to_string(),
+    };
+    let resp = zapper.stream(&path, &HeaderMap::new()).await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("the daemon answered {} for {path}", resp.status());
+    }
+    let mut body = resp.into_body();
+    let mut buf = String::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.push_str(&String::from_utf8_lossy(data));
+        while let Some(i) = buf.find('\n') {
+            let line: String = buf.drain(..=i).collect();
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(data.trim()) else {
+                continue;
+            };
+            if let (Some(epoch), Some(seq)) = (v["epoch"].as_str(), v["seq"].as_u64()) {
+                *after = Some(format!("{epoch}:{seq}"));
+            }
+            if v["type"] == "rule" {
+                crate::forget_removed_role_rule(
+                    office,
+                    v["state"].as_str().unwrap_or(""),
+                    v["id"].as_str().unwrap_or(""),
+                    v["scope"].as_str().unwrap_or(""),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The office page's gateway, the daemon UI's `ui_guard` for the office's own
@@ -171,7 +290,15 @@ pub async fn serve(
     let local = listener
         .local_addr()
         .context("the office listener's address")?;
-    let office = bootstrap(zapper, state_dir, socket_dir);
+    let office = bootstrap(zapper.clone(), state_dir, socket_dir);
+
+    // Keep the office's standing-approval record in step with the operator's
+    // edits by following the daemon's `/v1/events` SSE (the standalone
+    // counterpart of the co-host in-process `follow_rules`).
+    let follower = {
+        let (zapper, office) = (zapper.clone(), office.clone());
+        tokio::spawn(async move { follow_rules(zapper, office).await })
+    };
 
     // The office's own CLI socket (no gateway: a local unix socket, as the
     // daemon serves the `zapper` CLI). It serves the bare firm routes that the
@@ -194,7 +321,7 @@ pub async fn serve(
 
     let token = random_id(32);
     eprintln!("zapper-office: dashboard on http://{local}/?token={token}");
-    let app = app(office.clone(), token, local.port(), remote);
+    let app = app(office.clone(), zapper, token, local.port(), remote);
     let shutdown = {
         let office = office.clone();
         async move {
@@ -210,6 +337,7 @@ pub async fn serve(
         .await
         .context("serving the office")?;
     cli.abort();
+    follower.abort();
     let _ = std::fs::remove_file(&sock);
     Ok(())
 }
@@ -273,7 +401,15 @@ firms:
             t.core.state_dir().to_path_buf(),
             std::env::temp_dir(),
         );
-        let app = || super::app(office.clone(), "test-token".into(), 7999, false);
+        let app = || {
+            super::app(
+                office.clone(),
+                super::Zapper::new(sock.clone()),
+                "test-token".into(),
+                7999,
+                false,
+            )
+        };
 
         // No token: refused before anything else.
         let r = app()
@@ -315,6 +451,21 @@ firms:
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert!(body_string(r).await.contains("acme"));
+
+        // A daemon-backed read (the VMs view's session list) is proxied to the
+        // daemon over the socket — the office does not serve `/sessions`
+        // itself, so this reaching 200 proves the proxy.
+        let r = app()
+            .oneshot(
+                Request::get("/api/sessions")
+                    .header(header::HOST, HOST)
+                    .header(header::COOKIE, COOKIE)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
 
         // The page's assets are served (behind the gateway).
         let r = app()

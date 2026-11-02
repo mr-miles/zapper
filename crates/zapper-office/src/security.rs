@@ -1104,10 +1104,11 @@ pub fn revoke(run: &FirmRun, by: &str, rule: &str, reason: &str) -> Result<Value
 /// of its layer through the core — the operator, or `zapper` without the
 /// office. The rule is already gone from the layer, so this only drops the
 /// standing record and journals it, keeping the office's records in step.
-/// Driven by the core's `rule` removed event (see `follow_rules`), which is
-/// co-host only and test-gated now the office is its own process; a standalone
-/// office follows the daemon's `/v1/events` SSE stream in a follow-up (P4-d).
-#[cfg(test)]
+/// Driven by the core's `rule` removed event through
+/// [`crate::forget_removed_role_rule`]: the co-host office reads the core's
+/// in-process broadcast (`follow_rules`, test-gated with the co-host entry),
+/// the standalone office the daemon's `/v1/events` SSE
+/// (`standalone::follow_rules`).
 pub fn forget_standing(run: &FirmRun, rule: &str) {
     let st = run.security.lock().unwrap().standing.remove(rule);
     if let Some(st) = st {
