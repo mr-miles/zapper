@@ -58,14 +58,9 @@ Each phase is a commit; `make lint && make test` green at each.
 - **Operator-visible:** the config file splits in two and the examples' layout changes. This is intended (decision 2) but must be called out in docs and the changelog/PR description.
 - **Rollback:** each phase is a standalone commit on `feat/office-firms-config`; revert E2 to restore the single-file config if the round-trip story needs more work, keeping E1's office-owned reads.
 
-## Open question for the operator (decision 2, reload)
+## Reload (decision 2 — settled)
 
-How should a firm-config change take effect once firms live in `office.yaml`?
-- **(a) `zapper-office config reload`** — explicit, atomic, validated; parallels `zapper config reload`. *(recommended)*
-- **(b) Re-read `office.yaml` per firm operation** — closest to today's live `/v1/config` reads; no new command, but no "validated as a whole" guarantee and disk I/O per op.
-- **(c) Watch the file** — automatic; more moving parts, and a validation failure has no natural place to surface to the operator.
-
-Running firms are unaffected either way (a run snapshots its `Firm` at start).
+**`zapper-office config reload`** (operator's choice): re-reads `office.yaml`, re-validates the firms against the daemon's current profiles, and swaps the office's firms holder atomically — or fails as a whole and changes nothing, parallel to `zapper config reload`. Firm-config is no longer touched by the daemon's `zapper config reload`. Running firms are unaffected (a run snapshots its `Firm` at start). Implemented in E3.
 
 ## Progress log
 
