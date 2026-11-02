@@ -827,102 +827,8 @@ async fn run(cli: Cli) -> Result<i32> {
                     .await?,
             );
         }
-        Cmd::Config { cmd } => match cmd {
-            ConfigCmd::Show => print!("{}", c.text("/v1/config").await?),
-            ConfigCmd::Startup => print!("{}", c.text("/v1/config/startup").await?),
-            ConfigCmd::Diff => {
-                let d = c.text("/v1/config/diff").await?;
-                if d.trim().is_empty() {
-                    println!("no unsaved changes");
-                } else {
-                    print!("{d}");
-                }
-            }
-            ConfigCmd::Save => {
-                let v = c.json(Method::POST, "/v1/config/save", None).await?;
-                println!("saved to {}", s(&v["saved"]));
-            }
-            ConfigCmd::Reload => {
-                c.json(Method::POST, "/v1/config/reload", None).await?;
-                println!("running config replaced by the startup file");
-            }
-            ConfigCmd::Edit => {
-                let current = c.text("/v1/config").await?;
-                let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
-                util::write_private(&tmp, current.as_bytes())?;
-                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("{editor} \"$1\""))
-                    .arg("sh")
-                    .arg(&tmp)
-                    .status()?;
-                let edited = std::fs::read_to_string(&tmp)?;
-                let _ = std::fs::remove_file(&tmp);
-                if !status.success() || edited == current {
-                    println!("no change");
-                } else {
-                    c.json(Method::PUT, "/v1/config", Some(edited)).await?;
-                    println!("running config updated; `zapper config diff`, then `zapper config save` to keep it");
-                }
-            }
-            ConfigCmd::Apply { file } => {
-                c.json(
-                    Method::PUT,
-                    "/v1/config",
-                    Some(std::fs::read_to_string(file)?),
-                )
-                .await?;
-                println!("running config replaced; `zapper config save` to keep it");
-            }
-        },
-        Cmd::Profile { cmd } => match cmd {
-            ProfileCmd::Ls => {
-                let v = c.json(Method::GET, "/v1/profiles", None).await?;
-                if cli.json {
-                    print_json(&v);
-                } else {
-                    let rows = v
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|p| {
-                            vec![
-                                s(&p["name"]),
-                                s(&p["extends"]),
-                                s(&p["image"]),
-                                p["command"]
-                                    .as_array()
-                                    .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
-                                    .unwrap_or_default(),
-                                s(&p["description"]),
-                            ]
-                        })
-                        .collect();
-                    table(
-                        &["name", "extends", "image", "command", "description"],
-                        rows,
-                    );
-                }
-            }
-            ProfileCmd::Show { name } => {
-                print!("{}", c.text(&format!("/v1/profiles/{name}")).await?)
-            }
-            ProfileCmd::Set { name, file } => {
-                c.json(
-                    Method::PUT,
-                    &format!("/v1/profiles/{name}"),
-                    Some(std::fs::read_to_string(file)?),
-                )
-                .await?;
-                println!("profile {name} set; `zapper config save` to keep it");
-            }
-            ProfileCmd::Rm { name } => {
-                c.json(Method::DELETE, &format!("/v1/profiles/{name}"), None)
-                    .await?;
-                println!("profile {name} removed");
-            }
-        },
+        Cmd::Config { cmd } => config_cmd(&c, cmd).await?,
+        Cmd::Profile { cmd } => profile_cmd(&c, cmd, cli.json).await?,
         Cmd::Github { cmd } => return github::github(cmd).await,
         Cmd::Mint { cmd } => return github::mint(cmd).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
@@ -945,59 +851,164 @@ async fn run(cli: Cli) -> Result<i32> {
                 return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
             }
         },
-        Cmd::Image { cmd, cfg } => {
-            let config = load_config(&config_path(cfg.config.as_deref()))?;
-            let dir = PathBuf::from(expand_home(&config.daemon.images));
-            match cmd {
-                ImageCmd::Build {
-                    name,
-                    args,
-                    from,
-                    run,
-                    size,
-                    local,
-                } => {
-                    let daemon = !local
-                        && tokio::net::UnixStream::connect(client::socket_path())
-                            .await
-                            .is_ok();
-                    if daemon {
-                        return build_in_daemon(&c, &name, &args, from, run, size).await;
-                    }
-                    let r = images::recipe(&config, &name, from, run, &args)?;
-                    let out = images::build(
-                        images::Build {
-                            name: &name,
-                            recipe: &r,
-                            size: size.as_deref(),
-                            dir: &dir,
-                        },
-                        &|l| eprintln!("{l}"),
-                    )?;
-                    println!("built {}", out.display());
-                }
-                ImageCmd::Ls => {
-                    let v = images::list(&dir)?;
-                    if cli.json {
-                        print_json(&json!(v));
-                    } else {
-                        let rows = v
-                            .iter()
-                            .map(|i| {
-                                vec![
-                                    s(&i["name"]),
-                                    format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
-                                    s(&i["from"]),
-                                    i["sha256"]
-                                        .as_str()
-                                        .map(|h| h[..h.len().min(12)].to_string())
-                                        .unwrap_or_else(|| "-".into()),
-                                ]
-                            })
-                            .collect();
-                        table(&["name", "size", "from", "sha256"], rows);
-                    }
-                }
+        Cmd::Image { cmd, cfg } => return image_cmd(&c, cmd, cfg, cli.json).await,
+    }
+    Ok(0)
+}
+
+async fn config_cmd(c: &Client, cmd: ConfigCmd) -> Result<()> {
+    match cmd {
+        ConfigCmd::Show => print!("{}", c.text("/v1/config").await?),
+        ConfigCmd::Startup => print!("{}", c.text("/v1/config/startup").await?),
+        ConfigCmd::Diff => {
+            let d = c.text("/v1/config/diff").await?;
+            if d.trim().is_empty() {
+                println!("no unsaved changes");
+            } else {
+                print!("{d}");
+            }
+        }
+        ConfigCmd::Save => {
+            let v = c.json(Method::POST, "/v1/config/save", None).await?;
+            println!("saved to {}", s(&v["saved"]));
+        }
+        ConfigCmd::Reload => {
+            c.json(Method::POST, "/v1/config/reload", None).await?;
+            println!("running config replaced by the startup file");
+        }
+        ConfigCmd::Edit => {
+            let current = c.text("/v1/config").await?;
+            let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
+            util::write_private(&tmp, current.as_bytes())?;
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor} \"$1\""))
+                .arg("sh")
+                .arg(&tmp)
+                .status()?;
+            let edited = std::fs::read_to_string(&tmp)?;
+            let _ = std::fs::remove_file(&tmp);
+            if !status.success() || edited == current {
+                println!("no change");
+            } else {
+                c.json(Method::PUT, "/v1/config", Some(edited)).await?;
+                println!("running config updated; `zapper config diff`, then `zapper config save` to keep it");
+            }
+        }
+        ConfigCmd::Apply { file } => {
+            c.json(
+                Method::PUT,
+                "/v1/config",
+                Some(std::fs::read_to_string(file)?),
+            )
+            .await?;
+            println!("running config replaced; `zapper config save` to keep it");
+        }
+    }
+    Ok(())
+}
+
+async fn profile_cmd(c: &Client, cmd: ProfileCmd, json_out: bool) -> Result<()> {
+    match cmd {
+        ProfileCmd::Ls => {
+            let v = c.json(Method::GET, "/v1/profiles", None).await?;
+            if json_out {
+                print_json(&v);
+            } else {
+                let rows = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| {
+                        vec![
+                            s(&p["name"]),
+                            s(&p["extends"]),
+                            s(&p["image"]),
+                            p["command"]
+                                .as_array()
+                                .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
+                                .unwrap_or_default(),
+                            s(&p["description"]),
+                        ]
+                    })
+                    .collect();
+                table(
+                    &["name", "extends", "image", "command", "description"],
+                    rows,
+                );
+            }
+        }
+        ProfileCmd::Show { name } => print!("{}", c.text(&format!("/v1/profiles/{name}")).await?),
+        ProfileCmd::Set { name, file } => {
+            c.json(
+                Method::PUT,
+                &format!("/v1/profiles/{name}"),
+                Some(std::fs::read_to_string(file)?),
+            )
+            .await?;
+            println!("profile {name} set; `zapper config save` to keep it");
+        }
+        ProfileCmd::Rm { name } => {
+            c.json(Method::DELETE, &format!("/v1/profiles/{name}"), None)
+                .await?;
+            println!("profile {name} removed");
+        }
+    }
+    Ok(())
+}
+
+async fn image_cmd(c: &Client, cmd: ImageCmd, cfg: ConfigArg, json_out: bool) -> Result<i32> {
+    let config = load_config(&config_path(cfg.config.as_deref()))?;
+    let dir = PathBuf::from(expand_home(&config.daemon.images));
+    match cmd {
+        ImageCmd::Build {
+            name,
+            args,
+            from,
+            run,
+            size,
+            local,
+        } => {
+            let daemon = !local
+                && tokio::net::UnixStream::connect(client::socket_path())
+                    .await
+                    .is_ok();
+            if daemon {
+                return build_in_daemon(c, &name, &args, from, run, size).await;
+            }
+            let r = images::recipe(&config, &name, from, run, &args)?;
+            let out = images::build(
+                images::Build {
+                    name: &name,
+                    recipe: &r,
+                    size: size.as_deref(),
+                    dir: &dir,
+                },
+                &|l| eprintln!("{l}"),
+            )?;
+            println!("built {}", out.display());
+        }
+        ImageCmd::Ls => {
+            let v = images::list(&dir)?;
+            if json_out {
+                print_json(&json!(v));
+            } else {
+                let rows = v
+                    .iter()
+                    .map(|i| {
+                        vec![
+                            s(&i["name"]),
+                            format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
+                            s(&i["from"]),
+                            i["sha256"]
+                                .as_str()
+                                .map(|h| h[..h.len().min(12)].to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        ]
+                    })
+                    .collect();
+                table(&["name", "size", "from", "sha256"], rows);
             }
         }
     }
