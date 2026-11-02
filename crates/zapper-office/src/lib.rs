@@ -6,11 +6,11 @@
 //! `state/firms/<firm>/runs/<id>/` as it happens; the daemon keeps indexes.
 
 pub(crate) mod access;
-pub mod client;
+pub(crate) mod client;
 pub(crate) mod contracts;
 pub(crate) mod drive;
 pub(crate) mod facility;
-pub mod firm;
+pub(crate) mod firm;
 pub(crate) mod foreman;
 pub(crate) mod git;
 pub(crate) mod http;

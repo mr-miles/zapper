@@ -11,7 +11,8 @@ use http_body_util::BodyExt;
 use hyper::Method;
 use serde_json::{json, Value};
 
-use crate::cli::{print_json, s, table, url_encode, Client};
+use crate::cli::{url_encode, Client};
+use zapper_util::cli::{print_json, s, table};
 
 #[derive(Subcommand)]
 pub enum FirmCmd {

@@ -4,57 +4,32 @@
 //! routes to the browser (behind the UI gateway, at `/api`) and, for this CLI,
 //! on a local unix socket of its own (`standalone::office_socket_path`), the
 //! way the daemon serves the `zapper` CLI — so these commands reach the office
-//! the way `zapper`'s reached the daemon. The socket plumbing mirrors
-//! [`zapper_client::Zapper`], but keeps raw bytes (a drive download is binary)
-//! and sends a string body.
+//! the way `zapper`'s reached the daemon.
+//!
+//! The socket plumbing is the shared [`zapper_client::Zapper`]; [`Client`] is
+//! a thin board-facing adapter over it, keeping raw response bytes (a drive
+//! download is binary) and the board's error wrapping.
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::client::conn::http1::SendRequest;
-use hyper::{Method, Request, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
-use tokio::net::UnixStream;
+use zapper_client::Zapper;
 
 pub use zapper_client::url_encode;
 
 use zapper_office::standalone::office_socket_path;
 
-/// A client of the running office's unix-socket API, as the board.
-pub struct Client {
-    socket: std::path::PathBuf,
-}
+/// A client of the running office's unix-socket API, as the board: the shared
+/// [`Zapper`] (the socket plumbing) plus the board's JSON/text/bytes helpers
+/// and error wrapping.
+pub struct Client(Zapper);
 
 impl Client {
     pub fn new() -> Self {
-        Self {
-            socket: office_socket_path(),
-        }
-    }
-
-    async fn conn(&self) -> Result<SendRequest<Full<Bytes>>> {
-        let stream = UnixStream::connect(&self.socket).await.with_context(|| {
-            format!(
-                "connecting to the office at {} (is `zapper-office serve` running?)",
-                self.socket.display()
-            )
-        })?;
-        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        tokio::spawn(conn.with_upgrades());
-        Ok(sender)
-    }
-
-    fn request(method: Method, path: &str, body: Option<String>) -> Result<Request<Full<Bytes>>> {
-        let mut b = Request::builder()
-            .method(method)
-            .uri(format!("http://zapper{path}"))
-            .header("host", "zapper");
-        if body.is_some() {
-            b = b.header("content-type", "application/yaml");
-        }
-        Ok(b.body(Full::new(Bytes::from(body.unwrap_or_default())))?)
+        Self(Zapper::new(office_socket_path()))
     }
 
     pub async fn call(
@@ -63,13 +38,13 @@ impl Client {
         path: &str,
         body: Option<String>,
     ) -> Result<(StatusCode, Bytes)> {
-        let mut sender = self.conn().await?;
-        let resp = sender
-            .send_request(Self::request(method, path, body)?)
-            .await?;
-        let status = resp.status();
-        let bytes = resp.into_body().collect().await?.to_bytes();
-        Ok((status, bytes))
+        // The office handlers read the raw body, so the content-type is only a
+        // label; the board's commands send JSON.
+        let (ct, bytes) = match body {
+            Some(b) => (Some("application/json"), Bytes::from(b)),
+            None => (None, Bytes::new()),
+        };
+        self.0.call_raw(method, path, ct, bytes).await
     }
 
     fn check(status: StatusCode, bytes: &Bytes) -> Result<()> {
@@ -97,10 +72,7 @@ impl Client {
 
     /// A streaming GET, e.g. server-sent events.
     pub async fn stream(&self, path: &str) -> Result<Incoming> {
-        let mut sender = self.conn().await?;
-        let resp = sender
-            .send_request(Self::request(Method::GET, path, None)?)
-            .await?;
+        let resp = self.0.stream(path, &HeaderMap::new()).await?;
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.into_body().collect().await?.to_bytes();
@@ -116,6 +88,11 @@ impl Client {
 /// same file the daemon reads. Sets CONFIG_DIR to its directory so relative
 /// paths (a firm's `agents_dir`/`skills_dir`, the daemon's `state`) resolve
 /// against it, as they do for the daemon.
+///
+/// This mirrors `zapper`'s own `config_path`. The two are deliberately not
+/// shared: the logic needs `zapper-policy` and encodes zapper's layout, so it
+/// belongs in neither `zapper-util` (no zapper-crate deps, nothing
+/// zapper-specific) nor `zapper-policy` (no I/O) — each binary keeps its own.
 pub fn config_path() -> std::path::PathBuf {
     use zapper_policy::expand_home;
     let path = match std::env::var("ZAPPER_CONFIG") {
@@ -157,40 +134,4 @@ pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
         Config::default()
     };
     Ok(std::path::PathBuf::from(expand_home(&config.daemon.state)))
-}
-
-/// Prints `v` as pretty JSON.
-pub fn print_json(v: &Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap());
-}
-
-/// A JSON value as a plain string (a bare string without its quotes).
-pub fn s(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// Prints rows as aligned columns.
-pub fn table(header: &[&str], rows: Vec<Vec<String>>) {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
-    for r in &rows {
-        for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(c.chars().count());
-        }
-    }
-    let line = |cells: Vec<String>| {
-        let s: Vec<String> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
-            .collect();
-        println!("{}", s.join("  ").trim_end());
-    };
-    line(header.iter().map(|h| h.to_uppercase()).collect());
-    for r in rows {
-        line(r);
-    }
 }

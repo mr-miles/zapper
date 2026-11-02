@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use hyper::Method;
-use zapper_office::client::{socket_path, Zapper};
+use zapper_client::{socket_path, Zapper};
 
 mod cli;
 mod firm_cli;

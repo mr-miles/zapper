@@ -73,6 +73,51 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     written
 }
 
+/// Terminal output helpers shared by the command lines (`zapper` and
+/// `zapper-office`): generic JSON-to-terminal formatting, nothing
+/// zapper-specific. (Config-path resolution is *not* here — it needs
+/// `zapper-policy` and encodes zapper's layout, which would make this crate
+/// zapper-specific; each binary keeps its own.)
+pub mod cli {
+    use serde_json::Value;
+
+    /// Prints `v` as pretty JSON.
+    pub fn print_json(v: &Value) {
+        println!("{}", serde_json::to_string_pretty(v).unwrap());
+    }
+
+    /// A JSON value as a plain string (a bare string without its quotes).
+    pub fn s(v: &Value) -> String {
+        match v {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Prints rows as aligned columns under an upper-cased header.
+    pub fn table(header: &[&str], rows: Vec<Vec<String>>) {
+        let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
+        for r in &rows {
+            for (i, c) in r.iter().enumerate() {
+                widths[i] = widths[i].max(c.chars().count());
+            }
+        }
+        let line = |cells: Vec<String>| {
+            let s: Vec<String> = cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
+                .collect();
+            println!("{}", s.join("  ").trim_end());
+        };
+        line(header.iter().map(|h| h.to_uppercase()).collect());
+        for r in rows {
+            line(r);
+        }
+    }
+}
+
 /// What `zapper serve` prints when an operator's port is reachable from
 /// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
 pub fn exposed_warning(what: &str) -> String {

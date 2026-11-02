@@ -2856,6 +2856,7 @@ dependencies = [
  "zapper-keeper",
  "zapper-policy",
  "zapper-ssh",
+ "zapper-util",
 ]
 
 [[package]]
@@ -3141,6 +3142,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rand 0.8.8",
+ "serde_json",
 ]
 
 [[package]]

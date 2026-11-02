@@ -17,6 +17,7 @@ use http_body_util::BodyExt;
 use hyper::Method;
 use serde_json::{json, Value};
 use zapper_policy::{expand_home, Config};
+use zapper_util::cli::{print_json, s, table};
 
 use client::Client;
 
@@ -468,40 +469,6 @@ fn config_path(given: Option<&str>) -> PathBuf {
         zapper_policy::set_config_dir(dir);
     }
     path
-}
-
-fn print_json(v: &Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap());
-}
-
-/// Prints rows as aligned columns.
-fn table(header: &[&str], rows: Vec<Vec<String>>) {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
-    for r in &rows {
-        for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(c.chars().count());
-        }
-    }
-    let line = |cells: Vec<String>| {
-        let s: Vec<String> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
-            .collect();
-        println!("{}", s.join("  ").trim_end());
-    };
-    line(header.iter().map(|h| h.to_uppercase()).collect());
-    for r in rows {
-        line(r);
-    }
-}
-
-fn s(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
 }
 
 async fn run(cli: Cli) -> Result<i32> {

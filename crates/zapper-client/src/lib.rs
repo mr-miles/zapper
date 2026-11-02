@@ -111,6 +111,31 @@ impl Zapper {
         Ok(Answer { status, body })
     }
 
+    /// `method path` with a raw body and its content-type, returning the
+    /// status and the response bytes as they came — for a non-JSON request
+    /// body (YAML) or a binary response (a drive download) that [`call`] would
+    /// lossily parse as JSON. [`call`] is this for a JSON round-trip.
+    ///
+    /// [`call`]: Self::call
+    pub async fn call_raw(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: Option<&str>,
+        body: Bytes,
+    ) -> Result<(StatusCode, Bytes)> {
+        let mut headers = HeaderMap::new();
+        if let Some(ct) = content_type {
+            headers.insert("content-type", ct.parse()?);
+        }
+        let resp = self
+            .send(Self::request(method, path, &headers, body)?)
+            .await?;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await?.to_bytes();
+        Ok((status, bytes))
+    }
+
     /// A GET, returning what zapper answered.
     pub async fn get(&self, path: &str) -> Result<Answer> {
         self.call(Method::GET, path, None).await

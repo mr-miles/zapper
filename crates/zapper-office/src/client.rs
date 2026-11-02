@@ -12,7 +12,7 @@ use hyper::Method;
 use serde_json::Value;
 // The socket client, shared with the workbench.
 use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
-pub use zapper_client::{socket_path, url_encode, Answer, Zapper};
+pub use zapper_client::{url_encode, Zapper};
 #[cfg(test)]
 use zapper_core::{ApprovalApi, RuleApi, ServiceApi, SessionApi};
 use zapper_driver::process::DriveStream;
