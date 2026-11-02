@@ -15,6 +15,13 @@ use crate::cli::{url_encode, Client};
 use zapper_util::cli::{print_json, s, table};
 
 #[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Re-read office.yaml and apply its firms (validated against the daemon's
+    /// profiles) to the running office, atomically.
+    Reload,
+}
+
+#[derive(Subcommand)]
 pub enum FirmCmd {
     /// List firms and their runs' states.
     Ls,
@@ -1546,6 +1553,21 @@ pub async fn drive(c: &Client, cmd: DriveCmd, json_out: bool) -> Result<i32> {
             );
             if json_out {
                 print_json(entry);
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `zapper-office config`: the office's own config.
+pub async fn config(c: &Client, cmd: ConfigCmd, json_out: bool) -> Result<i32> {
+    match cmd {
+        ConfigCmd::Reload => {
+            let v = c.json(Method::POST, "/config/reload", None).await?;
+            if json_out {
+                print_json(&v);
+            } else {
+                println!("reloaded office.yaml: {} firm(s)", s(&v["firms"]));
             }
         }
     }

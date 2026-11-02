@@ -101,6 +101,7 @@ pub fn read_routes() -> Router<Arc<Office>> {
 /// and notes on runs.
 pub fn board_routes() -> Router<Arc<Office>> {
     Router::new()
+        .route("/config/reload", post(config_reload))
         // The task's attachments ride in the body, base64 like an upload's.
         .route(
             "/firms/{f}/up",
@@ -140,6 +141,13 @@ pub fn board_routes() -> Router<Arc<Office>> {
             "/firms/{f}/credentials/grants/{worker}/{resource}",
             delete(credentials_revoke),
         )
+}
+
+/// Re-reads `office.yaml` and swaps the firms in atomically (or fails and
+/// changes nothing). `zapper-office config reload`.
+async fn config_reload(State(office): S) -> R<Json<Value>> {
+    let firms = office.reload_firms()?;
+    Ok(Json(json!({ "firms": firms })))
 }
 
 async fn list(State(office): S) -> Json<Value> {

@@ -286,14 +286,13 @@ pub async fn serve(
 
     // The office's own firm config (`office.yaml`), validated against the
     // daemon's profiles; a bad firm config stops the office starting.
-    let firms = crate::firm::load(&office_config)?;
-    crate::firm::validate_firms(&firms, &office.client().config())?;
+    // `zapper-office config reload` re-reads it from the same path.
+    let _ = office.config_path.set(office_config.clone());
+    let n = office.reload_firms()?;
     eprintln!(
-        "zapper-office: {} firm(s) from {}",
-        firms.len(),
+        "zapper-office: {n} firm(s) from {}",
         office_config.display()
     );
-    office.load_firms(firms);
 
     // Keep the office's standing-approval record in step with the operator's
     // edits by following the daemon's `/v1/events` SSE (the standalone

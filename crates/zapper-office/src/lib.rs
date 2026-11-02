@@ -105,6 +105,9 @@ pub struct Office {
     /// validated. Loaded at boot and swapped on reload; the daemon no longer
     /// carries firm data (proposal 13 decision 2). Read through `firm`/`firms`.
     firms: RwLock<BTreeMap<String, Firm>>,
+    /// Where `firms` is read from (`office.yaml`); set at boot, re-read by
+    /// `reload_firms` (`zapper-office config reload`).
+    config_path: std::sync::OnceLock<PathBuf>,
 }
 
 impl Office {
@@ -161,6 +164,21 @@ impl Office {
     /// Replaces the office's firms (boot or reload); validate first.
     pub(crate) fn load_firms(&self, firms: BTreeMap<String, Firm>) {
         *self.firms.write().unwrap() = firms;
+    }
+
+    /// Re-reads `office.yaml`, validates it against the daemon's profiles, and
+    /// swaps the firms in atomically — or fails and changes nothing (the
+    /// office equivalent of `zapper config reload`). Returns the firm count.
+    pub(crate) fn reload_firms(&self) -> Result<usize> {
+        let path = self
+            .config_path
+            .get()
+            .ok_or_else(|| anyhow!("the office's config path is not set"))?;
+        let firms = crate::firm::load(path)?;
+        crate::firm::validate_firms(&firms, &self.client().config())?;
+        let n = firms.len();
+        self.load_firms(firms);
+        Ok(n)
     }
 
     /// Firm `name`'s definition, parsed.
@@ -872,10 +890,10 @@ pub fn start(d: &Core) {
     // Firms are the office's own config: load them from `office.yaml` beside
     // the daemon's config, as `standalone::serve` does in production (tests
     // write it there — see `test_core`). A restart reloads it the same way.
-    let office_yaml = d.startup_path().with_file_name("office.yaml");
-    let firms = firm::load(&office_yaml).expect("loading the test office.yaml");
-    firm::validate_firms(&firms, &d.config()).expect("the test firms validate");
-    office.load_firms(firms);
+    let _ = office
+        .config_path
+        .set(d.startup_path().with_file_name("office.yaml"));
+    office.reload_firms().expect("loading the test office.yaml");
     close_orphans(d.state_dir());
     follow_rules(d);
     d.on_shutdown(|d| {

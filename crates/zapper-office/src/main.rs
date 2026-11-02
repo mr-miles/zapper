@@ -21,6 +21,10 @@ mod firm_cli;
 
 use cli::Client;
 
+/// The starter `office.yaml` `init` writes: the firm config (empty), as the
+/// checkout's `config/office.yaml`.
+const OFFICE_EXAMPLE: &str = include_str!("../../../config/office.yaml");
+
 #[derive(Parser)]
 #[command(name = "zapper-office", about = "The Office as a process of its own")]
 struct Cli {
@@ -76,6 +80,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: firm_cli::DriveCmd,
     },
+    /// The office's own config (`office.yaml`: the firms).
+    Config {
+        #[command(subcommand)]
+        cmd: firm_cli::ConfigCmd,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +114,18 @@ async fn main() -> Result<()> {
                     written.join(", ")
                 );
             }
+            // The office's own firm config, kept if already there (like
+            // `zapper init` keeps zapper.yaml).
+            let office_yaml = cli::office_config_path();
+            if office_yaml.exists() {
+                println!("{} exists; not touching it", office_yaml.display());
+            } else {
+                if let Some(parent) = office_yaml.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&office_yaml, OFFICE_EXAMPLE)?;
+                println!("wrote {}", office_yaml.display());
+            }
             Ok(())
         }
         Cmd::Serve {
@@ -115,6 +136,9 @@ async fn main() -> Result<()> {
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
         Cmd::Drive { cmd } => std::process::exit(firm_cli::drive(&Client::new(), cmd, json).await?),
+        Cmd::Config { cmd } => {
+            std::process::exit(firm_cli::config(&Client::new(), cmd, json).await?)
+        }
     }
 }
 

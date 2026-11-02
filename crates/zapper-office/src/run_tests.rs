@@ -727,3 +727,33 @@ fn firms_need_the_driver() {
     let e = crate::firm::validate_firms(&firms, &c).unwrap_err();
     assert!(format!("{e:#}").contains("firms need the driver"), "{e:#}");
 }
+
+#[test]
+fn reload_applies_a_valid_office_yaml_and_rejects_a_bad_one() {
+    let t = crate::test_core(FIRM);
+    let office = t.core.office();
+    assert!(office.firm("acme").is_some() && office.firm("beta").is_none());
+    let office_yaml = t.startup().with_file_name("office.yaml");
+
+    // A valid edit adding a firm: reload applies it.
+    std::fs::write(
+        &office_yaml,
+        "firms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n  beta:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
+    )
+    .unwrap();
+    assert_eq!(office.reload_firms().unwrap(), 2);
+    assert!(office.firm("beta").is_some());
+
+    // A bad edit (a worker on an undefined role): reload fails and the firms
+    // are left as they were — swap-or-nothing.
+    std::fs::write(
+        &office_yaml,
+        "firms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: x, role: nope, reports_to: ceo }\n",
+    )
+    .unwrap();
+    assert!(office.reload_firms().is_err());
+    assert!(
+        office.firm("beta").is_some(),
+        "a failed reload changes nothing"
+    );
+}
