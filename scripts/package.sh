@@ -14,9 +14,11 @@ NAME=zapper-$VERSION-$ARCH-linux
 OUT=$HERE/dist
 ROOT=$OUT/$NAME
 
-# As the Makefile builds them: zapper-inspect reads firms' runs.
+# As the Makefile builds them: zapper-inspect reads firms' runs, and
+# zapper-office is The Office's binary (serve, the firm CLI, and `init`,
+# which installs the workers' agents and skills).
 BINS="zapper zapper-agent"
-[ "${OFFICE:-1}" = 0 ] || BINS="$BINS zapper-inspect"
+[ "${OFFICE:-1}" = 0 ] || BINS="$BINS zapper-inspect zapper-office"
 for b in $BINS; do
     [ -x "$HERE/target/release/$b" ] || { echo "no target/release/$b: run make build first" >&2; exit 1; }
 done
@@ -48,11 +50,12 @@ done
 
 cat > "$ROOT/install.sh" <<'EOF'
 #!/bin/sh
-# Installs zapper, zapper-agent and (with the office) zapper-inspect into
-# ~/.local/bin (set PREFIX for another place); runs `zapper init`, which writes the example
-# config as ~/.config/zapper/zapper.yaml and, if zapper has the office, the
-# workers' skills into ~/.config/zapper/skills, keeping what is there; then
-# puts Firecracker and a guest kernel into ~/.local/share/zapper.
+# Installs zapper, zapper-agent and (with the office) zapper-inspect and
+# zapper-office into ~/.local/bin (set PREFIX for another place); runs
+# `zapper init`, which writes the example config as ~/.config/zapper/zapper.yaml,
+# and (with the office) `zapper-office init`, which installs the workers' agents
+# and skills into ~/.config/zapper, keeping what is there; then puts Firecracker
+# and a guest kernel into ~/.local/share/zapper.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 PREFIX=${PREFIX:-$HOME/.local}
@@ -66,6 +69,12 @@ done
 
 install -d -m 0700 "$CONF"
 "$PREFIX/bin/zapper" init --config "$CONF/zapper.yaml"
+# The office's agents and skills, installed beside the config by the office's
+# own binary (the office is a separate process). ZAPPER_CONFIG pins the target
+# to this home, so it is written here even when run from inside a checkout.
+if [ -x "$PREFIX/bin/zapper-office" ]; then
+    ZAPPER_CONFIG="$CONF/zapper.yaml" "$PREFIX/bin/zapper-office" init
+fi
 
 "$HERE/scripts/fetch-deps.sh"
 
