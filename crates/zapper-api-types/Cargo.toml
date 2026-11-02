@@ -11,4 +11,3 @@ serde_json.workspace = true
 anyhow.workspace = true
 axum = { version = "0.8" }
 zapper-policy = { path = "../zapper-policy" }
-zapper-proto = { path = "../zapper-proto" }

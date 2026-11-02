@@ -23,7 +23,6 @@ graph TD
     driver[zapper-driver] --> policy
     mint[zapper-mint] --> policy
     apitypes[zapper-api-types] --> policy
-    apitypes --> proto
     record[zapper-record] --> keeper
     record --> policy
     inspect[zapper-inspect] --> policy
@@ -93,6 +92,7 @@ This structure is close to optimal. The items below are refinements.
 3. **Three socket clients.** `zapper::client::Client`, `zapper-office`'s `cli::Client`, and `zapper-client::Zapper` (used by the workbench and the office's `Remote`) each hand-roll the same unix-socket + hyper handshake plumbing. `Zapper` is the shared one; the other two predate or specialise it (raw bytes, a non-JSON body).
 4. **CLI helpers duplicated.** `print_json` / `table` / `s` and the config-path resolution are copied between `zapper`'s and `zapper-office`'s command-line code.
 5. **Over-exposed office modules.** `zapper-office` exposes `pub mod firm` and `pub mod client`, but nothing outside the crate uses them (the binary only needs re-exports available from `zapper-client` directly). They can be `pub(crate)`.
-6. **Minor:** `zapper-api → zapper-policy` is a direct edge, but the policy types the API bodies use are re-exported by `zapper-core`, which `api` already depends on — the direct edge is droppable.
+6. **Redundant `zapper-api-types → zapper-proto` edge (fixed).** `zapper-api-types` reached the proto types it uses (`Forward`, `GuestFile`, `GuestEvent`) through `zapper_policy::proto::*` — `zapper-policy` re-exports `zapper_proto::{facility, proto}` — never via `zapper_proto::` directly. The direct dependency was vestigial and has been removed (the edge is gone from the diagram above).
+7. **Minor:** `zapper-api → zapper-policy` is a direct edge, but the policy types the API bodies use are re-exported by `zapper-core`, which `api` already depends on — the direct edge is droppable.
 
 See `docs/office-process-step4-plan.md` for the status of changes addressing these.

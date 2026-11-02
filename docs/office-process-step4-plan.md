@@ -400,6 +400,22 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
         — not done here (out of the approved 1/2/3 scope).
 - [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
 
+## Architecture review (crate structure)
+
+A review of the whole workspace's crate responsibilities, dependency tree, API chattiness, exposed internals and duplication. The dependency diagram and verdict live in `docs/crate-dependencies.md` (the tree is a clean, acyclic, well-layered DAG; the items below are refinements). Changes A–D and the `api-types → proto` edge removal are **done** (`make lint && make test` green); E is **designed and deferred**.
+
+- [x] **A — one socket client, not two.** `zapper_client::Zapper` gained `call_raw` (raw body + content-type → status + bytes); the office's firm-CLI `cli::Client` is now a thin adapter over `Zapper` instead of a second hand-rolled unix-socket/hyper client.
+- [x] **B — shared CLI formatters.** `print_json`/`table`/`s` moved to `zapper_util::cli`, used by both the `zapper` and `zapper-office` command lines. Config-path resolution stays per-binary on purpose (needs `zapper-policy` + does I/O + encodes zapper's layout, so fits neither `zapper-util`'s "no zapper-crate deps" nor `zapper-policy`'s "no I/O").
+- [x] **C — tighter office surface.** `zapper-office` no longer exposes `pub mod firm`/`pub mod client` (nothing external used them). Surfaced that `firm::check` is prod-dead now the daemon doesn't validate firms — gated `#[cfg(test)]`, to be re-wired by E.
+- [x] **D — group the N+1 session reads.** `GET /v1/sessions?terminals=true` embeds terminals (one call for the VMs view, opt-in/additive — the daemon UI is unchanged); the office serves `GET /firms/{f}/requests` aggregating each worker's captured requests (one firm-scoped call for the officers' traffic view). The office's per-session `/terminals` and `/requests` proxies are gone.
+- [x] **`zapper-api-types → zapper-proto` edge removed.** api-types only used proto types via `zapper_policy::proto::*` (policy re-exports proto); the direct edge was vestigial.
+- [ ] **E — firms are the office's own config (deferred; design below).** Today `Remote::config()` fetches the whole daemon `Config` (firms included) over `/v1/config`, yet the daemon no longer validates or uses firms — it carries firm data it doesn't own, and the office asks the daemon for config that is conceptually its own. Completing decision 2 means:
+  - New **`config/office.yaml`** holding `firms:`, read by an office-owned loader; the office reads firms from it, not from the daemon.
+  - Remove `firms` from `zapper_policy::Config` (it is `deny_unknown_fields`, so this also removes the `firms:` section from `config/zapper.yaml` and the `EXAMPLE` template, and `zapper init` stops writing it).
+  - `profiles:` stays the daemon's — the office still reads it via `config()` (profiles define the VMs the daemon enforces); narrow the office's use of `config()` to profiles/daemon fields.
+  - Un-gate `firm::check` (C) and have the office validate its own firms against the daemon's profiles on load (a standalone validator; today only the test-gated co-host `start` wired it in).
+  - **The reason it is deferred:** every office test builds a firm by feeding `TestCore` one YAML that mixes `profiles:` and `firms:`, so `test_core` and ~18 test files need reworking to feed firms to the office separately — a sizeable, delicate change best done as its own focused piece, not folded into this review. It also splits the operator's single config file in two, which has a live-reload story to settle (firm-config reload becomes the office's concern, not the daemon's `zapper config reload`).
+
 ### Continuation note (context may be cleared mid-step)
 Branch `feat/office-process-step4` (worktree `~/zapper/zapper-structure`); nothing pushed. New
 crates: `zapper-api-types`, `zapper-util`, `zapper-record`, `zapper-mint`. **P4-c and P4-d-3 are

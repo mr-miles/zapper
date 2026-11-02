@@ -2901,7 +2901,6 @@ dependencies = [
  "serde",
  "serde_json",
  "zapper-policy",
- "zapper-proto",
 ]
 
 [[package]]
