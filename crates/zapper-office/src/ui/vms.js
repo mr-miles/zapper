@@ -23,10 +23,9 @@ function mountVms() {
 async function pollVms() {
   if (S.tab !== 'vms') return;
   try {
-    const list = arr(await api('/sessions')).filter((x) => x.state === 'running' || x.state === 'starting');
-    const terms = await Promise.all(list.map((x) => api('/sessions/' + enc(x.id) + '/terminals').then(arr, () => [])));
+    const list = arr(await api('/sessions?terminals=true')).filter((x) => x.state === 'running' || x.state === 'starting');
     VM.list = list;
-    VM.terms = new Map(list.map((x, i) => [x.id, terms[i]]));
+    VM.terms = new Map(list.map((x) => [x.id, arr(x.terminals)]));
     VM.error = null;
   } catch (e) { VM.error = e.message; }
   VM.at = Date.now();

@@ -93,6 +93,7 @@ pub fn read_routes() -> Router<Arc<Office>> {
         .route("/firms/{f}/threads/{id}", get(thread))
         .route("/firms/{f}/drive", get(drive_list))
         .route("/firms/{f}/security", get(security_state))
+        .route("/firms/{f}/requests", get(firm_requests))
         .route("/firms/{f}/credentials", get(credentials_state))
 }
 
@@ -520,6 +521,26 @@ async fn security_state(State(office): S, Path(f): Path<String>) -> R<Json<Value
     Ok(Json(
         json!({ "requests": security::requests(&run, false), "standing": security::standing(&run), "screenings": screenings }),
     ))
+}
+
+/// Every firm worker's captured requests, each tagged with the worker — the
+/// officers' traffic view in one call instead of a `/sessions/{id}/requests`
+/// per worker (and firm-scoped, not any session's). Reads the daemon through
+/// the office's client by each worker's session id.
+async fn firm_requests(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
+    let run = office.run(&f)?;
+    let client = office.client();
+    let mut out = Vec::new();
+    for w in run.rts() {
+        let Some(id) = w.session_id() else {
+            continue;
+        };
+        for mut r in client.requests(&id) {
+            r["worker"] = json!(w.name.clone());
+            out.push(r);
+        }
+    }
+    Ok(Json(json!(out)))
 }
 
 /// Starts a run, with the board's parameters for it if given:

@@ -566,8 +566,27 @@ async fn delete_profile(State(d): D, Path(name): Path<String>) -> R<Json<Value>>
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn list_sessions(State(d): D) -> Json<Vec<SessionInfo>> {
-    Json(d.sessions().iter().map(|s| d.session_info(s)).collect())
+#[derive(Deserialize, Default)]
+struct SessionsQuery {
+    /// Embed each session's terminals, so the VMs view reads the list in one
+    /// request instead of a `/terminals` call per session.
+    #[serde(default)]
+    terminals: bool,
+}
+
+async fn list_sessions(State(d): D, Query(q): Query<SessionsQuery>) -> Json<Vec<Value>> {
+    Json(
+        d.sessions()
+            .iter()
+            .map(|s| {
+                let mut v = serde_json::to_value(d.session_info(s)).unwrap_or_default();
+                if q.terminals {
+                    v["terminals"] = serde_json::to_value(s.terminals()).unwrap_or_default();
+                }
+                v
+            })
+            .collect(),
+    )
 }
 
 async fn get_session(State(d): D, Path(id): Path<String>) -> R<Json<SessionInfo>> {

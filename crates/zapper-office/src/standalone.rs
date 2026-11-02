@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::{Path, RawQuery, Request, State};
+use axum::extract::{RawQuery, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -129,23 +129,14 @@ async fn proxy_sessions(State(zapper): State<Zapper>, RawQuery(query): RawQuery)
     forward(&zapper, &path).await
 }
 
-async fn proxy_terminals(State(zapper): State<Zapper>, Path(id): Path<String>) -> Response {
-    forward(&zapper, &format!("/v1/sessions/{id}/terminals")).await
-}
-
-async fn proxy_requests(State(zapper): State<Zapper>, Path(id): Path<String>) -> Response {
-    forward(&zapper, &format!("/v1/sessions/{id}/requests")).await
-}
-
-/// The daemon-backed reads the office page needs but the office does not serve
-/// itself: the VM list and a session's terminals (the VMs view) and a
-/// session's captured requests (the officers' traffic view). Reads only, over
-/// the daemon's socket; the office's own firm routes are `crate::routes`.
+/// The one daemon-backed read the office page needs but the office does not
+/// serve itself: the VMs view's session list (with `?terminals=true`, the
+/// terminals embedded — one call, not a `/terminals` fetch per session). The
+/// officers' traffic view is served firm-scoped by the office itself
+/// (`/firms/{f}/requests`), not proxied. Reads only, over the daemon's socket.
 fn proxy_routes(zapper: Zapper) -> Router {
     Router::new()
         .route("/sessions", get(proxy_sessions))
-        .route("/sessions/{id}/terminals", get(proxy_terminals))
-        .route("/sessions/{id}/requests", get(proxy_requests))
         .with_state(zapper)
 }
 
