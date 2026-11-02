@@ -853,6 +853,13 @@ fn recent_traffic(run: &FirmRun, worker: &str) -> String {
     )
 }
 
+/// Where a decided request's standing rule is placed: a role's firm layer, or
+/// one worker's session.
+enum RuleTarget {
+    Role(String),
+    Session(Box<zapper_api_types::SessionInfo>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DecideArgs {
     pub allow: bool,
@@ -937,62 +944,63 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
     let mut rule_id = None;
     // A once-denial needs no rule: the request was already refused.
     if a.allow || scope != "once" {
-        match scope {
+        // Where the standing rule goes: a role's layer, or a worker's
+        // session. Resolve it (fallible) before taking a rule-counter value,
+        // so a failure leaves no gap; then place the rule and record the one
+        // standing entry the same way for both.
+        let (target, scope_label, expires) = match scope {
             "role" => {
                 let role = worker
                     .map(|w| w.role.clone())
                     .ok_or_else(|| anyhow!("{} has no role", r.worker))?;
-                sec.rule_counter += 1;
-                let mut rl = rule.clone();
-                rl.id = Some(format!("a-net-{}", sec.rule_counter));
-                rule_id = rl.id.clone();
-                run.client
-                    .add_layer_rule(&format!("{}/{}", run.firm, role), AnyRule::Net(rl.clone()));
-                sec.standing.insert(
-                    rl.id.clone().unwrap(),
-                    Standing {
-                        rule: rl,
-                        scope: format!("role:{role}"),
-                        by: by.into(),
-                        reason: a.reason.clone(),
-                        request: Some(id.into()),
-                        created: now(),
-                        expires,
-                    },
-                );
+                let scope_label = format!("role:{role}");
+                (RuleTarget::Role(role), scope_label, expires)
             }
             _ => {
                 let s = worker
                     .and_then(|w| w.session())
                     .or_else(|| run.facility.session_of(&r.worker))
                     .ok_or_else(|| anyhow!("{} has no session", r.worker))?;
-                // An id unique in the run, not just in the session: the
-                // standing approvals of all workers share one list.
-                sec.rule_counter += 1;
-                let mut rl = rule.clone();
-                rl.id = Some(format!("a-net-{}", sec.rule_counter));
-                run.client
-                    .put_session_rule(s.id(), AnyRule::Net(rl.clone()));
-                rule_id = rl.id.clone();
                 let expires = if scope == "once" {
                     Some(now() + ONCE_SECS)
                 } else {
                     expires
                 };
-                sec.standing.insert(
-                    rl.id.clone().unwrap(),
-                    Standing {
-                        rule: rl,
-                        scope: format!("{scope}:{}", r.worker),
-                        by: by.into(),
-                        reason: a.reason.clone(),
-                        request: Some(id.into()),
-                        created: now(),
-                        expires,
-                    },
-                );
+                (
+                    RuleTarget::Session(Box::new(s)),
+                    format!("{scope}:{}", r.worker),
+                    expires,
+                )
+            }
+        };
+        // An id unique in the run, not just in the session: the standing
+        // approvals of all workers share one list.
+        sec.rule_counter += 1;
+        let mut rl = rule.clone();
+        rl.id = Some(format!("a-net-{}", sec.rule_counter));
+        rule_id = rl.id.clone();
+        match &target {
+            RuleTarget::Role(role) => {
+                run.client
+                    .add_layer_rule(&format!("{}/{}", run.firm, role), AnyRule::Net(rl.clone()));
+            }
+            RuleTarget::Session(s) => {
+                run.client
+                    .put_session_rule(s.id(), AnyRule::Net(rl.clone()));
             }
         }
+        sec.standing.insert(
+            rl.id.clone().unwrap(),
+            Standing {
+                rule: rl,
+                scope: scope_label,
+                by: by.into(),
+                reason: a.reason.clone(),
+                request: Some(id.into()),
+                created: now(),
+                expires,
+            },
+        );
     }
     let decision = json!({ "by": by, "allow": a.allow, "scope": scope, "reason": a.reason, "rule": rule_id, "expires": expires, "methods": methods, "path": a.path, "at": now() });
     let req = sec.requests.get_mut(id).unwrap();
