@@ -35,7 +35,7 @@ async function pollVms() {
 setInterval(() => { if (S.tab === 'vms' && !document.hidden) pollVms(); }, 4000);
 function watchTerminal(id, n) {
   if (!SESSION_ID.test(str(id)) || !/^\d+$/.test(str(n))) return;
-  window.open('/terminal?session=' + enc(id) + '&n=' + enc(n), 'zapper-term-' + id + '-' + n, 'width=960,height=640');
+  window.open(daemonUrl('/terminal', { session: id, n }), 'zapper-term-' + id + '-' + n, 'width=960,height=640');
 }
 function vmMeter(label, used, total, unit) {
   const frac = total > 0 ? Math.min(1, used / total) : 0;

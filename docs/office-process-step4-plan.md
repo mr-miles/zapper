@@ -344,10 +344,11 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
         needs but the office does not serve (`/sessions`, `/sessions/{id}/terminals`,
         `/sessions/{id}/requests`) to the daemon over the socket, nested at `/api` behind the
         gateway alongside `routes()`. Reads only.
-      **Still a small UI follow-up:** the page's terminal/VM *deep links* (`window.open('/terminal…')`,
-      the `/sessions` link) target the daemon UI's own pages, which the office listener does not
-      serve; the tabs' data populates, but those click-throughs need the daemon UI's URL (the office
-      already resolves it for `firm replay`).
+      **Deep links — done** (2026-11-02): the office serves `GET /daemon-ui` (the daemon UI's
+      URL with its token, from `state/ui-url`); the page's `daemonUrl()` builds the terminal and
+      sessions links against the daemon's origin, and the daemon UI's token redirect now preserves
+      the rest of the query, so `/terminal?session=…&n=…&token=…` and `/sessions?firm=…&token=…`
+      land authenticated on the daemon UI's own pages.
 - [x] **P4-d-3** The office becomes a standalone process the **user** runs (`zapper-office
       serve`, like `zapper-workbench`); `zapper serve` does **not** start/spawn it. **Done** (three
       green commits: firm-CLI move → remove office from `zapper` → P4-c gating + core dev-dep);
