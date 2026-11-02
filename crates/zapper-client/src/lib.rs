@@ -354,6 +354,80 @@ pub mod gateway {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper::Response;
+    use std::convert::Infallible;
+
+    /// A tiny unix-socket HTTP server answering three canned routes, so the
+    /// client's JSON round-trip, raw-bytes call and error extraction are
+    /// exercised without a real daemon.
+    async fn serve(sock: std::path::PathBuf) {
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let svc = service_fn(|req: Request<Incoming>| async move {
+                        let resp = match req.uri().path() {
+                            "/ok" => Response::builder()
+                                .header("content-type", "application/json")
+                                .body(Full::new(Bytes::from(r#"{"hello":"world"}"#)))
+                                .unwrap(),
+                            "/raw" => Response::builder()
+                                .body(Full::new(Bytes::from(vec![0u8, 1, 2])))
+                                .unwrap(),
+                            _ => Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Full::new(Bytes::from(r#"{"error":"nope"}"#)))
+                                .unwrap(),
+                        };
+                        Ok::<_, Infallible>(resp)
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn round_trips_json_raw_bytes_and_errors() {
+        let sock = std::env::temp_dir().join(format!(
+            "zc-{}-{}.sock",
+            std::process::id(),
+            crate::url_encode("t")
+        ));
+        let _ = std::fs::remove_file(&sock);
+        serve(sock.clone()).await;
+        let z = Zapper::new(sock.clone());
+
+        // A JSON GET: the parsed body comes back and `ok()` yields it.
+        let a = z.get("/ok").await.unwrap();
+        assert_eq!(a.status, StatusCode::OK);
+        assert_eq!(a.ok().unwrap()["hello"], "world");
+
+        // A raw call keeps the bytes as they came (a binary response).
+        let (st, body) = z
+            .call_raw(Method::GET, "/raw", None, Bytes::new())
+            .await
+            .unwrap();
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(&body[..], &[0u8, 1, 2]);
+
+        // A non-2xx: `ok()` surfaces the status and the `error` field.
+        let err = z.get("/bad").await.unwrap().ok().unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, "nope");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
 /// `s` as a URL's query value (percent-encoded).
 pub fn url_encode(s: &str) -> String {
     s.bytes()

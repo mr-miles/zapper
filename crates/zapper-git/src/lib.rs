@@ -227,3 +227,116 @@ pub fn pre_receive_with_local_admin() -> String {
         1,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    fn git(cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut c = Command::new("git");
+        c.current_dir(cwd);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c.args(args)
+            .output()
+            .expect("git must be on PATH for this test")
+    }
+
+    /// A commit authored and committed by `who`, pushed to `ref` with `level`
+    /// as `user`; returns whether the push was accepted.
+    fn push(
+        work: &Path,
+        local: &str,
+        refspec: &str,
+        level: &str,
+        user: &str,
+    ) -> bool {
+        git(
+            work,
+            &[("ZAPPER_GIT_LEVEL", level), ("REMOTE_USER", user)],
+            &["push", "origin", &format!("{local}:{refspec}")],
+        )
+        .status
+        .success()
+    }
+
+    fn commit(work: &Path, who: &str, file: &str) {
+        std::fs::write(work.join(file), who).unwrap();
+        git(work, &[], &["add", "-A"]);
+        let env = [
+            ("GIT_AUTHOR_NAME", who),
+            ("GIT_AUTHOR_EMAIL", "a@b"),
+            ("GIT_COMMITTER_NAME", who),
+            ("GIT_COMMITTER_EMAIL", "a@b"),
+        ];
+        assert!(git(work, &env, &["commit", "-m", file]).status.success());
+    }
+
+    fn install_hook(bare: &Path, script: &str) {
+        let hook = bare.join("hooks").join("pre-receive");
+        std::fs::write(&hook, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn setup(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("zg-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bare, work) = (root.join("bare.git"), root.join("work"));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(git(&root, &[], &["init", "--bare", "bare.git"])
+            .status
+            .success());
+        assert!(git(&root, &[], &["init", "-b", "dev", "work"])
+            .status
+            .success());
+        git(&work, &[], &["remote", "add", "origin", bare.to_str().unwrap()]);
+        (bare, work)
+    }
+
+    // The branch-protection hook is the crate's security purpose; this drives
+    // real pushes at each level against it.
+    #[test]
+    fn hook_enforces_branch_protection() {
+        let (bare, work) = setup("protect");
+        install_hook(&bare, super::PRE_RECEIVE);
+
+        // admin starts main (write/merge both refuse a non-existent main).
+        commit(&work, "ops", "a");
+        assert!(push(&work, "dev", "refs/heads/main", "admin", "ops"), "admin creates main");
+
+        // write: a branch is fine; main, under main/, and tags are refused.
+        commit(&work, "bob", "b"); // dev is now ahead of main by one (bob's)
+        assert!(push(&work, "dev", "refs/heads/topic", "write", "bob"), "write pushes a branch");
+        assert!(!push(&work, "dev", "refs/heads/main", "write", "bob"), "write must not touch main");
+        assert!(!push(&work, "dev", "refs/heads/main/x", "write", "bob"), "write must not touch main/*");
+        assert!(!push(&work, "dev", "refs/tags/v1", "write", "bob"), "write must not push tags");
+
+        // merge: fast-forward main to someone else's branch tip is allowed…
+        assert!(push(&work, "dev", "refs/heads/main", "merge", "alice"), "merge fast-forwards others' work into main");
+
+        // …but merging your own work is refused (the self-merge guard).
+        commit(&work, "alice", "c");
+        assert!(push(&work, "dev", "refs/heads/topic2", "write", "alice"), "write pushes alice's branch");
+        assert!(!push(&work, "dev", "refs/heads/main", "merge", "alice"), "alice may not merge her own commits");
+    }
+
+    // The local-admin variant: a push on the host with no level set is the
+    // operator's and bypasses the checks.
+    #[test]
+    fn local_admin_with_no_level_is_the_operator() {
+        let (bare, work) = setup("localadmin");
+        install_hook(&bare, &super::pre_receive_with_local_admin());
+        commit(&work, "ops", "a");
+        // No ZAPPER_GIT_LEVEL in the environment → straight to main is allowed.
+        let ok = git(&work, &[], &["push", "origin", "dev:refs/heads/main"])
+            .status
+            .success();
+        assert!(ok, "the operator's own push (no level) reaches main");
+    }
+}

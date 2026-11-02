@@ -221,3 +221,64 @@ fn rel(path: &Path) -> Option<PathBuf> {
         .ok()
         .map(Path::to_path_buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zr-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // The record is kept locally when no keeper is configured (`init` is never
+    // called in these tests, so `records()` is `None`). This one test owns the
+    // process-global `HEALTHY` flag so the others can run in parallel.
+    #[test]
+    fn writer_appends_rejects_newlines_and_tracks_health() {
+        let dir = tmp("writer");
+        let path = dir.join("journal.jsonl");
+        let mut w = Writer::open(&path).unwrap();
+        w.line(br#"{"a":1}"#).unwrap();
+        w.line(br#"{"b":2}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"a\":1}\n{\"b\":2}\n"
+        );
+        assert!(healthy());
+        assert!(
+            w.line(b"has\nnewline").is_err(),
+            "a record line can't contain a newline"
+        );
+
+        // A failed append (a read-only sink) flips health false; a later
+        // success flips it back — the gate the daemon uses to stop firm turns.
+        let ro = dir.join("ro");
+        std::fs::write(&ro, b"").unwrap();
+        let mut bad = Writer(Sink::Local(std::fs::File::open(&ro).unwrap()));
+        assert!(bad.line(b"x").is_err());
+        assert!(!healthy(), "a failed append marks the record unhealthy");
+        Writer::open(&dir.join("ok.jsonl"))
+            .unwrap()
+            .line(b"y")
+            .unwrap();
+        assert!(healthy(), "a successful append marks it healthy again");
+    }
+
+    #[test]
+    fn view_without_a_keeper_is_the_path_itself() {
+        let p = PathBuf::from("/some/state/firms/acme/runs/r1/journal.jsonl");
+        assert_eq!(view(&p), p);
+    }
+
+    #[test]
+    fn verify_and_status_without_a_keeper() {
+        let dir = tmp("verify");
+        // Nothing is in the record (no keeper): verifying is an error, not a
+        // false "intact".
+        assert!(verify_state_dir(&dir).is_err());
+        assert_eq!(status()["keeper"], json!(false));
+    }
+}

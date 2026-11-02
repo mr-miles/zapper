@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::firm::{parse_duration, BOARD};
+use crate::firm::parse_duration;
 use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -1395,11 +1395,6 @@ fn check_attachments(run: &FirmRun, me: &str, list: &[String]) -> Result<()> {
         d.resolve(a, me, &|sp| super::access::can_read_space(run, me, sp))?;
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-fn board() -> &'static str {
-    BOARD
 }
 
 #[cfg(test)]
