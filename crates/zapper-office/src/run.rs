@@ -24,8 +24,8 @@ use crate::mail::{self, PostOffice};
 #[cfg(test)]
 use crate::OfficeOf;
 use crate::{
-    access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
-    security, skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
+    access, contracts, drive, facility, foreman, labels, ops, prompts, run_id, scenario, security,
+    skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
 };
 
 /// Each profile's agent kind and model, by profile name.
@@ -555,7 +555,7 @@ pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
 #[cfg(test)]
 pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = firm::get(&config, name).unwrap();
+    let firm = crate::firm::get(&config, name).unwrap();
     let started = with_options(name, firm, &config, o).unwrap();
     test_run_started(d, name, started)
 }
@@ -564,7 +564,7 @@ pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmR
 #[cfg(test)]
 pub(crate) async fn test_run_remote(d: &Core, name: &str, repos: &[&str]) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = firm::get(&config, name).unwrap();
+    let firm = crate::firm::get(&config, name).unwrap();
     let o = StartOptions {
         repos: Some(repos.iter().map(|r| r.to_string()).collect()),
         ..Default::default()
@@ -620,7 +620,7 @@ pub async fn up_with(
         }
     }
     let config = office.client().config();
-    let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
+    let firm = office.firm(name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
         company,

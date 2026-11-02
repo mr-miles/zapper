@@ -148,6 +148,26 @@ impl Office {
         }
         Ok(r)
     }
+
+    // --- firm definitions (E1 choke point) ---------------------------------
+    // The one place the office reads firm definitions. Today it parses them
+    // out of the daemon's config (fetched over the client); E flips these to
+    // an office-owned `office.yaml` holder without touching the call sites.
+
+    /// Firm `name`'s definition as the office reads it, parsed.
+    pub(crate) fn firm(&self, name: &str) -> Option<Firm> {
+        crate::firm::get(&self.client().config(), name)
+    }
+
+    /// Every configured firm, by name, parsed.
+    pub(crate) fn firms(&self) -> BTreeMap<String, Firm> {
+        crate::firm::all(&self.client().config())
+    }
+
+    /// Whether firm `name` is configured.
+    pub(crate) fn has_firm(&self, name: &str) -> bool {
+        self.client().config().firms.contains_key(name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
