@@ -235,6 +235,23 @@ fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<S
     httplog::finish(&s.requests, rec);
 }
 
+/// Emits a datapath failure to the event stream and finishes its record in one
+/// step, from a single `status`/`error`, so the UI event and the stored record
+/// can never disagree about why a request failed. The caller fills in `l` with
+/// everything about the request except the error, which this sets from `error`.
+fn fail_log(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    mut l: NetLog<'_>,
+    status: u16,
+    error: Option<String>,
+) {
+    l.error = error.clone();
+    log(d, s, l);
+    note_failure(s, rec, status, error);
+}
+
 /// Records the upstream response and wraps both bodies to capture them.
 fn note_response(
     s: &Session,
@@ -621,34 +638,15 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         .unwrap()
         .start_connect(scheme, &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
-    let logp = |error: Option<String>| {
-        log(
-            d,
-            s,
-            NetLog {
-                req: endpoint,
-                verdict: Some(&v),
-                inspected: false,
-                status: None,
-                secrets: vec![],
-                error,
-            },
-        );
-    };
+    let net = || NetLog::new(endpoint, Some(&v), false);
     if let Err(error) = server_name_matches(&first, &endpoint.host) {
-        logp(Some(error.clone()));
-        note_failure(s, &rec, 403, Some(error));
-        return;
+        return fail_log(d, s, &rec, net(), 403, Some(error));
     }
     let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
-        Err(e) => {
-            logp(Some(e.to_string()));
-            note_failure(s, &rec, 502, Some(e.to_string()));
-            return;
-        }
+        Err(e) => return fail_log(d, s, &rec, net(), 502, Some(e.to_string())),
     };
-    logp(None);
+    log(d, s, net());
     httplog::mark_ttfb(&rec);
     if upstream.write_all(&first).await.is_ok() {
         if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut io, &mut upstream).await {

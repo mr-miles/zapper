@@ -150,8 +150,7 @@ fn deny(
     v: &Verdict,
     denial: String,
 ) -> Response<Body> {
-    log(d, s, NetLog::new(net, Some(v), true));
-    note_failure(s, rec, 403, None);
+    fail_log(d, s, rec, NetLog::new(net, Some(v), true), 403, None);
     text(StatusCode::FORBIDDEN, denial)
 }
 
@@ -169,19 +168,17 @@ fn fail(
     secrets: Vec<String>,
     error: String,
 ) -> Response<Body> {
-    log(
+    fail_log(
         d,
         s,
+        rec,
         NetLog {
-            req: net,
-            verdict: Some(v),
-            inspected: true,
-            status: None,
             secrets,
-            error: Some(error.clone()),
+            ..NetLog::new(net, Some(v), true)
         },
+        status.as_u16(),
+        Some(error.clone()),
     );
-    note_failure(s, rec, status.as_u16(), Some(error.clone()));
     text(status, error)
 }
 
@@ -559,15 +556,14 @@ fn prepare_inspected(
             .map(|why| (StatusCode::FORBIDDEN, why)),
     };
     if let Some((status, why)) = refused {
-        log(
+        fail_log(
             d,
             s,
-            NetLog {
-                error: Some(why.clone()),
-                ..NetLog::new(&net, None, true)
-            },
+            &rec,
+            NetLog::new(&net, None, true),
+            status.as_u16(),
+            Some(why.clone()),
         );
-        note_failure(s, &rec, status.as_u16(), Some(why.clone()));
         return Err(Box::new(text(status, why)));
     }
     Ok((net, rec, path))
