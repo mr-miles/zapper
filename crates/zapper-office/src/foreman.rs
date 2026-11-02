@@ -302,8 +302,7 @@ pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 let t = end.tokens;
                 if end.outcome == Outcome::RateLimited {
                     // Not the worker's fault: try the same mail again later.
-                    requeue(&w, ids);
-                    requeue_access(&w, access_ids, digest_was_due);
+                    requeue_all(&w, ids, access_ids, digest_was_due);
                     backoff_until = now() + 60.0;
                     run.journal.append(
                         "turn",
@@ -311,8 +310,7 @@ pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                     );
                 } else if let Outcome::Failed(why) = end.outcome {
                     // Claude never saw the mail: keep it, say why, retry later.
-                    requeue(&w, ids);
-                    requeue_access(&w, access_ids, digest_was_due);
+                    requeue_all(&w, ids, access_ids, digest_was_due);
                     backoff_until = now() + 60.0;
                     run.journal.append(
                         "turn",
@@ -378,8 +376,7 @@ pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
             }
             Out::Exit(code) => {
                 proc = None;
-                requeue(&w, ids);
-                requeue_access(&w, access_ids, digest_was_due);
+                requeue_all(&w, ids, access_ids, digest_was_due);
                 let at = now();
                 w.notes.lock().unwrap().push(prompts::restart_note(at));
                 run.journal.append("turn", json!({ "worker": w.name, "event": "interrupted", "ms": ms, "exit_code": code }));
@@ -483,4 +480,11 @@ fn requeue(w: &WorkerRt, ids: Vec<String>) {
     let mut q = w.queue.lock().unwrap();
     let rest = std::mem::take(&mut *q);
     *q = ids.into_iter().chain(rest).collect();
+}
+
+/// Puts a turn's mail and the officer's undecided requests back, to be
+/// delivered again on a later turn (a turn the worker isn't to blame for).
+fn requeue_all(w: &WorkerRt, ids: Vec<String>, access_ids: Vec<String>, digest: bool) {
+    requeue(w, ids);
+    requeue_access(w, access_ids, digest);
 }
