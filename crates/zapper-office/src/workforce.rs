@@ -1436,18 +1436,54 @@ pub async fn release(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str) -
 /// told when someone else (`by`) made the call and `tell` is set. So does
 /// what they overspent: letting someone go writes off nothing (the board
 /// alone, which keeps no balance, takes on its own reports' overspend).
+/// Removes `worker` from the chart; their reports report to `manager` now.
+fn detach_from_chart(run: &FirmRun, worker: &str, manager: &str) {
+    let mut c = run.chart.write().unwrap();
+    c.workers.retain(|w| w.name != worker);
+    for w in c.workers.iter_mut() {
+        if w.reports_to.as_deref() == Some(worker) {
+            w.reports_to = Some(manager.to_string());
+        }
+    }
+}
+
+/// Moves `worker`'s balance to `manager` as they leave: unspent budget goes up
+/// (returned), and an overspend becomes the manager's debt unless the manager
+/// is the board. Returns `(returned, debt)`.
+fn move_balance(run: &FirmRun, worker: &str, manager: &str) -> (u64, u64) {
+    let mut l = run.ledger.lock();
+    let bal = l.balance(worker);
+    let left = bal.max(0) as u64;
+    if left > 0 {
+        l.transfer(Some(worker), manager, left);
+    }
+    let debt = if bal < 0 && manager != BOARD {
+        (-bal) as u64
+    } else {
+        0
+    };
+    if debt > 0 {
+        l.take_on_debt(worker, manager, debt);
+    }
+    (left, debt)
+}
+
+/// Marks the worker off, wakes their foreman to stop, and stops their VM.
+fn stop_worker_vm(run: &FirmRun, rt: &Arc<WorkerRt>) {
+    run.set_state(rt, WorkerState::Off, None);
+    rt.wake.notify_one();
+    if let Some(id) = rt.take_session() {
+        let client = run.client.clone();
+        tokio::spawn(async move {
+            let _ = client.stop_session(&id, "let go").await;
+        });
+    }
+}
+
 pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bool) -> Value {
     let chart = run.chart();
     let manager = chart.manager_of(worker).unwrap_or(BOARD).to_string();
-    {
-        let mut c = run.chart.write().unwrap();
-        c.workers.retain(|w| w.name != worker);
-        for w in c.workers.iter_mut() {
-            if w.reports_to.as_deref() == Some(worker) {
-                w.reports_to = Some(manager.clone());
-            }
-        }
-    }
+    detach_from_chart(run, worker, &manager);
     super::security::officer_left(run, worker, by);
     // What they had to decide (as the owner of the firm's services) moves on.
     super::security::requeue(run, worker);
@@ -1474,23 +1510,7 @@ pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bo
             objective_done: false,
         });
     }
-    let (returned, debt) = {
-        let mut l = run.ledger.lock();
-        let bal = l.balance(worker);
-        let left = bal.max(0) as u64;
-        if left > 0 {
-            l.transfer(Some(worker), &manager, left);
-        }
-        let debt = if bal < 0 && manager != BOARD {
-            (-bal) as u64
-        } else {
-            0
-        };
-        if debt > 0 {
-            l.take_on_debt(worker, &manager, debt);
-        }
-        (left, debt)
-    };
+    let (returned, debt) = move_balance(run, worker, &manager);
     let rt = run.workers.write().unwrap().remove(worker);
     run.journal.append("left", json!({ "worker": worker, "by": by, "reason": reason.trim(), "to": manager, "returned": returned, "moved": moved.iter().map(|o| &o.message).collect::<Vec<_>>() }));
     if returned > 0 {
@@ -1508,14 +1528,7 @@ pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bo
         )
     };
     if let Some(rt) = rt {
-        run.set_state(&rt, WorkerState::Off, None);
-        rt.wake.notify_one();
-        if let Some(id) = rt.take_session() {
-            let client = run.client.clone();
-            tokio::spawn(async move {
-                let _ = client.stop_session(&id, "let go").await;
-            });
-        }
+        stop_worker_vm(run, &rt);
     }
     if tell && manager != by && manager != BOARD {
         let list: String = moved
