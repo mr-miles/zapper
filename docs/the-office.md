@@ -67,11 +67,11 @@ zapper serve                  # the daemon; prints the UI URL
 In another terminal:
 
 ```
-zapper firm up acme           # boots the cluster, then the CEO, idle
-zapper mail send acme --to barbara --kind assignment --subject "First product" --body "…"
-zapper firm budget acme approve b-1   # once the CEO asks for a budget
-zapper firm journal acme -f   # mail, states, turns, hires, access requests, publishes
-zapper firm down acme         # ends the run; it stays on disk for replay
+zapper-office firm up acme           # boots the cluster, then the CEO, idle
+zapper-office mail send acme --to barbara --kind assignment --subject "First product" --body "…"
+zapper-office firm budget acme approve b-1   # once the CEO asks for a budget
+zapper-office firm journal acme -f   # mail, states, turns, hires, access requests, publishes
+zapper-office firm down acme         # ends the run; it stays on disk for replay
 ```
 
 Or open the UI's Kickoff tab: start the company there, write the CEO the first task and approve the budget. Workers use your Claude subscription; the budget you approve caps what the run spends, and `budget` in the config limits turns per day. The [quickstart](quickstart.md) walks through this step by step, and [commands](commands.md) lists every command.

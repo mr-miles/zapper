@@ -12,10 +12,10 @@ Operate the daemon by the [zapper](../zapper/SKILL.md) skill. Runs and their rec
 ## 1. Find the run and its people
 
 ```
-zapper firm runs acme                     # runs newest first: task, when, how long, messages
+zapper-office firm runs acme                     # runs newest first: task, when, how long, messages
 zapper-inspect people RUN                  # role, title, model, who hired whom, who left and why
-zapper firm status acme                    # a live run: states, turns and tokens today
-zapper firm budget acme                    # budget, balances, what was asked and approved
+zapper-office firm status acme                    # a live run: states, turns and tokens today
+zapper-office firm budget acme                    # budget, balances, what was asked and approved
 ```
 
 `RUN` is an id or a prefix. A run's files are under the daemon's `state` (`~/.local/state/zapper` in the examples):
@@ -32,8 +32,8 @@ state/sessions/<id>/audit.jsonl            per-worker host decisions: net, dns, 
 
 ```
 zapper-inspect export RUN WORKER -o -      # the worker's transcript: each wake, what it thought, said, called, got back
-zapper firm transcript acme WORKER         # the same from the daemon
-zapper firm journal acme | less            # the whole flow, one line per event
+zapper-office firm transcript acme WORKER         # the same from the daemon
+zapper-office firm journal acme | less            # the whole flow, one line per event
 ```
 
 ## 2. Read for the three questions
@@ -77,7 +77,7 @@ Look across workers, not just within one:
 - **The same mistake in several transcripts** is a gap in a shared skill, not one worker's slip.
 - **A worker reinventing a procedure** another already has in a skill means the skill wasn't pointed to, or its description doesn't trigger when it should.
 
-Compare runs to see whether a prompt change helped: `zapper firm replay acme RUN` and its **Config** show exactly the skills and config a past run started with.
+Compare runs to see whether a prompt change helped: `zapper-office firm replay acme RUN` and its **Config** show exactly the skills and config a past run started with.
 
 ## 3. The report
 

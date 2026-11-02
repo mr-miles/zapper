@@ -44,7 +44,7 @@ All decisions are made in the daemon. The agent in the guest asks; it doesn't de
 
 ### Starting a session
 
-What happens when a session starts, for each worker at `zapper firm up` or for `zapper run`:
+What happens when a session starts, for each worker at `zapper-office firm up` or for `zapper run`:
 
 1. The daemon is asked for a new session with a profile: by `firm up` for each worker and facility, or by the CLI.
 2. The daemon gives the session a directory, `state/sessions/<id>/`.

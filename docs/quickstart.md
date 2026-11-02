@@ -99,11 +99,11 @@ Claude Code works in a sandbox on its own too, without a firm: `zapper run -p cl
 ## 8. Start the firm
 
 ```
-zapper firm up acme                     # boots the cluster, then the CEO, idle
-zapper firm status acme                 # workers' states, mail, turns and tokens today
+zapper-office firm up acme                     # boots the cluster, then the CEO, idle
+zapper-office firm status acme                 # workers' states, mail, turns and tokens today
 ```
 
-Or start it in the UI's Kickoff tab: the company's name, its CEO (who holds security until they hire an officer), and the [charter](office.md#the-charter), the company's law, with the terms you set (the seed, security's share, the pace) and your own articles. `zapper firm up acme --articles law.md` does the same from the command line.
+Or start it in the UI's Kickoff tab: the company's name, its CEO (who holds security until they hire an officer), and the [charter](office.md#the-charter), the company's law, with the terms you set (the seed, security's share, the pace) and your own articles. `zapper-office firm up acme --articles law.md` does the same from the command line.
 
 `firm up` checks the firm's memory against the host's before booting anything. In the UI, the org chart fills in as workers boot, and the product port, `http://127.0.0.1:8080`, shows the firm's landing page.
 
@@ -112,7 +112,7 @@ Or start it in the UI's Kickoff tab: the company's name, its CEO (who holds secu
 Write the CEO the firm's first task in the Kickoff tab, or:
 
 ```
-zapper mail send acme --to barbara --kind assignment --subject "First product" --body "…"
+zapper-office mail send acme --to barbara --kind assignment --subject "First product" --body "…"
 ```
 
 Nothing in the config says what the firm builds; the kickoff does. [Office prompts](office-prompts.md#example-kickoff) has an example.
@@ -120,32 +120,32 @@ Nothing in the config says what the firm builds; the kickoff does. [Office promp
 The CEO scopes the task on the seed and asks you for a budget. Approve or decline it in Kickoff, or:
 
 ```
-zapper firm budget acme                 # the request: total, plan, reason
-zapper firm budget acme approve b-1     # or: decline b-1 --note "…"
+zapper-office firm budget acme                 # the request: total, plan, reason
+zapper-office firm budget acme approve b-1     # or: decline b-1 --note "…"
 ```
 
-Then the CEO hires the team; each hire waits for a background check (by an officer, or by you in the Security tab or with `zapper firm screen acme c-1 --approve`).
+Then the CEO hires the team; each hire waits for a background check (by an officer, or by you in the Security tab or with `zapper-office firm screen acme c-1 --approve`).
 
 ## 10. Watch it work
 
 ```
-zapper firm journal acme -f             # mail, states, turns, access requests, publishes
-zapper firm transcript acme ada         # what a worker's agent did
-zapper firm security acme               # access requests and standing approvals
-zapper drive ls acme                    # what workers published
+zapper-office firm journal acme -f             # mail, states, turns, access requests, publishes
+zapper-office firm transcript acme ada         # what a worker's agent did
+zapper-office firm security acme               # access requests and standing approvals
+zapper-office drive ls acme                    # what workers published
 ```
 
 In the UI: envelopes move along the org chart as workers mail each other, the Messages tab holds every thread, Security shows the officers' decisions and anything escalated to you, and the Shared drive tab opens what was published. The product the engineers deploy replaces the landing page at `http://127.0.0.1:8080`, and the cluster's Kubernetes dashboard is at `http://127.0.0.1:8081` (the UI has its sign-in token).
 
-The budget you approved caps the run, and `budget` in the config limits the turns per day; `zapper firm budget acme` and `zapper firm status acme` show what's used.
+The budget you approved caps the run, and `budget` in the config limits the turns per day; `zapper-office firm budget acme` and `zapper-office firm status acme` show what's used.
 
 ## 11. End the run
 
 ```
-zapper firm down acme
+zapper-office firm down acme
 ```
 
-The run stays on disk: `zapper firm runs acme` lists runs, and the UI's Runs tab replays one. The next `zapper firm up acme` starts a fresh run.
+The run stays on disk: `zapper-office firm runs acme` lists runs, and the UI's Runs tab replays one. The next `zapper-office firm up acme` starts a fresh run.
 
 ## Next
 

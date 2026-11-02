@@ -64,7 +64,7 @@ make image IMAGE=k3s && make kernel KERNEL=k8s   # the firm's cluster and its ke
 
 The red-team scenario's contractor runs on pi with DeepSeek through OpenRouter, and so do the other `office-*` profiles on pi. If the user wants them, they create a key at https://openrouter.ai/settings/keys (`sk-or-v1-…`; credits, or `:free` models only; if the key is limited to some models, it must allow the ones those profiles name), and store it like the Claude token: `(umask 077; read -rsp 'OpenRouter key: ' t; printf '%s' "$t" > ~/.config/zapper/openrouter-token); echo`.
 
-With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
+With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper-office firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper-office mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper-office firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
 
 ### A remote host
 
@@ -75,7 +75,7 @@ If zapper runs on a machine other than the user's, the UI (`daemon.ui`, `127.0.0
 
 ### Rules
 
-- Sessions and firms may be in use: before `zapper rm`, `zapper stop`, `zapper firm down`, `zapper config reload` or restarting the daemon, check `zapper ps`, `zapper firm ls` and `zapper config diff` and say what you are about to change. Unsaved running config is lost on restart, and a restart or `firm down` ends a firm's run, which can't be resumed.
+- Sessions and firms may be in use: before `zapper rm`, `zapper stop`, `zapper-office firm down`, `zapper config reload` or restarting the daemon, check `zapper ps`, `zapper-office firm ls` and `zapper config diff` and say what you are about to change. Unsaved running config is lost on restart, and a restart or `firm down` ends a firm's run, which can't be resumed.
 - `zapper config save` writes the user's startup file: run it when the user asks to keep a change.
 - Do not print `zapper config startup` output into chats when it may hold inline secrets; values are redacted, but names and sources are not.
 - The daemon's `state` directory holds audit logs and terminal recordings of sessions, and firms' runs (mail, transcripts, published files): treat them as sensitive and do not delete them unasked.
