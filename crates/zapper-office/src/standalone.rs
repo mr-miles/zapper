@@ -45,6 +45,21 @@ const UI_MARKER: &str = "x-zapper-ui";
 /// `zapper-api`'s `ui::favicon`).
 const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g fill="none" stroke="#D97757" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><circle cx="32" cy="32" r="28.5"/><path d="M42.16 36.21L36.21 42.16L27.79 42.16L21.84 36.21L21.84 27.79L27.79 21.84L36.21 21.84L42.16 27.79Z"/><path d="M42.16 36.21L42.16 60.23M36.21 42.16L19.23 59.15M27.79 42.16L3.77 42.16M21.84 36.21L4.85 19.23M21.84 27.79L21.84 3.77M27.79 21.84L44.77 4.85M36.21 21.84L60.23 21.84M42.16 27.79L59.15 44.77"/></g></svg>"##;
 
+/// Where the office listens for its own CLI (`zapper-office firm/mail/drive`):
+/// `$ZAPPER_OFFICE_SOCKET`, else `office.sock` beside the daemon's `api.sock`
+/// under `$XDG_RUNTIME_DIR`. A unix socket, gated by filesystem permissions to
+/// the local user, the way the daemon serves the `zapper` CLI — the browser
+/// gateway (token, `Host`/`Origin`, the UI marker) is for the page alone.
+pub fn office_socket_path() -> PathBuf {
+    if let Ok(p) = std::env::var("ZAPPER_OFFICE_SOCKET") {
+        return p.into();
+    }
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/zapper-{}", unsafe { libc::getuid() })));
+    base.join("zapper").join("office.sock")
+}
+
 async fn serve_page() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], PAGE)
 }
@@ -157,6 +172,26 @@ pub async fn serve(
         .local_addr()
         .context("the office listener's address")?;
     let office = bootstrap(zapper, state_dir, socket_dir);
+
+    // The office's own CLI socket (no gateway: a local unix socket, as the
+    // daemon serves the `zapper` CLI). It serves the bare firm routes that the
+    // page reaches at `/api`; `zapper-office firm/mail/drive` call them here.
+    let sock = office_socket_path();
+    if let Some(parent) = sock.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let _ = std::fs::remove_file(&sock);
+    let cli_listener = tokio::net::UnixListener::bind(&sock)
+        .with_context(|| format!("binding the office CLI socket at {}", sock.display()))?;
+    eprintln!("zapper-office: CLI socket at {}", sock.display());
+    let cli = {
+        let app = crate::routes(office.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(cli_listener, app).await;
+        })
+    };
+
     let token = random_id(32);
     eprintln!("zapper-office: dashboard on http://{local}/?token={token}");
     let app = app(office.clone(), token, local.port(), remote);
@@ -174,6 +209,8 @@ pub async fn serve(
         .with_graceful_shutdown(shutdown)
         .await
         .context("serving the office")?;
+    cli.abort();
+    let _ = std::fs::remove_file(&sock);
     Ok(())
 }
 
@@ -324,5 +361,68 @@ firms:
 
         serving.abort();
         let _ = std::fs::remove_file(&sock);
+    }
+
+    // The office's own CLI surface: the bare firm routes (what the CLI socket
+    // serves `zapper-office firm/mail/drive`) answer with no token, marker or
+    // Origin — a read and a write alike. The socket is gated by filesystem
+    // permissions, as the daemon serves the `zapper` CLI, so the browser
+    // gateway (token, `Host`/`Origin`, the UI marker) does not apply here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cli_routes_need_no_gateway() {
+        let t = test_core(FIRM);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sock = std::env::temp_dir().join(format!("zo-cli-{}-{nonce}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let api = zapper_api::api(t.core.clone(), &zapper_api::Mount::default());
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let serving = tokio::spawn(async move {
+            let _ = axum::serve(listener, api).await;
+        });
+
+        let office = super::bootstrap(
+            super::Zapper::new(sock.clone()),
+            t.core.state_dir().to_path_buf(),
+            std::env::temp_dir(),
+        );
+        let routes = || crate::routes(office.clone());
+
+        // A read with no headers at all: the firm is listed.
+        let r = routes()
+            .oneshot(Request::get("/firms").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(body_string(r).await.contains("acme"));
+
+        // A write with no token/marker/Origin reaches the handler (it 4xxs:
+        // no such firm is running), never a gateway's 401/403 — there is none.
+        let r = routes()
+            .oneshot(
+                Request::post("/firms/nope/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(r.status(), StatusCode::FORBIDDEN);
+        assert_ne!(r.status(), StatusCode::UNAUTHORIZED);
+
+        serving.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[test]
+    fn office_socket_path_honours_the_env_override() {
+        // (Process-global env: this is the only test that reads it.)
+        std::env::set_var("ZAPPER_OFFICE_SOCKET", "/tmp/zo-test.sock");
+        assert_eq!(
+            super::office_socket_path(),
+            std::path::PathBuf::from("/tmp/zo-test.sock")
+        );
+        std::env::remove_var("ZAPPER_OFFICE_SOCKET");
     }
 }

@@ -57,6 +57,10 @@ enum Cmd {
         #[arg(long)]
         listen: Option<SocketAddr>,
     },
+    /// Install the office workers' default agents and skills beside the
+    /// config file (what firms read through `agents_dir`/`skills_dir`),
+    /// keeping any file already there.
+    Init,
     /// Firms of workers: start, stop, watch, replay.
     Firm {
         #[command(subcommand)]
@@ -84,6 +88,23 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Url { listen } => {
             println!("http://{}", listen.unwrap_or_else(default_listen));
+            Ok(())
+        }
+        Cmd::Init => {
+            let dir = cli::config_dir();
+            let written = zapper_office::skills::install(&dir)?;
+            if written.is_empty() {
+                println!(
+                    "{}: the default agents and skills are all there",
+                    dir.display()
+                );
+            } else {
+                println!(
+                    "wrote agents and skills to {}: {}",
+                    dir.display(),
+                    written.join(", ")
+                );
+            }
             Ok(())
         }
         Cmd::Serve {

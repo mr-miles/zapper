@@ -339,13 +339,17 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
 - [x] **P4-d-3** The office becomes a standalone process the **user** runs (`zapper-office
       serve`, like `zapper-workbench`); `zapper serve` does **not** start/spawn it. **Done** (three
       green commits: firm-CLI move → remove office from `zapper` → P4-c gating + core dev-dep);
-      `make lint && make test` pass. **One open item** (deferred to P4-e / a follow-up): the moved
-      firm CLI still talks to the **daemon's** socket at `/v1/firms/...` (verbatim move). The
-      daemon no longer serves those routes — the standalone office serves them at `/api/firms/...`
-      behind its UI gateway (P4-d-2). So `zapper-office firm …` must be pointed at the office's own
-      listener (TCP + its token), which is new wiring not covered by the checklist and pairs with
-      P4-d-2's other open items (SSE rule-following, proxying daemon-backed reads). Compiles and is
-      lint/test-clean; runtime is validated by the operator's `make test-e2e-office` (P4-e).
+      `make lint && make test` pass. **The CLI-transport open item is now resolved** (follow-up
+      commit, operator-approved): the office serves its firm routes on its **own unix socket**
+      (`standalone::office_socket_path` — `$ZAPPER_OFFICE_SOCKET`, else `office.sock` beside the
+      daemon's `api.sock` under `$XDG_RUNTIME_DIR`), bound in `standalone::serve` alongside the
+      TCP listener, serving the bare `routes()` with **no gateway** — a local socket gated by
+      filesystem permissions, exactly as the daemon serves the `zapper` CLI (the browser gateway —
+      token, `Host`/`Origin`, the UI marker — is for the page alone). `cli::Client` now connects
+      there and the firm CLI calls `/firms/…` (was the daemon mount's `/v1/firms/…`). Two new unit
+      tests lock it in (`cli_routes_need_no_gateway`, `office_socket_path_honours_the_env_override`).
+      Still deferred to P4-e: runtime validation on KVM. Still open from P4-d-2 (unrelated to the
+      CLI): SSE rule-following and proxying the page's daemon-backed session/VM reads.
       **Locked decisions (operator):** (1) the `zapper firm/mail/drive` CLI moves to the
       `zapper-office` binary — `zapper` drops those subcommands and stops linking `zapper-office`
       entirely; (2) firm config is the office's own — the daemon stops validating `firms:`; (3)
@@ -368,16 +372,20 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
       - `cli.rs` holds the office's own small daemon-socket `Client` (mirrors `zapper_client::Zapper`
         but keeps raw bytes for a drive download) and the `print_json`/`s`/`table` helpers +
         `daemon_state_dir` (for `firm replay`'s `ui-url` lookup) that lived in `zapper`.
-      - `zapper record verify <firm> <run>` (the `#[cfg(feature=office)]` variant) was **dropped**
-        from `zapper`: the daemon no longer serves `/v1/firms/.../verify`. The office serves that
-        route (`run_verify`); a `zapper-office record verify` is a follow-up if wanted.
-      - `zapper init` no longer installs the office workers' agents/skills (it can't link the
-        office). Those should move to `zapper-office` (an `init`, or on first serve) — follow-up.
+      - `zapper record verify <firm> <run>` (the `#[cfg(feature=office)]` variant) was dropped from
+        `zapper` when the office left it. **Now re-added** (operator-approved) as `zapper-office firm
+        verify <firm> [run]` (default run `current`): GETs the office's `run_verify` route and
+        renders it as `zapper record verify` did (per-file ok/CHANGED, a summary line, exit 0/1).
+      - `zapper init` no longer installs the office workers' agents/skills. **Now re-added** as
+        `zapper-office init`: resolves the config dir (`cli::config_dir`, same `$ZAPPER_CONFIG` /
+        checkout `config/` / `~/.config/zapper` resolution the daemon uses) and calls
+        `skills::install` beside it, exactly as `zapper init`'s example template did.
       - The firm example-config tests (`the_*_example_loads`) moved from `zapper`'s `main.rs` to
         `zapper-office/src/examples_tests.rs`.
-      - User-facing docs still say `zapper firm/mail/drive` (AGENTS.md, `skills/zapper/SKILL.md`,
-        `docs/commands.md`, `docs/office.md`): a doc sweep to `zapper-office …` is a follow-up,
-        best done once the CLI's transport to the standalone office is settled (open item above).
+      - **Still a follow-up:** user-facing docs say `zapper firm/mail/drive` and `zapper init`
+        installing skills (AGENTS.md, `skills/zapper/SKILL.md`, `docs/commands.md`, `docs/office.md`).
+        The CLI transport is now settled, so the `zapper … → zapper-office …` doc sweep is unblocked
+        — not done here (out of the approved 1/2/3 scope).
 - [ ] **P4-e** Operator: `make test-e2e-office` on a KVM host — the final gate.
 
 ### Continuation note (context may be cleared mid-step)
@@ -386,10 +394,12 @@ crates: `zapper-api-types`, `zapper-util`, `zapper-record`, `zapper-mint`. **P4-
 done** — three green commits (`office-process P4-d-3: move the firm/mail/drive CLI into
 zapper-office`; `… remove the office from the zapper binary`; `office-process P4-c: gate the
 co-host adapter test-only; zapper-core dev-only`). `make lint && make test` pass. The office is no
-longer built into `zapper`; `zapper-office` carries the firm CLI and runs the firms. **Next:**
-**P4-e** (operator's KVM `make test-e2e-office`), and the open items above — chiefly pointing the
-`zapper-office firm/mail/drive` CLI at the office's own listener (it still targets the daemon
-socket), plus P4-d-2's SSE rule-following and daemon-backed-read proxying.
+longer built into `zapper`; `zapper-office` carries the firm CLI and runs the firms. A follow-up
+commit (operator-approved) then settled the CLI transport — the office serves the firm routes on
+its own unix socket for `zapper-office firm/mail/drive`, with no gateway — and re-added
+`zapper-office firm verify` and `zapper-office init`. `make lint && make test` still pass. **Next:**
+**P4-e** (operator's KVM `make test-e2e-office`); the `zapper … → zapper-office …` doc sweep
+(now unblocked); and P4-d-2's SSE rule-following and daemon-backed-read proxying.
 **Disk gotcha:** `target/debug` fills the shared volume (~30G); when a build fails with "No space
 left on device", run `rm -rf target/debug` (release/`make lint` artifacts are separate) and rebuild.
 

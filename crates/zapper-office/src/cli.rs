@@ -1,9 +1,12 @@
 //! Support for the office's own command line (`zapper-office firm/mail/drive`,
-//! in `firm_cli.rs`): a small client of the daemon's unix-socket API and the
-//! output helpers the commands share. The office is a client of the daemon
-//! (proposal 13, step 4), so these commands talk to it over its socket the way
-//! `zapper`'s did; the socket plumbing mirrors [`zapper_client::Zapper`], but
-//! keeps raw bytes (a drive download is binary) and sends a string body.
+//! in `firm_cli.rs`): a small client of the running office's unix-socket API
+//! and the output helpers the commands share. The office serves its firm
+//! routes to the browser (behind the UI gateway, at `/api`) and, for this CLI,
+//! on a local unix socket of its own (`standalone::office_socket_path`), the
+//! way the daemon serves the `zapper` CLI — so these commands reach the office
+//! the way `zapper`'s reached the daemon. The socket plumbing mirrors
+//! [`zapper_client::Zapper`], but keeps raw bytes (a drive download is binary)
+//! and sends a string body.
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -15,9 +18,11 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::UnixStream;
 
-pub use zapper_client::{socket_path, url_encode};
+pub use zapper_client::url_encode;
 
-/// A client of the daemon's unix-socket API, as the board.
+use zapper_office::standalone::office_socket_path;
+
+/// A client of the running office's unix-socket API, as the board.
 pub struct Client {
     socket: std::path::PathBuf,
 }
@@ -25,14 +30,14 @@ pub struct Client {
 impl Client {
     pub fn new() -> Self {
         Self {
-            socket: socket_path(),
+            socket: office_socket_path(),
         }
     }
 
     async fn conn(&self) -> Result<SendRequest<Full<Bytes>>> {
         let stream = UnixStream::connect(&self.socket).await.with_context(|| {
             format!(
-                "connecting to the daemon at {} (is `zapper serve` running?)",
+                "connecting to the office at {} (is `zapper-office serve` running?)",
                 self.socket.display()
             )
         })?;
@@ -106,13 +111,13 @@ impl Client {
     }
 }
 
-/// The daemon's `state` directory, from its config file — the same file the
-/// daemon reads (`$ZAPPER_CONFIG`, else the checkout's `config/zapper.yaml`,
-/// else `~/.config/zapper/zapper.yaml`). Used by `firm replay` to find the
-/// daemon's `ui-url`. Relative paths in the config resolve against its
-/// directory, as they do for the daemon.
-pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
-    use zapper_policy::{expand_home, Config};
+/// The config file zapper and the office read: `$ZAPPER_CONFIG`, else the
+/// checkout's `config/zapper.yaml`, else `~/.config/zapper/zapper.yaml` — the
+/// same file the daemon reads. Sets CONFIG_DIR to its directory so relative
+/// paths (a firm's `agents_dir`/`skills_dir`, the daemon's `state`) resolve
+/// against it, as they do for the daemon.
+pub fn config_path() -> std::path::PathBuf {
+    use zapper_policy::expand_home;
     let path = match std::env::var("ZAPPER_CONFIG") {
         Ok(p) => std::path::PathBuf::from(expand_home(&p)),
         Err(_) => {
@@ -128,6 +133,23 @@ pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
     if let Some(dir) = path.parent() {
         zapper_policy::set_config_dir(dir);
     }
+    path
+}
+
+/// The directory the config file lives in: where the office's workers' agents
+/// and skills are installed, beside the config (as `zapper init` wrote them).
+pub fn config_dir() -> std::path::PathBuf {
+    config_path()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf()
+}
+
+/// The daemon's `state` directory, from its config file. Used by `firm replay`
+/// to find the daemon's `ui-url`.
+pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
+    use zapper_policy::{expand_home, Config};
+    let path = config_path();
     let config = if path.exists() {
         Config::from_yaml(&std::fs::read_to_string(&path)?)
             .with_context(|| format!("loading {}", path.display()))?
