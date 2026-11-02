@@ -48,27 +48,29 @@ The office ([office](office.md)), as the board:
 
 | Command | Purpose |
 |---|---|
-| `zapper firm ls` | Firms and their runs' states |
-| `zapper firm credentials FIRM [grant WORKER RESOURCE LEVEL \| approve REQUEST \| deny REQUEST \| revoke WORKER RESOURCE] [--level L] [--expires 8h] [--note TEXT]` | Grants and credential requests; or the board grants, decides or revokes (resources: `git`, `git:<repo>`, `cluster`, `drive:<space>`) |
-| `zapper firm contracts FIRM` | The run's contracts: hirer, contractor, state, offered, quoted and agreed budgets, how each ended |
-| `zapper firm up FIRM [--company NAME] [--ceo NAME] [--seed TOKENS] [--ceo-prompt FILE] [--articles FILE] [--security-share F] [--max-concurrent N] [--daily-turns N] [--scenario NAME] [--repo NAME…] [--task FILE [--attach FILE]…]` / `zapper firm down FIRM` | Start a fresh run (facilities, then the CEO, idle; in a firm on GitHub, every repository its App is installed on, or those `--repo` names, each cloned or fetched into `git.dir` when the run first uses it; the CEO holds security until they hire an officer), with the board's parameters and charter terms for this run, optionally a [scenario](office.md#scenarios), and optionally the board's task (`--task`: its first line the subject, the rest the message; `--attach` adds files, up to 10 and 5 MiB together, put on the shared drive as the board's and attached to it), sent to the CEO as the first assignment once the run is up / stop it; the run stays on disk |
-| `zapper firm scenarios FIRM` | The firm's scenarios: hire slots with extra instructions, and the board's scripted actions |
-| `zapper firm pause FIRM` / `zapper firm resume FIRM` | Stop starting turns / start again |
-| `zapper firm status FIRM` | Workers' states, what they are doing, mail and desks, turns and tokens today |
-| `zapper firm journal FIRM [--run RUN] [-f]` | The run's journal: mail, states, turns, access, publishes |
-| `zapper firm transcript FIRM WORKER [--run RUN] [-f]` | A worker's transcript (its agent's output: Claude Code or pi) |
-| `zapper firm runs FIRM` / `zapper firm note FIRM RUN TEXT` / `zapper firm prune FIRM RUN` | Past runs, with the board's notes / put a note on one (any text, to find it again; empty removes it; also the Note button in the UI's Runs tab) / delete one |
-| `zapper firm replay FIRM RUN` | The UI address that replays a run |
-| `zapper firm security FIRM` | Access requests and standing approvals |
-| `zapper firm decide FIRM REQUEST --allow\|--deny [--scope once\|worker\|role] [--reason TEXT]` / `zapper firm revoke FIRM RULE` | Decide a request as the board / remove a standing approval |
-| `zapper firm screen FIRM CHECK --approve\|--object [--note TEXT]` | Approve a new hire's background check as the board, or object |
+| `zapper-office firm ls` | Firms and their runs' states |
+| `zapper-office firm credentials FIRM [grant WORKER RESOURCE LEVEL \| approve REQUEST \| deny REQUEST \| revoke WORKER RESOURCE] [--level L] [--expires 8h] [--note TEXT]` | Grants and credential requests; or the board grants, decides or revokes (resources: `git`, `git:<repo>`, `cluster`, `drive:<space>`) |
+| `zapper-office firm contracts FIRM` | The run's contracts: hirer, contractor, state, offered, quoted and agreed budgets, how each ended |
+| `zapper-office firm up FIRM [--company NAME] [--ceo NAME] [--seed TOKENS] [--ceo-prompt FILE] [--articles FILE] [--security-share F] [--max-concurrent N] [--daily-turns N] [--scenario NAME] [--repo NAME…] [--task FILE [--attach FILE]…]` / `zapper-office firm down FIRM` | Start a fresh run (facilities, then the CEO, idle; in a firm on GitHub, every repository its App is installed on, or those `--repo` names, each cloned or fetched into `git.dir` when the run first uses it; the CEO holds security until they hire an officer), with the board's parameters and charter terms for this run, optionally a [scenario](office.md#scenarios), and optionally the board's task (`--task`: its first line the subject, the rest the message; `--attach` adds files, up to 10 and 5 MiB together, put on the shared drive as the board's and attached to it), sent to the CEO as the first assignment once the run is up / stop it; the run stays on disk |
+| `zapper-office firm scenarios FIRM` | The firm's scenarios: hire slots with extra instructions, and the board's scripted actions |
+| `zapper-office firm pause FIRM` / `zapper-office firm resume FIRM` | Stop starting turns / start again |
+| `zapper-office firm status FIRM` | Workers' states, what they are doing, mail and desks, turns and tokens today |
+| `zapper-office firm journal FIRM [--run RUN] [-f]` | The run's journal: mail, states, turns, access, publishes |
+| `zapper-office firm transcript FIRM WORKER [--run RUN] [-f]` | A worker's transcript (its agent's output: Claude Code or pi) |
+| `zapper-office firm runs FIRM` / `zapper-office firm note FIRM RUN TEXT` / `zapper-office firm prune FIRM RUN` | Past runs, with the board's notes / put a note on one (any text, to find it again; empty removes it; also the Note button in the UI's Runs tab) / delete one |
+| `zapper-office firm replay FIRM RUN` | The UI address that replays a run |
+| `zapper-office firm security FIRM` | Access requests and standing approvals |
+| `zapper-office firm decide FIRM REQUEST --allow\|--deny [--scope once\|worker\|role] [--reason TEXT]` / `zapper-office firm revoke FIRM RULE` | Decide a request as the board / remove a standing approval |
+| `zapper-office firm screen FIRM CHECK --approve\|--object [--note TEXT]` | Approve a new hire's background check as the board, or object |
 | `zapper record status` / `zapper record verify FIRM RUN` | Who keeps the record and whether it's being written / a run's record checked against the keeper's chains and signatures |
-| `zapper firm fund FIRM WORKER TOKENS --reason TEXT` | The board gives a worker tokens on top of the approved budget (which grows by that much): for an officer who ran out, say |
-| `zapper firm release FIRM WORKER --reason TEXT` | The board lets a worker go; the only way to let a security officer go |
-| `zapper firm budget FIRM [approve\|decline REQUEST [--note TEXT]]` | The run's budget, balances and the CEO's budget requests; or the board's answer to one |
-| `zapper mail send FIRM --to NAME[,NAME] [--cc …] [--subject S] [--kind K] [--due 2h] [--reply-to ID] [--body TEXT]` | Write as the board; the body is read from stdin if `--body` is missing |
-| `zapper mail ls FIRM [--for WORKER] [--unread]` / `zapper mail thread FIRM THREAD` | The board's (or a worker's) inbox / a thread |
-| `zapper drive ls FIRM` / `zapper drive get FIRM ARTIFACT[@vN] DIR [--run RUN]` | The shared drive / download an artifact |
+| `zapper-office firm fund FIRM WORKER TOKENS --reason TEXT` | The board gives a worker tokens on top of the approved budget (which grows by that much): for an officer who ran out, say |
+| `zapper-office firm release FIRM WORKER --reason TEXT` | The board lets a worker go; the only way to let a security officer go |
+| `zapper-office firm budget FIRM [approve\|decline REQUEST [--note TEXT]]` | The run's budget, balances and the CEO's budget requests; or the board's answer to one |
+| `zapper-office mail send FIRM --to NAME[,NAME] [--cc …] [--subject S] [--kind K] [--due 2h] [--reply-to ID] [--body TEXT]` | Write as the board; the body is read from stdin if `--body` is missing |
+| `zapper-office mail ls FIRM [--for WORKER] [--unread]` / `zapper-office mail thread FIRM THREAD` | The board's (or a worker's) inbox / a thread |
+| `zapper-office drive ls FIRM` / `zapper-office drive get FIRM ARTIFACT[@vN] DIR [--run RUN]` | The shared drive / download an artifact |
+| `zapper-office config reload` | Re-read `office.yaml` (the office's firm config) and apply it to the running office — validated against the daemon's profiles, swapped atomically or not at all. Running firms keep the definition they started with |
+| `zapper-office init` | Install the office workers' agents and skills, and write a starter `office.yaml`, beside the config (keeping any already there) |
 
 In a worker's VM, `office` (the same binary as the MCP server) calls the office tools from a shell: `office desk`, `office mail_send --to dennis --subject … --body … --kind fyi`, `office drive_list`.
 
@@ -91,7 +93,7 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 | `zapper start ID [--accept-changed-disks]` | Start a stopped persistent session again from its disks, once they are checked against the hashes recorded when it stopped; a disk changed since is recorded, and refused unless `--accept-changed-disks`, which is recorded too |
 | `zapper audit ID` | The session's audit log (JSON lines) |
 | `zapper events [-s ID] [--history]` | Follow events, one line each, or raw with `--json` |
-| `zapper approvals` | Pending `ask` decisions (outside firms; in a firm, see `zapper firm security`) |
+| `zapper approvals` | Pending `ask` decisions (outside firms; in a firm, see `zapper-office firm security`) |
 | `zapper approve ID [--remember session]` / `zapper deny …` | Answer one, for this request or the rest of the session |
 | `zapper rules [--scope S]` | List rules of all layers, or of `global`, `profile:NAME` or `session:ID` |
 | `zapper service ls` | Services and zones, a firm's included ([network: services](network.md#services)) |
@@ -107,10 +109,10 @@ Sessions, rules and config: the layer workers run on, for inspecting and debuggi
 Examples:
 
 ```
-zapper firm up acme                          # an idle firm
-zapper mail send acme --to barbara --kind assignment --subject "First product" < brief.md
-zapper firm journal acme -f                  # watch it work
-zapper firm decide acme r-3 --allow --scope worker --reason "package index for the build"
+zapper-office firm up acme                          # an idle firm
+zapper-office mail send acme --to barbara --kind assignment --subject "First product" < brief.md
+zapper-office firm journal acme -f                  # watch it work
+zapper-office firm decide acme r-3 --allow --scope worker --reason "package index for the build"
 zapper events --history -s tusn49            # what one worker's session did so far
 zapper eval -p office-engineer net git.acme.internal:443   # the decision, its rule and layer
 zapper run -C $(mktemp -d)                   # a plain shell session, removed on exit

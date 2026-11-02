@@ -67,6 +67,7 @@ fn body(text: &str) -> R<Value> {
 
 pub fn read_routes() -> Router<Arc<Office>> {
     Router::new()
+        .route("/daemon-ui", get(daemon_ui))
         .route("/firms", get(list))
         .route("/firms/{f}", get(status))
         .route("/firms/{f}/runs", get(runs))
@@ -101,6 +102,7 @@ pub fn read_routes() -> Router<Arc<Office>> {
 /// and notes on runs.
 pub fn board_routes() -> Router<Arc<Office>> {
     Router::new()
+        .route("/config/reload", post(config_reload))
         // The task's attachments ride in the body, base64 like an upload's.
         .route(
             "/firms/{f}/up",
@@ -142,9 +144,29 @@ pub fn board_routes() -> Router<Arc<Office>> {
         )
 }
 
+/// Re-reads `office.yaml` and swaps the firms in atomically (or fails and
+/// changes nothing). `zapper-office config reload`.
+async fn config_reload(State(office): S) -> R<Json<Value>> {
+    let firms = office.reload_firms()?;
+    Ok(Json(json!({ "firms": firms })))
+}
+
+/// The daemon's UI URL (with its token), as `zapper serve` wrote it to
+/// `state/ui-url`. The office page's deep links to daemon-only pages (the
+/// sessions view, a terminal viewer) target it, since the office is a separate
+/// origin and does not serve those pages. `null` if the daemon's UI is off or
+/// unreachable from here.
+async fn daemon_ui(State(office): S) -> Json<Value> {
+    let url = std::fs::read_to_string(office.state_dir().join("ui-url"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Json(json!({ "url": url }))
+}
+
 async fn list(State(office): S) -> Json<Value> {
-    let config = office.client().config();
-    let out: Vec<Value> = crate::firm::all(&config)
+    let out: Vec<Value> = office
+        .firms()
         .iter()
         .map(|(name, f)| {
             let run = office.run(name).ok();
@@ -163,7 +185,7 @@ async fn status(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
     // A running firm's chart is its live one (the founders it booted with,
     // and its hires), whatever the config says now.
     let booted = run.as_ref().filter(|r| !r.ended()).map(|r| r.chart());
-    let configured = crate::firm::get(&config, &f);
+    let configured = office.firm(&f);
     let firm = match (&booted, &configured) {
         (Some(b), _) => b,
         (None, Some(c)) => c,
@@ -196,8 +218,9 @@ async fn status(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
 
 /// The firm's scenarios as configured.
 async fn scenarios(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
-    let config = office.client().config();
-    let firm = crate::firm::get(&config, &f).ok_or_else(|| anyhow::anyhow!("no firm {f}"))?;
+    let firm = office
+        .firm(&f)
+        .ok_or_else(|| anyhow::anyhow!("no firm {f}"))?;
     Ok(Json(json!(firm.scenarios)))
 }
 
@@ -246,7 +269,7 @@ async fn run_config(State(office): S, Path((f, run)): Path<(String, String)>) ->
 }
 
 async fn runs(State(office): S, Path(f): Path<String>) -> R<Json<Value>> {
-    if !office.client().config().firms.contains_key(&f) && !office.firm_dir(&f).is_dir() {
+    if !office.has_firm(&f) && !office.firm_dir(&f).is_dir() {
         return Err(anyhow::anyhow!("no firm {f}").into());
     }
     Ok(Json(json!(super::list_runs(&office, &f))))

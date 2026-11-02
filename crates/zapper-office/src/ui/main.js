@@ -295,13 +295,14 @@ document.addEventListener('keydown', (ev) => {
 async function start() {
   buildHeader();
   mountAll();
+  await loadDaemonUi();
   await loadFirms();
   const h = readHash();
   S.tab = TABS.some(([t]) => t === h.tab) ? h.tab : 'kickoff';
   S.firm = (h.firm && S.firms.some((f) => f.name === h.firm) && h.firm) || (S.firms[0] && S.firms[0].name) || null;
   showTab(S.tab);
   if (!S.firm) {
-    $('tab-overview').replaceChildren(el('div', { class: 'empty card' }, 'No firms are configured. Add one under `firms:` in the config; see docs/office.md.'));
+    $('tab-overview').replaceChildren(el('div', { class: 'empty card' }, 'No firms are configured. Add one under `firms:` in config/office.yaml, then `zapper-office config reload`; see docs/office.md.'));
     renderHeader();
     return;
   }

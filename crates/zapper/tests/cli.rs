@@ -519,7 +519,7 @@ async fn check_reports_the_driver_and_the_daemon() {
     let d = daemon(TestCore::new(CONFIG)).await;
     let text = out(&zapper(&d, &["check"]).await);
     assert!(
-        text.contains("note   the driver is on, for driven profiles: bot\n"),
+        text.contains("note   the driver is on; it runs The Office's firm workers (zapper-office) and driven profiles: bot\n"),
         "{text}"
     );
     assert!(
@@ -545,7 +545,7 @@ async fn check_reports_the_driver_and_the_daemon() {
     let t = TestCore::new("profiles:\n  web: {}\n");
     let text = out(&run(&t.startup(), None, &["check"]).await);
     assert!(
-        text.contains("note   the driver is on, unused: no firm, and no profile sets agent.driven"),
+        text.contains("note   the driver is on; it runs The Office's firm workers (zapper-office) and any agent.driven profile (none set)"),
         "{text}"
     );
 

@@ -524,7 +524,7 @@ function updatePanel() {
   if (S.mode === 'replay') renderFeed();
 }
 // The sessions UI, with the firm to come back to.
-function sessionsHref() { return '/sessions' + (S.firm ? '?firm=' + enc(S.firm) : ''); }
+function sessionsHref() { return daemonUrl('/sessions', S.firm ? { firm: S.firm } : {}); }
 function sessionsLink(text) { const a = el('a', {}, text); a.href = sessionsHref(); return a; }
 // readAt: when the worker read it, for the panel's Read mail.
 function mailItem(m, unread, readAt) {

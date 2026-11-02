@@ -243,7 +243,23 @@ async fn ui_guard(
             "zapper_token={}; HttpOnly; SameSite=Strict; Path=/",
             d.ui_token()
         );
-        let mut resp = Redirect::to(req.uri().path()).into_response();
+        // Redirect to the same path, dropping only `token` and keeping the
+        // rest of the query (from the raw string, so encoding is preserved):
+        // a deep link like `/terminal?session=…&n=…&token=…` keeps its target
+        // across the cookie-setting redirect.
+        let rest: Vec<&str> = req
+            .uri()
+            .query()
+            .unwrap_or("")
+            .split('&')
+            .filter(|p| !p.is_empty() && !p.starts_with("token="))
+            .collect();
+        let target = if rest.is_empty() {
+            req.uri().path().to_string()
+        } else {
+            format!("{}?{}", req.uri().path(), rest.join("&"))
+        };
+        let mut resp = Redirect::to(&target).into_response();
         resp.headers_mut()
             .insert(header::SET_COOKIE, cookie.parse().unwrap());
         return resp;

@@ -1600,20 +1600,16 @@ async fn check(config_path: &Path) -> Result<i32> {
             .filter(|n| config.resolve(n).is_ok_and(|p| p.agent.driven))
             .map(String::as_str)
             .collect();
-        // What it drives: firms' workers (through the office's foreman) and
-        // sessions of driven profiles.
-        let firms: Vec<&str> = config.firms.keys().map(String::as_str).collect();
-        let mut uses = Vec::new();
-        if !firms.is_empty() {
-            uses.push(format!("the workers of firm {}", firms.join(", ")));
-        }
-        if !driven.is_empty() {
-            uses.push(format!("driven profiles: {}", driven.join(", ")));
-        }
-        if uses.is_empty() {
-            println!("note   the driver is on, unused: no firm, and no profile sets agent.driven");
+        // What it drives: The Office's firm workers (through zapper-office's
+        // foreman) and sessions of driven profiles. Firms are the office's own
+        // config (office.yaml) now, so `zapper` doesn't enumerate them here.
+        if driven.is_empty() {
+            println!("note   the driver is on; it runs The Office's firm workers (zapper-office) and any agent.driven profile (none set)");
         } else {
-            println!("note   the driver is on, for {}", uses.join("; "));
+            println!(
+                "note   the driver is on; it runs The Office's firm workers (zapper-office) and driven profiles: {}",
+                driven.join(", ")
+            );
         }
     } else {
         println!(
@@ -1925,7 +1921,6 @@ mod tests {
     #[test]
     fn example_config_is_valid() {
         let c = zapper_policy::Config::from_yaml(super::EXAMPLE).unwrap();
-        assert!(c.firms.is_empty());
         let names: Vec<&str> = c.profiles.keys().map(String::as_str).collect();
         assert_eq!(names, ["base", "claude", "default", "k3s"]);
         assert_eq!(c.resolve("base").unwrap().engine.image, "ubuntu-26.04");

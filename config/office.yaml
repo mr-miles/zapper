@@ -1,0 +1,9 @@
+# The Office's own config: the firms zapper-office runs, beside the daemon's
+# config/zapper.yaml. Firms are no longer part of the daemon's config — the
+# daemon neither validates nor uses them (proposal 13, decision 2). The office
+# reads this file, validates each firm against the daemon's profiles, and runs
+# them; `zapper-office config reload` re-reads it.
+#
+# See docs/the-office.md for the firm schema, and examples/*/office.yaml for
+# complete firms (mini-firm, shopping-list, research-firm, github-firm).
+firms: {}

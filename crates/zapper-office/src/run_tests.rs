@@ -692,56 +692,68 @@ async fn the_daemon_stopping_ends_its_firms() {
     assert!(ended, "{:?}", journal(&run));
 }
 
-// The firms' config, checked with the rest.
+// The firms' config (`office.yaml`), validated by the office against the
+// daemon's profiles — the daemon no longer carries or checks firms. Reload
+// atomicity (swap-or-nothing) is `zapper-office config reload`, tested with E3.
 
 #[test]
-fn a_firm_that_doesnt_add_up_is_refused_with_the_whole_change() {
-    let (t, _run) = run();
-    let e = t
-        .core
-        .change("a firm", |c| {
-            c.profiles.insert("extra".into(), Default::default());
-            let mut bad = crate::firm::get(c, "acme").unwrap();
-            bad.workers[1].role = "nosuch".into();
-            c.firms
-                .insert("broken".into(), serde_yaml::to_value(bad).unwrap());
-            Ok(())
-        })
-        .unwrap_err();
-    let e = format!("{e:#}");
-    assert!(e.contains("firm broken:"), "{e}");
-    let c = t.core.config();
-    assert!(!c.firms.contains_key("broken") && !c.profiles.contains_key("extra"));
+fn a_firm_that_doesnt_add_up_is_refused() {
+    let t = crate::test_core("profiles:\n  w: {}\n");
+    // A worker on a role the firm doesn't define.
+    let firms = crate::firm::test_firms(
+        "profiles: { w: {} }\nfirms:\n  broken:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: x, role: nosuch, reports_to: ceo }\n",
+    );
+    let e = crate::firm::validate_firms(&firms, &t.core.config()).unwrap_err();
+    assert!(format!("{e:#}").contains("firm broken:"), "{e:#}");
+}
+
+#[test]
+fn a_firm_on_an_unknown_profile_is_refused() {
+    let t = crate::test_core("profiles:\n  w: {}\n");
+    let firms = crate::firm::test_firms(
+        "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { ceo: { profile: nosuch, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
+    );
+    let e = crate::firm::validate_firms(&firms, &t.core.config()).unwrap_err();
+    assert!(format!("{e:#}").contains("firm acme:"), "{e:#}");
 }
 
 #[test]
 fn firms_need_the_driver() {
-    let (t, _run) = run();
-    let e = t
-        .core
-        .change("driver off", |c| {
-            c.daemon.driver = false;
-            Ok(())
-        })
-        .unwrap_err();
+    let c = zapper_policy::Config::from_yaml("daemon: { driver: false }\nprofiles: { w: {} }\n")
+        .unwrap();
+    let firms = crate::firm::test_firms(
+        "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
+    );
+    let e = crate::firm::validate_firms(&firms, &c).unwrap_err();
     assert!(format!("{e:#}").contains("firms need the driver"), "{e:#}");
 }
 
 #[test]
-fn a_startup_config_with_a_broken_firm_doesnt_load() {
-    let t = crate::test_core("profiles:\n  w: {}\n");
+fn reload_applies_a_valid_office_yaml_and_rejects_a_bad_one() {
+    let t = crate::test_core(FIRM);
+    let office = t.core.office();
+    assert!(office.firm("acme").is_some() && office.firm("beta").is_none());
+    let office_yaml = t.startup().with_file_name("office.yaml");
+
+    // A valid edit adding a firm: reload applies it.
     std::fs::write(
-        t.startup(),
-        std::fs::read_to_string(t.startup()).unwrap()
-            + "firms:\n  acme:\n    roles: { ceo: { profile: nosuch, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
+        &office_yaml,
+        "firms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n  beta:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
     )
     .unwrap();
-    let e = match zapper_core::Core::start(t.startup()) {
-        Ok(d) => {
-            crate::start(&d);
-            d.check_config().unwrap_err()
-        }
-        Err(e) => e,
-    };
-    assert!(format!("{e:#}").contains("firm acme:"), "{e:#}");
+    assert_eq!(office.reload_firms().unwrap(), 2);
+    assert!(office.firm("beta").is_some());
+
+    // A bad edit (a worker on an undefined role): reload fails and the firms
+    // are left as they were — swap-or-nothing.
+    std::fs::write(
+        &office_yaml,
+        "firms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: x, role: nope, reports_to: ceo }\n",
+    )
+    .unwrap();
+    assert!(office.reload_firms().is_err());
+    assert!(
+        office.firm("beta").is_some(),
+        "a failed reload changes nothing"
+    );
 }

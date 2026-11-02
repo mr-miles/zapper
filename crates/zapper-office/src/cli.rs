@@ -122,6 +122,20 @@ pub fn config_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// The office's own config file (`office.yaml`): the firms it runs, beside the
+/// daemon's `zapper.yaml` (`$ZAPPER_OFFICE_CONFIG` overrides). Firms are the
+/// office's config, not the daemon's (proposal 13 decision 2).
+pub fn office_config_path() -> std::path::PathBuf {
+    use zapper_policy::expand_home;
+    match std::env::var("ZAPPER_OFFICE_CONFIG") {
+        Ok(p) => {
+            let path = std::path::PathBuf::from(expand_home(&p));
+            std::path::absolute(&path).unwrap_or(path)
+        }
+        Err(_) => config_dir().join("office.yaml"),
+    }
+}
+
 /// The daemon's `state` directory, from its config file. Used by `firm replay`
 /// to find the daemon's `ui-url`.
 pub fn daemon_state_dir() -> Result<std::path::PathBuf> {

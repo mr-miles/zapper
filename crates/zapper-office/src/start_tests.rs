@@ -22,8 +22,7 @@ firms:
 
 #[tokio::test]
 async fn a_firm_starts_only_beside_the_sessions_still_running() {
-    let t = TestCore::with_daemon("max_sessions: 2", FIRM);
-    crate::start(&t.core);
+    let t = crate::test_core_daemon("max_sessions: 2", FIRM);
     let session = |t: &TestCore| {
         let new = NewSession::plain("w".into(), t.workdir(), Policy::default());
         t.core.test_session(new, true).unwrap()

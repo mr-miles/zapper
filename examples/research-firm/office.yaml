@@ -1,0 +1,59 @@
+# The Office's firms for the research-firm example (zapper-office's own config).
+# Loaded by the office, beside this example's zapper.yaml.
+firms:
+  lab:
+    description: A CEO, a research manager and researchers answering a question with cited findings, then a prototype engineer building from them
+    # The repository's skills: the playbooks any role may use.
+    skills_dir: ../../config/skills
+    # The repository's agent definitions: each role's brief and own skills.
+    agents_dir: ../../config/agents
+    # A run budget, in tokens: hiring needs one. The seed is what Ada has to
+    # scope the task; she asks the board for the rest.
+    budget: { seed: 1000000, max_concurrent: 3 }
+    # A repository for prototypes: code goes to git, never to the drive.
+    git: { repos: [prototypes] }
+    credentials:
+      # research: the plan and the packs; board: the board pack.
+      spaces: [general, research, board]
+    # Names for hires, in order, when the hirer doesn't pick one.
+    names: [rosa, theo, iris, noor]
+    roles:
+      ceo:
+        profile: claude
+        title: CEO
+        model: claude-sonnet-5-5
+        agent: ceo
+        # No officer role: with one, Ada would have to hire a security
+        # officer before anyone else. She holds security herself.
+        # A prototype comes after the research: once the board has the pack
+        # and asks for one, Ada commissions it.
+        # A process lead runs the retrospective at the end, before the team
+        # is released; the board runs the process-review skill itself.
+        hires: [research-manager, prototype-engineer, process-improvement]
+      research-manager:
+        profile: claude
+        title: Research Manager
+        model: claude-sonnet-5-5
+        agent: research-manager
+        hires: [researcher]
+      researcher:
+        profile: claude
+        title: Researcher
+        model: claude-sonnet-5-5
+        agent: researcher
+      # Builds the prototype the board commissions from the research, in the
+      # prototypes repository.
+      prototype-engineer:
+        profile: claude
+        title: Prototype Engineer
+        model: claude-sonnet-5-5
+      # Runs the firm's retrospective: asks everyone what worked and what
+      # didn't, de-duplicates and votes it with them, and reports the
+      # improvements the firm chose. Mail and the drive only.
+      process-improvement:
+        profile: claude
+        title: Process Lead
+        model: claude-sonnet-5-5
+    # The founder; everyone else is hired during the run.
+    workers:
+      - { name: ada, role: ceo }

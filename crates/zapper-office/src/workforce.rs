@@ -1701,11 +1701,10 @@ mod tests {
 
     #[test]
     fn observed_cost_by_role() {
-        let c = zapper_policy::Config::from_yaml(
+        let f = &crate::firm::test_firm(
             "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { boss: { profile: w, agent: ceo }, eng: { profile: w, agent: x } }\n    workers:\n      - { name: ceo, role: boss }\n      - { name: ada, role: eng, reports_to: ceo }\n      - { name: bo, role: eng, reports_to: ceo }\n",
-        )
-        .unwrap();
-        let f = &crate::firm::get(&c, "acme").unwrap();
+            "acme",
+        );
         let mut l = Ledger::new(f);
         l.spend("ceo", 800);
         l.spend("ada", 3000);

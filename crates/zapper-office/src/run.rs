@@ -24,8 +24,8 @@ use crate::mail::{self, PostOffice};
 #[cfg(test)]
 use crate::OfficeOf;
 use crate::{
-    access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
-    security, skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
+    access, contracts, drive, facility, foreman, labels, ops, prompts, run_id, scenario, security,
+    skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
 };
 
 /// Each profile's agent kind and model, by profile name.
@@ -555,7 +555,7 @@ pub(crate) fn test_run(d: &Core, name: &str) -> Arc<FirmRun> {
 #[cfg(test)]
 pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = firm::get(&config, name).unwrap();
+    let firm = d.office().firm(name).unwrap();
     let started = with_options(name, firm, &config, o).unwrap();
     test_run_started(d, name, started)
 }
@@ -564,7 +564,7 @@ pub(crate) fn test_run_with(d: &Core, name: &str, o: &StartOptions) -> Arc<FirmR
 #[cfg(test)]
 pub(crate) async fn test_run_remote(d: &Core, name: &str, repos: &[&str]) -> Arc<FirmRun> {
     let config = d.config();
-    let firm = firm::get(&config, name).unwrap();
+    let firm = d.office().firm(name).unwrap();
     let o = StartOptions {
         repos: Some(repos.iter().map(|r| r.to_string()).collect()),
         ..Default::default()
@@ -620,7 +620,7 @@ pub async fn up_with(
         }
     }
     let config = office.client().config();
-    let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
+    let firm = office.firm(name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
         company,
@@ -987,11 +987,9 @@ mod tests {
 
     #[test]
     fn start_options() {
-        let c = zapper_policy::Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, agent: ceo, hires: [sec] }, sec: { profile: w, agent: security-officer, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n",
-        )
-        .unwrap();
-        let firm = crate::firm::get(&c, "acme").unwrap();
+        let yaml = "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    landing: {}\n    facilities: { cluster: { kind: k3s, profile: w } }\n    roles: { ceo: { profile: w, agent: ceo, hires: [sec] }, sec: { profile: w, agent: security-officer, officer: true } }\n    workers:\n      - { name: barbara, role: ceo }\n    names: [alice, grace]\n";
+        let c = crate::firm::test_config(yaml);
+        let firm = crate::firm::test_firm(yaml, "acme");
         let o = super::StartOptions {
             company: Some("Widgets Ltd".into()),
             ceo: Some("Alice".into()),
@@ -1043,11 +1041,9 @@ mod tests {
 
     #[test]
     fn start_scenarios() {
-        let c = zapper_policy::Config::from_yaml(
-            "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, agent: ceo, hires: [eng] }, eng: { profile: w, agent: software-engineer } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n",
-        )
-        .unwrap();
-        let firm = crate::firm::get(&c, "acme").unwrap();
+        let yaml = "profiles: { w: {} }\nfirms:\n  acme:\n    budget: { seed: 1000 }\n    roles: { ceo: { profile: w, agent: ceo, hires: [eng] }, eng: { profile: w, agent: software-engineer } }\n    workers:\n      - { name: barbara, role: ceo }\n    scenarios:\n      rt:\n        articles: Exercises happen.\n        hires: [{ role: eng, contract: true, board_line: true, prompt: red }]\n        script: [{ after: 1h, kill: { role: eng } }]\n";
+        let c = crate::firm::test_config(yaml);
+        let firm = crate::firm::test_firm(yaml, "acme");
         let with = |o: super::StartOptions| super::with_options("acme", firm.clone(), &c, &o);
         let opts = |scenario: &str| super::StartOptions {
             scenario: Some(scenario.into()),
@@ -1090,8 +1086,8 @@ mod tests {
         };
         let remote = "    git: { remote: { github: { config: acme.yaml } }, dir: /tmp/repos }\n";
         let with = |y: String, repos: Option<Vec<&str>>| {
-            let c = zapper_policy::Config::from_yaml(&y).unwrap();
-            let firm = crate::firm::get(&c, "acme").unwrap();
+            let c = crate::firm::test_config(&y);
+            let firm = crate::firm::test_firm(&y, "acme");
             let o = super::StartOptions {
                 repos: repos.map(|r| r.into_iter().map(String::from).collect()),
                 ..Default::default()

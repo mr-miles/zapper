@@ -40,7 +40,7 @@ make image                      # ubuntu-26.04: the base profiles, and a plain s
 make image IMAGE=office         # Claude Code and pi: `zapper run -p claude`, and The Office's workers
 ```
 
-Run zapper from the repository's root: it uses `config/zapper.yaml`, tracked in the repository, whose paths are relative to it or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the config to `~/.config/zapper/zapper.yaml` and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
+Run zapper from the repository's root: it uses `config/zapper.yaml` (the daemon's config) and `config/office.yaml` (the office's firms), tracked in the repository, whose paths are relative to them or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the daemon config to `~/.config/zapper/zapper.yaml`, and `zapper-office init` writes the office's `~/.config/zapper/office.yaml` (firms) and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
 
 Run image builds in the background with a log (`make image > /tmp/zapper-image.log 2>&1`) and give the user `tail -f /tmp/zapper-image.log`.
 
@@ -64,7 +64,9 @@ make image IMAGE=k3s && make kernel KERNEL=k8s   # the firm's cluster and its ke
 
 The red-team scenario's contractor runs on pi with DeepSeek through OpenRouter, and so do the other `office-*` profiles on pi. If the user wants them, they create a key at https://openrouter.ai/settings/keys (`sk-or-v1-…`; credits, or `:free` models only; if the key is limited to some models, it must allow the ones those profiles name), and store it like the Claude token: `(umask 077; read -rsp 'OpenRouter key: ' t; printf '%s' "$t" > ~/.config/zapper/openrouter-token); echo`.
 
-With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
+The Office runs as its own process beside the daemon (like the workbench): with `zapper serve` running, start `zapper-office serve` (no arguments — it reads the same config to find the daemon's socket and `state` directory, connects, and prints the office's URL and its CLI socket). It serves the office UI (org chart, messages, security, drive, VMs, replay) and the `zapper-office firm/mail/drive` commands. Firms are its own config, `config/office.yaml` (`zapper-office init` writes a starter one outside a checkout); `zapper-office config reload` applies edits to a running office.
+
+With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper-office firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper-office mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper-office firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
 
 ### A remote host
 
@@ -75,7 +77,7 @@ If zapper runs on a machine other than the user's, the UI (`daemon.ui`, `127.0.0
 
 ### Rules
 
-- Sessions and firms may be in use: before `zapper rm`, `zapper stop`, `zapper firm down`, `zapper config reload` or restarting the daemon, check `zapper ps`, `zapper firm ls` and `zapper config diff` and say what you are about to change. Unsaved running config is lost on restart, and a restart or `firm down` ends a firm's run, which can't be resumed.
+- Sessions and firms may be in use: before `zapper rm`, `zapper stop`, `zapper-office firm down`, `zapper config reload` or restarting the daemon, check `zapper ps`, `zapper-office firm ls` and `zapper config diff` and say what you are about to change. Unsaved running config is lost on restart, and a restart or `firm down` ends a firm's run, which can't be resumed.
 - `zapper config save` writes the user's startup file: run it when the user asks to keep a change.
 - Do not print `zapper config startup` output into chats when it may hold inline secrets; values are redacted, but names and sources are not.
 - The daemon's `state` directory holds audit logs and terminal recordings of sessions, and firms' runs (mail, transcripts, published files): treat them as sensitive and do not delete them unasked.
@@ -103,7 +105,7 @@ crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gat
 crates/zapper-api/       the REST API (the CLI's, on a unix socket) and the web UI, over `Core`; mounts what it is given (the office's routes and page)
   src/ui.html              the web UI: state, terminal viewer, answering approvals (textContent only)
   src/assets/              xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
-crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the `firms` config (`firm.rs`), which it parses and checks
+crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the firms config (`firm.rs`), its own `office.yaml` which it parses and validates against the daemon's profiles (not the daemon's config)
   src/office.html          the office UI (org chart, messages, security, drive, statistics, replay); its stylesheet and scripts, one per tab or part, in src/ui/
 crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
@@ -114,9 +116,10 @@ crates/zapper-git/       git over HTTP for guests: `git http-backend` run as a C
 crates/zapper-workbench/ `zapper-workbench`: a layer for single users (proposal 12, part 2), a client of zapper's API on its socket; its gateway's tokens and grants, the session views it proxies, its facilities and its UI (src/ui.html)
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
 crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests
-config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
+config/                  zapper.yaml: the daemon's config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
+  office.yaml              the office's own config: the firms zapper-office runs (not the daemon's — it reads and validates them; `zapper-office config reload` re-reads it)
   agents/                  office roles' agent definitions: each AGENT.md, the brief in the role's preamble, and the role's own skills/
-  skills/                  office skills any role may use; both built in (`zapper init` writes them), read live by firms through `agents_dir` and `skills_dir`
+  skills/                  office skills any role may use; both built in (`zapper-office init` writes them), read live by firms through `agents_dir` and `skills_dir`
   kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
 scripts/fetch-deps.sh    Firecracker and kernel download
 scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)

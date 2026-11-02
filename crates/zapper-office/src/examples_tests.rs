@@ -2,12 +2,17 @@
 //! all their workers' skills present. Moved here from the `zapper` binary when
 //! the office left it (proposal 13, step 4): firm config is the office's own.
 
+use std::collections::BTreeMap;
+
 use zapper_policy::Config;
 
-/// An example's directory: a config this build loads, whose profiles are all
-/// on the one image the firms need (`zapper check` asks for every profile's
+use crate::firm::Firm;
+
+/// An example's directory: the daemon config (`zapper.yaml`) this build loads,
+/// and the office's firms (`office.yaml`) which validate against its profiles,
+/// all on the one image the firms need (`zapper check` asks for every profile's
 /// image), each firm's skills there, and a task with a subject.
-fn example(name: &str) -> Config {
+fn example(name: &str) -> (Config, BTreeMap<String, Firm>) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples")
         .join(name);
@@ -20,21 +25,23 @@ fn example(name: &str) -> Config {
     for p in c.profiles.keys() {
         assert_eq!(c.resolve(p).unwrap().engine.image, "office", "{name}: {p}");
     }
-    for firm in crate::firm::all(&c).values() {
+    let firms = crate::firm::load(&dir.join("office.yaml")).unwrap();
+    crate::firm::validate_firms(&firms, &c).unwrap();
+    for firm in firms.values() {
         assert_eq!(crate::skills::missing(firm), Vec::<String>::new());
     }
     let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
     assert!(!task.lines().next().unwrap().trim().is_empty());
-    c
+    (c, firms)
 }
 
 /// `examples/mini-firm`: Ada alone, who may contract a writer, named Ben from
 /// the pool.
 #[test]
 fn the_mini_firm_example_loads() {
-    let c = example("mini-firm");
+    let (c, firms) = example("mini-firm");
     assert_eq!(c.profiles.len(), 1);
-    let mini = &crate::firm::all(&c)["mini"];
+    let mini = &firms["mini"];
     let founders: Vec<&str> = mini.workers.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(founders, ["ada"]);
     assert_eq!(mini.roles["ceo"].hires, ["writer"]);
@@ -47,8 +54,8 @@ fn the_mini_firm_example_loads() {
 /// the engineers only.
 #[test]
 fn the_shopping_list_example_loads() {
-    let c = example("shopping-list");
-    let shop = &crate::firm::all(&c)["shop"];
+    let (c, firms) = example("shopping-list");
+    let shop = &firms["shop"];
     let founders: Vec<&str> = shop.workers.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(founders, ["ada"]);
     assert_eq!(shop.roles["ceo"].hires, ["product-manager", "engineer"]);
@@ -82,8 +89,8 @@ fn the_shopping_list_example_loads() {
 /// GitHub, behind the firm's own git server.
 #[test]
 fn the_github_firm_example_loads() {
-    let c = example("github-firm");
-    let octo = &crate::firm::all(&c)["octo"];
+    let (_c, firms) = example("github-firm");
+    let octo = &firms["octo"];
     let founders: Vec<&str> = octo.workers.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(founders, ["ada", "lin"]);
     assert_eq!(octo.roles["librarian"].agent.as_deref(), Some("librarian"));
@@ -100,8 +107,8 @@ fn the_github_firm_example_loads() {
 /// spaces for the research and the board pack, a repository for prototypes.
 #[test]
 fn the_research_firm_example_loads() {
-    let c = example("research-firm");
-    let lab = &crate::firm::all(&c)["lab"];
+    let (_c, firms) = example("research-firm");
+    let lab = &firms["lab"];
     let founders: Vec<&str> = lab.workers.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(founders, ["ada"]);
     assert_eq!(

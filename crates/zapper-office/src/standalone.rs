@@ -276,12 +276,23 @@ pub async fn serve(
     zapper: Zapper,
     state_dir: PathBuf,
     socket_dir: PathBuf,
+    office_config: PathBuf,
     remote: bool,
 ) -> Result<()> {
     let local = listener
         .local_addr()
         .context("the office listener's address")?;
     let office = bootstrap(zapper.clone(), state_dir, socket_dir);
+
+    // The office's own firm config (`office.yaml`), validated against the
+    // daemon's profiles; a bad firm config stops the office starting.
+    // `zapper-office config reload` re-reads it from the same path.
+    let _ = office.config_path.set(office_config.clone());
+    let n = office.reload_firms()?;
+    eprintln!(
+        "zapper-office: {n} firm(s) from {}",
+        office_config.display()
+    );
 
     // Keep the office's standing-approval record in step with the operator's
     // edits by following the daemon's `/v1/events` SSE (the standalone
@@ -340,6 +351,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::test_core;
+    use crate::OfficeOf;
 
     const FIRM: &str = "
 profiles:
@@ -392,6 +404,9 @@ firms:
             t.core.state_dir().to_path_buf(),
             std::env::temp_dir(),
         );
+        // `serve` loads firms from `office.yaml`; here the bootstrap'd office
+        // takes the same firms `test_core` loaded onto the daemon's office.
+        office.load_firms(t.core.office().firms());
         let app = || {
             super::app(
                 office.clone(),
@@ -530,6 +545,7 @@ firms:
             t.core.state_dir().to_path_buf(),
             std::env::temp_dir(),
         );
+        office.load_firms(t.core.office().firms());
         let routes = || crate::routes(office.clone());
 
         // A read with no headers at all: the firm is listed.

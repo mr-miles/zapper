@@ -75,8 +75,8 @@ Before a release, walk through these:
 | SIGTERM to the daemon | Each session stops with `daemon shutdown` |
 | A profile with `ttl_secs: 60` | The session stops after a minute with `ttl expired` |
 | Open the UI URL, then the same URL with another `Host` header | The UI loads, and the other host gets 403 |
-| A two-worker firm on real Claude Code (a small model, a CEO and an engineer founder reporting to them, `budget: { daily_turns: 30 }`, no `seed` so nobody hires), and an assignment to the CEO: "have your engineer write a haiku to /work/haiku.md, publish it and report back" | Within a minute: the CEO delegates by mail, the engineer publishes and reports with `close`, the CEO reports to the board; `zapper drive get` returns the file; `zapper events -s` on a worker's session shows `api.anthropic.com` with `secrets: [claude]` |
-| `zapper firm up acme` with the example firm, then a kickoff from the UI | The org chart animates; workers' avatars follow their states; envelopes fly; the board pack arrives in the board's inbox |
+| A two-worker firm on real Claude Code (a small model, a CEO and an engineer founder reporting to them, `budget: { daily_turns: 30 }`, no `seed` so nobody hires), and an assignment to the CEO: "have your engineer write a haiku to /work/haiku.md, publish it and report back" | Within a minute: the CEO delegates by mail, the engineer publishes and reports with `close`, the CEO reports to the board; `zapper-office drive get` returns the file; `zapper events -s` on a worker's session shows `api.anthropic.com` with `secrets: [claude]` |
+| `zapper-office firm up acme` with the example firm, then a kickoff from the UI | The org chart animates; workers' avatars follow their states; envelopes fly; the board pack arrives in the board's inbox |
 
 ## References
 

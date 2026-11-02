@@ -1137,17 +1137,15 @@ impl PostOffice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zapper_policy::Config;
 
     fn office() -> (PostOffice, Journal, std::path::PathBuf) {
-        let c = Config::from_yaml(
+        let f = crate::firm::test_firm(
             "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { r: { profile: w, agent: x } }\n    workers:\n      - { name: ceo, role: r }\n      - { name: cto, role: r, reports_to: ceo }\n      - { name: ada, role: r, reports_to: cto }\n      - { name: ken, role: r, reports_to: ceo }\n",
-        )
-        .unwrap();
+            "acme",
+        );
         let dir = std::env::temp_dir().join(format!("zapper-mail-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("journal.jsonl")).unwrap();
-        let f = crate::firm::get(&c, "acme").unwrap();
         (
             PostOffice::new(&f, Arc::new(RwLock::new(f.clone()))),
             j,

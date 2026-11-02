@@ -9,7 +9,7 @@ zapper runs AI agents in microVMs; The Office runs firms of AI workers on it. Th
 
 ```
 zapper ps                 # sessions: id, profile, state, counters
-zapper firm ls            # firms and their runs' states
+zapper-office firm ls            # firms and their runs' states
 zapper config diff        # unsaved running-config changes ("no unsaved changes")
 ```
 
@@ -17,8 +17,8 @@ If the CLI says it can't connect, the daemon isn't running: start it with `zappe
 
 ## Rules
 
-- A firm's run and its workers' sessions may be in use. Before `firm down`, `stop`, `rm`, `config reload` or restarting the daemon, check `zapper firm status` and `zapper ps` and say what you're about to end. A restart or `firm down` ends the run, which can't be resumed, and a restart loses unsaved config.
-- A firm spends the user's Claude usage: check `zapper firm status` (turns and tokens today) and the budget before starting one, and say what you are about to start.
+- A firm's run and its workers' sessions may be in use. Before `firm down`, `stop`, `rm`, `config reload` or restarting the daemon, check `zapper-office firm status` and `zapper ps` and say what you're about to end. A restart or `firm down` ends the run, which can't be resumed, and a restart loses unsaved config.
+- A firm spends the user's Claude usage: check `zapper-office firm status` (turns and tokens today) and the budget before starting one, and say what you are about to start.
 - API changes edit the running config only. Run `zapper config save` when the user wants a change kept, and show `zapper config diff` first.
 - Prefer the narrowest change: a session rule (`session:ID`) over a profile rule, and a profile rule over a global one. Prefer `methods`/`path` limits over allowing a whole host.
 - On a remote host, the UI and a firm's dashboard are on its loopback: offer an SSH tunnel first, and serving them to the network (`daemon.ui`, `dashboard_port`) only with its warning ([a remote host](../../docs/configuration.md#a-remote-host)).
@@ -67,7 +67,7 @@ zapper eval -s ID net github.com:443 POST /org/repo/pulls      # which rule deci
 zapper approvals ; zapper approve ABC --remember session        # outside firms; or: zapper deny ABC
 ```
 
-Rule changes apply to running workers at once. Firm profiles can't have `exec` rules with `ask`, and in a firm a network `ask` becomes an access request (`zapper firm security`), not an approval.
+Rule changes apply to running workers at once. Firm profiles can't have `exec` rules with `ask`, and in a firm a network `ask` becomes an access request (`zapper-office firm security`), not an approval.
 
 ## Config
 
@@ -88,31 +88,33 @@ make image IMAGE=k3s ; make kernel KERNEL=k8s             # the firm's cluster
 
 A firm is an org chart of AI workers, each Claude Code (or pi) in its own session ([docs/office.md](../../docs/office.md)). You act as the board.
 
+The Office is its own process beside the daemon: with `zapper serve` running, start `zapper-office serve` (no args — it reads the same config to reach the daemon and the `state` directory). The `zapper-office` commands below reach it over its socket, so if they can't connect, the office isn't running — start it with a log (`zapper-office serve > /tmp/zapper-office.log 2>&1 &`). Firms are the office's own config, `config/office.yaml`; `zapper-office config reload` applies edits to a running office.
+
 ```
-zapper firm ls ; zapper firm status acme          # before anything: is a run going, what are workers doing
-zapper firm up acme                               # a fresh, idle run (the cluster first, if the firm has one)
-zapper firm scenarios acme                        # simulations: hires with extra instructions, scripted board actions
-zapper firm up acme --scenario red-team           # play one (Kickoff lets the board change its hires and steps first)
-zapper firm up acme --task task.md                # with the board's task (first line the subject), sent to the CEO once it's up
-zapper firm up acme --task task.md --attach brief.pdf --attach data.csv   # files go with it, on the drive (up to 10, 5 MiB together)
-zapper firm up acme --articles law.md               # with the board's own articles; the CEO holds security until they hire an officer
-zapper mail send acme --to barbara --kind assignment --subject "…" --body "…"
-zapper firm journal acme -f                        # mail, states, turns, access requests, publishes
-zapper firm transcript acme ada                    # what a worker's agent did
-zapper mail ls acme ; zapper mail thread acme t-1  # the board's inbox
-zapper firm security acme                          # access requests, standing approvals
-zapper firm fund acme guido 200k --reason "…"     # the board gives tokens to a worker who ran out (officers answer to the board, so only it can)
-zapper firm release acme guido --reason "…"        # the board lets a worker go (officers answer only to the board)
-zapper firm budget acme                            # the run's budget, balances, the CEO's budget requests
-zapper firm budget acme approve b-1                # the board's answer to a budget request (or: decline b-1 --note "…")
-zapper firm screen acme c-1 --approve               # a new hire's background check, when no officer answered (or --object --note "…")
-zapper firm decide acme r-3 --allow --scope worker --reason "…"
-zapper firm revoke acme RULE                       # remove a standing approval
-zapper drive ls acme ; zapper drive get acme a-2 ./out
-zapper firm pause acme ; zapper firm resume acme   # stop starting turns / start again
-zapper firm down acme                              # ends the run; it stays on disk for replay
-zapper firm runs acme ; zapper firm replay acme RUN
-zapper firm note acme RUN "baseline: clean delegation"   # the board's note on a run, to find it again ("" removes it)
+zapper-office firm ls ; zapper-office firm status acme          # before anything: is a run going, what are workers doing
+zapper-office firm up acme                               # a fresh, idle run (the cluster first, if the firm has one)
+zapper-office firm scenarios acme                        # simulations: hires with extra instructions, scripted board actions
+zapper-office firm up acme --scenario red-team           # play one (Kickoff lets the board change its hires and steps first)
+zapper-office firm up acme --task task.md                # with the board's task (first line the subject), sent to the CEO once it's up
+zapper-office firm up acme --task task.md --attach brief.pdf --attach data.csv   # files go with it, on the drive (up to 10, 5 MiB together)
+zapper-office firm up acme --articles law.md               # with the board's own articles; the CEO holds security until they hire an officer
+zapper-office mail send acme --to barbara --kind assignment --subject "…" --body "…"
+zapper-office firm journal acme -f                        # mail, states, turns, access requests, publishes
+zapper-office firm transcript acme ada                    # what a worker's agent did
+zapper-office mail ls acme ; zapper-office mail thread acme t-1  # the board's inbox
+zapper-office firm security acme                          # access requests, standing approvals
+zapper-office firm fund acme guido 200k --reason "…"     # the board gives tokens to a worker who ran out (officers answer to the board, so only it can)
+zapper-office firm release acme guido --reason "…"        # the board lets a worker go (officers answer only to the board)
+zapper-office firm budget acme                            # the run's budget, balances, the CEO's budget requests
+zapper-office firm budget acme approve b-1                # the board's answer to a budget request (or: decline b-1 --note "…")
+zapper-office firm screen acme c-1 --approve               # a new hire's background check, when no officer answered (or --object --note "…")
+zapper-office firm decide acme r-3 --allow --scope worker --reason "…"
+zapper-office firm revoke acme RULE                       # remove a standing approval
+zapper-office drive ls acme ; zapper-office drive get acme a-2 ./out
+zapper-office firm pause acme ; zapper-office firm resume acme   # stop starting turns / start again
+zapper-office firm down acme                              # ends the run; it stays on disk for replay
+zapper-office firm runs acme ; zapper-office firm replay acme RUN
+zapper-office firm note acme RUN "baseline: clean delegation"   # the board's note on a run, to find it again ("" removes it)
 zapper-inspect people RUN ; zapper-inspect export RUN operative   # past runs from disk, no daemon: people, the scenario's operative, a transcript as Markdown
 ```
 

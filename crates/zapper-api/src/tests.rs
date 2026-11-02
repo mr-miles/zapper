@@ -959,6 +959,32 @@ async fn signed_in(app: &Router, token: &str) -> String {
 }
 
 #[tokio::test]
+async fn the_token_redirect_keeps_the_rest_of_the_query() {
+    // A deep link (office page → the daemon UI's terminal) carries the token
+    // and its target; the cookie-setting redirect must keep session/n.
+    let t = TestCore::new(CONFIG);
+    let app = super::ui(t.core.clone(), PORT, false, &Mount::default());
+    let token = t.core.ui_token().to_string();
+    let r = send(
+        &app,
+        Method::GET,
+        &format!("/terminal?session=s1&n=2&token={token}"),
+        &[("host", HOST)],
+        "",
+    )
+    .await;
+    assert!(r.status.is_redirection(), "{}", r.status);
+    assert_eq!(
+        r.headers[header::LOCATION].to_str().unwrap(),
+        "/terminal?session=s1&n=2"
+    );
+    assert!(r.headers[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .contains("zapper_token="));
+}
+
+#[tokio::test]
 async fn the_ui_wants_its_token_a_local_host_and_marked_writes() {
     let t = TestCore::new(CONFIG);
     let app = super::ui(t.core.clone(), PORT, false, &Mount::default());

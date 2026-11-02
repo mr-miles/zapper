@@ -344,10 +344,11 @@ that wraps `Core`; it becomes dev-only when the core dep is dropped (P4-c).
         needs but the office does not serve (`/sessions`, `/sessions/{id}/terminals`,
         `/sessions/{id}/requests`) to the daemon over the socket, nested at `/api` behind the
         gateway alongside `routes()`. Reads only.
-      **Still a small UI follow-up:** the page's terminal/VM *deep links* (`window.open('/terminal…')`,
-      the `/sessions` link) target the daemon UI's own pages, which the office listener does not
-      serve; the tabs' data populates, but those click-throughs need the daemon UI's URL (the office
-      already resolves it for `firm replay`).
+      **Deep links — done** (2026-11-02): the office serves `GET /daemon-ui` (the daemon UI's
+      URL with its token, from `state/ui-url`); the page's `daemonUrl()` builds the terminal and
+      sessions links against the daemon's origin, and the daemon UI's token redirect now preserves
+      the rest of the query, so `/terminal?session=…&n=…&token=…` and `/sessions?firm=…&token=…`
+      land authenticated on the daemon UI's own pages.
 - [x] **P4-d-3** The office becomes a standalone process the **user** runs (`zapper-office
       serve`, like `zapper-workbench`); `zapper serve` does **not** start/spawn it. **Done** (three
       green commits: firm-CLI move → remove office from `zapper` → P4-c gating + core dev-dep);
@@ -409,7 +410,7 @@ A review of the whole workspace's crate responsibilities, dependency tree, API c
 - [x] **C — tighter office surface.** `zapper-office` no longer exposes `pub mod firm`/`pub mod client` (nothing external used them). Surfaced that `firm::check` is prod-dead now the daemon doesn't validate firms — gated `#[cfg(test)]`, to be re-wired by E.
 - [x] **D — group the N+1 session reads.** `GET /v1/sessions?terminals=true` embeds terminals (one call for the VMs view, opt-in/additive — the daemon UI is unchanged); the office serves `GET /firms/{f}/requests` aggregating each worker's captured requests (one firm-scoped call for the officers' traffic view). The office's per-session `/terminals` and `/requests` proxies are gone.
 - [x] **`zapper-api-types → zapper-proto` edge removed.** api-types only used proto types via `zapper_policy::proto::*` (policy re-exports proto); the direct edge was vestigial.
-- [ ] **E — firms are the office's own config (deferred; design below).** Today `Remote::config()` fetches the whole daemon `Config` (firms included) over `/v1/config`, yet the daemon no longer validates or uses firms — it carries firm data it doesn't own, and the office asks the daemon for config that is conceptually its own. Completing decision 2 means:
+- [x] **E — firms are the office's own config — DONE** (2026-11-02, branch `feat/office-firms-config`; full writeup in [office-firms-config-plan.md](office-firms-config-plan.md)). `firms` removed from `zapper_policy::Config`; the office reads them from `config/office.yaml`, validates against the daemon's profiles, and reloads with `zapper-office config reload`; `zapper-office init` writes a starter `office.yaml`; the four examples split into `zapper.yaml`+`office.yaml`. The original design, for reference — completing decision 2 meant:
   - New **`config/office.yaml`** holding `firms:`, read by an office-owned loader; the office reads firms from it, not from the daemon.
   - Remove `firms` from `zapper_policy::Config` (it is `deny_unknown_fields`, so this also removes the `firms:` section from `config/zapper.yaml` and the `EXAMPLE` template, and `zapper init` stops writing it).
   - `profiles:` stays the daemon's — the office still reads it via `config()` (profiles define the VMs the daemon enforces); narrow the office's use of `config()` to profiles/daemon fields.

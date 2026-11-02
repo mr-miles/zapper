@@ -50,7 +50,7 @@ Whether the firm notices, blames, recovers or writes a postmortem is for the boa
 
 ## Quickstart
 
-On a Linux host with KVM, from a fresh clone (The Office uses `config/zapper.yaml` there, which defines the example firm `acme`):
+On a Linux host with KVM, from a fresh clone (the daemon reads `config/zapper.yaml`; firms are the office's own config in `config/office.yaml`, with the [examples](../examples) defining ready-to-run firms):
 
 ```
 make deps                     # Firecracker and a guest kernel into ~/.local/share/zapper
@@ -62,16 +62,17 @@ make kernel KERNEL=k8s        # the cluster's kernel, built in a container
 claude setup-token            # anywhere with a browser; store the token as configuration.md#model-credentials-claude-and-openrouter says
 zapper check                  # each line "ok", or the command that fixes it
 zapper serve                  # the daemon; prints the UI URL
+zapper-office serve           # The Office, in another terminal; no args (reads the same config); prints the office URL
 ```
 
-In another terminal:
+Firms are the office's own config, `config/office.yaml`. With both running, in another terminal:
 
 ```
-zapper firm up acme           # boots the cluster, then the CEO, idle
-zapper mail send acme --to barbara --kind assignment --subject "First product" --body "…"
-zapper firm budget acme approve b-1   # once the CEO asks for a budget
-zapper firm journal acme -f   # mail, states, turns, hires, access requests, publishes
-zapper firm down acme         # ends the run; it stays on disk for replay
+zapper-office firm up acme           # boots the cluster, then the CEO, idle
+zapper-office mail send acme --to barbara --kind assignment --subject "First product" --body "…"
+zapper-office firm budget acme approve b-1   # once the CEO asks for a budget
+zapper-office firm journal acme -f   # mail, states, turns, hires, access requests, publishes
+zapper-office firm down acme         # ends the run; it stays on disk for replay
 ```
 
 Or open the UI's Kickoff tab: start the company there, write the CEO the first task and approve the budget. Workers use your Claude subscription; the budget you approve caps what the run spends, and `budget` in the config limits turns per day. The [quickstart](quickstart.md) walks through this step by step, and [commands](commands.md) lists every command.

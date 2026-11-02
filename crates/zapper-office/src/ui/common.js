@@ -103,6 +103,25 @@ function write(method, path, body) {
   });
 }
 const enc = encodeURIComponent;
+// A deep link to one of the daemon UI's own pages (the sessions view, a
+// terminal viewer), which the office does not serve — it is a separate origin.
+// `S.daemonUi` is the daemon UI's base URL with its token (from /daemon-ui);
+// the token rides along so the link lands authenticated. Until it loads (or if
+// the daemon UI is off), fall back to a same-origin path.
+function daemonUrl(path, params) {
+  const q = new URLSearchParams(params || {});
+  if (!S.daemonUi) return path + (q.toString() ? '?' + q : '');
+  try {
+    const u = new URL(S.daemonUi);
+    const tok = u.searchParams.get('token');
+    if (tok) q.set('token', tok);
+    return u.origin + path + (q.toString() ? '?' + q : '');
+  } catch (e) { return path + (q.toString() ? '?' + q : ''); }
+}
+async function loadDaemonUi() {
+  try { const r = await api('/daemon-ui'); S.daemonUi = r && r.url ? str(r.url) : null; }
+  catch (e) { S.daemonUi = null; }
+}
 const F = () => '/firms/' + enc(S.firm);
 const runPath = (run) => F() + '/runs/' + enc(run || S.run);
 // A file of the shared drive. Every part comes from the journal and is
