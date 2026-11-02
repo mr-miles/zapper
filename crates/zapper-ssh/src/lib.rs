@@ -328,6 +328,43 @@ impl<S: Sandbox> russh::server::Handler for Connection<S> {
         Ok(())
     }
 
+    // X11, agent and remote (reverse) port forwarding are refused outright —
+    // explicitly, not by leaning on russh's defaults (the gateway maps SSH
+    // only onto the workload user's terminals; see docs/security.md). russh's
+    // `x11_request` default returns Ok without a failure reply (a silent
+    // ignore), so refuse it explicitly; `agent_request`/`tcpip_forward`
+    // default to `Ok(false)` already, pinned here so an upgrade can't loosen
+    // them unnoticed.
+    async fn x11_request(
+        &mut self,
+        channel: ChannelId,
+        _single_connection: bool,
+        _x11_auth_protocol: &str,
+        _x11_auth_cookie: &str,
+        _x11_screen_number: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn agent_request(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        _address: &str,
+        _port: &mut u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     async fn channel_close(
         &mut self,
         channel: ChannelId,
@@ -668,24 +705,24 @@ mod tests {
             "remote forwarding must not be accepted: {forwarded:?}"
         );
 
-        // X11 forwarding on a session channel is not granted (refused or
-        // ignored — the server never replies Success).
+        // X11 forwarding on a session channel is explicitly refused (a channel
+        // failure, not a silent ignore).
         let mut ch = h.channel_open_session().await.unwrap();
         ch.request_x11(true, false, "MIT-MAGIC-COOKIE-1", "00", 0)
             .await
             .unwrap();
-        let granted = tokio::time::timeout(Duration::from_secs(2), async {
+        let refused = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match ch.wait().await {
-                    Some(ChannelMsg::Success) => break true,
-                    Some(ChannelMsg::Failure) | None => break false,
+                    Some(ChannelMsg::Failure) => break true,
+                    Some(ChannelMsg::Success) | None => break false,
                     Some(_) => {}
                 }
             }
         })
         .await
         .unwrap_or(false);
-        assert!(!granted, "X11 forwarding must not be granted");
+        assert!(refused, "X11 forwarding must be explicitly refused");
 
         assert!(
             fake.asked.lock().unwrap().is_empty(),

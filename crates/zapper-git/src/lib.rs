@@ -196,10 +196,15 @@ merge_into_main() {
     not_theirs "$old" "$tip"
 }
 
+# Stage each push's attributions; commit them to zapper-pushed only once every
+# ref has passed. The push is atomic, so a later refusal (exit 1) must leave no
+# record behind — the trap drops the staging file on any exit.
+staged="$GIT_DIR/zapper-pushed.staged.$$"
+trap 'rm -f "$staged"' EXIT
 while read old new ref; do
     # Who pushed each commit new to the repository, for the merge check.
     if [ "$new" != "$zero" ]; then
-        git rev-list "$new" --not --all | sed "s/\$/ $REMOTE_USER/" >> "$pushed"
+        git rev-list "$new" --not --all | sed "s/\$/ $REMOTE_USER/" >> "$staged"
     fi
     case "$ZAPPER_GIT_LEVEL" in
         admin) ;;
@@ -214,6 +219,7 @@ while read old new ref; do
             esac ;;
     esac
 done
+[ -f "$staged" ] && cat "$staged" >> "$pushed"
 exit 0
 "#;
 
@@ -345,6 +351,32 @@ mod tests {
         assert!(
             !push(&work, "dev", "refs/heads/main", "merge", "alice"),
             "alice may not merge her own commits"
+        );
+    }
+
+    // An atomic push that the hook refuses leaves no attribution in
+    // zapper-pushed (else a never-accepted commit could skew later merge
+    // checks).
+    #[test]
+    fn a_refused_push_records_no_attribution() {
+        let (bare, work) = setup("norecord");
+        install_hook(&bare, super::PRE_RECEIVE);
+        commit(&work, "ops", "a");
+        assert!(push(&work, "dev", "refs/heads/main", "admin", "ops"));
+        // A fresh commit that only ever gets refused.
+        commit(&work, "bob", "b");
+        let sha = String::from_utf8(git(&work, &[], &["rev-parse", "dev"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            !push(&work, "dev", "refs/heads/main", "write", "bob"),
+            "write to main is refused"
+        );
+        let recorded = std::fs::read_to_string(bare.join("zapper-pushed")).unwrap_or_default();
+        assert!(
+            !recorded.contains(&sha),
+            "a refused push must leave no attribution: {recorded:?}"
         );
     }
 
