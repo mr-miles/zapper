@@ -315,9 +315,8 @@ async fn inject_for(
         used(effects, headers)
             .into_iter()
             .filter_map(|name| {
-                let secret = secrets::find(&config, &own, &name)?;
-                let sendable = secrets::check(&name, secret, Use::Header, host, !plaintext).is_ok();
-                let spec = secret.source.mint_spec().filter(|_| sendable)?;
+                let (secret, allowed) = header_secret(&config, &own, &name, host, plaintext)?;
+                let spec = secret.source.mint_spec().filter(|_| allowed.is_ok())?;
                 Some((name, spec))
             })
             .collect()
@@ -338,6 +337,25 @@ async fn inject_for(
         headers,
         &minted,
     )
+}
+
+/// `name`'s secret (the config's, else the session's own) and whether it may
+/// go in a header to `host` over this connection — the find-and-check the
+/// mint pre-pass and the injection share, so the two can't drift on which
+/// `Use` or host they check. `Err` carries why it may not, for the injection
+/// to surface; the pre-pass only needs whether it is `Ok`.
+fn header_secret<'a>(
+    config: &'a zapper_policy::Config,
+    own: &'a BTreeMap<String, zapper_policy::Secret>,
+    name: &str,
+    host: &str,
+    plaintext: bool,
+) -> Option<(&'a zapper_policy::Secret, Result<(), String>)> {
+    let secret = secrets::find(config, own, name)?;
+    Some((
+        secret,
+        secrets::check(name, secret, Use::Header, host, !plaintext),
+    ))
 }
 
 /// Whether a header of the request holds `placeholder`.
@@ -378,9 +396,9 @@ pub(crate) fn inject_with(
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
-        let secret =
-            secrets::find(config, own, name).ok_or_else(|| format!("unknown secret {name}"))?;
-        secrets::check(name, secret, Use::Header, host, !plaintext)?;
+        let (secret, allowed) = header_secret(config, own, name, host, plaintext)
+            .ok_or_else(|| format!("unknown secret {name}"))?;
+        allowed?;
         match secret.source.mint_spec() {
             Some(_) => match minted.get(name) {
                 Some(v) => v
