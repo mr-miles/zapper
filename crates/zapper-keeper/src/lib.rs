@@ -754,6 +754,33 @@ mod tests {
     }
 
     #[test]
+    fn evicting_open_streams_keeps_each_chain_intact() {
+        let d = tmp();
+        let k = Keeper::new(&d, load_key(&d.join("key"), &d).unwrap());
+        let pubkey = std::fs::read_to_string(d.join("keeper.pub")).unwrap();
+        let first = "sessions/first/audit.jsonl";
+        assert_eq!(k.append(first, "a").unwrap(), 1);
+        // Open more than MAX_OPEN other streams: the open map fills, so all
+        // open streams are checkpointed and dropped — `first` among them.
+        for i in 0..=MAX_OPEN {
+            k.append(&format!("sessions/s{i}/audit.jsonl"), "x")
+                .unwrap();
+        }
+        // Re-appending to the evicted stream resumes its chain from disk (seq
+        // 2, not a restart at 1), and it still verifies unbroken.
+        assert_eq!(
+            k.append(first, "b").unwrap(),
+            2,
+            "the chain resumes after eviction"
+        );
+        k.checkpoint_all();
+        let r = verify(&d.join(first), first, &pubkey).unwrap();
+        assert_eq!(r.lines, 2);
+        assert_eq!(r.signed, 2);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
     fn a_crash_between_writes_is_chained_on_reopen() {
         let d = tmp();
         let k = Keeper::new(&d, load_key(&d.join("key"), &d).unwrap());

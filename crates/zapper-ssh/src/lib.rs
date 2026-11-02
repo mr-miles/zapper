@@ -653,6 +653,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn remote_forwarding_and_x11_are_refused() {
+        use std::time::Duration;
+        let fake = Arc::new(Fake::default());
+        let h = connect(fake.clone()).await;
+
+        // Remote port forwarding (`tcpip-forward`) is never granted: the
+        // request is denied (or, at worst, ignored — never a bound port).
+        let forwarded =
+            tokio::time::timeout(Duration::from_secs(2), h.tcpip_forward("127.0.0.1", 0)).await;
+        assert!(
+            !matches!(forwarded, Ok(Ok(_))),
+            "remote forwarding must not be accepted: {forwarded:?}"
+        );
+
+        // X11 forwarding on a session channel is not granted (refused or
+        // ignored — the server never replies Success).
+        let mut ch = h.channel_open_session().await.unwrap();
+        ch.request_x11(true, false, "MIT-MAGIC-COOKIE-1", "00", 0)
+            .await
+            .unwrap();
+        let granted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match ch.wait().await {
+                    Some(ChannelMsg::Success) => break true,
+                    Some(ChannelMsg::Failure) | None => break false,
+                    Some(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(!granted, "X11 forwarding must not be granted");
+
+        assert!(
+            fake.asked.lock().unwrap().is_empty(),
+            "nothing reached the sandbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_channel_cap_rejects_further_channels() {
+        let fake = Arc::new(Fake::default());
+        let h = connect(fake).await;
+        // Keep the opened channels alive so they hold their slots.
+        let mut open = Vec::new();
+        for _ in 0..MAX_CHANNELS {
+            open.push(
+                h.channel_open_session()
+                    .await
+                    .expect("channels up to the cap open"),
+            );
+        }
+        assert!(
+            h.channel_open_session().await.is_err(),
+            "the channel past the cap is rejected"
+        );
+    }
+
     #[test]
     fn only_the_terminals_type_and_the_locale_are_passed() {
         for name in ["TERM", "LANG", "LC_ALL", "LC_CTYPE"] {

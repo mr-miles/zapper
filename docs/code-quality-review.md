@@ -28,17 +28,14 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
 
 - [x] **A4 — core `aws::resign`: already covered (finding corrected).** The original claim was scoped too narrowly to aws.rs's *inline* `mod tests`. `resign`'s gate is exercised through the proxy datapath in `hardening_tests.rs`: `the_fake_aws_key_signs_only_where_a_rule_lists_its_secret` (the "no rule lists its secret" refusal + the guest's-own-key passthrough), `the_fake_aws_key_signs_only_for_the_secrets_hosts` (the host `check`), and `a_request_signed_with_the_fake_aws_key_is_signed_again` (happy path). No change needed.
 
-- [ ] **A5 — core `proxy::resolve` address selection untested.** `crates/zapper-core/src/daemon/proxy.rs:350`. Implements "connect only to the address you checked; reject a name that resolves only to forbidden addresses" — covered only e2e (the underlying `addr::checked` is well unit-tested).
-  **Fix:** factor the selection loop to take an iterator of `SocketAddr` (not do DNS itself) so it is unit-testable with synthetic lists.
+- [x] **A5 — core `proxy::resolve` address selection untested.** Done: factored the selection loop out of `resolve` into `first_reachable(policy, host, addrs)` (DNS stays in `resolve`); `first_reachable_skips_forbidden_and_reports_why` asserts a forbidden address is skipped for a reachable one, a name resolving only to forbidden addresses is refused, and an empty list errors.
 
-- [ ] **A6 — `zapper-ssh` forwarding/X11/agent refusals and channel cap untested.** `crates/zapper-ssh/src/lib.rs:285-465`, cap at `:306`. Refusal of remote (`tcpip-forward`), X11 and agent forwarding relies on russh *defaults*, not an explicit override — a library upgrade could weaken it silently.
-  **Fix / test:** open a remote-forward global request and an X11 request and assert both fail; open `MAX_CHANNELS+1` sessions and assert the last is rejected with `ResourceShortage`.
+- [x] **A6 — `zapper-ssh` forwarding/X11/agent refusals and channel cap untested.** Done: `remote_forwarding_and_x11_are_refused` asserts `tcpip-forward` is not granted and an X11 request is never answered Success (bounded waits), and `the_channel_cap_rejects_further_channels` opens `MAX_CHANNELS` sessions and asserts the next is rejected. The forward/X11 cases are regression canaries over russh's defaults (confirmed to refuse/ignore today); a russh upgrade that changed them would now fail here. Note: these rely on russh defaults rather than explicit `x11_request`/`agent_request`/`tcpip_forward` overrides — adding explicit rejections would make the guarantee the office's own (a small follow-up).
 
 - [x] **A7 — `zapper-client::Zapper` methods untested.** Done: `round_trips_json_raw_bytes_and_errors` serves a tiny HTTP server over a unix socket and exercises `get`/`call_raw`/`Answer::ok`. `crates/zapper-client/src/lib.rs` — `call`/`call_raw`/`stream`/`upgrade`; only the `gateway` sub-module is tested. This is the socket client both the office and workbench depend on (and `call_raw` was just added).
   **Fix / test:** a unix-socket round-trip test serving a tiny axum router (the office `standalone` tests show the pattern): assert JSON round-trip, a raw-bytes body, and an error-status path.
 
-- [ ] **A8 — `zapper-keeper` `MAX_OPEN` eviction path untested.** `crates/zapper-keeper/src/lib.rs:440-451`. Reopen-resumes-chain is tested for one stream, not across evict-then-reappend of many.
-  **Fix / test:** append to `> MAX_OPEN` distinct streams, then re-append to an early one and `verify` its chain is unbroken.
+- [x] **A8 — `zapper-keeper` `MAX_OPEN` eviction path untested.** Done: `evicting_open_streams_keeps_each_chain_intact` opens `> MAX_OPEN` streams (forcing the checkpoint-and-clear eviction), then re-appends to an evicted stream and asserts its chain resumes at seq 2 and still verifies.
 
 ## B. Large multi-responsibility functions (readability + testability)
 
@@ -110,4 +107,5 @@ Each change must keep `make lint && make test` green; security-relevant ones (A1
 
 - 2026-11-02 — Review written. (Separately, the architecture-review items A–D and the `api-types → proto` edge removal are already done; see `docs/crate-dependencies.md`. This document is the independent code-quality review.)
 - 2026-11-02 — Did the quick-wins + the named high-value test gaps: **D1** (deleted dead `board()`), **D4** (unused field + tool comment + notice wording), **A1** (git-hook integration test), **A3** (record tests), **A7** (client round-trip test), **A2** (self-decide screening guard test). **A4** turned out already covered (finding corrected). **C2** and **C5** reclassified as won't-fix / needs-care with rationale above. `make lint` green.
-  **Still open ("the rest"):** the other test gaps **A5** (proxy::resolve), **A6** (ssh forwarding/X11/cap), **A8** (keeper eviction); the larger refactors **B1–B7**, **C1**, **C3**, **C4**, **D2** (git-hook `zapper-pushed` ordering), **D3**.
+  **Still open ("the rest"):** the larger refactors **B1–B7**, **C1**, **C3**, **C4**, **D2** (git-hook `zapper-pushed` ordering), **D3**.
+- 2026-11-02 — Did the remaining test gaps: **A5** (extracted `first_reachable`, tested address selection), **A6** (ssh remote-forward/X11 refusal + channel cap), **A8** (keeper eviction keeps chains). All of section **A** is now done. `make lint` green. A possible follow-up surfaced by A6: `zapper-ssh` relies on russh defaults to refuse X11/agent/remote-forward rather than explicit handler overrides.
