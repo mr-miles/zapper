@@ -31,8 +31,13 @@ daemon:     paths, UI address, limits, private networks               (below)
 secrets:    name → source, mode and hosts                             (policy.md: Secrets)
 policy:     the global layer                                          (policy.md)
 profiles:   name → profile: the VM of a worker, facility or session   (below)
-firms:      name → org chart, budgets, officers, the firm's services  (office.md)
+images:     name → image recipe (zapper image build)
 ```
+
+Firms (`name → org chart, budgets, officers, the firm's services`) are the
+office's own config, in a separate `office.yaml` beside this file, not the
+daemon's config — the daemon neither validates nor uses them (see
+[office.md](office.md), and `zapper-office config reload`).
 
 ### daemon
 
@@ -161,11 +166,16 @@ ssh -L 7878:127.0.0.1:7878 -L 8081:127.0.0.1:8081 you@zapper-host
 
 Then open the URL `zapper serve` printed (it is also in `state/ui-url`) on your machine; the product port (`0.0.0.0:8080` in the example firm) is already on the network.
 
-To serve them to the network instead:
+To serve them to the network instead — `daemon.ui` in `zapper.yaml`, and the
+firm's `dashboard_port` in the office's `office.yaml`:
 
 ```
+# zapper.yaml
 daemon:
   ui: 0.0.0.0:7878
+```
+```
+# office.yaml
 firms:
   acme:
     dashboard_port: 0.0.0.0:8081

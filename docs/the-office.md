@@ -50,7 +50,7 @@ Whether the firm notices, blames, recovers or writes a postmortem is for the boa
 
 ## Quickstart
 
-On a Linux host with KVM, from a fresh clone (The Office uses `config/zapper.yaml` there, which defines the example firm `acme`):
+On a Linux host with KVM, from a fresh clone (the daemon reads `config/zapper.yaml`; firms are the office's own config in `config/office.yaml`, with the [examples](../examples) defining ready-to-run firms):
 
 ```
 make deps                     # Firecracker and a guest kernel into ~/.local/share/zapper

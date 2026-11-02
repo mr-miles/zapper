@@ -40,7 +40,7 @@ make image                      # ubuntu-26.04: the base profiles, and a plain s
 make image IMAGE=office         # Claude Code and pi: `zapper run -p claude`, and The Office's workers
 ```
 
-Run zapper from the repository's root: it uses `config/zapper.yaml`, tracked in the repository, whose paths are relative to it or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the config to `~/.config/zapper/zapper.yaml` and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
+Run zapper from the repository's root: it uses `config/zapper.yaml` (the daemon's config) and `config/office.yaml` (the office's firms), tracked in the repository, whose paths are relative to them or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the daemon config to `~/.config/zapper/zapper.yaml`, and `zapper-office init` writes the office's `~/.config/zapper/office.yaml` (firms) and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
 
 Run image builds in the background with a log (`make image > /tmp/zapper-image.log 2>&1`) and give the user `tail -f /tmp/zapper-image.log`.
 
@@ -103,7 +103,7 @@ crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gat
 crates/zapper-api/       the REST API (the CLI's, on a unix socket) and the web UI, over `Core`; mounts what it is given (the office's routes and page)
   src/ui.html              the web UI: state, terminal viewer, answering approvals (textContent only)
   src/assets/              xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
-crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the `firms` config (`firm.rs`), which it parses and checks
+crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the firms config (`firm.rs`), its own `office.yaml` which it parses and validates against the daemon's profiles (not the daemon's config)
   src/office.html          the office UI (org chart, messages, security, drive, statistics, replay); its stylesheet and scripts, one per tab or part, in src/ui/
 crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
 crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
@@ -114,9 +114,10 @@ crates/zapper-git/       git over HTTP for guests: `git http-backend` run as a C
 crates/zapper-workbench/ `zapper-workbench`: a layer for single users (proposal 12, part 2), a client of zapper's API on its socket; its gateway's tokens and grants, the session views it proxies, its facilities and its UI (src/ui.html)
 crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
 crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests
-config/                  zapper.yaml: the config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
+config/                  zapper.yaml: the daemon's config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
+  office.yaml              the office's own config: the firms zapper-office runs (not the daemon's — it reads and validates them; `zapper-office config reload` re-reads it)
   agents/                  office roles' agent definitions: each AGENT.md, the brief in the role's preamble, and the role's own skills/
-  skills/                  office skills any role may use; both built in (`zapper init` writes them), read live by firms through `agents_dir` and `skills_dir`
+  skills/                  office skills any role may use; both built in (`zapper-office init` writes them), read live by firms through `agents_dir` and `skills_dir`
   kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
 scripts/fetch-deps.sh    Firecracker and kernel download
 scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)

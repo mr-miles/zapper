@@ -27,7 +27,7 @@ The office runs on zapper, which provides the sandbox: each worker is a zapper s
 
 ## Configuration
 
-The repository's config ([config/zapper.yaml](../config/zapper.yaml)) has a firm `acme` and its profiles. In short:
+Firms are the office's own config, in [config/office.yaml](../config/office.yaml) (not the daemon's `zapper.yaml` — the daemon neither validates nor uses firms); their profiles stay in `zapper.yaml`. The [examples](../examples) each pair a `zapper.yaml` (profiles) with an `office.yaml` (one firm). In short, `office.yaml`:
 
 ```yaml
 firms:
@@ -90,7 +90,7 @@ Only its skills and who it is. A worker boots with its skills and a short genera
 
 ### Validation
 
-Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; every role's agent exists, and the skills it and its place need ([agents and skills](#agents-and-skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. The `firms` section is the office's: zapper-office parses and checks it with the rest of each change, so a config is validated as a whole like the rest of zapper's config. `zapper config show` prints it as written, without the defaults filled in.
+Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; every role's agent exists, and the skills it and its place need ([agents and skills](#agents-and-skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. Firms are the office's own config (`office.yaml`): zapper-office reads them, validates them against the daemon's profiles, and holds them; `zapper-office config reload` re-reads the file and applies it atomically (validated as a whole, or nothing changes). A run snapshots its firm at `firm up`, so a reload doesn't disturb running firms.
 
 The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network and exec rules still apply to running workers at once, as for any session.
 
