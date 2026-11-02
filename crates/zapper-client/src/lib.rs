@@ -354,6 +354,18 @@ pub mod gateway {
     }
 }
 
+/// `s` as a URL's query value (percent-encoded).
+pub fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,11 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_trips_json_raw_bytes_and_errors() {
-        let sock = std::env::temp_dir().join(format!(
-            "zc-{}-{}.sock",
-            std::process::id(),
-            crate::url_encode("t")
-        ));
+        let sock = std::env::temp_dir().join(format!("zc-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         serve(sock.clone()).await;
         let z = Zapper::new(sock.clone());
@@ -426,16 +434,4 @@ mod tests {
 
         let _ = std::fs::remove_file(&sock);
     }
-}
-
-/// `s` as a URL's query value (percent-encoded).
-pub fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            b => format!("%{b:02X}"),
-        })
-        .collect()
 }

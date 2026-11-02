@@ -270,7 +270,7 @@ pub fn ask(
     sec.requests.insert(id.clone(), r);
     drop(sec);
     if board {
-        run.notice(BOARD, &format!("Access request {id}"), &format!("[Automatic notice] An access request needs the board's decision{}.\n\n{text}\nDecide it in the UI's Security tab.\n", " (the firm has no other officer)"));
+        run.notice(BOARD, &format!("Access request {id}"), &format!("[Automatic notice] An access request needs the board's decision (no officer can decide it).\n\n{text}\nDecide it in the UI's Security tab.\n"));
     } else if let Some(o) = officer.and_then(|o| run.rt(&o)) {
         o.access_queue.lock().unwrap().push(id.clone());
         o.wake.notify_one();

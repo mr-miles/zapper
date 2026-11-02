@@ -14,21 +14,19 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
 
 ## A. Test gaps on security-sensitive code (highest value)
 
-- [ ] **A1 — `zapper-git` branch-protection hook has zero tests.** `crates/zapper-git/src/lib.rs:154-218` (`PRE_RECEIVE`). The embedded shell script *is* the crate's security purpose (keep `write` off `main`/`main/*`/tags, confine `merge` to a clean fast-forward of someone else's branch with nothing added, let `admin` through). A regression in the string silently weakens branch protection with no signal.
+- [x] **A1 — `zapper-git` branch-protection hook has zero tests.** Done: `hook_enforces_branch_protection` + `local_admin_with_no_level_is_the_operator` drive real pushes at each level. `crates/zapper-git/src/lib.rs:154-218` (`PRE_RECEIVE`). The embedded shell script *is* the crate's security purpose (keep `write` off `main`/`main/*`/tags, confine `merge` to a clean fast-forward of someone else's branch with nothing added, let `admin` through). A regression in the string silently weakens branch protection with no signal.
   **Fix / test:** a shell-level integration test — init a bare repo, install the hook, assert: `write` pushing `main`, `main/x`, a tag is refused but a plain branch succeeds; `merge` fast-forwards `main` to another user's tip but refuses a tip containing the merger's own commits (both the `zapper-pushed` and author/committer-name paths) and refuses a merge commit whose tree adds anything (`merge-tree` mismatch); `admin` bypasses all; `pre_receive_with_local_admin()` exits 0 when `ZAPPER_GIT_LEVEL` is unset.
   *Verified:* hook present and untested.
 
-- [ ] **A2 — `zapper-office/security.rs` has one test for 1578 lines.** The office's defining invariants — "nobody decides their own hire's background check" (`decide_screening`, `src/security.rs:433`, `if s.by == by`) and "never the requester" (`pick_officer`, `:141`) — are exercised only indirectly via `tools_tests.rs`.
+- [x] **A2 — `zapper-office/security.rs` has one test for 1578 lines.** Done: `nobody_decides_their_own_hires_background_check` drives the self-decide guard directly — the hiring officer is refused their own hire's check, the board decides it. (A reusable `may_screen` predicate extraction is still worthwhile but not required for the test.) The office's defining invariants — "nobody decides their own hire's background check" (`decide_screening`, `src/security.rs:433`, `if s.by == by`) and "never the requester" (`pick_officer`, `:141`) — are exercised only indirectly via `tools_tests.rs`.
   **Fix / test:** extract the guards into small pure predicates (e.g. `may_screen(officer, screening)`), then add direct negative tests: an officer who is also the hirer of a pending check is refused while a second officer is allowed.
   *Verified:* `grep -c '#\[test\]' security.rs` = 1.
 
-- [ ] **A3 — `zapper-record` has zero tests**, including `healthy()`, the flag that stops the daemon taking firm turns on a keeper-append failure (AGENTS.md invariant). `crates/zapper-record/src/lib.rs`.
+- [x] **A3 — `zapper-record` has zero tests**, including `healthy()`, the flag that stops the daemon taking firm turns on a keeper-append failure (AGENTS.md invariant). `crates/zapper-record/src/lib.rs`.
   **Fix / test:** assert path→stream routing (`stream()`/`view()`, :77-92 — a `state` path with a valid stream suffix routes to the keeper, a non-matching path writes locally); a failing keeper append flips `healthy()` false and a later success flips it back (:137-146); `Writer::line` rejects a line containing `\n`; `verify_dir` (:178-216) on a tampered stream.
   *Verified:* 0 files with `#[cfg(test)]` in the crate.
 
-- [ ] **A4 — core `aws::resign` has no unit test.** `crates/zapper-core/src/daemon/proxy/aws.rs:624`. The fake-key re-signing gate (the named secret must be rule-listed and sendable to `host`, else the request is refused) — a security invariant covered only end-to-end; the `tests` module exercises only `sign()`/`Chunks`.
-  **Fix / test:** drive `resign` with a fake-key request against configs where the secret is / isn't listed and `host` is / isn't allowed; assert refuse vs sign.
-  *Verified:* `resign(` appears only at its definition.
+- [x] **A4 — core `aws::resign`: already covered (finding corrected).** The original claim was scoped too narrowly to aws.rs's *inline* `mod tests`. `resign`'s gate is exercised through the proxy datapath in `hardening_tests.rs`: `the_fake_aws_key_signs_only_where_a_rule_lists_its_secret` (the "no rule lists its secret" refusal + the guest's-own-key passthrough), `the_fake_aws_key_signs_only_for_the_secrets_hosts` (the host `check`), and `a_request_signed_with_the_fake_aws_key_is_signed_again` (happy path). No change needed.
 
 - [ ] **A5 — core `proxy::resolve` address selection untested.** `crates/zapper-core/src/daemon/proxy.rs:350`. Implements "connect only to the address you checked; reject a name that resolves only to forbidden addresses" — covered only e2e (the underlying `addr::checked` is well unit-tested).
   **Fix:** factor the selection loop to take an iterator of `SocketAddr` (not do DNS itself) so it is unit-testable with synthetic lists.
@@ -36,7 +34,7 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
 - [ ] **A6 — `zapper-ssh` forwarding/X11/agent refusals and channel cap untested.** `crates/zapper-ssh/src/lib.rs:285-465`, cap at `:306`. Refusal of remote (`tcpip-forward`), X11 and agent forwarding relies on russh *defaults*, not an explicit override — a library upgrade could weaken it silently.
   **Fix / test:** open a remote-forward global request and an X11 request and assert both fail; open `MAX_CHANNELS+1` sessions and assert the last is rejected with `ResourceShortage`.
 
-- [ ] **A7 — `zapper-client::Zapper` methods untested.** `crates/zapper-client/src/lib.rs` — `call`/`call_raw`/`stream`/`upgrade`; only the `gateway` sub-module is tested. This is the socket client both the office and workbench depend on (and `call_raw` was just added).
+- [x] **A7 — `zapper-client::Zapper` methods untested.** Done: `round_trips_json_raw_bytes_and_errors` serves a tiny HTTP server over a unix socket and exercises `get`/`call_raw`/`Answer::ok`. `crates/zapper-client/src/lib.rs` — `call`/`call_raw`/`stream`/`upgrade`; only the `gateway` sub-module is tested. This is the socket client both the office and workbench depend on (and `call_raw` was just added).
   **Fix / test:** a unix-socket round-trip test serving a tiny axum router (the office `standalone` tests show the pattern): assert JSON round-trip, a raw-bytes body, and an error-status path.
 
 - [ ] **A8 — `zapper-keeper` `MAX_OPEN` eviction path untested.** `crates/zapper-keeper/src/lib.rs:440-451`. Reopen-resumes-chain is tested for one stream, not across evict-then-reappend of many.
@@ -71,7 +69,7 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
   **Fix:** extract a shared pending-decision-queue (assign/reassign/escalate/notify over a trait for network-request vs screening vs credential-request); each module keeps only its domain-specific rule effects. Lets the queue invariants be unit-tested once. Biggest structural win.
   *Verified:* parallel `Request`/`decide`/`escalate`/`tick`/reassign in both files.
 
-- [ ] **C2 — `read_frame` triplicated.** `zapper-driver/src/lib.rs:22`, `zapper-ssh/src/lib.rs:271`, `zapper-core/src/daemon/session/terminal.rs:322` — identical 5-byte-header read → `Frame::header` → `vec![0; len]` → `read_exact` → `Frame::decode` (the `debug_assert!(len <= MAX_FRAME)` is redundant; the bound is enforced in `Frame::header`).
+- [~] **C2 — `read_frame` triplicated — won't fix (no clean home).** Confirmed three copies (driver `lib.rs:22`, ssh `lib.rs:271`, core `session/terminal.rs:322`). But all three need `tokio::io::AsyncRead`, and `zapper-proto` (where `Frame` lives) has no tokio dep and is linked by the guest agent — adding tokio there to host the shared reader would bloat the base protocol crate; `zapper-policy` forbids I/O; `zapper-ssh` depends on neither higher crate. The three ~8-line copies (bounded by `Frame::header`) are the lesser evil. Original finding: `zapper-driver/src/lib.rs:22`, `zapper-ssh/src/lib.rs:271`, `zapper-core/src/daemon/session/terminal.rs:322` — identical 5-byte-header read → `Frame::header` → `vec![0; len]` → `read_exact` → `Frame::decode` (the `debug_assert!(len <= MAX_FRAME)` is redundant; the bound is enforced in `Frame::header`).
   **Fix:** one `read_frame` in `zapper-proto` next to `Frame`; all three call it.
   *Verified:* three definitions.
 
@@ -82,12 +80,12 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
 - [ ] **C4 — core datapath fail-logging repeated.** `proxy.rs:433,446`, `relay.rs:123`, `inspect.rs:145` — the `log(NetLog{ error: Some(..), .. }) + note_failure(..)` pairing recurs at every failure site; the event and the record must agree and are easy to desync.
   **Fix:** one `fail_request(d, s, rec, net, v, status, error)` helper covering both.
 
-- [ ] **C5 — office small duplications.** The founding-officer test `chart.is_officer(w) && chart.root() != Some(w) && run.config.worker(w).is_some()` is inlined 3× (`workforce.rs:520,687-688,697`) → `chart.is_founding_officer(run, w)`. The funds-`"move"` journal `json!` appears 8× across `workforce.rs`/`contracts.rs` → `run.journal_move(from, to, tokens, reason)`. `security::decide` (`:939-995`) role-vs-worker branches are copy-paste → compute `(scope, target)` first, build `Standing` once. `inject_for`/`value_of` (`core proxy/inspect.rs:304,380`) look up + policy-check each secret twice per request → hand the resolved `(secret, sendable)` forward.
+- [~] **C5 — office small duplications — needs care, deferred.** On inspection the "duplicates" aren't identical: the founding-officer test at `workforce.rs:688` adds a `run.config.worker(w)` check that `:520`/`:697` omit, and the funds-`"move"` sites carry varying extra keys (e.g. `"granted"` at `:963`). Unifying them blindly could change office security/accounting behavior, so each site needs individual judgment rather than a blanket helper — left for a focused pass. Original finding: The founding-officer test `chart.is_officer(w) && chart.root() != Some(w) && run.config.worker(w).is_some()` is inlined 3× (`workforce.rs:520,687-688,697`) → `chart.is_founding_officer(run, w)`. The funds-`"move"` journal `json!` appears 8× across `workforce.rs`/`contracts.rs` → `run.journal_move(from, to, tokens, reason)`. `security::decide` (`:939-995`) role-vs-worker branches are copy-paste → compute `(scope, target)` first, build `Standing` once. `inject_for`/`value_of` (`core proxy/inspect.rs:304,380`) look up + policy-check each secret twice per request → hand the resolved `(secret, sendable)` forward.
   *Verified:* founding-officer test inlined 3×.
 
 ## D. Dead code / unnecessary steps / minor
 
-- [ ] **D1 — `office ops::board()` is dead** (`src/ops.rs:1400-1403`, `#[allow(dead_code)]`, no callers). Delete it and the silencer.
+- [x] **D1 — `office ops::board()` is dead** (`src/ops.rs:1400-1403`, `#[allow(dead_code)]`, no callers). Delete it and the silencer.
   *Verified:* only test *names* match `board`; no call sites.
 
 - [ ] **D2 — git hook appends `zapper-pushed` before it can `refuse`** (`zapper-git/src/lib.rs:199-203`). The `git rev-list … >> "$pushed"` runs per ref at the top of the loop; because the push is atomic, a later `refuse` leaves attribution lines for commits that never entered the repo, which can only make future `not_theirs` merge checks over-refuse.
@@ -96,7 +94,7 @@ The codebase is in good health: almost no dead-code markers (two `#[allow(dead_c
 
 - [ ] **D3 — core `inject_for`/`value_of` recompute** `find`+`check` per secret (`proxy/inspect.rs:304,380`) — see C5; the second policy check is pure recomputation.
 
-- [ ] **D4 — minor.** `office skills.rs` `Front.description` (`:113`) is parsed but never read (no `deny_unknown_fields`, so not even needed to accept the key). `ops.rs` TOOLS lists `"contracts"` twice (`:797,:855`, differ only by `shown`) — add a comment or merge with a predicate. `security.rs:273` builds a board notice with `format!` interpolating a constant literal and always emits a parenthetical ("the firm has no other officer") that isn't always the true reason.
+- [x] **D4 — minor (done).** Removed the unused `Front.description` field; added a comment clarifying the two disjoint `contracts` TOOLS entries; replaced the board access-notice's pointless `format!` constant arg and always-on "(the firm has no other officer)" with the truthful "(no officer can decide it)". Original: `office skills.rs` `Front.description` (`:113`) is parsed but never read (no `deny_unknown_fields`, so not even needed to accept the key). `ops.rs` TOOLS lists `"contracts"` twice (`:797,:855`, differ only by `shown`) — add a comment or merge with a predicate. `security.rs:273` builds a board notice with `format!` interpolating a constant literal and always emits a parenthetical ("the firm has no other officer") that isn't always the true reason.
 
 ---
 
@@ -110,4 +108,6 @@ Each change must keep `make lint && make test` green; security-relevant ones (A1
 
 ## Progress log
 
-- 2026-11-02 — Review written; nothing from this document implemented yet. (Separately, the architecture-review items A–D and the `api-types → proto` edge removal are already done; see `docs/crate-dependencies.md` and `docs/office-process-step4-plan.md`. This document is the code-quality review and is independent of those.)
+- 2026-11-02 — Review written. (Separately, the architecture-review items A–D and the `api-types → proto` edge removal are already done; see `docs/crate-dependencies.md`. This document is the independent code-quality review.)
+- 2026-11-02 — Did the quick-wins + the named high-value test gaps: **D1** (deleted dead `board()`), **D4** (unused field + tool comment + notice wording), **A1** (git-hook integration test), **A3** (record tests), **A7** (client round-trip test), **A2** (self-decide screening guard test). **A4** turned out already covered (finding corrected). **C2** and **C5** reclassified as won't-fix / needs-care with rationale above. `make lint` green.
+  **Still open ("the rest"):** the other test gaps **A5** (proxy::resolve), **A6** (ssh forwarding/X11/cap), **A8** (keeper eviction); the larger refactors **B1–B7**, **C1**, **C3**, **C4**, **D2** (git-hook `zapper-pushed` ordering), **D3**.

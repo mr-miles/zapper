@@ -109,9 +109,8 @@ pub fn agents_dir(firm: &Firm) -> PathBuf {
 #[derive(Deserialize)]
 struct Front {
     name: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    description: String,
+    // `description:` in the frontmatter is for the reader; it is ignored here
+    // (no `deny_unknown_fields`, so it needs no field to be accepted).
     /// Skills from the firm's skills directory the role uses.
     #[serde(default)]
     skills: Vec<String>,

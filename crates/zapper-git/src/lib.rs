@@ -246,13 +246,7 @@ mod tests {
 
     /// A commit authored and committed by `who`, pushed to `ref` with `level`
     /// as `user`; returns whether the push was accepted.
-    fn push(
-        work: &Path,
-        local: &str,
-        refspec: &str,
-        level: &str,
-        user: &str,
-    ) -> bool {
+    fn push(work: &Path, local: &str, refspec: &str, level: &str, user: &str) -> bool {
         git(
             work,
             &[("ZAPPER_GIT_LEVEL", level), ("REMOTE_USER", user)],
@@ -295,7 +289,11 @@ mod tests {
         assert!(git(&root, &[], &["init", "-b", "dev", "work"])
             .status
             .success());
-        git(&work, &[], &["remote", "add", "origin", bare.to_str().unwrap()]);
+        git(
+            &work,
+            &[],
+            &["remote", "add", "origin", bare.to_str().unwrap()],
+        );
         (bare, work)
     }
 
@@ -308,22 +306,46 @@ mod tests {
 
         // admin starts main (write/merge both refuse a non-existent main).
         commit(&work, "ops", "a");
-        assert!(push(&work, "dev", "refs/heads/main", "admin", "ops"), "admin creates main");
+        assert!(
+            push(&work, "dev", "refs/heads/main", "admin", "ops"),
+            "admin creates main"
+        );
 
         // write: a branch is fine; main, under main/, and tags are refused.
         commit(&work, "bob", "b"); // dev is now ahead of main by one (bob's)
-        assert!(push(&work, "dev", "refs/heads/topic", "write", "bob"), "write pushes a branch");
-        assert!(!push(&work, "dev", "refs/heads/main", "write", "bob"), "write must not touch main");
-        assert!(!push(&work, "dev", "refs/heads/main/x", "write", "bob"), "write must not touch main/*");
-        assert!(!push(&work, "dev", "refs/tags/v1", "write", "bob"), "write must not push tags");
+        assert!(
+            push(&work, "dev", "refs/heads/topic", "write", "bob"),
+            "write pushes a branch"
+        );
+        assert!(
+            !push(&work, "dev", "refs/heads/main", "write", "bob"),
+            "write must not touch main"
+        );
+        assert!(
+            !push(&work, "dev", "refs/heads/main/x", "write", "bob"),
+            "write must not touch main/*"
+        );
+        assert!(
+            !push(&work, "dev", "refs/tags/v1", "write", "bob"),
+            "write must not push tags"
+        );
 
         // merge: fast-forward main to someone else's branch tip is allowed…
-        assert!(push(&work, "dev", "refs/heads/main", "merge", "alice"), "merge fast-forwards others' work into main");
+        assert!(
+            push(&work, "dev", "refs/heads/main", "merge", "alice"),
+            "merge fast-forwards others' work into main"
+        );
 
         // …but merging your own work is refused (the self-merge guard).
         commit(&work, "alice", "c");
-        assert!(push(&work, "dev", "refs/heads/topic2", "write", "alice"), "write pushes alice's branch");
-        assert!(!push(&work, "dev", "refs/heads/main", "merge", "alice"), "alice may not merge her own commits");
+        assert!(
+            push(&work, "dev", "refs/heads/topic2", "write", "alice"),
+            "write pushes alice's branch"
+        );
+        assert!(
+            !push(&work, "dev", "refs/heads/main", "merge", "alice"),
+            "alice may not merge her own commits"
+        );
     }
 
     // The local-admin variant: a push on the host with no level set is the

@@ -852,6 +852,9 @@ static TOOLS: &[Tool] = &[
             )
         }),
     },
+    // A second `contracts` entry, deliberately: `shown` is disjoint with the
+    // hirer's one above (contractor vs budget+hires), so `dispatch` offers
+    // exactly one, with wording for that side.
     Tool {
         name: "contracts",
         shown: |p| p.contractor,

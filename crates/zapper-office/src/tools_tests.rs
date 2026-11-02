@@ -730,6 +730,64 @@ async fn a_hired_officer_decides_nothing_before_clearance() {
     ok(&t, &run, "kim", "access_requests", json!({})).await;
 }
 
+// Nobody decides their own hire's background check: the officer who hired a
+// worker is refused their check, and the board (or another officer) decides it.
+// A firm whose CEO is its sole security officer and does the hiring, so the
+// hirer is an officer.
+const FIRM_CEO_OFFICER: &str = "
+profiles:
+  w: { agent: { kind: claude-code }, policy: { net: [] } }
+firms:
+  acme:
+    budget: { seed: 1000000, security_share: 0.2 }
+    security: { officers: [ceo] }
+    roles:
+      ceo: { profile: w, agent: ceo, hires: [eng], officer: true }
+      eng: { profile: w, agent: software-engineer }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: pat, role: eng, reports_to: ceo }
+";
+
+#[tokio::test]
+async fn nobody_decides_their_own_hires_background_check() {
+    let t = crate::test_core(FIRM_CEO_OFFICER);
+    let run = test_run(&t.core, "acme");
+    approved(&t, &run).await;
+    let hired = ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "budget": "100k", "subject": "Eng", "brief": "code", "reason": "help", "name": "sam" }),
+    )
+    .await;
+    assert_eq!(hired["worker"], "sam", "{hired}");
+    let id = run
+        .security
+        .lock()
+        .unwrap()
+        .screenings
+        .values()
+        .find(|s| s.worker == "sam")
+        .expect("sam's background check")
+        .id
+        .clone();
+
+    // The CEO hired sam and is the only officer: they cannot decide the check.
+    let err = security::decide_screening(&run, "ceo", &id, false, "I hired them", &json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("you hired"), "{err}");
+
+    // The board can.
+    security::decide_screening(&run, crate::firm::BOARD, &id, true, "ok", &json!([])).unwrap();
+    assert_eq!(
+        run.security.lock().unwrap().screenings[&id].state,
+        "cleared"
+    );
+}
+
 #[tokio::test]
 async fn credentials_are_asked_for_and_a_policy_owner_grants_them() {
     let (t, run) = run();
