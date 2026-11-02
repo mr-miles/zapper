@@ -516,6 +516,63 @@ pub(crate) fn upstream_uri(host: &str, port: u16, path: &str, h2: bool) -> hyper
         .unwrap_or_default()
 }
 
+/// The pre-dispatch validation of an inspected request: the path the upstream
+/// will act on is the path forwarded (one whose meaning depends on the
+/// upstream is refused), the record is started with the headers as the guest
+/// sent them, and a method override is refused. `Ok` is the validated
+/// `(net, rec, path)` for the dispatch; `Err` is the refusal response, already
+/// logged and noted.
+fn prepare_inspected(
+    d: &Arc<Daemon>,
+    s: &Arc<Session>,
+    req: &Request<Incoming>,
+    host: &str,
+    port: u16,
+    scheme: &'static str,
+) -> Result<(NetRequest, httplog::Shared, String), Box<Response<Body>>> {
+    let sent = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    let normalized = super::sanitize::normalize_path(&sent);
+    let path = normalized.clone().unwrap_or_else(|_| sent.clone());
+    let net = NetRequest {
+        host: host.to_string(),
+        port,
+        method: Some(req.method().to_string()),
+        path: Some(path.clone()),
+        ..Default::default()
+    };
+    // Headers as the guest sent them: before secrets are added.
+    let rec = s.requests.lock().unwrap().start(
+        scheme,
+        req.method().as_str(),
+        host,
+        port,
+        Some(&path),
+        httplog::headers(req.headers()),
+    );
+    let refused = match normalized {
+        Err(why) => Some((StatusCode::BAD_REQUEST, format!("{why}: {sent}"))),
+        Ok(_) => super::sanitize::method_override(req.method().as_str(), &path, req.headers())
+            .map(|why| (StatusCode::FORBIDDEN, why)),
+    };
+    if let Some((status, why)) = refused {
+        log(
+            d,
+            s,
+            NetLog {
+                error: Some(why.clone()),
+                ..NetLog::new(&net, None, true)
+            },
+        );
+        note_failure(s, &rec, status.as_u16(), Some(why.clone()));
+        return Err(Box::new(text(status, why)));
+    }
+    Ok((net, rec, path))
+}
+
 /// Decides, cleans, injects, and forwards one inspected request, then logs the
 /// outcome. The shared body of the TLS (`inspected`) and plain (`forward_plain`)
 /// paths; `send` shapes the request for the negotiated protocol and dispatches
@@ -536,48 +593,10 @@ where
     F: FnOnce(hyper::http::request::Parts, Body, String) -> Fut,
     Fut: std::future::Future<Output = Result<Response<Incoming>, (StatusCode, String)>>,
 {
-    let sent = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/".into());
-    // Rules judge the path the upstream will act on, and that is the path
-    // forwarded; one whose meaning depends on the upstream is refused.
-    let normalized = super::sanitize::normalize_path(&sent);
-    let path = normalized.clone().unwrap_or_else(|_| sent.clone());
-    let net = NetRequest {
-        host: host.clone(),
-        port,
-        method: Some(req.method().to_string()),
-        path: Some(path.clone()),
-        ..Default::default()
+    let (net, rec, path) = match prepare_inspected(d, s, &req, &host, port, scheme) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
     };
-    // Headers as the guest sent them: before secrets are added.
-    let rec = s.requests.lock().unwrap().start(
-        scheme,
-        req.method().as_str(),
-        &host,
-        port,
-        Some(&path),
-        httplog::headers(req.headers()),
-    );
-    let refused = match normalized {
-        Err(why) => Some((StatusCode::BAD_REQUEST, format!("{why}: {sent}"))),
-        Ok(_) => super::sanitize::method_override(req.method().as_str(), &path, req.headers())
-            .map(|why| (StatusCode::FORBIDDEN, why)),
-    };
-    if let Some((status, why)) = refused {
-        log(
-            d,
-            s,
-            NetLog {
-                error: Some(why.clone()),
-                ..NetLog::new(&net, None, true)
-            },
-        );
-        note_failure(s, &rec, status.as_u16(), Some(why.clone()));
-        return text(status, why);
-    }
     let v = decide(d, s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {
