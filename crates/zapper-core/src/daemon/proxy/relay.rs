@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use zapper_policy::{NetProtocol, NetRequest};
 
-use super::{dial, log, note_failure, note_verdict, NetLog, Prefixed, Target, Verdict};
+use super::{dial, fail_log, log, note_verdict, NetLog, Prefixed, Target, Verdict};
 use crate::daemon::dbwire::{cassandra, kafka, mongodb, mysql, pgwire, redis, tds};
 use crate::daemon::session::Session;
 use crate::daemon::{httplog, services, tls, Daemon};
@@ -121,15 +121,14 @@ pub(super) async fn relay_database<S>(
             .start_connect(proto.scheme(), &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
     let fail = |status, error: String| {
-        log(
+        fail_log(
             d,
             s,
-            NetLog {
-                error: Some(error.clone()),
-                ..NetLog::new(endpoint, Some(&v), false)
-            },
+            &rec,
+            NetLog::new(endpoint, Some(&v), false),
+            status,
+            Some(error),
         );
-        note_failure(s, &rec, status, Some(error));
     };
 
     // The relay only serves a real network address, never a daemon service.
@@ -154,13 +153,16 @@ pub(super) async fn relay_database<S>(
 
     let host = endpoint.host.as_str();
     let outcome = match proto {
+        // Postgres, MySQL and TDS each parse a bespoke startup/handshake and
+        // hand the guest protocol-specific post-auth bytes.
         NetProtocol::Postgres => pg_exchange(s, guest, first, server, host, &cred).await,
-        NetProtocol::Redis => redis_exchange(s, guest, first, server, host, &cred).await,
-        NetProtocol::Cassandra => cassandra_exchange(s, guest, first, server, host, &cred).await,
-        NetProtocol::Mongodb => mongodb_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Mysql => mysql_exchange(s, guest, first, server, host, &cred).await,
         NetProtocol::Tds => tds_exchange(s, guest, first, server, host, &cred).await,
-        NetProtocol::Kafka => kafka_exchange(s, guest, first, server, host, &cred).await,
+        // The rest share one shape — negotiate both legs, authenticate the
+        // server leg, send the guest nothing — and differ only in the auth call.
+        NetProtocol::Redis | NetProtocol::Cassandra | NetProtocol::Mongodb | NetProtocol::Kafka => {
+            simple_relay(s, guest, first, server, host, &cred, proto).await
+        }
         NetProtocol::Tcp => unreachable!("tcp is not a database protocol"),
     };
     let Relayed {
@@ -288,80 +290,65 @@ where
     Ok((guest, false, startup))
 }
 
-/// Redis/Valkey: the guest holds no password and never authenticates; the proxy
-/// issues one `AUTH` on the server leg with the host-held credential, then
-/// splices. The guest's commands run on that pre-authenticated connection.
-async fn redis_exchange<S>(
+/// The shared relay for the protocols whose handshake is "negotiate both legs,
+/// authenticate the server leg, present the guest as logged in with no
+/// fabricated bytes": Redis, Cassandra, MongoDB and Kafka. The guest leg (TLS
+/// terminated with the session CA, or plaintext) and the mirrored server leg
+/// are identical across them; only the per-protocol auth call differs:
+///
+/// - **Redis/Valkey:** the guest holds no password and never authenticates; one
+///   `AUTH` on the server leg with the host-held credential, then splice.
+/// - **Cassandra (CQL):** relay the guest's OPTIONS/STARTUP and answer the
+///   server's auth with SASL/PLAIN, fabricating a READY for the guest — the one
+///   case that touches the guest leg during auth.
+/// - **MongoDB:** authenticate the server leg over SCRAM-SHA-256 (`OP_MSG`
+///   SASL); the `database` pin is the auth source (default `admin`).
+/// - **Kafka:** authenticate the server leg with SASL using the secret's
+///   mechanism.
+async fn simple_relay<S>(
     s: &Arc<Session>,
     guest: S,
     first: Vec<u8>,
     server: TcpStream,
     host: &str,
     cred: &DbCred,
-) -> Result<Relayed, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
-    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
-    redis::authenticate(&mut server, &cred.user, &cred.password).await?;
-    Ok(Relayed {
-        guest,
-        server,
-        to_guest: vec![],
-    })
-}
-
-/// Cassandra (CQL): relay the guest's OPTIONS/STARTUP to the server and, when
-/// the server demands auth, answer it with SASL/PLAIN using the host-held
-/// credential, then fabricate a READY for the guest. Then splice.
-async fn cassandra_exchange<S>(
-    s: &Arc<Session>,
-    guest: S,
-    first: Vec<u8>,
-    server: TcpStream,
-    host: &str,
-    cred: &DbCred,
+    proto: NetProtocol,
 ) -> Result<Relayed, String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut guest, guest_tls) = guest_leg(s, guest, first, host).await?;
     let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
-    cassandra::handshake(&mut guest, &mut server, &cred.user, &cred.password).await?;
-    Ok(Relayed {
-        guest,
-        server,
-        to_guest: vec![],
-    })
-}
-
-/// MongoDB: the guest holds no password and never authenticates; the proxy
-/// authenticates the server leg over SCRAM-SHA-256 (`OP_MSG` SASL), then
-/// splices. The guest's `hello` and commands run on that connection. The
-/// `database` pin is the auth source (default `admin`).
-async fn mongodb_exchange<S>(
-    s: &Arc<Session>,
-    guest: S,
-    first: Vec<u8>,
-    server: TcpStream,
-    host: &str,
-    cred: &DbCred,
-) -> Result<Relayed, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
-    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
-    let auth_db = cred.database.as_deref().unwrap_or("admin");
-    mongodb::authenticate(
-        &mut server,
-        &cred.user,
-        &cred.password,
-        auth_db,
-        &scram_nonce(),
-    )
-    .await?;
+    match proto {
+        NetProtocol::Redis => {
+            redis::authenticate(&mut server, &cred.user, &cred.password).await?;
+        }
+        NetProtocol::Cassandra => {
+            cassandra::handshake(&mut guest, &mut server, &cred.user, &cred.password).await?;
+        }
+        NetProtocol::Mongodb => {
+            let auth_db = cred.database.as_deref().unwrap_or("admin");
+            mongodb::authenticate(
+                &mut server,
+                &cred.user,
+                &cred.password,
+                auth_db,
+                &scram_nonce(),
+            )
+            .await?;
+        }
+        NetProtocol::Kafka => {
+            kafka::authenticate(
+                &mut server,
+                &cred.mechanism,
+                &cred.user,
+                &cred.password,
+                &scram_nonce(),
+            )
+            .await?;
+        }
+        other => unreachable!("simple_relay is not a {other} relay"),
+    }
     Ok(Relayed {
         guest,
         server,
@@ -561,38 +548,6 @@ where
         guest,
         server,
         to_guest: tds::frame(tds::PKT_RESPONSE, &resp),
-    })
-}
-
-/// Kafka: the guest holds no credential and connects as a plaintext Kafka
-/// client; the proxy authenticates the server leg with SASL (the secret's
-/// mechanism), then splices. The guest's requests run on the authenticated
-/// connection.
-async fn kafka_exchange<S>(
-    s: &Arc<Session>,
-    guest: S,
-    first: Vec<u8>,
-    server: TcpStream,
-    host: &str,
-    cred: &DbCred,
-) -> Result<Relayed, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (guest, guest_tls) = guest_leg(s, guest, first, host).await?;
-    let mut server = server_leg(server, host, guest_tls, cred.plaintext).await?;
-    kafka::authenticate(
-        &mut server,
-        &cred.mechanism,
-        &cred.user,
-        &cred.password,
-        &scram_nonce(),
-    )
-    .await?;
-    Ok(Relayed {
-        guest,
-        server,
-        to_guest: vec![],
     })
 }
 

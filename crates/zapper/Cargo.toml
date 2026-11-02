@@ -5,20 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["office"]
-# The Office: firms of workers, their mail, drive, security officers and
-# cluster. Without it (`--no-default-features`), zapper runs sessions only.
-office = ["dep:zapper-office"]
-
 [dependencies]
 zapper-core = { path = "../zapper-core", default-features = false }
 zapper-api = { path = "../zapper-api" }
-zapper-office = { path = "../zapper-office", optional = true }
 zapper-policy = { path = "../zapper-policy" }
 zapper-keeper = { path = "../zapper-keeper" }
 zapper-github = { path = "../zapper-github" }
 zapper-ssh = { path = "../zapper-ssh" }
+zapper-util = { path = "../zapper-util" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -115,10 +115,17 @@ async fn handle(run: &FirmRun, mut req: Request<Incoming>, port: u32) -> Respons
         .and_then(|h| h.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let Some(cluster) = run.facility.cluster.lock().unwrap().clone() else {
+    let Some(id) = run
+        .facility
+        .cluster
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.id().to_string())
+    else {
         return text(StatusCode::BAD_GATEWAY, "the firm's cluster isn't running");
     };
-    let io = match super::facility::vsock_connect(&cluster, port).await {
+    let io = match run.client.connect_port(&id, port).await {
         Ok(io) => io,
         Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("the cluster: {e:#}")),
     };

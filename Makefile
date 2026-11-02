@@ -39,8 +39,8 @@ EXCLUDE  := --exclude zapper-office --exclude zapper-inspect --exclude zapper-ru
 FAKE     :=
 else
 FEATURES :=
-HOST     := -p zapper -p zapper-keeper -p zapper-inspect -p zapper-workbench
-BINS     := zapper zapper-agent zapper-inspect zapper-workbench
+HOST     := -p zapper -p zapper-keeper -p zapper-inspect -p zapper-workbench -p zapper-office
+BINS     := zapper zapper-agent zapper-inspect zapper-workbench zapper-office
 EXCLUDE  :=
 # The fake Claude Code and pi of the office's e2e tests, static like the
 # agent: the office-fake image installs it.

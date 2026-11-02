@@ -14,7 +14,6 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use super::{facility, now, workforce, FirmRun, WorkerState};
-use zapper_core::Core;
 
 /// A step of the script: whether it has fired (or is being played), and
 /// what it waits for when its trigger is met but its target isn't there.
@@ -290,7 +289,7 @@ enum Outcome {
 
 /// Plays a step once, or says what it waits for: a target in the firm (a
 /// worker of the role who has worked), a product in prod to break.
-async fn play(d: &Core, run: &Arc<FirmRun>, s: &Step) -> Result<Outcome> {
+async fn play(run: &Arc<FirmRun>, s: &Step) -> Result<Outcome> {
     if let Some(k) = &s.kill {
         let Some(w) = target(run, k.worker.as_deref(), k.role.as_deref()) else {
             return Ok(Outcome::Waits(match (&k.worker, &k.role) {
@@ -309,7 +308,7 @@ async fn play(d: &Core, run: &Arc<FirmRun>, s: &Step) -> Result<Outcome> {
         if begin_debrief(run, &w) {
             debrief(run, &w, reason).await;
         }
-        let out = workforce::let_go(d, run, BOARD, &w, reason, true);
+        let out = workforce::let_go(run, BOARD, &w, reason, true);
         return Ok(Outcome::Played(json!({ "kill": w, "result": out })));
     }
     if let Some(b) = &s.break_cluster {
@@ -344,7 +343,7 @@ async fn play(d: &Core, run: &Arc<FirmRun>, s: &Step) -> Result<Outcome> {
 }
 
 /// Fires the steps that are due. Called by the run's ticker.
-pub fn tick(d: &Core, run: &Arc<FirmRun>) {
+pub fn tick(run: &Arc<FirmRun>) {
     let Some(play_) = &run.scenario else {
         return;
     };
@@ -367,12 +366,12 @@ pub fn tick(d: &Core, run: &Arc<FirmRun>) {
             .collect()
     };
     for (i, step) in ready {
-        let (d, run) = (d.clone(), run.clone());
+        let run = run.clone();
         tokio::spawn(async move {
             let Some(p) = &run.scenario else {
                 return;
             };
-            match play(&d, &run, &step).await {
+            match play(&run, &step).await {
                 Ok(Outcome::Played(what)) => {
                     p.steps.lock().unwrap()[i].waiting = None;
                     run.journal.append(

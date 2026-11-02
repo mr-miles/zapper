@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use zapper_core::util::now;
+use zapper_util::now;
 
 /// Longest line kept; longer ones are cut and marked.
 pub const MAX_LINE: usize = 256 * 1024;
@@ -20,7 +20,7 @@ pub const MAX_LINE: usize = 256 * 1024;
 pub struct Journal {
     /// Where it is read from.
     path: PathBuf,
-    file: Mutex<zapper_core::record::Writer>,
+    file: Mutex<zapper_record::Writer>,
     offset: AtomicU64,
     seq: AtomicU64,
     /// Tests only: make every write fail, to stand in for a full disk.
@@ -46,9 +46,9 @@ impl At {
 
 impl Journal {
     pub fn create(path: &Path) -> Result<Journal> {
-        let file = zapper_core::record::Writer::open(path)
+        let file = zapper_record::Writer::open(path)
             .with_context(|| format!("creating {}", path.display()))?;
-        let path = zapper_core::record::view(path);
+        let path = zapper_record::view(path);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         // An existing journal continues its sequence.
         let last = std::fs::read(&path).ok().and_then(|b| {
@@ -147,10 +147,8 @@ mod tests {
 
     #[test]
     fn append_and_read_back() {
-        let dir = std::env::temp_dir().join(format!(
-            "zapper-journal-{}",
-            zapper_core::util::random_id(6)
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-journal-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("j.jsonl")).unwrap();
         let a = j.append("mail", json!({ "subject": "hi" }));
@@ -180,10 +178,8 @@ mod tests {
     #[test]
     fn a_partial_write_does_not_desync_later_reads() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "zapper-journal-{}",
-            zapper_core::util::random_id(6)
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zapper-journal-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("j.jsonl");
         let j = Journal::create(&path).unwrap();

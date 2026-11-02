@@ -15,8 +15,7 @@ use zapper_policy::parse_size;
 use zapper_policy::proto::{Frame, ShellRequest};
 
 use super::{now, FirmRun};
-use zapper_core::util::read_frame;
-use zapper_core::Session;
+use zapper_driver::read_frame;
 
 /// No `code`: code lives in the firm's git repository, shared as a branch.
 const KINDS: [&str; 5] = ["document", "report", "dataset", "deck", "board-pack"];
@@ -125,21 +124,44 @@ pub fn guest_path(p: &str, home: &str) -> Result<String> {
     Ok(p.to_string())
 }
 
-/// Runs a command as root in the guest, feeding `input` to it and writing its
-/// output to `out`; returns its exit code and stderr.
+/// Runs a command as root in session `id`'s guest over the office's client,
+/// feeding `input` to it and streaming its output to `out`; returns its exit
+/// code and stderr. Over `attach`, so it works in-process and over the socket
+/// and streams rather than buffering (an artifact tar may be large).
 pub async fn guest_command<R, W>(
-    s: &Session,
+    client: &dyn crate::client::OfficeClient,
+    id: &str,
     argv: Vec<String>,
     input: Option<R>,
-    mut out: W,
+    out: W,
     limit: u64,
 ) -> Result<(i32, String)>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let stream = s.open_shell(ShellRequest::system(argv)).await?.stream;
-    let (mut r, mut w) = stream.into_split();
+    let stream = client.attach(id, ShellRequest::system(argv)).await?;
+    pump_command(stream, input, out, limit).await
+}
+
+/// Drives a command over `stream`, a terminal already opened for it: feeds
+/// `input`, writes stdout to `out` (at most `limit` bytes), returns the exit
+/// code and stderr. The stream is a VM terminal in-process (from
+/// `Session::open_shell`) or an attached one over the office's client — the
+/// cluster, a sandbox and not an agent, is driven over it as a terminal
+/// user would. Each call runs one command (a shell script may bundle many).
+pub(crate) async fn pump_command<S, R, W>(
+    stream: S,
+    input: Option<R>,
+    mut out: W,
+    limit: u64,
+) -> Result<(i32, String)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let (mut r, mut w) = tokio::io::split(stream);
     let feeder = tokio::spawn(async move {
         if let Some(mut input) = input {
             let mut buf = vec![0u8; 60 * 1024];
@@ -310,7 +332,8 @@ impl Drive {
 pub async fn publish(
     run: &Arc<FirmRun>,
     worker: &str,
-    s: &Session,
+    sid: &str,
+    user: &str,
     a: PublishArgs,
 ) -> Result<Value> {
     if a.kind == "code" {
@@ -370,7 +393,7 @@ pub async fn publish(
             );
         }
     }
-    let home = format!("/home/{}", s.resolved.agent.user);
+    let home = format!("/home/{user}");
     let mut argv = vec!["tar".to_string(), "-cf".into(), "-".into()];
     let mut names = std::collections::BTreeSet::new();
     for p in &a.paths {
@@ -386,7 +409,7 @@ pub async fn publish(
     let tmp = run
         .dir
         .join("drive")
-        .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+        .join(format!("tmp-{}", zapper_util::random_id(8)));
     std::fs::create_dir_all(&tmp)?;
     let result = async {
         // The archive comes from the guest: it is parsed here, keeping only
@@ -395,7 +418,8 @@ pub async fn publish(
         let archive = tmp.join("archive.tar");
         let file = tokio::fs::File::create(&archive).await?;
         let (code, err) = guest_command(
-            s,
+            run.client.as_ref(),
+            sid,
             argv,
             None::<tokio::io::Empty>,
             file,
@@ -551,7 +575,7 @@ pub fn publish_board(
             let tmp = run
                 .dir
                 .join("drive")
-                .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+                .join(format!("tmp-{}", zapper_util::random_id(8)));
             std::fs::write(&tmp, data)?;
             std::fs::rename(&tmp, &blob)?;
         }
@@ -622,11 +646,12 @@ fn hex(b: &[u8]) -> String {
 pub async fn fetch(
     run: &Arc<FirmRun>,
     worker: &str,
-    s: &Session,
+    sid: &str,
+    user: &str,
     r: &str,
     dest: &str,
 ) -> Result<Value> {
-    let home = format!("/home/{}", s.resolved.agent.user);
+    let home = format!("/home/{user}");
     let dest = guest_path(dest, &home)?;
     let (id, version, files) = {
         let d = run.drive.lock().unwrap();
@@ -638,7 +663,7 @@ pub async fn fetch(
     let tmp = run
         .dir
         .join("drive")
-        .join(format!("tmp-{}", zapper_core::util::random_id(8)));
+        .join(format!("tmp-{}", zapper_util::random_id(8)));
     let result = async {
         for f in &files {
             let to = tmp.join(&f.path);
@@ -656,7 +681,7 @@ pub async fn fetch(
             "mkdir -p '{dest}' && tar --no-same-owner -xf - -C '{dest}' && chown -R 1000:1000 '{dest}'",
             dest = dest.replace('\'', "")
         );
-        let (code, err) = guest_command(s, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
+        let (code, err) = guest_command(run.client.as_ref(), sid, vec!["sh".into(), "-c".into(), script], Some(stdout), tokio::io::sink(), 1 << 20).await?;
         let _ = tar.wait().await;
         if code != 0 {
             bail!("writing into {dest} failed: {}", err.trim());
@@ -682,7 +707,7 @@ pub fn find_file(
     version: u32,
     path: &str,
 ) -> Result<(String, u64)> {
-    let text = std::fs::read_to_string(zapper_core::record::view(&run_dir.join("journal.jsonl")))?;
+    let text = std::fs::read_to_string(zapper_record::view(&run_dir.join("journal.jsonl")))?;
     for line in text.lines().rev() {
         if !line.contains("\"published\"") {
             continue;
@@ -843,8 +868,7 @@ mod tests {
 
     #[test]
     fn untar_keeps_regular_files_only() {
-        let dir =
-            std::env::temp_dir().join(format!("zapper-untar-{}", zapper_core::util::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-untar-{}", zapper_util::random_id(6)));
         let src = dir.join("src");
         std::fs::create_dir_all(src.join("sub")).unwrap();
         std::fs::write(src.join("a.md"), "hello").unwrap();

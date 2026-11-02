@@ -4,24 +4,28 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+#[cfg(test)]
 use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_core::util::now;
-use zapper_core::{Core, NewSession};
+use zapper_api_types::NewSession;
+#[cfg(test)]
+use zapper_core::Core;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
+use zapper_util::now;
 
 use crate::firm::{Firm, BOARD};
 use crate::history::RUN_CONFIG;
 use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
+#[cfg(test)]
+use crate::OfficeOf;
 use crate::{
-    access, contracts, drive, facility, firm, firm_dir, foreman, labels, ops, prompts, run_id,
-    scenario, security, skills, utc_day, workforce, FirmRun, OfficeOf, RunState, Usage, WorkerRt,
-    WorkerState,
+    access, contracts, drive, facility, firm, foreman, labels, ops, prompts, run_id, scenario,
+    security, skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
 };
 
 /// Each profile's agent kind and model, by profile name.
@@ -101,11 +105,11 @@ pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<Stri
 
 /// Memory still available on the host, in MiB.
 pub(crate) fn mem_available_mib() -> Option<u64> {
-    zapper_core::util::host_memory_mib("MemAvailable")
+    zapper_util::host_memory_mib("MemAvailable")
 }
 
 /// Checks that the firm fits before booting anything.
-fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
+fn check_resources(office: &Office, config: &Config, firm: &Firm) -> Result<()> {
     let mut mib = 0u64;
     let mut count = 0usize;
     for w in &firm.workers {
@@ -117,7 +121,7 @@ fn check_resources(d: &Core, config: &Config, firm: &Firm) -> Result<()> {
         mib += config.resolve(&f.profile)?.engine.memory_mib as u64;
         count += 1;
     }
-    let running = d.sessions().iter().filter(|s| !s.ended()).count();
+    let running = office.client().session_count();
     if running + count > config.daemon.max_sessions {
         bail!(
             "the firm needs {count} sessions and {running} are running; daemon.max_sessions is {}",
@@ -424,7 +428,7 @@ fn with_options(name: &str, mut firm: Firm, config: &Config, o: &StartOptions) -
 /// Builds a firm's run: its directory, journal, post office, ledger, drive
 /// and grants, in the registry as starting. `up_with` then boots it.
 fn create_run(
-    d: &Core,
+    office: &Arc<Office>,
     name: &str,
     config: &Config,
     started: Started,
@@ -440,24 +444,20 @@ fn create_run(
         scenario,
     } = started;
     let id = run_id();
-    let dir = firm_dir(d, name).join("runs").join(&id);
+    let dir = office.firm_dir(name).join("runs").join(&id);
     for sub in ["transcripts", "drive", "skills", "empty"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
     let journal = Journal::create(&dir.join("journal.jsonl"))?;
     let domain = firm.domain(name);
-    // Each role's shared layer lives in the core, named `<firm>/<role>`;
-    // workers attach it by their `firm-role` label. Reset to empty for this
-    // run (the registry outlives a run, which starts with no approvals).
-    let roles: std::collections::BTreeMap<_, _> = firm
-        .roles
-        .keys()
-        .map(|r| {
-            let layer = d.named_layer(&format!("{name}/{r}"));
-            *layer.write().unwrap() = Policy::default();
-            (r.clone(), layer)
-        })
-        .collect();
+    // Each role's shared layer lives in the daemon, named `<firm>/<role>`;
+    // workers attach it by their `firm-role` label, and the office changes it
+    // through the client. Reset to empty for this run (the registry outlives a
+    // run, which starts with no approvals).
+    let client = office.client().clone();
+    for r in firm.roles.keys() {
+        client.reset_layer(&format!("{name}/{r}"));
+    }
     let workers = firm
         .workers
         .iter()
@@ -473,6 +473,7 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
+        socket_dir: office.socket_dir().to_path_buf(),
         post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
@@ -488,7 +489,8 @@ fn create_run(
         security: Mutex::new(security::Security::default()),
         contracts: Mutex::new(contracts::Contracts::default()),
         access: Mutex::new(access::Access::default()),
-        roles,
+        client,
+        office: Arc::downgrade(office),
         turns: Arc::new(Semaphore::new(firm.budget.max_concurrent as usize)),
         usage: Mutex::new(Usage {
             day: utc_day(started),
@@ -506,24 +508,22 @@ fn create_run(
         stopping: Notify::new(),
     });
     let info = json!({ "firm": name, "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "run": id, "started": started, "chart": chart(name, &firm, &models, &agents), "budget": firm.budget, "agent_version": env!("CARGO_PKG_VERSION") });
-    zapper_core::util::write_private(
+    zapper_util::write_private(
         &dir.join("run.json"),
         serde_json::to_string_pretty(&info)?.as_bytes(),
     )?;
     // The whole config the run started with, for replay: profiles, rules,
     // firms. Inline secret values are hidden, as in `zapper config startup`.
-    zapper_core::util::write_private(
+    zapper_util::write_private(
         &dir.join(RUN_CONFIG),
-        zapper_core::util::redact(config.clone())
-            .to_yaml()
-            .as_bytes(),
+        zapper_policy::redact(config.clone()).to_yaml().as_bytes(),
     )?;
     run.journal.append("run", json!({ "state": "starting", "company": company, "prompts": prompts, "articles": articles, "scenario": scenario.as_ref().map(|(n, sc)| json!({ "name": n, "scenario": sc })), "chart": chart(name, &firm, &models, &agents), "budget": firm.budget }));
     workforce::seed(&run);
     // The policy owners (the CEO, any founding officers) hold admin on
     // everything; everyone else starts with nothing.
     for o in access::owners(&run) {
-        access::owner_access(d, &run, &o, BOARD);
+        access::owner_access(&run, &o, BOARD);
     }
     for w in run.config.warnings() {
         run.notice(
@@ -532,10 +532,10 @@ fn create_run(
             &format!("[Automatic notice] firm {name}: {w}.\n"),
         );
     }
-    facility::register(d, &run)?;
-    security::register(d, &run)?;
-    ops::register(d, &run)?;
-    d.office()
+    facility::register(&run)?;
+    security::register(&run)?;
+    ops::register(&run)?;
+    office
         .runs
         .write()
         .unwrap()
@@ -579,7 +579,7 @@ pub(crate) async fn test_run_remote(d: &Core, name: &str, repos: &[&str]) -> Arc
 #[cfg(test)]
 fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
     let config = d.config();
-    let (run, _boots) = create_run(d, name, &config, started).unwrap();
+    let (run, _boots) = create_run(&d.office(), name, &config, started).unwrap();
     *run.state.lock().unwrap() = RunState::Running;
     for w in run.rts() {
         let profile = run
@@ -590,13 +590,19 @@ fn test_run_started(d: &Core, name: &str, started: Started) -> Arc<FirmRun> {
         let mut new = NewSession::plain(profile, run.dir.join("empty"), Policy::default());
         // The role's shared layer is attached by the `firm-role` label.
         new.labels = labels(&run.firm, &run.id, &w.name, &w.role, true);
-        *w.session.lock().unwrap() = Some(d.test_session(new, true).unwrap());
-        access::reapply(d, &run, &w.name);
+        let s = d.test_session(new, true).unwrap();
+        w.set_session(d.session_info(&s), s.resolved.agent.kind.clone());
+        *w.session_arc.lock().unwrap() = Some(s);
+        access::reapply(&run, &w.name);
     }
     run
 }
 
-pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<FirmRun>> {
+pub async fn up_with(
+    office: &Arc<Office>,
+    name: &str,
+    opts: &StartOptions,
+) -> Result<Arc<FirmRun>> {
     let task = opts.task.as_deref().and_then(task_parts);
     if let Some((_, body)) = &task {
         if body.len() > mail::MAX_BODY {
@@ -608,12 +614,12 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
     if !files.is_empty() && task.is_none() {
         bail!("attachments go with the board's task: give one");
     }
-    if let Ok(r) = d.office().run(name) {
+    if let Ok(r) = office.run(name) {
         if !r.ended() {
             bail!("firm {name} is already running (run {})", r.id);
         }
     }
-    let config = d.config();
+    let config = office.client().config();
     let firm = firm::get(&config, name).ok_or_else(|| anyhow!("no firm {name}"))?;
     let Started {
         firm,
@@ -622,13 +628,13 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         articles,
         scenario,
     } = with_options(name, firm, &config, opts)?;
-    check_resources(d, &config, &firm)?;
+    check_resources(office, &config, &firm)?;
     let firm = super::remote::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;
     }
     let (run, boot_rx) = create_run(
-        d,
+        office,
         name,
         &config,
         Started {
@@ -640,20 +646,20 @@ pub async fn up_with(d: &Core, name: &str, opts: &StartOptions) -> Result<Arc<Fi
         },
     )?;
 
-    if let Err(e) = boot(d, &run, &config).await {
+    if let Err(e) = boot(&run, &config).await {
         let msg = format!("{e:#}");
         run.journal
             .append("run", json!({ "state": "failed", "error": msg }));
-        down(d, &run, "boot failed").await;
+        down(&run, "boot failed").await;
         bail!("firm {name}: {msg}");
     }
     *run.state.lock().unwrap() = RunState::Running;
     run.journal.append("run", json!({ "state": "running" }));
     for w in run.rts() {
-        tokio::spawn(foreman::run(d.clone(), run.clone(), w));
+        tokio::spawn(foreman::run(run.clone(), w));
     }
-    tokio::spawn(ticker(d.clone(), run.clone()));
-    tokio::spawn(booter(d.clone(), run.clone(), boot_rx));
+    tokio::spawn(ticker(run.clone()));
+    tokio::spawn(booter(office.clone(), run.clone(), boot_rx));
     // The board's task, if it gave one: the CEO's first assignment.
     if let Some((subject, body)) = task {
         if let Err(e) = send_task(&run, &subject, &body, files) {
@@ -694,7 +700,7 @@ pub(crate) fn send_task(
 
 /// Boots the VMs of workers hired during the run, and starts their foremen.
 async fn booter(
-    d: Core,
+    office: Arc<Office>,
     run: Arc<FirmRun>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<WorkerRt>>,
 ) {
@@ -705,23 +711,22 @@ async fn booter(
         let Some(role) = run.config.roles.get(&w.role).cloned() else {
             continue;
         };
-        let config = d.config();
-        let (d, run) = (d.clone(), run.clone());
+        let config = office.client().config();
+        let run = run.clone();
         tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);
-            match boot_worker(&d, &run, &config, &w, &role).await {
+            match boot_worker(&run, &config, &w, &role).await {
                 // Let go while booting: stop the VM again.
                 Ok(()) if run.ended() || run.rt(&w.name).is_none() => {
-                    if let Some(s) = w.session.lock().unwrap().take() {
-                        let d = d.clone();
+                    if let Some(id) = w.take_session() {
+                        let client = run.client.clone();
                         tokio::spawn(async move {
-                            d.stop_session(&s, "let go").await;
-                            let _ = d.forget_session(&s.id);
+                            let _ = client.stop_session(&id, "let go").await;
                         });
                     }
                 }
                 Ok(()) => {
-                    tokio::spawn(foreman::run(d.clone(), run.clone(), w));
+                    tokio::spawn(foreman::run(run.clone(), w));
                 }
                 Err(e) => {
                     run.set_state(&w, WorkerState::Error, Some(format!("{e:#}")));
@@ -735,18 +740,18 @@ async fn booter(
     }
 }
 
-async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+async fn boot(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let firm = &run.config;
-    facility::start(d, run, config).await?;
+    facility::start(run, config).await?;
     skills::prepare(run, config)?;
     let mut tasks = Vec::new();
     for w in run.rts() {
-        let (d, run) = (d.clone(), run.clone());
+        let run = run.clone();
         let role = firm.roles[&w.role].clone();
         let config = config.clone();
         tasks.push(tokio::spawn(async move {
             run.set_state(&w, WorkerState::Booting, None);
-            let r = boot_worker(&d, &run, &config, &w, &role).await;
+            let r = boot_worker(&run, &config, &w, &role).await;
             if let Err(e) = &r {
                 run.set_state(&w, WorkerState::Error, Some(format!("{e:#}")));
             }
@@ -766,7 +771,6 @@ async fn boot(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
 }
 
 pub(crate) async fn boot_worker(
-    d: &Core,
     run: &Arc<FirmRun>,
     config: &Config,
     w: &Arc<WorkerRt>,
@@ -826,14 +830,14 @@ pub(crate) async fn boot_worker(
         accept_changed_image: false,
         ssh: false,
     };
-    let s = d.create_session(new).await?;
+    let info = run.client.create_session(new).await?;
     run.journal.append(
         "worker_session",
-        json!({ "worker": w.name, "session": s.id }),
+        json!({ "worker": w.name, "session": info.id() }),
     );
-    *w.session.lock().unwrap() = Some(s);
+    w.set_session(info, profile.agent.kind.clone());
     // Grants made before the VM was up: its network rules and kubeconfig.
-    access::reapply(d, run, &w.name);
+    access::reapply(run, &w.name);
     Ok(())
 }
 
@@ -868,13 +872,13 @@ pub(crate) fn agent_overlay(
 /// How the office drives a profile's agent: its harness's driver.
 fn harness_driver(
     profile: &zapper_policy::ResolvedProfile,
-) -> Result<&'static dyn zapper_core::harness::Headless> {
-    zapper_core::harness::headless(&profile.agent.kind)
+) -> Result<&'static dyn zapper_driver::harness::Headless> {
+    zapper_driver::harness::headless(&profile.agent.kind)
         .map_err(|e| anyhow!("profile {}: {e:#}", profile.name))
 }
 
 /// Follow-ups, digests and expiries.
-async fn ticker(d: Core, run: Arc<FirmRun>) {
+async fn ticker(run: Arc<FirmRun>) {
     let mut last_digest = now();
     loop {
         tokio::select! {
@@ -889,16 +893,16 @@ async fn ticker(d: Core, run: Arc<FirmRun>) {
             run.deliver(s);
         }
         security::tick(&run, &mut last_digest);
-        contracts::tick(&d, &run);
-        access::tick(&d, &run);
+        contracts::tick(&run);
+        access::tick(&run);
         workforce::tick(&run);
         run.tell_close_waiter();
-        scenario::tick(&d, &run);
+        scenario::tick(&run);
     }
 }
 
 /// Stops a run: its workers' sessions, its facilities, its tasks.
-pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
+pub async fn down(run: &Arc<FirmRun>, reason: &str) {
     {
         let mut st = run.state.lock().unwrap();
         if matches!(*st, RunState::Ended) {
@@ -912,11 +916,10 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
     }
     let mut tasks = Vec::new();
     for w in run.rts() {
-        if let Some(s) = w.session.lock().unwrap().take() {
-            let d = d.clone();
+        if let Some(id) = w.take_session() {
+            let client = run.client.clone();
             tasks.push(tokio::spawn(async move {
-                d.stop_session(&s, "firm down").await;
-                let _ = d.forget_session(&s.id);
+                let _ = client.stop_session(&id, "firm down").await;
             }));
         }
         run.set_state(&w, WorkerState::Off, None);
@@ -925,9 +928,9 @@ pub async fn down(d: &Core, run: &Arc<FirmRun>, reason: &str) {
         let _ = t.await;
     }
     super::remote::finish(run).await;
-    facility::stop(d, run).await;
-    security::unregister(d, run);
-    ops::unregister(d, run);
+    facility::stop(run).await;
+    security::unregister(run);
+    ops::unregister(run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));

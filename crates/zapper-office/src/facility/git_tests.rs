@@ -107,7 +107,7 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "read", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "read", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), refs).await;
     assert!(allowed(&r), "{r:?}");
     let (status, text) = git(&run, "pat", Some("pat:pw"), push).await;
@@ -126,17 +126,15 @@ async fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
         "asking to push is a push"
     );
 
-    access::board_grant(&t.core, &run, "pat", "git:api", "write", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), push).await;
     assert!(allowed(&r), "{r:?}");
     // Merge pushes too: the repository's hook says where (into main only).
-    access::board_grant(&t.core, &run, "pat", "git:api", "merge", None, "test").unwrap();
+    access::board_grant(&run, "pat", "git:api", "merge", None, "test").unwrap();
     let r = git(&run, "pat", Some("pat:pw"), push).await;
     assert!(allowed(&r), "{r:?}");
     // Merge is git's: not a level of the cluster or a drive space.
-    assert!(
-        access::board_grant(&t.core, &run, "pat", "drive:general", "merge", None, "test").is_err()
-    );
+    assert!(access::board_grant(&run, "pat", "drive:general", "merge", None, "test").is_err());
 
     // Other repositories: their own grant; unknown ones aren't there.
     assert_eq!(

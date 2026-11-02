@@ -8,7 +8,6 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use zapper_core::prelude::*;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
@@ -16,16 +15,18 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 use zapper_policy::proto::{Forward, GuestFile};
 use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
-use super::{drive, FirmRun};
-use zapper_core::util::random_id;
+use super::FirmRun;
+use zapper_api_types::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
+#[cfg(test)]
 use zapper_core::Core;
-use zapper_core::{NewSession, ServiceHandler, ServiceIo, ServiceSpec, ServiceTarget, Session};
+#[cfg(test)]
+use zapper_core::Session;
+use zapper_util::random_id;
 
 /// Ports the cluster VM forwards from vsock to itself.
 pub const API_PORT: u32 = 6443;
@@ -41,7 +42,9 @@ const MAX_GIT_BODY: usize = 512 << 20;
 
 #[derive(Default)]
 pub struct Facilities {
-    pub cluster: Mutex<Option<Arc<Session>>>,
+    /// The cluster's session info once it has booted; the office reaches it
+    /// over `run.client` by this id, holding no `Session`.
+    pub cluster: Mutex<Option<SessionInfo>>,
     pub kubeconfig: Mutex<Option<String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
@@ -53,62 +56,54 @@ pub struct Facilities {
     pub dashboard_token: Mutex<Option<String>>,
     /// The run's services and zone, removed when it stops.
     pub services: Mutex<Vec<u64>>,
+    /// The firm's git server, served by the office on a socket (as its tools
+    /// and decider are) and registered with the daemon as a socket service;
+    /// the guard removes the registration, stops serving and unlinks the
+    /// socket when the run stops.
+    git: Mutex<Option<crate::client::FacilityGuard>>,
 }
 
 impl Facilities {
     pub fn status(&self) -> Value {
         json!({
-            "cluster": self.cluster.lock().unwrap().as_ref().map(|s| s.id.clone()),
+            "cluster": self.cluster.lock().unwrap().as_ref().map(|s| s.id().to_string()),
             "product": self.product.lock().unwrap().is_some(),
             "dashboard": self.dashboard.lock().unwrap().is_some(),
             "dashboard_token": self.dashboard_token.lock().unwrap().clone(),
         })
     }
 
-    pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
+    pub fn session_of(&self, name: &str) -> Option<SessionInfo> {
         (name == CLUSTER)
             .then(|| self.cluster.lock().unwrap().clone())
             .flatten()
     }
 }
 
-/// Opens a host-initiated vsock connection to a port of a session's VM.
-pub async fn vsock_connect(s: &Session, port: u32) -> Result<UnixStream> {
-    s.connect_port(port).await
+/// Reads the caller line the daemon sends first on a socket service's
+/// Answers one git connection: the daemon's first line names the caller
+/// (`ServiceCaller`; the member is its `member` label, from the VM), then the
+/// office speaks the guest's HTTP/1.1 — the same server, reachable whether the
+/// office runs in the daemon or as a process of its own.
+async fn answer_git(run: Weak<FirmRun>, line: Vec<u8>, stream: tokio::net::UnixStream) {
+    let Ok(who) = serde_json::from_slice::<zapper_policy::facility::ServiceCaller>(&line) else {
+        return;
+    };
+    let Some(run) = run.upgrade() else {
+        return;
+    };
+    let member = who.labels.get("member").cloned().unwrap_or_default();
+    let svc = hyper::service::service_fn(move |req| {
+        let (run, member) = (run.clone(), member.clone());
+        async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
 }
 
-/// The firm's git server, a service of its domain: TLS is terminated by
-/// the daemon, and who asks is the session's member label.
-struct GitServer {
-    run: Weak<FirmRun>,
-}
-
-impl ServiceHandler for GitServer {
-    fn serve(&self, s: Arc<Session>, io: Box<dyn ServiceIo>) {
-        let Some(run) = self.run.upgrade() else {
-            return;
-        };
-        let member = s.label("member").unwrap_or_default().to_string();
-        tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |req| {
-                let (run, member) = (run.clone(), member.clone());
-                async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
-            });
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(io), svc)
-                .await;
-        });
-    }
-}
-
-fn add_service(
-    d: &impl ServiceApi,
-    run: &FirmRun,
-    name: String,
-    port: u16,
-    target: ServiceTarget,
-) -> Result<()> {
-    let id = d.add_service(ServiceSpec {
+fn add_service(run: &FirmRun, name: String, port: u16, target: ServiceTarget) -> Result<()> {
+    let id = run.client.add_service(ServiceSpec {
         name,
         port,
         sessions: super::run_sessions(run),
@@ -121,24 +116,46 @@ fn add_service(
 
 /// The firm's domain, a zone of the run's sessions (its names are the
 /// firm's services, never looked up on the host), and its git server.
-pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
-    let id = d.add_zone(
+pub fn register(run: &Arc<FirmRun>) -> Result<()> {
+    let id = run.client.add_zone(
         &run.domain,
         super::run_sessions(run),
         &format!("firm {}", run.firm),
     )?;
     run.facility.services.lock().unwrap().push(id);
     if run.config.git_internal() {
-        let handler = Arc::new(GitServer {
-            run: Arc::downgrade(run),
-        });
-        add_service(
-            d,
-            run,
-            format!("git.{}", run.domain),
-            443,
-            ServiceTarget::Handler { tls: true, handler },
+        // Served on a socket, as the tools and decider are: the daemon
+        // terminates TLS and forwards the plain stream to the socket, so the
+        // office serves git whether it runs in the daemon or on its own.
+        let socket = format!("office-{}-git.sock", run.firm);
+        let name = format!("git.{}", run.domain);
+        let sessions = super::run_sessions(run);
+        let owner = format!("firm {}", run.firm);
+        let weak = Arc::downgrade(run);
+        let guard = crate::client::serve_facility(
+            &run.client,
+            &run.socket_dir,
+            &socket,
+            crate::client::Registered::Service,
+            move |listener| {
+                zapper_client::serve_socket(listener, move |line, stream| {
+                    answer_git(weak.clone(), line, stream)
+                })
+            },
+            |socket| {
+                run.client.add_service(ServiceSpec {
+                    name,
+                    port: 443,
+                    sessions,
+                    target: ServiceTarget::Socket {
+                        name: socket.to_string(),
+                        tls: true,
+                    },
+                    owner,
+                })
+            },
         )?;
+        *run.facility.git.lock().unwrap() = Some(guard);
     }
     Ok(())
 }
@@ -146,29 +163,29 @@ pub fn register(d: &impl ServiceApi, run: &Arc<FirmRun>) -> Result<()> {
 /// For tests: `cluster` as the run's cluster, as `start` makes it once it
 /// has booted.
 #[cfg(test)]
-pub(crate) fn test_cluster(d: &Core, run: &FirmRun, cluster: &Arc<Session>) {
-    *run.facility.cluster.lock().unwrap() = Some(cluster.clone());
-    register_cluster(d, run, cluster).unwrap();
+pub(crate) fn test_cluster(core: &Core, run: &FirmRun, cluster: &Arc<Session>) {
+    use zapper_core::SessionApi;
+    *run.facility.cluster.lock().unwrap() = Some(core.session_info(cluster));
+    register_cluster(run, &cluster.id).unwrap();
 }
 
 /// The cluster's API and the apps it serves, as services of the firm's
 /// domain on the cluster VM's ports.
-fn register_cluster(d: &impl ServiceApi, run: &FirmRun, cluster: &Session) -> Result<()> {
+fn register_cluster(run: &FirmRun, cluster_id: &str) -> Result<()> {
     let dom = &run.domain;
     let to = |port: u32| ServiceTarget::Session {
-        id: cluster.id.clone(),
+        id: cluster_id.to_string(),
         port,
     };
     add_service(
-        d,
         run,
         format!("{CLUSTER}.{dom}"),
         API_PORT as u16,
         to(API_PORT),
     )?;
     for name in [format!("apps.{dom}"), format!("*.apps.{dom}")] {
-        add_service(d, run, name.clone(), 80, to(HTTP_PORT))?;
-        add_service(d, run, name, 443, to(HTTPS_PORT))?;
+        add_service(run, name.clone(), 80, to(HTTP_PORT))?;
+        add_service(run, name, 443, to(HTTPS_PORT))?;
     }
     Ok(())
 }
@@ -345,7 +362,7 @@ pub fn network_follows_grant(
     // repository leaves the others' rules, and so the host, in place.
     let id = format!("credentials-{}", resource.replace(':', "-"));
     if level == super::access::Level::None {
-        s.remove_rule(&id);
+        run.client.remove_session_rule(s.id(), &id);
         return;
     }
     let (host, port) = if resource.starts_with("git:") {
@@ -353,19 +370,22 @@ pub fn network_follows_grant(
     } else {
         (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
     };
-    s.put_rule(zapper_policy::AnyRule::Net(zapper_policy::NetRule {
-        id: Some(id),
-        action: zapper_policy::Action::Allow,
-        host,
-        ports: vec![port],
-        methods: vec![],
-        path: None,
-        protocol: Default::default(),
-        secrets: vec![],
-        set_headers: Default::default(),
-        final_: false,
-        comment: Some(format!("credentials: {resource} {}", level.name())),
-    }));
+    run.client.put_session_rule(
+        s.id(),
+        zapper_policy::AnyRule::Net(zapper_policy::NetRule {
+            id: Some(id),
+            action: zapper_policy::Action::Allow,
+            host,
+            ports: vec![port],
+            methods: vec![],
+            path: None,
+            protocol: Default::default(),
+            secrets: vec![],
+            set_headers: Default::default(),
+            final_: false,
+            comment: Some(format!("credentials: {resource} {}", level.name())),
+        }),
+    );
 }
 
 /// A worker's access to the cluster, as their grant says: their own
@@ -373,7 +393,6 @@ pub fn network_follows_grant(
 /// dev; admin: also `admin` in prod), and a kubeconfig in their VM with its
 /// token. No grant: no account, no kubeconfig. Kubernetes enforces it.
 pub async fn cluster_access(
-    _d: &Core,
     run: &FirmRun,
     worker: &str,
     level: super::access::Level,
@@ -397,10 +416,10 @@ pub async fn cluster_access(
         script.push_str(&format!(
             "k3s kubectl -n {WORKER_NS} delete serviceaccount {sa} --ignore-not-found >/dev/null"
         ));
-        sh(&c, &script).await?;
+        sh(run, c.id(), &script).await?;
         if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
-            let home = format!("/home/{}", s.resolved.agent.user);
-            let _ = sh(&s, &format!("rm -f {home}/.kube/config")).await;
+            let home = format!("/home/{}", s.user());
+            let _ = sh(run, s.id(), &format!("rm -f {home}/.kube/config")).await;
         }
         return Ok(());
     }
@@ -418,7 +437,7 @@ pub async fn cluster_access(
     script.push_str(&format!(
         "k3s kubectl -n {WORKER_NS} create token {sa} --duration={secs}s"
     ));
-    let (code, out) = sh(&c, &script).await?;
+    let (code, out) = sh(run, c.id(), &script).await?;
     if code != 0 {
         bail!("RBAC for {worker}: {out}");
     }
@@ -442,13 +461,12 @@ pub async fn cluster_access(
         d = run.domain
     );
     if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
-        let home = format!("/home/{}", s.resolved.agent.user);
-        let mut out = Vec::new();
-        let (code, err) = drive::guest_command(
-            &s,
+        let home = format!("/home/{}", s.user());
+        let (code, _out, err) = crate::client::run_command(
+            run.client.as_ref(),
+            s.id(),
             vec!["sh".into(), "-c".into(), format!("mkdir -p {home}/.kube && cat > {home}/.kube/config && chmod 600 {home}/.kube/config && chown -R 1000:1000 {home}/.kube")],
-            Some(std::io::Cursor::new(kube.into_bytes())),
-            &mut out,
+            Some(kube.into_bytes()),
             1 << 16,
         )
         .await?;
@@ -460,13 +478,14 @@ pub async fn cluster_access(
 }
 
 /// Runs a shell command as root in a session's VM; its stdout.
-pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
-    let mut out = Vec::new();
-    let (code, err) = drive::guest_command(
-        s,
+/// Runs a shell command in session `id` over the office's client; its exit
+/// code and output (stdout, then stderr if it failed).
+pub(super) async fn sh(run: &FirmRun, id: &str, script: &str) -> Result<(i32, String)> {
+    let (code, out, err) = crate::client::run_command(
+        run.client.as_ref(),
+        id,
         vec!["sh".into(), "-c".into(), script.into()],
-        None::<tokio::io::Empty>,
-        &mut out,
+        None,
         4 << 20,
     )
     .await?;
@@ -477,7 +496,7 @@ pub(super) async fn sh(s: &Session, script: &str) -> Result<(i32, String)> {
     Ok((code, text))
 }
 
-pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> {
+pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     let repos = run.config.git_repos();
     if run.config.git_remote().is_some() {
         // The repositories are the remote's, kept in git.dir across runs.
@@ -553,39 +572,44 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         ssh: false,
     };
     let _ = config;
-    let s = d.create_session(new).await.context("booting the cluster")?;
-    *run.facility.cluster.lock().unwrap() = Some(s.clone());
-    register_cluster(d, run, &s)?;
+    let s = run
+        .client
+        .create_session(new)
+        .await
+        .context("booting the cluster")?;
+    let cid = s.id().to_string();
+    *run.facility.cluster.lock().unwrap() = Some(s);
+    register_cluster(run, &cid)?;
     run.journal.append(
         "facility",
-        json!({ "name": name, "state": "starting", "session": s.id }),
+        json!({ "name": name, "state": "starting", "session": cid.clone() }),
     );
     let san = format!("{CLUSTER}.{}", run.domain);
     let script = format!(
         "mkdir -p /var/log && nohup k3s server --node-name {CLUSTER} --tls-san {san} --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &"
     );
-    let (code, out) = sh(&s, &script).await?;
+    let (code, out) = sh(run, &cid, &script).await?;
     if code != 0 {
         bail!("starting k3s: {out}");
     }
     // The API first; the workers' kubeconfig comes from it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     loop {
-        let (code, out) = sh(&s, "k3s kubectl get --raw=/readyz 2>&1")
+        let (code, out) = sh(run, &cid, "k3s kubectl get --raw=/readyz 2>&1")
             .await
             .unwrap_or((1, String::new()));
         if code == 0 && out.trim() == "ok" {
             break;
         }
         if tokio::time::Instant::now() > deadline {
-            let (_, log) = sh(&s, "tail -30 /var/log/k3s.log")
+            let (_, log) = sh(run, &cid, "tail -30 /var/log/k3s.log")
                 .await
                 .unwrap_or_default();
             bail!("k3s did not become ready in 5 minutes; its log ends:\n{log}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let (code, kube) = sh(&s, "cat /etc/rancher/k3s/k3s.yaml").await?;
+    let (code, kube) = sh(run, &cid, "cat /etc/rancher/k3s/k3s.yaml").await?;
     if code != 0 {
         bail!("reading the kubeconfig: {kube}");
     }
@@ -593,19 +617,19 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
     *run.facility.kubeconfig.lock().unwrap() = Some(kube);
     // The firm's two namespaces (prod is what the ingress serves), and the
     // one that holds workers' service accounts.
-    let (code, out) = sh(&s, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
+    let (code, out) = sh(run, &cid, &format!("for n in dev prod {WORKER_NS}; do k3s kubectl create namespace $n --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null || exit 1; done")).await?;
     if code != 0 {
         bail!("creating the namespaces: {out}");
     }
     run.journal.append(
         "facility",
-        json!({ "name": name, "state": "ready", "session": s.id }),
+        json!({ "name": name, "state": "ready", "session": cid.clone() }),
     );
     if let Some(l) = &run.config.landing {
         // In the background: Traefik comes up after the API.
         let manifest = landing_manifest(&l.display_name(&run.firm), &l.motto);
-        let (run, s) = (run.clone(), s.clone());
-        tokio::spawn(async move { deploy_landing(&run, &s, manifest).await });
+        let (run, id) = (run.clone(), cid.clone());
+        tokio::spawn(async move { deploy_landing(&run, &id, manifest).await });
     }
     if let Some(addr) = &run.config.product_port {
         let task = serve_product(run, addr).await?;
@@ -623,15 +647,15 @@ pub async fn start(d: &Core, run: &Arc<FirmRun>, config: &Config) -> Result<()> 
         {
             eprintln!(
                 "{}",
-                zapper_core::util::exposed_warning(&format!(
+                zapper_util::exposed_warning(&format!(
                     "firm {}'s Kubernetes dashboard (dashboard_port) listens on {addr}",
                     run.firm
                 ))
             );
         }
         *run.facility.dashboard.lock().unwrap() = Some(task);
-        let (run, s) = (run.clone(), s.clone());
-        tokio::spawn(async move { deploy_dashboard(&run, &s).await });
+        let (run, id) = (run.clone(), cid.clone());
+        tokio::spawn(async move { deploy_dashboard(&run, &id).await });
     }
     Ok(())
 }
@@ -672,11 +696,18 @@ async fn forward_port(
             };
             let run = run.clone();
             tokio::spawn(async move {
-                let Some(c) = run.facility.cluster.lock().unwrap().clone() else {
+                let Some(id) = run
+                    .facility
+                    .cluster
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|c| c.id().to_string())
+                else {
                     return;
                 };
                 tracing::debug!(firm = %run.firm, "{what} port: connection from {peer}");
-                if let Ok(mut up) = vsock_connect(&c, port).await {
+                if let Ok(mut up) = run.client.connect_port(&id, port).await {
                     let _ = tokio::io::copy_bidirectional(&mut conn, &mut up).await;
                 }
             });
@@ -709,27 +740,25 @@ fn dashboard_manifest() -> String {
     serde_json::to_string(&list).unwrap()
 }
 
-async fn deploy_dashboard(run: &FirmRun, s: &Session) {
+async fn deploy_dashboard(run: &FirmRun, cluster_id: &str) {
     let manifest = dashboard_manifest();
     for _ in 0..60 {
         if run.ended() {
             return;
         }
-        let mut out = Vec::new();
-        let input = std::io::Cursor::new(manifest.clone().into_bytes());
-        let applied = drive::guest_command(
-            s,
+        let applied = crate::client::run_command(
+            run.client.as_ref(),
+            cluster_id,
             vec![
                 "sh".into(),
                 "-c".into(),
                 "cat > /tmp/dashboard.json && k3s kubectl apply -f /tmp/dashboard.json".into(),
             ],
-            Some(input),
-            &mut out,
+            Some(manifest.clone().into_bytes()),
             1 << 20,
         )
         .await;
-        if let Ok((0, _)) = applied {
+        if let Ok((0, _, _)) = applied {
             break;
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -739,7 +768,7 @@ async fn deploy_dashboard(run: &FirmRun, s: &Session) {
         if run.ended() {
             return;
         }
-        if let Ok((0, t)) = sh(s, "k3s kubectl -n dashboard get secret board-token -o jsonpath='{.data.token}' | base64 -d").await {
+        if let Ok((0, t)) = sh(run, cluster_id, "k3s kubectl -n dashboard get secret board-token -o jsonpath='{.data.token}' | base64 -d").await {
             let t = t.trim().to_string();
             if t.len() > 20 {
                 *run.facility.dashboard_token.lock().unwrap() = Some(t);
@@ -808,26 +837,24 @@ pub fn landing_manifest(name: &str, motto: &str) -> String {
     serde_json::to_string(&list).unwrap()
 }
 
-async fn deploy_landing(run: &FirmRun, s: &Session, manifest: String) {
+async fn deploy_landing(run: &FirmRun, cluster_id: &str, manifest: String) {
     for _ in 0..40 {
         if run.ended() {
             return;
         }
-        let mut out = Vec::new();
-        let input = std::io::Cursor::new(manifest.clone().into_bytes());
-        let r = drive::guest_command(
-            s,
+        let r = crate::client::run_command(
+            run.client.as_ref(),
+            cluster_id,
             vec![
                 "sh".into(),
                 "-c".into(),
                 "cat > /tmp/landing.json && k3s kubectl apply -f /tmp/landing.json".into(),
             ],
-            Some(input),
-            &mut out,
+            Some(manifest.clone().into_bytes()),
             1 << 20,
         )
         .await;
-        if let Ok((0, _)) = r {
+        if let Ok((0, _, _)) = r {
             run.journal.append(
                 "facility",
                 json!({ "name": "landing", "state": "deployed" }),
@@ -840,7 +867,7 @@ async fn deploy_landing(run: &FirmRun, s: &Session, manifest: String) {
         .append("facility", json!({ "name": "landing", "state": "failed" }));
 }
 
-pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
+pub async fn stop(run: &Arc<FirmRun>) {
     for t in [
         run.facility.product.lock().unwrap().take(),
         run.facility.dashboard.lock().unwrap().take(),
@@ -850,14 +877,16 @@ pub async fn stop(d: &Core, run: &Arc<FirmRun>) {
     {
         t.abort();
     }
+    // The git server's guard removes its registration, stops serving and
+    // unlinks its socket.
+    run.facility.git.lock().unwrap().take();
     let services: Vec<u64> = run.facility.services.lock().unwrap().drain(..).collect();
     for id in services {
-        d.remove_service(id);
+        run.client.remove_service(id);
     }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
-        d.stop_session(&s, "firm down").await;
-        let _ = d.forget_session(&s.id);
+        let _ = run.client.stop_session(s.id(), "firm down").await;
     }
 }
 
@@ -984,7 +1013,8 @@ pub async fn prod_has_workload(run: &FirmRun) -> Result<bool> {
         .clone()
         .ok_or_else(|| anyhow!("the cluster isn't running"))?;
     let (code, out) = sh(
-        &s,
+        run,
+        s.id(),
         "k3s kubectl --request-timeout=10s -n prod get deploy,sts,ds -o name 2>&1",
     )
     .await?;
@@ -1011,7 +1041,7 @@ pub async fn break_cluster(run: &FirmRun, mode: &str) -> Result<String> {
         "api" => "for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -q '^k3s server' && kill -STOP ${d#/proc/}; done; echo frozen",
         other => bail!("break_cluster mode {other}: prod or api"),
     };
-    let (code, out) = sh(&s, script).await?;
+    let (code, out) = sh(run, s.id(), script).await?;
     if code != 0 {
         bail!("breaking the cluster: {out}");
     }
@@ -1054,63 +1084,6 @@ mod tests {
         );
     }
 
-    /// A fake `ServiceApi` recording what was registered — enough to test the
-    /// firm's service wiring without the daemon's real service registry.
-    #[derive(Default)]
-    struct FakeServices {
-        zones: std::sync::Mutex<Vec<String>>,
-        services: std::sync::Mutex<Vec<(String, u16)>>,
-    }
-
-    impl zapper_core::ServiceApi for FakeServices {
-        fn add_service(&self, spec: zapper_core::ServiceSpec) -> anyhow::Result<u64> {
-            self.services.lock().unwrap().push((spec.name, spec.port));
-            Ok(0)
-        }
-        fn add_zone(
-            &self,
-            domain: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _owner: &str,
-        ) -> anyhow::Result<u64> {
-            self.zones.lock().unwrap().push(domain.to_string());
-            Ok(0)
-        }
-        fn remove_service(&self, _id: u64) -> Option<zapper_core::ServiceInfo> {
-            None
-        }
-        fn services(&self) -> Vec<zapper_core::ServiceInfo> {
-            vec![]
-        }
-        fn service(&self, _: u64) -> Option<zapper_core::ServiceInfo> {
-            None
-        }
-        fn add_mcp_server(
-            &self,
-            _name: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _server: std::sync::Arc<dyn zapper_core::McpServer>,
-        ) -> anyhow::Result<u64> {
-            Ok(0)
-        }
-        fn add_mcp_socket(
-            &self,
-            _name: &str,
-            _sessions: std::collections::BTreeMap<String, String>,
-            _socket: &str,
-            _instructions: Option<String>,
-            _owner: &str,
-        ) -> anyhow::Result<u64> {
-            Ok(0)
-        }
-        fn mcp_servers(&self) -> Vec<serde_json::Value> {
-            vec![]
-        }
-        fn remove_mcp_server(&self, _id: u64) -> bool {
-            false
-        }
-    }
-
     const FIRM: &str = "
 profiles:
   w:
@@ -1124,29 +1097,27 @@ firms:
     git: { repos: [api] }
 ";
 
-    /// `register` depends only on `ServiceApi`: a fake stands in for the real
-    /// registry, and we check it wired up the firm's zone and git service.
+    /// Starting the run wires the firm's zone and git service through the
+    /// office's client; the daemon's registry holds them.
     #[tokio::test]
     async fn register_wires_the_firms_zone_and_git_service() {
+        use zapper_core::ServiceApi;
         let t = crate::test_core(FIRM);
         let run = crate::test_run(&t.core, "acme");
-        let fake = FakeServices::default();
-        super::register(&fake, &run).unwrap();
+        let services = t.core.services();
         assert!(
-            fake.zones.lock().unwrap().contains(&run.domain),
+            services.iter().any(|s| s.name == run.domain),
             "zone {} not registered: {:?}",
             run.domain,
-            fake.zones.lock().unwrap(),
+            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
         let git = format!("git.{}", run.domain);
         assert!(
-            fake.services
-                .lock()
-                .unwrap()
+            services
                 .iter()
-                .any(|(name, port)| *name == git && *port == 443),
+                .any(|s| s.name == git && s.port == Some(443)),
             "git service {git} missing: {:?}",
-            fake.services.lock().unwrap(),
+            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
     }
 }

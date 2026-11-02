@@ -259,6 +259,23 @@ fn preview(body: &str) -> String {
     )
 }
 
+/// Only the board and a recipient's own managers may give them an assignment;
+/// authority flows down the chart.
+fn check_assignment_authority(chart: &Firm, d: &Draft, to: &[String], system: bool) -> Result<()> {
+    if d.kind == Kind::Assignment && d.from != BOARD && !system {
+        for r in to {
+            if !chart.is_above(&d.from, r) {
+                bail!(
+                    "{} can't give {r} an assignment: only the board and {r}'s managers can. Send a question instead, or ask {}",
+                    d.from,
+                    chart.manager_of(r).unwrap_or(BOARD)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The run's post office behind its lock. Mail changes only through
 /// these methods; other modules read it inside `with`, which holds the lock
 /// for the closure alone, so no caller keeps it while taking another.
@@ -523,17 +540,7 @@ impl PostOffice {
         }
         // Authority flows down the chart.
         let chart = self.chart();
-        if d.kind == Kind::Assignment && d.from != BOARD && !system {
-            for r in &to {
-                if !chart.is_above(&d.from, r) {
-                    bail!(
-                        "{} can't give {r} an assignment: only the board and {r}'s managers can. Send a question instead, or ask {}",
-                        d.from,
-                        chart.manager_of(r).unwrap_or(BOARD)
-                    );
-                }
-            }
-        }
+        check_assignment_authority(&chart, &d, &to, system)?;
         let parent = match &d.in_reply_to {
             Some(id) => {
                 let m = self
@@ -560,80 +567,9 @@ impl PostOffice {
         }
         // Closing the board's objective pauses the firm: not while work it
         // asked for is still open anywhere in the firm.
-        if d.close && !system {
-            if let Some(t) = &thread_id {
-                if self.closes_objective(t, &d.from) {
-                    let open: Vec<String> = self
-                        .obligations
-                        .values()
-                        .filter(|o| {
-                            o.expects == Expects::Done
-                                && Some(o.message.as_str()) != self.kickoff.as_deref()
-                        })
-                        .map(|o| format!("\"{}\" ({} owes {})", o.subject, o.debtor, o.creditor))
-                        .take(8)
-                        .collect();
-                    if !open.is_empty() {
-                        bail!("the board's objective can't close while assignments are open: {}. The firm pauses when it closes, so that work would never be done. Send the board a progress report without close, or finish the open work (or take it back) first", open.join("; "));
-                    }
-                }
-            }
-        }
-        if !system && d.from != BOARD {
-            let fanout = fan_to || fan_cc;
-            if fanout && !Self::rate_ok(&mut self.fanout_log, &d.from, self.fanout_per_hour, now) {
-                bail!(
-                    "you sent {} messages to all or team: in the last hour; that's the limit",
-                    self.fanout_per_hour
-                );
-            }
-            if !Self::rate_ok(&mut self.sent_log, &d.from, self.mail_per_hour, now) {
-                bail!(
-                    "you sent {} messages in the last hour; that's the limit",
-                    self.mail_per_hour
-                );
-            }
-            // Two workers bouncing mail back and forth: a loop.
-            for r in to
-                .iter()
-                .chain(cc.iter())
-                .filter(|r| chart.worker(r).is_some())
-            {
-                let key = if d.from < *r {
-                    (d.from.clone(), r.clone())
-                } else {
-                    (r.clone(), d.from.clone())
-                };
-                let log = self.pair_log.entry(key.clone()).or_default();
-                while log.front().is_some_and(|t| now - t > 600.0) {
-                    log.pop_front();
-                }
-                if self.pair_per_10min > 0 && log.len() >= self.pair_per_10min {
-                    let n = log.len();
-                    if self.pair_told.get(&key).is_none_or(|t| now - t > 3600.0) {
-                        self.pair_told.insert(key.clone(), now);
-                        journal.append(
-                            "loop_guard",
-                            json!({ "workers": [key.0, key.1], "messages": n }),
-                        );
-                        let body = format!(
-                            "[Automatic notice] {} and {} exchanged {n} messages in ten minutes, which looks like a loop. The post office refuses more mail between them for now; it resumes as the ten-minute window moves. Check their threads, and pause the firm if they are stuck.\n",
-                            key.0, key.1
-                        );
-                        let mut notice = Draft::new(
-                            OFFICE,
-                            vec![BOARD.into()],
-                            &format!("Loop? {} and {}", key.0, key.1),
-                            &body,
-                            Kind::Fyi,
-                        );
-                        notice.automatic = true;
-                        let _ = self.send_notice(journal, notice, now);
-                    }
-                    bail!("you and {r} exchanged {n} messages in the last ten minutes; the post office stops this as a likely loop. If you are stuck, tell your manager or the board, or end your turn");
-                }
-            }
-        }
+        self.check_objective_close(thread_id.as_ref(), &d, system)?;
+        // Per-sender rate limits and the two-worker loop guard.
+        self.rate_and_loop_guard(journal, &chart, &d, &to, &cc, fan_to, fan_cc, system, now)?;
 
         let id = self.next_id("m");
         let thread = thread_id.unwrap_or_else(|| format!("t-{}", id.trim_start_matches("m-")));
@@ -795,6 +731,112 @@ impl PostOffice {
             recipients,
             objective_done,
         })
+    }
+
+    /// The board's objective can't be closed while work it asked for is still
+    /// open anywhere in the firm (the firm pauses on close, so that work would
+    /// never be done).
+    fn check_objective_close(
+        &self,
+        thread_id: Option<&String>,
+        d: &Draft,
+        system: bool,
+    ) -> Result<()> {
+        if d.close && !system {
+            if let Some(t) = thread_id {
+                if self.closes_objective(t, &d.from) {
+                    let open: Vec<String> = self
+                        .obligations
+                        .values()
+                        .filter(|o| {
+                            o.expects == Expects::Done
+                                && Some(o.message.as_str()) != self.kickoff.as_deref()
+                        })
+                        .map(|o| format!("\"{}\" ({} owes {})", o.subject, o.debtor, o.creditor))
+                        .take(8)
+                        .collect();
+                    if !open.is_empty() {
+                        bail!("the board's objective can't close while assignments are open: {}. The firm pauses when it closes, so that work would never be done. Send the board a progress report without close, or finish the open work (or take it back) first", open.join("; "));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-sender rate limits (overall and fan-out), and the two-worker loop
+    /// guard: once a pair exchanges too many messages in ten minutes the post
+    /// office refuses more between them and tells the board once.
+    #[allow(clippy::too_many_arguments)]
+    fn rate_and_loop_guard(
+        &mut self,
+        journal: &Journal,
+        chart: &Firm,
+        d: &Draft,
+        to: &[String],
+        cc: &[String],
+        fan_to: bool,
+        fan_cc: bool,
+        system: bool,
+        now: f64,
+    ) -> Result<()> {
+        if system || d.from == BOARD {
+            return Ok(());
+        }
+        let fanout = fan_to || fan_cc;
+        if fanout && !Self::rate_ok(&mut self.fanout_log, &d.from, self.fanout_per_hour, now) {
+            bail!(
+                "you sent {} messages to all or team: in the last hour; that's the limit",
+                self.fanout_per_hour
+            );
+        }
+        if !Self::rate_ok(&mut self.sent_log, &d.from, self.mail_per_hour, now) {
+            bail!(
+                "you sent {} messages in the last hour; that's the limit",
+                self.mail_per_hour
+            );
+        }
+        // Two workers bouncing mail back and forth: a loop.
+        for r in to
+            .iter()
+            .chain(cc.iter())
+            .filter(|r| chart.worker(r).is_some())
+        {
+            let key = if d.from < *r {
+                (d.from.clone(), r.clone())
+            } else {
+                (r.clone(), d.from.clone())
+            };
+            let log = self.pair_log.entry(key.clone()).or_default();
+            while log.front().is_some_and(|t| now - t > 600.0) {
+                log.pop_front();
+            }
+            if self.pair_per_10min > 0 && log.len() >= self.pair_per_10min {
+                let n = log.len();
+                if self.pair_told.get(&key).is_none_or(|t| now - t > 3600.0) {
+                    self.pair_told.insert(key.clone(), now);
+                    journal.append(
+                        "loop_guard",
+                        json!({ "workers": [key.0, key.1], "messages": n }),
+                    );
+                    let body = format!(
+                        "[Automatic notice] {} and {} exchanged {n} messages in ten minutes, which looks like a loop. The post office refuses more mail between them for now; it resumes as the ten-minute window moves. Check their threads, and pause the firm if they are stuck.\n",
+                        key.0, key.1
+                    );
+                    let mut notice = Draft::new(
+                        OFFICE,
+                        vec![BOARD.into()],
+                        &format!("Loop? {} and {}", key.0, key.1),
+                        &body,
+                        Kind::Fyi,
+                    );
+                    notice.automatic = true;
+                    let _ = self.send_notice(journal, notice, now);
+                }
+                bail!("you and {r} exchanged {n} messages in the last ten minutes; the post office stops this as a likely loop. If you are stuck, tell your manager or the board, or end your turn");
+            }
+        }
+        Ok(())
     }
 
     /// The text of a message, from the journal.
@@ -1102,8 +1144,7 @@ mod tests {
             "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { r: { profile: w, agent: x } }\n    workers:\n      - { name: ceo, role: r }\n      - { name: cto, role: r, reports_to: ceo }\n      - { name: ada, role: r, reports_to: cto }\n      - { name: ken, role: r, reports_to: ceo }\n",
         )
         .unwrap();
-        let dir =
-            std::env::temp_dir().join(format!("zapper-mail-{}", zapper_core::util::random_id(6)));
+        let dir = std::env::temp_dir().join(format!("zapper-mail-{}", zapper_util::random_id(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("journal.jsonl")).unwrap();
         let f = crate::firm::get(&c, "acme").unwrap();

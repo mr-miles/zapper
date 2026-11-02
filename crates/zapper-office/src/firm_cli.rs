@@ -1,5 +1,7 @@
-//! `zapper firm`, `zapper mail` and `zapper drive`: the office from the
-//! command line, as the board.
+//! `zapper-office firm`, `zapper-office mail` and `zapper-office drive`: the
+//! office from the command line, as the board. These reach the running office
+//! over its own unix socket (`cli::Client`), calling the firm routes at their
+//! root (`/firms/…`) — the same routes the office page reaches at `/api`.
 
 use std::path::PathBuf;
 
@@ -9,8 +11,8 @@ use http_body_util::BodyExt;
 use hyper::Method;
 use serde_json::{json, Value};
 
-use crate::client::{url_encode, Client};
-use crate::{print_json, s, table};
+use crate::cli::{url_encode, Client};
+use zapper_util::cli::{print_json, s, table};
 
 #[derive(Subcommand)]
 pub enum FirmCmd {
@@ -204,6 +206,12 @@ pub enum FirmCmd {
         /// A note to the CEO, e.g. why it was declined.
         #[arg(long, default_value = "")]
         note: String,
+    },
+    /// Check a run's record against the keeper's chains and signatures.
+    Verify {
+        firm: String,
+        #[arg(default_value = "current")]
+        run: String,
     },
 }
 
@@ -623,7 +631,7 @@ fn transcript_line(e: &Value) -> String {
 pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
     match cmd {
         FirmCmd::Ls => {
-            let v = c.json(Method::GET, "/v1/firms", None).await?;
+            let v = c.json(Method::GET, "/firms", None).await?;
             if json_out {
                 print_json(&v);
             } else {
@@ -646,7 +654,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         }
         FirmCmd::Scenarios { firm } => {
             let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}/scenarios"), None)
+                .json(Method::GET, &format!("/firms/{firm}/scenarios"), None)
                 .await?;
             if json_out {
                 print_json(&v);
@@ -739,7 +747,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             let v = c
                 .json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/up"),
+                    &format!("/firms/{firm}/up"),
                     Some(body.to_string()),
                 )
                 .await?;
@@ -750,7 +758,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         }
         FirmCmd::Down { firm } => {
             let v = c
-                .json(Method::POST, &format!("/v1/firms/{firm}/down"), None)
+                .json(Method::POST, &format!("/firms/{firm}/down"), None)
                 .await?;
             println!(
                 "firm {firm} stopped; run {} is in {}",
@@ -761,7 +769,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Pause { firm } => print_json(
             &c.json(
                 Method::POST,
-                &format!("/v1/firms/{firm}/pause"),
+                &format!("/firms/{firm}/pause"),
                 Some(r#"{"paused": true}"#.into()),
             )
             .await?,
@@ -769,15 +777,13 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Resume { firm } => print_json(
             &c.json(
                 Method::POST,
-                &format!("/v1/firms/{firm}/pause"),
+                &format!("/firms/{firm}/pause"),
                 Some(r#"{"paused": false}"#.into()),
             )
             .await?,
         ),
         FirmCmd::Status { firm } => {
-            let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}"), None)
-                .await?;
+            let v = c.json(Method::GET, &format!("/firms/{firm}"), None).await?;
             if json_out {
                 print_json(&v);
                 return Ok(0);
@@ -839,7 +845,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             expires,
             note,
         } => {
-            let base = format!("/v1/firms/{firm}/credentials");
+            let base = format!("/firms/{firm}/credentials");
             let arg = |i: usize, what: &str| {
                 args.get(i)
                     .cloned()
@@ -852,7 +858,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
                         print_json(&v);
                         return Ok(0);
                     }
-                    let now = crate::util::now();
+                    let now = zapper_util::now();
                     println!(
                         "{:<12} {:<20} {:<7} {:<10} EXPIRES",
                         "WORKER", "RESOURCE", "LEVEL", "BY"
@@ -949,9 +955,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             }
         }
         FirmCmd::Contracts { firm } => {
-            let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}"), None)
-                .await?;
+            let v = c.json(Method::GET, &format!("/firms/{firm}"), None).await?;
             let list = v["run"]["contracts"]
                 .as_array()
                 .cloned()
@@ -994,7 +998,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             let v = c
                 .json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/fund"),
+                    &format!("/firms/{firm}/fund"),
                     Some(
                         json!({ "worker": worker, "tokens": tokens, "reason": reason }).to_string(),
                     ),
@@ -1014,7 +1018,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             let v = c
                 .json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/release"),
+                    &format!("/firms/{firm}/release"),
                     Some(json!({ "worker": worker, "reason": reason }).to_string()),
                 )
                 .await?;
@@ -1042,16 +1046,14 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
                 print_json(
                     &c.json(
                         Method::POST,
-                        &format!("/v1/firms/{firm}/budget/{id}"),
+                        &format!("/firms/{firm}/budget/{id}"),
                         Some(json!({ "approve": approve, "note": note }).to_string()),
                     )
                     .await?,
                 );
                 return Ok(0);
             }
-            let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}"), None)
-                .await?;
+            let v = c.json(Method::GET, &format!("/firms/{firm}"), None).await?;
             let f = &v["run"]["funds"];
             if json_out {
                 print_json(f);
@@ -1098,7 +1100,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         }
         FirmCmd::Runs { firm } => {
             let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}/runs"), None)
+                .json(Method::GET, &format!("/firms/{firm}/runs"), None)
                 .await?;
             if json_out {
                 print_json(&v);
@@ -1128,25 +1130,21 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Note { firm, run, note } => print_json(
             &c.json(
                 Method::PUT,
-                &format!("/v1/firms/{firm}/runs/{run}/note"),
+                &format!("/firms/{firm}/runs/{run}/note"),
                 Some(json!({ "note": note }).to_string()),
             )
             .await?,
         ),
         FirmCmd::Prune { firm, run } => print_json(
-            &c.json(
-                Method::DELETE,
-                &format!("/v1/firms/{firm}/runs/{run}"),
-                None,
-            )
-            .await?,
+            &c.json(Method::DELETE, &format!("/firms/{firm}/runs/{run}"), None)
+                .await?,
         ),
         FirmCmd::Journal {
             firm,
             run,
             follow: f,
         } => {
-            let path = format!("/v1/firms/{firm}/runs/{run}/journal");
+            let path = format!("/firms/{firm}/runs/{run}/journal");
             if f {
                 follow(c, &format!("{path}?follow=true"), journal_line, json_out).await?;
             } else {
@@ -1165,7 +1163,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             run,
             follow: f,
         } => {
-            let path = format!("/v1/firms/{firm}/runs/{run}/transcripts/{worker}");
+            let path = format!("/firms/{firm}/runs/{run}/transcripts/{worker}");
             if f {
                 follow(c, &format!("{path}?follow=true"), transcript_line, json_out).await?;
             } else {
@@ -1183,16 +1181,16 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             }
         }
         FirmCmd::Replay { firm, run } => {
-            c.json(Method::GET, &format!("/v1/firms/{firm}/runs"), None)
+            c.json(Method::GET, &format!("/firms/{firm}/runs"), None)
                 .await?;
-            let state = super::daemon_state_dir()?;
+            let state = crate::cli::daemon_state_dir()?;
             let url = std::fs::read_to_string(state.join("ui-url"))
                 .context("the daemon's UI address (is the UI enabled?)")?;
             println!("{}#firm={firm}&replay={run}", url.trim());
         }
         FirmCmd::Security { firm } => {
             let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}/security"), None)
+                .json(Method::GET, &format!("/firms/{firm}/security"), None)
                 .await?;
             if json_out {
                 print_json(&v);
@@ -1283,7 +1281,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             print_json(
                 &c.json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/security/requests/{request}"),
+                    &format!("/firms/{firm}/security/requests/{request}"),
                     Some(body.to_string()),
                 )
                 .await?,
@@ -1292,7 +1290,7 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Revoke { firm, rule } => print_json(
             &c.json(
                 Method::DELETE,
-                &format!("/v1/firms/{firm}/security/rules/{rule}"),
+                &format!("/firms/{firm}/security/rules/{rule}"),
                 None,
             )
             .await?,
@@ -1310,11 +1308,50 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
             print_json(
                 &c.json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/security/screenings/{screening}"),
+                    &format!("/firms/{firm}/security/screenings/{screening}"),
                     Some(json!({ "clear": approve, "note": note }).to_string()),
                 )
                 .await?,
             );
+        }
+        FirmCmd::Verify { firm, run } => {
+            let v = c
+                .json(
+                    Method::GET,
+                    &format!("/firms/{firm}/runs/{run}/verify"),
+                    None,
+                )
+                .await?;
+            if json_out {
+                print_json(&v);
+                return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
+            }
+            for f in v["files"].as_array().into_iter().flatten() {
+                if f["ok"] == json!(true) {
+                    println!(
+                        "ok     {} ({} lines, {} signed)",
+                        f["file"].as_str().unwrap_or(""),
+                        f["lines"],
+                        f["signed"]
+                    );
+                } else {
+                    println!(
+                        "CHANGED {}: {}",
+                        f["file"].as_str().unwrap_or(""),
+                        f["error"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            let ok = v["ok"] == json!(true);
+            println!(
+                "{}",
+                if ok {
+                    "the run's record is intact"
+                } else {
+                    "the run's record was changed"
+                }
+            );
+            return Ok(if ok { 0 } else { 1 });
         }
     }
     Ok(0)
@@ -1346,14 +1383,14 @@ pub async fn mail(c: &Client, cmd: MailCmd, json_out: bool) -> Result<i32> {
             let sent = c
                 .json(
                     Method::POST,
-                    &format!("/v1/firms/{firm}/mail"),
+                    &format!("/firms/{firm}/mail"),
                     Some(v.to_string()),
                 )
                 .await?;
             println!("sent {} in thread {}", s(&sent["id"]), s(&sent["thread"]));
         }
         MailCmd::Ls { firm, who, unread } => {
-            let mut path = format!("/v1/firms/{firm}/mail?unread={unread}");
+            let mut path = format!("/firms/{firm}/mail?unread={unread}");
             if let Some(w) = who {
                 path.push_str(&format!("&for={}", url_encode(&w)));
             }
@@ -1391,7 +1428,7 @@ pub async fn mail(c: &Client, cmd: MailCmd, json_out: bool) -> Result<i32> {
             let v = c
                 .json(
                     Method::GET,
-                    &format!("/v1/firms/{firm}/threads/{thread}"),
+                    &format!("/firms/{firm}/threads/{thread}"),
                     None,
                 )
                 .await?;
@@ -1431,7 +1468,7 @@ pub async fn drive(c: &Client, cmd: DriveCmd, json_out: bool) -> Result<i32> {
     match cmd {
         DriveCmd::Ls { firm } => {
             let v = c
-                .json(Method::GET, &format!("/v1/firms/{firm}/drive"), None)
+                .json(Method::GET, &format!("/firms/{firm}/drive"), None)
                 .await?;
             if json_out {
                 print_json(&v);
@@ -1459,9 +1496,7 @@ pub async fn drive(c: &Client, cmd: DriveCmd, json_out: bool) -> Result<i32> {
             dir,
             run,
         } => {
-            let journal = c
-                .text(&format!("/v1/firms/{firm}/runs/{run}/journal"))
-                .await?;
+            let journal = c.text(&format!("/firms/{firm}/runs/{run}/journal")).await?;
             let r = artifact.trim_start_matches("drive:");
             let (id, ver) = match r.split_once('@') {
                 Some((i, v)) => (
@@ -1490,7 +1525,7 @@ pub async fn drive(c: &Client, cmd: DriveCmd, json_out: bool) -> Result<i32> {
                     continue;
                 }
                 let url = format!(
-                    "/v1/firms/{firm}/runs/{run}/drive/{id}/{version}/{}",
+                    "/firms/{firm}/runs/{run}/drive/{id}/{version}/{}",
                     path.split('/')
                         .map(url_encode)
                         .collect::<Vec<_>>()

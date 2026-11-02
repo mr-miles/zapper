@@ -2,6 +2,7 @@
 //! fit beside the running ones, and the list of runs says how the live one
 //! is doing.
 
+use crate::OfficeOf;
 use zapper_core::prelude::*;
 use zapper_core::testing::TestCore;
 use zapper_core::NewSession;
@@ -29,7 +30,7 @@ async fn a_firm_starts_only_beside_the_sessions_still_running() {
     };
     let (a, b) = (session(&t), session(&t));
     t.core.stop_session(&b, "done").await;
-    let e = crate::up_with(&t.core, "acme", &Default::default())
+    let e = crate::up_with(&t.core.office(), "acme", &Default::default())
         .await
         .err()
         .unwrap()
@@ -44,7 +45,7 @@ async fn a_firm_starts_only_beside_the_sessions_still_running() {
 fn the_live_run_is_listed_with_its_state() {
     let t = crate::test_core(FIRM);
     let run = crate::test_run(&t.core, "acme");
-    let runs = crate::list_runs(&t.core, "acme");
+    let runs = crate::list_runs(&t.core.office(), "acme");
     let live = runs.iter().find(|r| r["run"] == run.id.as_str()).unwrap();
     assert_eq!(live["state"], "running", "{live}");
 }
@@ -113,7 +114,7 @@ async fn a_task_carries_the_boards_files() {
             "two files are named x",
         ),
     ] {
-        let e = crate::up_with(&t.core, "acme", &o)
+        let e = crate::up_with(&t.core.office(), "acme", &o)
             .await
             .err()
             .unwrap()

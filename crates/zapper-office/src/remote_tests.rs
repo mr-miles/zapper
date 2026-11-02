@@ -450,7 +450,7 @@ async fn main_comes_from_the_remote_and_nobody_pushes_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
     let w = world();
-    let (t, run, code, kb) = firm("pub").await;
+    let (_t, run, code, kb) = firm("pub").await;
     ready(&run).await;
     let head = push_branch(&run, &code, "feature", "src.txt", "write").unwrap();
     // Publishing needs write.
@@ -459,16 +459,7 @@ async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("needs write"), "{e}");
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{code}"),
-        "write",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{code}"), "write", None, "x").unwrap();
     let v = remote::publish_branch(&run, "pat", &code, "feature", "Add src", "What it does.")
         .await
         .unwrap();
@@ -527,16 +518,7 @@ async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
             .unwrap_err(),
     );
     assert!(e.contains("tip of main"), "{e}");
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{kb}"),
-        "write",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{kb}"), "write", None, "x").unwrap();
     let e = refused(
         remote::publish_branch(&run, "pat", &kb, "feature", "x", "")
             .await
@@ -548,18 +530,9 @@ async fn a_published_branch_is_checked_pushed_and_opened_as_a_pull_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_author_hears_of_checks_reviews_and_the_merge() {
     let w = world();
-    let (t, run, code, _kb) = firm("tell").await;
+    let (_t, run, code, _kb) = firm("tell").await;
     ready(&run).await;
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{code}"),
-        "write",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{code}"), "write", None, "x").unwrap();
     let head = push_branch(&run, &code, "fix", "fix.txt", "write").unwrap();
     remote::publish_branch(&run, "pat", &code, "fix", "Fix it", "")
         .await
@@ -683,18 +656,9 @@ async fn a_local_main_is_pushed_out_and_stops_when_the_remote_moved() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_keeps_what_it_had_and_its_tokens_are_revoked() {
     let w = world();
-    let (t, run, code, _kb) = firm("end").await;
+    let (_t, run, code, _kb) = firm("end").await;
     ready(&run).await;
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{code}"),
-        "write",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{code}"), "write", None, "x").unwrap();
     let during = push_branch(&run, &code, "during", "d.txt", "write").unwrap();
     remote::publish_branch(&run, "pat", &code, "during", "During", "")
         .await
@@ -744,7 +708,7 @@ async fn a_run_keeps_what_it_had_and_its_tokens_are_revoked() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     let w = world();
-    let (t, run, code, kb) = firm_with("kb", false).await;
+    let (_t, run, code, kb) = firm_with("kb", false).await;
     ready(&run).await;
     crate::kb::seed(&run).await.unwrap();
     // The layout, committed on the firm's server and pushed out.
@@ -771,7 +735,7 @@ async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     // A hire reads it from being cleared.
     let r = format!("git:{kb}");
     assert_eq!(access::level(&run, "pat", &r), access::Level::None);
-    access::grant_at_clearance(&t.core, &run, "ceo", "pat", "c-1", &[]);
+    access::grant_at_clearance(&run, "ceo", "pat", "c-1", &[]);
     assert_eq!(access::level(&run, "pat", &r), access::Level::Read);
     assert_eq!(
         access::level(&run, "pat", &format!("git:{code}")),
@@ -844,7 +808,7 @@ async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
     let w = world();
-    let (t, run, code, _kb) = firm("touch").await;
+    let (_t, run, code, _kb) = firm("touch").await;
     remote::prepare(&run).await.unwrap();
     run.facility
         .git_passwords
@@ -861,16 +825,7 @@ async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
     assert_eq!(status, 403);
     assert!(!local.exists());
     // With one, their first fetch brings it in, and is served.
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{code}"),
-        "read",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{code}"), "read", None, "x").unwrap();
     let (status, body) = git_request(
         &run,
         &format!("/{code}.git/info/refs?service=git-upload-pack"),
@@ -899,16 +854,7 @@ async fn without_a_main_on_the_remote_publishing_waits_for_the_board() {
     let t = crate::test_core(&config("nomain"));
     let run = test_run_remote(&t.core, "acme", &[&code, &kb]).await;
     ready(&run).await;
-    access::board_grant(
-        &t.core,
-        &run,
-        "pat",
-        &format!("git:{code}"),
-        "write",
-        None,
-        "x",
-    )
-    .unwrap();
+    access::board_grant(&run, "pat", &format!("git:{code}"), "write", None, "x").unwrap();
     push_branch(&run, &code, "skeleton", "src.txt", "write").unwrap();
 
     for _ in 0..2 {

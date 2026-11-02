@@ -150,8 +150,7 @@ fn deny(
     v: &Verdict,
     denial: String,
 ) -> Response<Body> {
-    log(d, s, NetLog::new(net, Some(v), true));
-    note_failure(s, rec, 403, None);
+    fail_log(d, s, rec, NetLog::new(net, Some(v), true), 403, None);
     text(StatusCode::FORBIDDEN, denial)
 }
 
@@ -169,19 +168,17 @@ fn fail(
     secrets: Vec<String>,
     error: String,
 ) -> Response<Body> {
-    log(
+    fail_log(
         d,
         s,
+        rec,
         NetLog {
-            req: net,
-            verdict: Some(v),
-            inspected: true,
-            status: None,
             secrets,
-            error: Some(error.clone()),
+            ..NetLog::new(net, Some(v), true)
         },
+        status.as_u16(),
+        Some(error.clone()),
     );
-    note_failure(s, rec, status.as_u16(), Some(error.clone()));
     text(status, error)
 }
 
@@ -315,9 +312,8 @@ async fn inject_for(
         used(effects, headers)
             .into_iter()
             .filter_map(|name| {
-                let secret = secrets::find(&config, &own, &name)?;
-                let sendable = secrets::check(&name, secret, Use::Header, host, !plaintext).is_ok();
-                let spec = secret.source.mint_spec().filter(|_| sendable)?;
+                let (secret, allowed) = header_secret(&config, &own, &name, host, plaintext)?;
+                let spec = secret.source.mint_spec().filter(|_| allowed.is_ok())?;
                 Some((name, spec))
             })
             .collect()
@@ -338,6 +334,25 @@ async fn inject_for(
         headers,
         &minted,
     )
+}
+
+/// `name`'s secret (the config's, else the session's own) and whether it may
+/// go in a header to `host` over this connection — the find-and-check the
+/// mint pre-pass and the injection share, so the two can't drift on which
+/// `Use` or host they check. `Err` carries why it may not, for the injection
+/// to surface; the pre-pass only needs whether it is `Ok`.
+fn header_secret<'a>(
+    config: &'a zapper_policy::Config,
+    own: &'a BTreeMap<String, zapper_policy::Secret>,
+    name: &str,
+    host: &str,
+    plaintext: bool,
+) -> Option<(&'a zapper_policy::Secret, Result<(), String>)> {
+    let secret = secrets::find(config, own, name)?;
+    Some((
+        secret,
+        secrets::check(name, secret, Use::Header, host, !plaintext),
+    ))
 }
 
 /// Whether a header of the request holds `placeholder`.
@@ -378,9 +393,9 @@ pub(crate) fn inject_with(
     let mut used = Vec::new();
     let mut values = Vec::new();
     let value_of = |name: &str| -> Result<String, String> {
-        let secret =
-            secrets::find(config, own, name).ok_or_else(|| format!("unknown secret {name}"))?;
-        secrets::check(name, secret, Use::Header, host, !plaintext)?;
+        let (secret, allowed) = header_secret(config, own, name, host, plaintext)
+            .ok_or_else(|| format!("unknown secret {name}"))?;
+        allowed?;
         match secret.source.mint_spec() {
             Some(_) => match minted.get(name) {
                 Some(v) => v
@@ -498,6 +513,62 @@ pub(crate) fn upstream_uri(host: &str, port: u16, path: &str, h2: bool) -> hyper
         .unwrap_or_default()
 }
 
+/// The pre-dispatch validation of an inspected request: the path the upstream
+/// will act on is the path forwarded (one whose meaning depends on the
+/// upstream is refused), the record is started with the headers as the guest
+/// sent them, and a method override is refused. `Ok` is the validated
+/// `(net, rec, path)` for the dispatch; `Err` is the refusal response, already
+/// logged and noted.
+fn prepare_inspected(
+    d: &Arc<Daemon>,
+    s: &Arc<Session>,
+    req: &Request<Incoming>,
+    host: &str,
+    port: u16,
+    scheme: &'static str,
+) -> Result<(NetRequest, httplog::Shared, String), Box<Response<Body>>> {
+    let sent = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    let normalized = super::sanitize::normalize_path(&sent);
+    let path = normalized.clone().unwrap_or_else(|_| sent.clone());
+    let net = NetRequest {
+        host: host.to_string(),
+        port,
+        method: Some(req.method().to_string()),
+        path: Some(path.clone()),
+        ..Default::default()
+    };
+    // Headers as the guest sent them: before secrets are added.
+    let rec = s.requests.lock().unwrap().start(
+        scheme,
+        req.method().as_str(),
+        host,
+        port,
+        Some(&path),
+        httplog::headers(req.headers()),
+    );
+    let refused = match normalized {
+        Err(why) => Some((StatusCode::BAD_REQUEST, format!("{why}: {sent}"))),
+        Ok(_) => super::sanitize::method_override(req.method().as_str(), &path, req.headers())
+            .map(|why| (StatusCode::FORBIDDEN, why)),
+    };
+    if let Some((status, why)) = refused {
+        fail_log(
+            d,
+            s,
+            &rec,
+            NetLog::new(&net, None, true),
+            status.as_u16(),
+            Some(why.clone()),
+        );
+        return Err(Box::new(text(status, why)));
+    }
+    Ok((net, rec, path))
+}
+
 /// Decides, cleans, injects, and forwards one inspected request, then logs the
 /// outcome. The shared body of the TLS (`inspected`) and plain (`forward_plain`)
 /// paths; `send` shapes the request for the negotiated protocol and dispatches
@@ -518,48 +589,10 @@ where
     F: FnOnce(hyper::http::request::Parts, Body, String) -> Fut,
     Fut: std::future::Future<Output = Result<Response<Incoming>, (StatusCode, String)>>,
 {
-    let sent = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/".into());
-    // Rules judge the path the upstream will act on, and that is the path
-    // forwarded; one whose meaning depends on the upstream is refused.
-    let normalized = super::sanitize::normalize_path(&sent);
-    let path = normalized.clone().unwrap_or_else(|_| sent.clone());
-    let net = NetRequest {
-        host: host.clone(),
-        port,
-        method: Some(req.method().to_string()),
-        path: Some(path.clone()),
-        ..Default::default()
+    let (net, rec, path) = match prepare_inspected(d, s, &req, &host, port, scheme) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
     };
-    // Headers as the guest sent them: before secrets are added.
-    let rec = s.requests.lock().unwrap().start(
-        scheme,
-        req.method().as_str(),
-        &host,
-        port,
-        Some(&path),
-        httplog::headers(req.headers()),
-    );
-    let refused = match normalized {
-        Err(why) => Some((StatusCode::BAD_REQUEST, format!("{why}: {sent}"))),
-        Ok(_) => super::sanitize::method_override(req.method().as_str(), &path, req.headers())
-            .map(|why| (StatusCode::FORBIDDEN, why)),
-    };
-    if let Some((status, why)) = refused {
-        log(
-            d,
-            s,
-            NetLog {
-                error: Some(why.clone()),
-                ..NetLog::new(&net, None, true)
-            },
-        );
-        note_failure(s, &rec, status.as_u16(), Some(why.clone()));
-        return text(status, why);
-    }
     let v = decide(d, s, &net).await;
     note_verdict(&rec, &v);
     if !v.allowed {

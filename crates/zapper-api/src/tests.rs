@@ -595,6 +595,46 @@ async fn socket_mcp_servers_added_listed_and_removed_by_their_owner() {
 }
 
 #[tokio::test]
+async fn zones_and_socket_deciders_added_and_removed() {
+    let t = TestCore::new(CONFIG);
+    let app = super::api(t.core.clone(), &Mount::default());
+
+    // A zone: its names resolve only to services for the sessions it picks.
+    let r = post(
+        &app,
+        "/v1/zones",
+        r#"{"domain":"acme.internal","sessions":{"firm":"acme"}}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let zone = r.json()["id"].as_u64().unwrap();
+    assert_eq!(r.json()["kind"], "zone");
+    let r = send(
+        &app,
+        Method::DELETE,
+        &format!("/v1/services/{zone}"),
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+    // A socket decider: it decides the `ask`s of the sessions it picks.
+    let r = post(
+        &app,
+        "/v1/deciders",
+        r#"{"sessions":{"firm":"acme"},"socket":"office-acme-decider.sock"}"#,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let id = r.json()["id"].as_u64().unwrap();
+    let r = send(&app, Method::DELETE, &format!("/v1/deciders/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = send(&app, Method::DELETE, &format!("/v1/deciders/{id}"), &[], "").await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_secret_is_set_and_removed_alone_and_validated() {
     let t = TestCore::new(CONFIG);
     let app = super::api(t.core.clone(), &Mount::default());

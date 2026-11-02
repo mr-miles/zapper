@@ -6,7 +6,6 @@ mod client;
 mod github;
 use zapper_core::prelude::*;
 use zapper_core::{images, util};
-mod office;
 mod ssh;
 mod term;
 
@@ -18,6 +17,7 @@ use http_body_util::BodyExt;
 use hyper::Method;
 use serde_json::{json, Value};
 use zapper_policy::{expand_home, Config};
+use zapper_util::cli::{print_json, s, table};
 
 use client::Client;
 
@@ -50,10 +50,9 @@ struct ConfigArg {
 enum Cmd {
     /// Write a starter config to --config if it does not exist.
     Init {
-        /// Which config to write. `example`: a full starter config and, with
-        /// the office, the default skills of its workers into `skills/` next
-        /// to it (keeping those already there). `empty`: just the daemon
-        /// defaults `serve` needs, and nothing else.
+        /// Which config to write. `example`: a full starter config. `empty`:
+        /// just the daemon defaults `serve` needs, and nothing else. (The
+        /// office's worker agents and skills are installed by `zapper-office`.)
         #[arg(value_enum, default_value_t = Template::Example)]
         template: Template,
         #[command(flatten)]
@@ -214,8 +213,6 @@ enum Cmd {
         #[command(flatten)]
         cfg: ConfigArg,
     },
-    #[command(flatten)]
-    Office(office::Cmd),
     /// The record: who keeps it, and checking it against the keeper's chains.
     Record {
         #[command(subcommand)]
@@ -306,9 +303,6 @@ fn label_pairs(pairs: &[String]) -> Result<Value> {
 enum RecordCmd {
     /// Who keeps the record and whether it is being written.
     Status,
-    /// Checks a firm's run against the keeper's chains and signatures.
-    #[cfg(feature = "office")]
-    Verify { firm: String, run: String },
     /// Checks a session's record: its files against the keeper's chains
     /// (with a keeper), and its disks' hashes from each stop to the start
     /// after it; exits 1 on any finding.
@@ -418,7 +412,6 @@ fn load_config(path: &Path) -> Result<Config> {
         return Ok(Config::default());
     }
     Config::from_yaml(&std::fs::read_to_string(path)?)
-        .and_then(|c| office::config(&c).map(|_| c))
         .with_context(|| format!("loading {}", path.display()))
 }
 
@@ -478,40 +471,6 @@ fn config_path(given: Option<&str>) -> PathBuf {
     path
 }
 
-fn print_json(v: &Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap());
-}
-
-/// Prints rows as aligned columns.
-fn table(header: &[&str], rows: Vec<Vec<String>>) {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
-    for r in &rows {
-        for (i, c) in r.iter().enumerate() {
-            widths[i] = widths[i].max(c.chars().count());
-        }
-    }
-    let line = |cells: Vec<String>| {
-        let s: Vec<String> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{c:<w$}", w = widths[i]))
-            .collect();
-        println!("{}", s.join("  ").trim_end());
-    };
-    line(header.iter().map(|h| h.to_uppercase()).collect());
-    for r in rows {
-        line(r);
-    }
-}
-
-fn s(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
 async fn run(cli: Cli) -> Result<i32> {
     let c = Client::new();
     match cli.cmd {
@@ -522,16 +481,11 @@ async fn run(cli: Cli) -> Result<i32> {
             } else {
                 std::fs::create_dir_all(config_path.parent().unwrap())?;
                 let contents = match template {
-                    Template::Example => office::example().to_string(),
+                    Template::Example => EXAMPLE.to_string(),
                     Template::Empty => Config::default().to_yaml(),
                 };
                 util::write_private(&config_path, contents.as_bytes())?;
                 println!("wrote {}", config_path.display());
-            }
-            // The example also installs the office workers' skills; `empty`
-            // is config only.
-            if matches!(template, Template::Example) {
-                office::init(config_path.parent().unwrap())?;
             }
         }
         Cmd::Check { cfg } => return check(&config_path(cfg.config.as_deref())).await,
@@ -873,211 +827,188 @@ async fn run(cli: Cli) -> Result<i32> {
                     .await?,
             );
         }
-        Cmd::Config { cmd } => match cmd {
-            ConfigCmd::Show => print!("{}", c.text("/v1/config").await?),
-            ConfigCmd::Startup => print!("{}", c.text("/v1/config/startup").await?),
-            ConfigCmd::Diff => {
-                let d = c.text("/v1/config/diff").await?;
-                if d.trim().is_empty() {
-                    println!("no unsaved changes");
-                } else {
-                    print!("{d}");
-                }
-            }
-            ConfigCmd::Save => {
-                let v = c.json(Method::POST, "/v1/config/save", None).await?;
-                println!("saved to {}", s(&v["saved"]));
-            }
-            ConfigCmd::Reload => {
-                c.json(Method::POST, "/v1/config/reload", None).await?;
-                println!("running config replaced by the startup file");
-            }
-            ConfigCmd::Edit => {
-                let current = c.text("/v1/config").await?;
-                let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
-                util::write_private(&tmp, current.as_bytes())?;
-                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("{editor} \"$1\""))
-                    .arg("sh")
-                    .arg(&tmp)
-                    .status()?;
-                let edited = std::fs::read_to_string(&tmp)?;
-                let _ = std::fs::remove_file(&tmp);
-                if !status.success() || edited == current {
-                    println!("no change");
-                } else {
-                    c.json(Method::PUT, "/v1/config", Some(edited)).await?;
-                    println!("running config updated; `zapper config diff`, then `zapper config save` to keep it");
-                }
-            }
-            ConfigCmd::Apply { file } => {
-                c.json(
-                    Method::PUT,
-                    "/v1/config",
-                    Some(std::fs::read_to_string(file)?),
-                )
-                .await?;
-                println!("running config replaced; `zapper config save` to keep it");
-            }
-        },
-        Cmd::Profile { cmd } => match cmd {
-            ProfileCmd::Ls => {
-                let v = c.json(Method::GET, "/v1/profiles", None).await?;
-                if cli.json {
-                    print_json(&v);
-                } else {
-                    let rows = v
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|p| {
-                            vec![
-                                s(&p["name"]),
-                                s(&p["extends"]),
-                                s(&p["image"]),
-                                p["command"]
-                                    .as_array()
-                                    .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
-                                    .unwrap_or_default(),
-                                s(&p["description"]),
-                            ]
-                        })
-                        .collect();
-                    table(
-                        &["name", "extends", "image", "command", "description"],
-                        rows,
-                    );
-                }
-            }
-            ProfileCmd::Show { name } => {
-                print!("{}", c.text(&format!("/v1/profiles/{name}")).await?)
-            }
-            ProfileCmd::Set { name, file } => {
-                c.json(
-                    Method::PUT,
-                    &format!("/v1/profiles/{name}"),
-                    Some(std::fs::read_to_string(file)?),
-                )
-                .await?;
-                println!("profile {name} set; `zapper config save` to keep it");
-            }
-            ProfileCmd::Rm { name } => {
-                c.json(Method::DELETE, &format!("/v1/profiles/{name}"), None)
-                    .await?;
-                println!("profile {name} removed");
-            }
-        },
-        Cmd::Office(cmd) => return office::run(&c, cmd, cli.json).await,
+        Cmd::Config { cmd } => config_cmd(&c, cmd).await?,
+        Cmd::Profile { cmd } => profile_cmd(&c, cmd, cli.json).await?,
         Cmd::Github { cmd } => return github::github(cmd).await,
         Cmd::Mint { cmd } => return github::mint(cmd).await,
         Cmd::Service { cmd } => service(&c, cmd, cli.json).await?,
         Cmd::Ssh { cmd } => return ssh::ssh(&c, cmd, cli.json).await,
-        Cmd::Record { cmd } => {
-            let (path, verify) = match &cmd {
-                RecordCmd::Status => ("/v1/record".to_string(), false),
-                #[cfg(feature = "office")]
-                RecordCmd::Verify { firm, run } => {
-                    (format!("/v1/firms/{firm}/runs/{run}/verify"), true)
-                }
-                RecordCmd::Session { id } => {
-                    let v = c
-                        .json(Method::GET, &format!("/v1/sessions/{id}/verify"), None)
-                        .await?;
-                    if cli.json {
-                        print_json(&v);
-                    } else {
-                        print_session_check(&v);
-                    }
-                    return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
-                }
-            };
-            let v = c.json(Method::GET, &path, None).await?;
-            if cli.json || !verify {
+        Cmd::Record { cmd } => match cmd {
+            RecordCmd::Status => {
+                let v = c.json(Method::GET, "/v1/record", None).await?;
                 print_json(&v);
                 return Ok(0);
             }
-            for f in v["files"].as_array().into_iter().flatten() {
-                if f["ok"] == json!(true) {
-                    println!(
-                        "ok     {} ({} lines, {} signed)",
-                        f["file"].as_str().unwrap_or(""),
-                        f["lines"],
-                        f["signed"]
-                    );
+            RecordCmd::Session { id } => {
+                let v = c
+                    .json(Method::GET, &format!("/v1/sessions/{id}/verify"), None)
+                    .await?;
+                if cli.json {
+                    print_json(&v);
                 } else {
-                    println!(
-                        "CHANGED {}: {}",
-                        f["file"].as_str().unwrap_or(""),
-                        f["error"].as_str().unwrap_or("")
-                    );
+                    print_session_check(&v);
                 }
+                return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
             }
-            let ok = v["ok"] == json!(true);
-            println!(
-                "{}",
-                if ok {
-                    "the run's record is intact"
-                } else {
-                    "the run's record was changed"
-                }
-            );
-            return Ok(if ok { 0 } else { 1 });
+        },
+        Cmd::Image { cmd, cfg } => return image_cmd(&c, cmd, cfg, cli.json).await,
+    }
+    Ok(0)
+}
+
+async fn config_cmd(c: &Client, cmd: ConfigCmd) -> Result<()> {
+    match cmd {
+        ConfigCmd::Show => print!("{}", c.text("/v1/config").await?),
+        ConfigCmd::Startup => print!("{}", c.text("/v1/config/startup").await?),
+        ConfigCmd::Diff => {
+            let d = c.text("/v1/config/diff").await?;
+            if d.trim().is_empty() {
+                println!("no unsaved changes");
+            } else {
+                print!("{d}");
+            }
         }
-        Cmd::Image { cmd, cfg } => {
-            let config = load_config(&config_path(cfg.config.as_deref()))?;
-            let dir = PathBuf::from(expand_home(&config.daemon.images));
-            match cmd {
-                ImageCmd::Build {
-                    name,
-                    args,
-                    from,
-                    run,
-                    size,
-                    local,
-                } => {
-                    let daemon = !local
-                        && tokio::net::UnixStream::connect(client::socket_path())
-                            .await
-                            .is_ok();
-                    if daemon {
-                        return build_in_daemon(&c, &name, &args, from, run, size).await;
-                    }
-                    let r = images::recipe(&config, &name, from, run, &args)?;
-                    let out = images::build(
-                        images::Build {
-                            name: &name,
-                            recipe: &r,
-                            size: size.as_deref(),
-                            dir: &dir,
-                        },
-                        &|l| eprintln!("{l}"),
-                    )?;
-                    println!("built {}", out.display());
-                }
-                ImageCmd::Ls => {
-                    let v = images::list(&dir)?;
-                    if cli.json {
-                        print_json(&json!(v));
-                    } else {
-                        let rows = v
-                            .iter()
-                            .map(|i| {
-                                vec![
-                                    s(&i["name"]),
-                                    format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
-                                    s(&i["from"]),
-                                    i["sha256"]
-                                        .as_str()
-                                        .map(|h| h[..h.len().min(12)].to_string())
-                                        .unwrap_or_else(|| "-".into()),
-                                ]
-                            })
-                            .collect();
-                        table(&["name", "size", "from", "sha256"], rows);
-                    }
-                }
+        ConfigCmd::Save => {
+            let v = c.json(Method::POST, "/v1/config/save", None).await?;
+            println!("saved to {}", s(&v["saved"]));
+        }
+        ConfigCmd::Reload => {
+            c.json(Method::POST, "/v1/config/reload", None).await?;
+            println!("running config replaced by the startup file");
+        }
+        ConfigCmd::Edit => {
+            let current = c.text("/v1/config").await?;
+            let tmp = std::env::temp_dir().join(format!("zapper-{}.yaml", util::random_id(6)));
+            util::write_private(&tmp, current.as_bytes())?;
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor} \"$1\""))
+                .arg("sh")
+                .arg(&tmp)
+                .status()?;
+            let edited = std::fs::read_to_string(&tmp)?;
+            let _ = std::fs::remove_file(&tmp);
+            if !status.success() || edited == current {
+                println!("no change");
+            } else {
+                c.json(Method::PUT, "/v1/config", Some(edited)).await?;
+                println!("running config updated; `zapper config diff`, then `zapper config save` to keep it");
+            }
+        }
+        ConfigCmd::Apply { file } => {
+            c.json(
+                Method::PUT,
+                "/v1/config",
+                Some(std::fs::read_to_string(file)?),
+            )
+            .await?;
+            println!("running config replaced; `zapper config save` to keep it");
+        }
+    }
+    Ok(())
+}
+
+async fn profile_cmd(c: &Client, cmd: ProfileCmd, json_out: bool) -> Result<()> {
+    match cmd {
+        ProfileCmd::Ls => {
+            let v = c.json(Method::GET, "/v1/profiles", None).await?;
+            if json_out {
+                print_json(&v);
+            } else {
+                let rows = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| {
+                        vec![
+                            s(&p["name"]),
+                            s(&p["extends"]),
+                            s(&p["image"]),
+                            p["command"]
+                                .as_array()
+                                .map(|a| a.iter().map(s).collect::<Vec<_>>().join(" "))
+                                .unwrap_or_default(),
+                            s(&p["description"]),
+                        ]
+                    })
+                    .collect();
+                table(
+                    &["name", "extends", "image", "command", "description"],
+                    rows,
+                );
+            }
+        }
+        ProfileCmd::Show { name } => print!("{}", c.text(&format!("/v1/profiles/{name}")).await?),
+        ProfileCmd::Set { name, file } => {
+            c.json(
+                Method::PUT,
+                &format!("/v1/profiles/{name}"),
+                Some(std::fs::read_to_string(file)?),
+            )
+            .await?;
+            println!("profile {name} set; `zapper config save` to keep it");
+        }
+        ProfileCmd::Rm { name } => {
+            c.json(Method::DELETE, &format!("/v1/profiles/{name}"), None)
+                .await?;
+            println!("profile {name} removed");
+        }
+    }
+    Ok(())
+}
+
+async fn image_cmd(c: &Client, cmd: ImageCmd, cfg: ConfigArg, json_out: bool) -> Result<i32> {
+    let config = load_config(&config_path(cfg.config.as_deref()))?;
+    let dir = PathBuf::from(expand_home(&config.daemon.images));
+    match cmd {
+        ImageCmd::Build {
+            name,
+            args,
+            from,
+            run,
+            size,
+            local,
+        } => {
+            let daemon = !local
+                && tokio::net::UnixStream::connect(client::socket_path())
+                    .await
+                    .is_ok();
+            if daemon {
+                return build_in_daemon(c, &name, &args, from, run, size).await;
+            }
+            let r = images::recipe(&config, &name, from, run, &args)?;
+            let out = images::build(
+                images::Build {
+                    name: &name,
+                    recipe: &r,
+                    size: size.as_deref(),
+                    dir: &dir,
+                },
+                &|l| eprintln!("{l}"),
+            )?;
+            println!("built {}", out.display());
+        }
+        ImageCmd::Ls => {
+            let v = images::list(&dir)?;
+            if json_out {
+                print_json(&json!(v));
+            } else {
+                let rows = v
+                    .iter()
+                    .map(|i| {
+                        vec![
+                            s(&i["name"]),
+                            format!("{} MiB", i["size"].as_u64().unwrap_or(0) >> 20),
+                            s(&i["from"]),
+                            i["sha256"]
+                                .as_str()
+                                .map(|h| h[..h.len().min(12)].to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        ]
+                    })
+                    .collect();
+                table(&["name", "size", "from", "sha256"], rows);
             }
         }
     }
@@ -1369,10 +1300,11 @@ fn event_line(e: &Value) -> String {
 
 async fn serve(config_path: PathBuf) -> Result<()> {
     let d = zapper_core::Core::start(config_path.clone())?;
-    office::start(&d);
     d.check_config()
         .with_context(|| format!("loading {}", config_path.display()))?;
-    let mount = office::mount(&d);
+    // The office is its own process now (`zapper-office serve`); the daemon
+    // serves only its own API and UI (proposal 13, step 4).
+    let mount = zapper_api::Mount::default();
     let socket = client::socket_path();
     let dir = socket.parent().unwrap();
     std::fs::create_dir_all(dir)?;
@@ -1558,7 +1490,6 @@ async fn check(config_path: &Path) -> Result<i32> {
             );
         }
     }
-    office::check(&config, &mut report);
     let probe = |nic: bool| {
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.args(["__vmm", "--probe"]);
@@ -1990,124 +1921,6 @@ mod tests {
         }
     }
 
-    /// An example's directory: a config this build loads, whose profiles
-    /// are all on the one image the firms need (`zapper check` asks for
-    /// every profile's image), each firm's skills there, and a task with a
-    /// subject.
-    #[cfg(feature = "office")]
-    fn example(name: &str) -> zapper_policy::Config {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples")
-            .join(name);
-        let c = super::load_config(&dir.join("zapper.yaml")).unwrap();
-        for p in c.profiles.keys() {
-            assert_eq!(c.resolve(p).unwrap().engine.image, "office", "{name}: {p}");
-        }
-        for firm in zapper_office::firm::all(&c).values() {
-            assert_eq!(zapper_office::skills::missing(firm), Vec::<String>::new());
-        }
-        let task = std::fs::read_to_string(dir.join("task.md")).unwrap();
-        assert!(!task.lines().next().unwrap().trim().is_empty());
-        c
-    }
-
-    /// `examples/mini-firm`: Ada alone, who may contract a writer, named
-    /// Ben from the pool.
-    #[cfg(feature = "office")]
-    #[test]
-    fn the_mini_firm_example_loads() {
-        let c = example("mini-firm");
-        assert_eq!(c.profiles.len(), 1);
-        let mini = &zapper_office::firm::all(&c)["mini"];
-        let founders: Vec<&str> = mini.workers.iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(founders, ["ada"]);
-        assert_eq!(mini.roles["ceo"].hires, ["writer"]);
-        assert!(mini.budget.seed > 0);
-        assert_eq!(mini.names, ["ben"]);
-    }
-
-    /// `examples/shopping-list`: Ada alone, who may hire a product manager
-    /// and engineers; a git repository, which the profile leaves to grants;
-    /// npm for the engineers only.
-    #[cfg(feature = "office")]
-    #[test]
-    fn the_shopping_list_example_loads() {
-        let c = example("shopping-list");
-        let shop = &zapper_office::firm::all(&c)["shop"];
-        let founders: Vec<&str> = shop.workers.iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(founders, ["ada"]);
-        assert_eq!(shop.roles["ceo"].hires, ["product-manager", "engineer"]);
-        assert!(shop.budget.seed > 0);
-        assert_eq!(shop.git_repos(), ["product"]);
-        let hosts = |profile: &str| -> Vec<(String, zapper_policy::Action)> {
-            c.resolve(profile)
-                .unwrap()
-                .layers
-                .iter()
-                .flat_map(|(_, l)| l.net.iter().map(|n| (n.host.clone(), n.action)))
-                .collect()
-        };
-        let git = format!("git.{}", shop.domain("shop"));
-        let npm = "registry.npmjs.org".to_string();
-        for role in ["ceo", "product-manager", "engineer"] {
-            let h = hosts(&shop.roles[role].profile);
-            assert!(
-                h.contains(&(git.clone(), zapper_policy::Action::Deny)),
-                "{role}: {h:?}"
-            );
-            assert_eq!(
-                h.iter().any(|(x, _)| *x == npm),
-                role == "engineer",
-                "{role}: {h:?}"
-            );
-        }
-    }
-
-    /// `examples/github-firm`: the shopping list company with its
-    /// repositories on GitHub, behind the firm's own git server.
-    #[cfg(feature = "office")]
-    #[test]
-    fn the_github_firm_example_loads() {
-        let c = example("github-firm");
-        let octo = &zapper_office::firm::all(&c)["octo"];
-        let founders: Vec<&str> = octo.workers.iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(founders, ["ada", "lin"]);
-        assert_eq!(octo.roles["librarian"].agent.as_deref(), Some("librarian"));
-        assert!(octo.git_internal());
-        assert_eq!(octo.git_remote().unwrap().config, "acme.yaml");
-        assert!(octo.git.as_ref().unwrap().dir.is_some());
-        // Its knowledge base is kb, whose main is the firm's.
-        assert_eq!(octo.knowledge_base().as_deref(), Some("kb"));
-        assert!(octo.main_is_local("kb") && !octo.main_is_local("shopping-list"));
-    }
-
-    /// `examples/research-firm`: Ada alone, who may hire a research
-    /// manager, who may hire researchers, a prototype engineer, and a
-    /// process lead; drive spaces for the research and the board pack, a
-    /// repository for prototypes.
-    #[cfg(feature = "office")]
-    #[test]
-    fn the_research_firm_example_loads() {
-        let c = example("research-firm");
-        let lab = &zapper_office::firm::all(&c)["lab"];
-        let founders: Vec<&str> = lab.workers.iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(founders, ["ada"]);
-        assert_eq!(
-            lab.roles["ceo"].hires,
-            [
-                "research-manager",
-                "prototype-engineer",
-                "process-improvement"
-            ]
-        );
-        assert_eq!(lab.roles["research-manager"].hires, ["researcher"]);
-        assert!(lab.budget.seed > 0);
-        assert_eq!(lab.git_repos(), ["prototypes"]);
-        for space in ["research", "board"] {
-            assert!(lab.credentials.spaces.iter().any(|s| s == space), "{space}");
-        }
-    }
-
     /// The fork's minimal config: shells, Claude Code and k3s, no firms.
     #[test]
     fn example_config_is_valid() {
@@ -2155,31 +1968,11 @@ mod tests {
         assert_eq!(p.agent.env["CLAUDE_CODE_OAUTH_TOKEN"], "{{secret:claude}}");
     }
 
-    /// Firms need the office; the office is mounted on the API and UI only
-    /// when it is in the build.
-    #[test]
-    fn firms_and_the_office_go_together() {
-        let firms = zapper_policy::Config::from_yaml(
-            "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
-        )
-        .unwrap();
-        let e = super::office::config(&firms).err().map(|e| e.to_string());
-        assert_eq!(e.is_none(), cfg!(feature = "office"), "{e:?}");
-        assert!(super::office::config(&zapper_policy::Config::default()).is_ok());
-
-        let t = zapper_core::testing::TestCore::new("");
-        let m = super::office::mount(&t.core);
-        assert_eq!(m.page.is_some(), cfg!(feature = "office"));
-    }
-
-    /// What `zapper init` writes loads in this build, office or not.
+    /// What `zapper init` writes loads: the daemon validates its own config,
+    /// never firms (those are the office's own now — proposal 13, step 4).
     #[test]
     fn init_writes_a_config_this_build_loads() {
-        let c = zapper_policy::Config::from_yaml(super::office::example()).unwrap();
-        super::office::config(&c).unwrap();
+        let c = zapper_policy::Config::from_yaml(super::EXAMPLE).unwrap();
         assert!(c.profiles.contains_key("claude"));
-        if !cfg!(feature = "office") {
-            assert!(!super::office::example().contains("Firms (docs/office.md)"));
-        }
     }
 }

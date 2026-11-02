@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
-use zapper_core::prelude::*;
 
 use crate::firm::{Firm, Worker, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
@@ -16,8 +15,7 @@ use serde_json::{json, Value};
 use zapper_policy::valid_worker_name;
 
 use super::mail::{Draft, Expects, Kind};
-use super::{now, FirmRun, WorkerRt, WorkerState};
-use zapper_core::Core;
+use super::{now, FirmRun, Office, WorkerRt, WorkerState};
 
 /// Longest budget plan or reason, in bytes.
 const MAX_PLAN: usize = 20_000;
@@ -1188,7 +1186,7 @@ pub struct HireArgs {
 /// Hires a worker under `by`: checks the role, the money and the host,
 /// adds them to the chart, funds them, boots their VM, and sends them the
 /// brief as their first assignment.
-pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
+pub async fn hire(run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     let hirer = run.worker(by)?;
     let can = run
         .config
@@ -1234,7 +1232,7 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     if a.brief.len() > super::mail::MAX_BODY || a.reason.len() > MAX_PLAN {
         bail!("the brief or the reason is too long");
     }
-    let config = room(d, &a.role, &role)?;
+    let config = room(&run.office(), &a.role, &role)?;
     let (name, firm, rt) = join(
         run,
         by,
@@ -1291,7 +1289,6 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     // officer: its own check clears them at once.
     if role.officer && super::security::is_first_officer(run, &name) {
         let _ = super::security::decide_screening(
-            d,
             run,
             BOARD,
             &check,
@@ -1308,23 +1305,14 @@ pub async fn hire(d: &Core, run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result
     }))
 }
 
-/// Room on the host for one more VM of `role`: the config, or why not.
+/// Room on the host for one more VM of `role`: the config, or why not. The
+/// host-room decision (session limit + memory) is one call to the daemon.
 pub(super) fn room(
-    d: &Core,
-    role_name: &str,
+    office: &Office,
+    _role_name: &str,
     role: &crate::firm::Role,
 ) -> Result<zapper_policy::Config> {
-    let config = d.config();
-    let profile = config.resolve(&role.profile)?;
-    if let Some(avail) = super::mem_available_mib() {
-        if profile.engine.memory_mib as u64 > avail {
-            bail!("the host has {avail} MiB of memory available, and a {role_name} needs {} MiB; tell the board", profile.engine.memory_mib);
-        }
-    }
-    let running = d.sessions().len();
-    if running >= config.daemon.max_sessions {
-        bail!("the host runs {running} sessions, its limit; tell the board");
-    }
+    let config = office.client().admit(&role.profile)?;
     Ok(config)
 }
 
@@ -1411,20 +1399,14 @@ pub(super) fn join(
             .git_passwords
             .lock()
             .unwrap()
-            .insert(name.clone(), zapper_core::util::random_id(24));
+            .insert(name.clone(), zapper_util::random_id(24));
     }
     Ok((name, firm, rt))
 }
 
 /// Lets a worker go: their VM stops, their reports and open work move to
 /// their manager, and so does their unspent budget.
-pub async fn release(
-    d: &Core,
-    run: &Arc<FirmRun>,
-    by: &str,
-    worker: &str,
-    reason: &str,
-) -> Result<Value> {
+pub async fn release(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str) -> Result<Value> {
     let chart = run.chart();
     if chart.worker(worker).is_none() {
         bail!("no worker {worker}");
@@ -1446,7 +1428,7 @@ pub async fn release(
     if super::scenario::begin_debrief(run, worker) {
         super::scenario::debrief(run, worker, reason.trim()).await;
     }
-    Ok(let_go(d, run, by, worker, reason, true))
+    Ok(let_go(run, by, worker, reason, true))
 }
 
 /// A worker leaves the firm: out of the chart, their VM stopped; their
@@ -1454,25 +1436,54 @@ pub async fn release(
 /// told when someone else (`by`) made the call and `tell` is set. So does
 /// what they overspent: letting someone go writes off nothing (the board
 /// alone, which keeps no balance, takes on its own reports' overspend).
-pub fn let_go(
-    d: &Core,
-    run: &Arc<FirmRun>,
-    by: &str,
-    worker: &str,
-    reason: &str,
-    tell: bool,
-) -> Value {
-    let chart = run.chart();
-    let manager = chart.manager_of(worker).unwrap_or(BOARD).to_string();
-    {
-        let mut c = run.chart.write().unwrap();
-        c.workers.retain(|w| w.name != worker);
-        for w in c.workers.iter_mut() {
-            if w.reports_to.as_deref() == Some(worker) {
-                w.reports_to = Some(manager.clone());
-            }
+/// Removes `worker` from the chart; their reports report to `manager` now.
+fn detach_from_chart(run: &FirmRun, worker: &str, manager: &str) {
+    let mut c = run.chart.write().unwrap();
+    c.workers.retain(|w| w.name != worker);
+    for w in c.workers.iter_mut() {
+        if w.reports_to.as_deref() == Some(worker) {
+            w.reports_to = Some(manager.to_string());
         }
     }
+}
+
+/// Moves `worker`'s balance to `manager` as they leave: unspent budget goes up
+/// (returned), and an overspend becomes the manager's debt unless the manager
+/// is the board. Returns `(returned, debt)`.
+fn move_balance(run: &FirmRun, worker: &str, manager: &str) -> (u64, u64) {
+    let mut l = run.ledger.lock();
+    let bal = l.balance(worker);
+    let left = bal.max(0) as u64;
+    if left > 0 {
+        l.transfer(Some(worker), manager, left);
+    }
+    let debt = if bal < 0 && manager != BOARD {
+        (-bal) as u64
+    } else {
+        0
+    };
+    if debt > 0 {
+        l.take_on_debt(worker, manager, debt);
+    }
+    (left, debt)
+}
+
+/// Marks the worker off, wakes their foreman to stop, and stops their VM.
+fn stop_worker_vm(run: &FirmRun, rt: &Arc<WorkerRt>) {
+    run.set_state(rt, WorkerState::Off, None);
+    rt.wake.notify_one();
+    if let Some(id) = rt.take_session() {
+        let client = run.client.clone();
+        tokio::spawn(async move {
+            let _ = client.stop_session(&id, "let go").await;
+        });
+    }
+}
+
+pub fn let_go(run: &Arc<FirmRun>, by: &str, worker: &str, reason: &str, tell: bool) -> Value {
+    let chart = run.chart();
+    let manager = chart.manager_of(worker).unwrap_or(BOARD).to_string();
+    detach_from_chart(run, worker, &manager);
     super::security::officer_left(run, worker, by);
     // What they had to decide (as the owner of the firm's services) moves on.
     super::security::requeue(run, worker);
@@ -1480,7 +1491,6 @@ pub fn let_go(
     super::contracts::left(run, worker, reason);
     // Offboarding: every grant goes.
     super::access::revoke_all(
-        d,
         run,
         worker,
         by,
@@ -1500,23 +1510,7 @@ pub fn let_go(
             objective_done: false,
         });
     }
-    let (returned, debt) = {
-        let mut l = run.ledger.lock();
-        let bal = l.balance(worker);
-        let left = bal.max(0) as u64;
-        if left > 0 {
-            l.transfer(Some(worker), &manager, left);
-        }
-        let debt = if bal < 0 && manager != BOARD {
-            (-bal) as u64
-        } else {
-            0
-        };
-        if debt > 0 {
-            l.take_on_debt(worker, &manager, debt);
-        }
-        (left, debt)
-    };
+    let (returned, debt) = move_balance(run, worker, &manager);
     let rt = run.workers.write().unwrap().remove(worker);
     run.journal.append("left", json!({ "worker": worker, "by": by, "reason": reason.trim(), "to": manager, "returned": returned, "moved": moved.iter().map(|o| &o.message).collect::<Vec<_>>() }));
     if returned > 0 {
@@ -1534,16 +1528,7 @@ pub fn let_go(
         )
     };
     if let Some(rt) = rt {
-        run.set_state(&rt, WorkerState::Off, None);
-        rt.wake.notify_one();
-        let s = rt.session.lock().unwrap().take();
-        if let Some(s) = s {
-            let d = d.clone();
-            tokio::spawn(async move {
-                d.stop_session(&s, "let go").await;
-                let _ = d.forget_session(&s.id);
-            });
-        }
+        stop_worker_vm(run, &rt);
     }
     if tell && manager != by && manager != BOARD {
         let list: String = moved

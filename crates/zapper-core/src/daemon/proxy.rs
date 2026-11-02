@@ -235,6 +235,23 @@ fn note_failure(s: &Session, rec: &httplog::Shared, status: u16, error: Option<S
     httplog::finish(&s.requests, rec);
 }
 
+/// Emits a datapath failure to the event stream and finishes its record in one
+/// step, from a single `status`/`error`, so the UI event and the stored record
+/// can never disagree about why a request failed. The caller fills in `l` with
+/// everything about the request except the error, which this sets from `error`.
+fn fail_log(
+    d: &Daemon,
+    s: &Session,
+    rec: &httplog::Shared,
+    mut l: NetLog<'_>,
+    status: u16,
+    error: Option<String>,
+) {
+    l.error = error.clone();
+    log(d, s, l);
+    note_failure(s, rec, status, error);
+}
+
 /// Records the upstream response and wraps both bodies to capture them.
 fn note_response(
     s: &Session,
@@ -358,9 +375,21 @@ async fn resolve(d: &Daemon, host: &str, port: u16) -> Result<addr::Checked, Str
         Ok(Err(e)) => return Err(format!("resolving {host}: {e}")),
         Err(_) => return Err(format!("resolving {host}: timed out")),
     };
-    let policy = d.addrs.read().unwrap();
+    first_reachable(&d.addrs.read().unwrap(), host, &addrs)
+}
+
+/// The first of `addrs` the address policy allows, or a forbidden-address
+/// error (naming the last rejection). Split out of [`resolve`] so the
+/// address-selection — "connect only to an address the policy checked; a name
+/// that resolves only to forbidden addresses is refused" — is unit-testable
+/// without DNS.
+fn first_reachable(
+    policy: &addr::AddressPolicy,
+    host: &str,
+    addrs: &[SocketAddr],
+) -> Result<addr::Checked, String> {
     let mut why = "no addresses";
-    for a in &addrs {
+    for a in addrs {
         match policy.checked(*a) {
             Ok(checked) => return Ok(checked),
             Err(e) => why = e,
@@ -609,34 +638,15 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
         .unwrap()
         .start_connect(scheme, &endpoint.host, endpoint.port);
     note_verdict(&rec, &v);
-    let logp = |error: Option<String>| {
-        log(
-            d,
-            s,
-            NetLog {
-                req: endpoint,
-                verdict: Some(&v),
-                inspected: false,
-                status: None,
-                secrets: vec![],
-                error,
-            },
-        );
-    };
+    let net = || NetLog::new(endpoint, Some(&v), false);
     if let Err(error) = server_name_matches(&first, &endpoint.host) {
-        logp(Some(error.clone()));
-        note_failure(s, &rec, 403, Some(error));
-        return;
+        return fail_log(d, s, &rec, net(), 403, Some(error));
     }
     let mut upstream = match dial_target(d, s, addr).await {
         Ok(u) => u,
-        Err(e) => {
-            logp(Some(e.to_string()));
-            note_failure(s, &rec, 502, Some(e.to_string()));
-            return;
-        }
+        Err(e) => return fail_log(d, s, &rec, net(), 502, Some(e.to_string())),
     };
-    logp(None);
+    log(d, s, net());
     httplog::mark_ttfb(&rec);
     if upstream.write_all(&first).await.is_ok() {
         if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut io, &mut upstream).await {
@@ -713,6 +723,29 @@ mod tests {
     use super::{server_name_matches, split_authority};
     use crate::testing::TestCore;
     use zapper_policy::{placeholder, NetEffects};
+
+    /// Address selection: the first allowed address is used, a forbidden one
+    /// is skipped, and a name resolving only to forbidden addresses is refused
+    /// (the "connect only to a checked address" invariant, without DNS).
+    #[test]
+    fn first_reachable_skips_forbidden_and_reports_why() {
+        use std::net::SocketAddr;
+        let policy = super::addr::AddressPolicy::new(&[]).unwrap();
+        let loopback: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let public: SocketAddr = "8.8.8.8:80".parse().unwrap();
+        // A forbidden address is skipped for a reachable one.
+        assert_eq!(
+            super::first_reachable(&policy, "h", &[loopback, public])
+                .unwrap()
+                .addr(),
+            public
+        );
+        // Only forbidden addresses: refused, naming why.
+        let err = super::first_reachable(&policy, "h", &[loopback]).unwrap_err();
+        assert!(err.contains("forbidden address"), "{err}");
+        // Nothing resolved.
+        assert!(super::first_reachable(&policy, "h", &[]).is_err());
+    }
 
     /// A passed-through ClientHello must name the checked host; one whose
     /// name can't be read is refused, a hello split across two records

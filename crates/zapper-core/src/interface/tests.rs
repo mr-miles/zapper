@@ -475,31 +475,33 @@ fn every_way_a_rule_changes_is_a_rule_event() {
 }
 
 #[test]
-fn a_rule_a_client_keeps_is_an_event_when_removed_through_it() {
-    struct Keeper(std::sync::Mutex<Policy>);
-    impl crate::RuleKeeper for Keeper {
-        fn layers(&self) -> Vec<(Scope, Policy)> {
-            vec![(Scope::Role("eng".into()), self.0.lock().unwrap().clone())]
-        }
-        fn remove(&self, id: &str) -> Option<anyhow::Result<()>> {
-            self.0.lock().unwrap().remove(id).map(|_| Ok(()))
-        }
-    }
+fn a_rule_in_a_named_layer_is_listed_and_an_event_when_removed() {
     let t = TestCore::new(RULES);
-    let mut layer = Policy::default();
-    layer.insert(
+    // A firm role's shared layer the core keeps by name.
+    let layer = t.core.daemon().named_layer("acme/eng");
+    layer.write().unwrap().insert(
         serde_yaml::from_str("{ id: role-1, kind: net, action: allow, host: r.example }").unwrap(),
         None,
     );
-    t.core
-        .add_rule_keeper(Arc::new(Keeper(std::sync::Mutex::new(layer))));
+    // It is listed among the rule layers, as `role:acme/eng`.
+    assert!(t
+        .core
+        .rule_layers()
+        .iter()
+        .any(|(s, p)| matches!(s, Scope::Role(r) if r == "acme/eng")
+            && p.rules().iter().any(|r| r.id() == Some("role-1"))));
+    // Removing it takes it out of the layer and says so.
     let mut events = t.core.subscribe();
     assert!(matches!(
         t.core.remove_rule("role-1").unwrap(),
         RuleRemoval::Revoked
     ));
+    assert!(
+        layer.read().unwrap().rules().is_empty(),
+        "gone from the layer"
+    );
     assert_eq!(
         rule_events(&mut events),
-        [ev("removed", "role-1", "role:eng")]
+        [ev("removed", "role-1", "role:acme/eng")]
     );
 }

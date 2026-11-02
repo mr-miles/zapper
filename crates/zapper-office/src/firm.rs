@@ -1194,8 +1194,11 @@ pub fn get(c: &Config, name: &str) -> Option<Firm> {
     serde_yaml::from_value(c.firms.get(name)?.clone()).ok()
 }
 
-/// The office's check of a config, with the rest of each change: its firms
-/// parse and add up with the profiles they name, and the driver is on.
+/// The office's check of a config: its firms parse and add up with the
+/// profiles they name, and the driver is on. Wired into the co-host daemon's
+/// config checks by `start` (test-gated now the office is its own process); a
+/// standalone office that owns its firm config validates on load (P4-d-2/E).
+#[cfg(test)]
 pub fn check(c: &Config) -> Result<()> {
     let mut errors = Vec::new();
     for (name, v) in &c.firms {

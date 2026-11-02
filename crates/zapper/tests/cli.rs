@@ -253,9 +253,6 @@ async fn serve_listens_on_its_socket() {
     assert!(text.contains("global-deny"), "{text}");
     let text = ok(run(&t.startup(), Some(&socket), &["ps"]).await);
     assert_eq!(text.lines().count(), 1, "the header only: {text}");
-    // With the office, its routes are mounted.
-    #[cfg(feature = "office")]
-    ok(run(&t.startup(), Some(&socket), &["firm", "ls"]).await);
     serve.start_kill().unwrap();
 }
 
@@ -371,52 +368,6 @@ async fn a_ui_listening_on_the_network_end_to_end() {
     serve.start_kill().unwrap();
 }
 
-/// The board approves a background check or objects: one of the two, and
-/// `--clear`, the old name, still approves.
-#[cfg(feature = "office")]
-#[tokio::test(flavor = "multi_thread")]
-async fn screen_needs_approve_or_object() {
-    let d = daemon(TestCore::new(CONFIG)).await;
-    let e = failed(zapper(&d, &["firm", "screen", "acme", "c-1"]).await);
-    assert!(e.contains("give --approve or --object"), "{e}");
-    let e = err(&zapper(
-        &d,
-        &["firm", "screen", "acme", "c-1", "--approve", "--object"],
-    )
-    .await);
-    assert!(e.contains("cannot be used with"), "{e}");
-    // Past parsing to the daemon, which has no such firm.
-    for flag in ["--approve", "--clear"] {
-        let e = failed(zapper(&d, &["firm", "screen", "acme", "c-1", flag]).await);
-        assert!(e.starts_with("zapper: "), "{e}");
-    }
-}
-
-/// Without the office, `zapper serve` refuses a config with firms.
-#[cfg(not(feature = "office"))]
-#[tokio::test]
-async fn serve_without_the_office_refuses_firms() {
-    let t = TestCore::new("");
-    std::fs::write(
-        t.startup(),
-        std::fs::read_to_string(t.startup()).unwrap()
-            + "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
-    )
-    .unwrap();
-    let o = tokio::process::Command::new(env!("CARGO_BIN_EXE_zapper"))
-        .arg("serve")
-        .arg("--config")
-        .arg(t.startup())
-        .env("ZAPPER_SOCKET", t.dir.join("api.sock"))
-        .env("HOME", &t.dir)
-        .output()
-        .await
-        .unwrap();
-    assert_eq!(o.status.code(), Some(1));
-    let e = err(&o);
-    assert!(e.contains("built without the office"), "{e}");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn services_added_listed_and_removed() {
     let d = daemon(TestCore::new(CONFIG)).await;
@@ -512,7 +463,7 @@ async fn run_labels_are_checked_before_anything_starts() {
 // `init` and `check`: no daemon needed.
 
 #[tokio::test]
-async fn init_writes_the_config_and_skills_once() {
+async fn init_writes_the_config_once() {
     let t = TestCore::new("");
     let config = t.dir.join("fresh").join("zapper.yaml");
     let text = ok(run(&config, None, &["init"]).await);
@@ -523,28 +474,11 @@ async fn init_writes_the_config_and_skills_once() {
     let written = std::fs::read_to_string(&config).unwrap();
     let example = include_str!("../../../config/zapper.yaml");
     assert!(written.contains("profiles:"), "{written}");
-    let base = config.parent().unwrap();
-    let skills = base.join("skills");
-    if cfg!(feature = "office") || !example.contains("\nfirms:") {
-        assert_eq!(written, example);
-    } else {
-        // Without the office: no firms, nor the comment above them.
-        assert!(example.starts_with(&written));
-        assert!(!written.contains("\nfirms:"), "{written}");
-        let last = written.trim_end().lines().last().unwrap();
-        assert!(!last.starts_with('#'), "{last}");
-    }
-    if cfg!(feature = "office") {
-        assert!(
-            text.contains(&format!("wrote agents and skills to {}", base.display())),
-            "{text}"
-        );
-        assert!(skills.join("office-mail/SKILL.md").is_file());
-        assert!(base.join("agents/ceo/AGENT.md").is_file());
-    } else {
-        assert!(!skills.exists());
-        assert_eq!(text.lines().count(), 1, "{text}");
-    }
+    // The daemon writes its config verbatim; the office's worker agents and
+    // skills are installed by `zapper-office`, not here.
+    assert_eq!(written, example);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(!config.parent().unwrap().join("skills").exists());
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&config).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "the config is private");
@@ -552,12 +486,6 @@ async fn init_writes_the_config_and_skills_once() {
     std::fs::write(&config, "# mine\n").unwrap();
     let text = ok(run(&config, None, &["init"]).await);
     assert!(text.contains("exists; not touching it"), "{text}");
-    if cfg!(feature = "office") {
-        assert!(
-            text.contains("the default agents and skills are all there"),
-            "{text}"
-        );
-    }
     assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
 }
 
@@ -584,15 +512,6 @@ async fn serve_needs_a_config_file() {
     let text = failed(run(&missing, None, &["serve"]).await);
     assert!(text.contains("no config file at"), "{text}");
     assert!(text.contains("zapper init"), "{text}");
-}
-
-#[cfg(feature = "office")]
-/// `check`'s lines starting `prefix`.
-fn lines_of(text: &str, prefix: &str) -> Vec<String> {
-    text.lines()
-        .filter(|l| l.starts_with(prefix))
-        .map(str::to_string)
-        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -639,56 +558,6 @@ async fn check_reports_the_driver_and_the_daemon() {
         out(&o).starts_with(&format!("ERROR  config {}", bad.display())),
         "{}",
         out(&o)
-    );
-}
-
-/// `zapper check` notes a firm config that is valid but likely not meant.
-#[cfg(feature = "office")]
-#[tokio::test]
-async fn check_notes_officers_without_a_budget() {
-    let t = TestCore::new(
-        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    budget: { seed: 1000, security_share: 0 }\n    security: { officers: [sec] }\n    roles:\n      ceo: { profile: w, agent: ceo }\n      sec: { profile: w, agent: security-officer }\n    workers:\n      - { name: ceo, role: ceo }\n      - { name: sec, role: sec, reports_to: ceo }\n",
-    );
-    let text = out(&run(&t.startup(), None, &["check"]).await);
-    let notes = lines_of(&text, "note   firm acme");
-    assert_eq!(notes.len(), 1, "{text}");
-    assert!(notes[0].contains("budget.security_share is 0"), "{text}");
-    assert!(
-        text.contains("note   the driver is on, for the workers of firm acme\n"),
-        "{text}"
-    );
-}
-
-#[cfg(feature = "office")]
-#[tokio::test]
-async fn check_reports_a_firms_missing_skills_until_init() {
-    let t = TestCore::new(
-        "profiles:\n  w: { agent: { kind: claude-code } }\nfirms:\n  acme:\n    roles:\n      ceo: { profile: w, agent: ceo }\n    workers:\n      - { name: ceo, role: ceo }\n",
-    );
-    let line = format!(
-        "firm acme: agents in {}, skills in {}",
-        t.dir.join("agents").display(),
-        t.dir.join("skills").display()
-    );
-    let text = out(&run(&t.startup(), None, &["check"]).await);
-    assert_eq!(
-        lines_of(&text, "ERROR  firm acme"),
-        [format!("ERROR  {line}")],
-        "{text}"
-    );
-    assert!(
-        text.contains(
-            "fix: zapper init (writes the default agents and skills), or add them: agents/ceo"
-        ),
-        "{text}"
-    );
-
-    ok(run(&t.startup(), None, &["init"]).await);
-    let text = out(&run(&t.startup(), None, &["check"]).await);
-    assert_eq!(
-        lines_of(&text, "ok     firm acme"),
-        [format!("ok     {line}")],
-        "{text}"
     );
 }
 

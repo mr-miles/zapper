@@ -16,10 +16,8 @@ use zapper_policy::proto::ShellRequest;
 
 use super::journal::Journal;
 use super::{now, prompts, security, FirmRun, RunState, WorkerRt, WorkerState};
-use zapper_core::driver::{self, Observer, Out, Proc};
-use zapper_core::harness::{self, Headless, Outcome};
-use zapper_core::Core;
-use zapper_core::Session;
+use zapper_driver::harness::{self, Outcome};
+use zapper_driver::process::{self as driver, Observer, Out, Proc};
 
 /// Restarts allowed within ten minutes before the worker is marked broken.
 const MAX_RESTARTS: usize = 5;
@@ -60,17 +58,22 @@ impl Observer for Watch {
     }
 }
 
+/// Starts the worker's agent: a terminal opened in its VM over the office's
+/// client (`attach`), driven by its harness. The office reaches the guest
+/// through the client, so this holds no `Arc<Session>` — the same path works
+/// in-process and, once the office is its own process, over the socket.
 async fn start(
     run: &Arc<FirmRun>,
     w: &Arc<WorkerRt>,
-    s: &Arc<Session>,
+    id: &str,
+    kind: &str,
     transcript: Arc<Journal>,
     resume: Option<&str>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<Proc> {
-    let conv = driver_of(s)?.conversation(resume);
+    let conv = harness::headless(kind)?.conversation(resume);
     let req = ShellRequest::exec(conv.argv());
-    let stream = s.open_shell(req).await?.stream;
+    let stream = run.client.attach(id, req).await?;
     let watch = Watch {
         run: run.clone(),
         w: w.clone(),
@@ -78,11 +81,6 @@ async fn start(
         session_id,
     };
     Ok(driver::start(stream, conv, Arc::new(watch)))
-}
-
-/// The worker's harness driver, from its profile's `agent.kind`.
-fn driver_of(s: &Session) -> Result<&'static dyn Headless> {
-    harness::headless(&s.resolved.agent.kind)
 }
 
 fn idle_state(run: &FirmRun, w: &WorkerRt) -> WorkerState {
@@ -105,14 +103,13 @@ async fn nap(run: &FirmRun, w: &WorkerRt, secs: u64) {
 /// Why the worker can't take a turn now: the state to show, its detail,
 /// and how long to wait before looking again.
 fn blocked(
-    d: &Core,
     run: &FirmRun,
     w: &WorkerRt,
     backoff_until: f64,
 ) -> Option<(WorkerState, Option<String>, u64)> {
-    // Through the core's interface (`/v1/record`), not its internals, so the
-    // same gate holds once the office is a process of its own.
-    blocked_by(run, w, backoff_until, d.record_writable())
+    // Through the office's client, not the core's internals, so the same gate
+    // holds once the office is a process of its own.
+    blocked_by(run, w, backoff_until, run.client.record_writable())
 }
 
 /// As `blocked`, given whether the record can be written.
@@ -153,7 +150,7 @@ pub(crate) fn blocked_by(
     None
 }
 
-pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
+pub async fn run(run: Arc<FirmRun>, w: Arc<WorkerRt>) {
     let transcript = match Journal::create(
         &run.dir
             .join("transcripts")
@@ -177,8 +174,8 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
         if run.ended() {
             return;
         }
-        let Some(session) = w.session() else { return };
-        if let Some((st, detail, secs)) = blocked(&d, &run, &w, backoff_until) {
+        let Some((id, kind)) = w.driven() else { return };
+        if let Some((st, detail, secs)) = blocked(&run, &w, backoff_until) {
             run.set_state(&w, st, detail);
             nap(&run, &w, secs).await;
             continue;
@@ -193,7 +190,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 };
                 // Things change while queued (a pause, the budget, the
                 // record): the gates again, before the turn.
-                if let Some((st, detail, secs)) = blocked(&d, &run, &w, backoff_until) {
+                if let Some((st, detail, secs)) = blocked(&run, &w, backoff_until) {
                     drop(p);
                     run.set_state(&w, st, detail);
                     nap(&run, &w, secs).await;
@@ -210,7 +207,8 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
             match start(
                 &run,
                 &w,
-                &session,
+                &id,
+                &kind,
                 transcript.clone(),
                 resume.as_deref(),
                 session_id.clone(),
@@ -304,8 +302,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                 let t = end.tokens;
                 if end.outcome == Outcome::RateLimited {
                     // Not the worker's fault: try the same mail again later.
-                    requeue(&w, ids);
-                    requeue_access(&w, access_ids, digest_was_due);
+                    requeue_all(&w, ids, access_ids, digest_was_due);
                     backoff_until = now() + 60.0;
                     run.journal.append(
                         "turn",
@@ -313,8 +310,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
                     );
                 } else if let Outcome::Failed(why) = end.outcome {
                     // Claude never saw the mail: keep it, say why, retry later.
-                    requeue(&w, ids);
-                    requeue_access(&w, access_ids, digest_was_due);
+                    requeue_all(&w, ids, access_ids, digest_was_due);
                     backoff_until = now() + 60.0;
                     run.journal.append(
                         "turn",
@@ -380,8 +376,7 @@ pub async fn run(d: Core, run: Arc<FirmRun>, w: Arc<WorkerRt>) {
             }
             Out::Exit(code) => {
                 proc = None;
-                requeue(&w, ids);
-                requeue_access(&w, access_ids, digest_was_due);
+                requeue_all(&w, ids, access_ids, digest_was_due);
                 let at = now();
                 w.notes.lock().unwrap().push(prompts::restart_note(at));
                 run.journal.append("turn", json!({ "worker": w.name, "event": "interrupted", "ms": ms, "exit_code": code }));
@@ -485,4 +480,11 @@ fn requeue(w: &WorkerRt, ids: Vec<String>) {
     let mut q = w.queue.lock().unwrap();
     let rest = std::mem::take(&mut *q);
     *q = ids.into_iter().chain(rest).collect();
+}
+
+/// Puts a turn's mail and the officer's undecided requests back, to be
+/// delivered again on a later turn (a turn the worker isn't to blame for).
+fn requeue_all(w: &WorkerRt, ids: Vec<String>, access_ids: Vec<String>, digest: bool) {
+    requeue(w, ids);
+    requeue_access(w, access_ids, digest);
 }

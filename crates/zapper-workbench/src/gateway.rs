@@ -787,88 +787,21 @@ async fn page() -> Response {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], PAGE).into_response()
 }
 
-fn local_hosts(port: u16) -> [String; 3] {
-    [
-        format!("127.0.0.1:{port}"),
-        format!("localhost:{port}"),
-        format!("[::1]:{port}"),
-    ]
-}
-
-/// Whether a request's `Host` may reach the UI: a local name on loopback,
-/// which defeats DNS rebinding; listening elsewhere, any well-formed host.
-fn host_ok(host: &str, port: u16, remote: bool) -> bool {
-    if remote {
-        !host.is_empty()
-            && host.len() <= 300
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
-    } else {
-        local_hosts(port).iter().any(|l| l == host)
-    }
-}
-
-/// Whether a write's `Origin` is the UI itself.
-fn origin_ok(origin: &str, host: &str, port: u16, remote: bool) -> bool {
-    if remote {
-        origin == format!("http://{host}") || origin == format!("https://{host}")
-    } else {
-        local_hosts(port)
-            .iter()
-            .any(|l| origin == format!("http://{l}"))
-    }
-}
-
 const COOKIE: &str = "workbench_token";
 
-fn host_of(req_headers: &HeaderMap) -> &str {
-    req_headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-}
-
-/// A browser's request reaches the UI only by a name it may have
-/// (`host_ok`); one that changes something only with the `X-Workbench-UI`
-/// header, which another site's page can't send without a preflight that
-/// is never granted, and an `Origin` naming the UI (`origin_ok`).
+/// A browser's request reaches the UI only by a name it may have, and changes
+/// something only with the `X-Workbench-UI` header and the UI's `Origin` — the
+/// shared gateway check (`zapper_client::gateway`), with the workbench's
+/// marker header.
 fn from_the_ui(ctx: &Ctx, method: &Method, headers: &HeaderMap) -> Result<(), Error> {
-    let host = host_of(headers);
-    if !host_ok(host, ctx.port, ctx.remote) {
-        return Err(Error(StatusCode::FORBIDDEN, "bad Host header".into()));
-    }
-    if !matches!(*method, Method::GET | Method::HEAD) {
-        let origin = headers
-            .get(header::ORIGIN)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        let marked = headers.get("x-workbench-ui").is_some_and(|v| v == "1");
-        if !marked || !origin_ok(origin, host, ctx.port, ctx.remote) {
-            return Err(Error(
-                StatusCode::FORBIDDEN,
-                "missing X-Workbench-UI or the UI's Origin".into(),
-            ));
-        }
-    }
-    Ok(())
+    zapper_client::gateway::from_the_ui(method, headers, ctx.port, ctx.remote, "x-workbench-ui")
+        .map_err(|(s, m)| Error(s, m))
 }
 
 /// The browser's grant: its cookie's token, set at sign-in (`login`).
 fn browser(ctx: &Ctx, req: &Request) -> Result<Grant, Error> {
     from_the_ui(ctx, req.method(), req.headers())?;
-    let offered = req
-        .headers()
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|c| c.to_str().ok())
-        .flat_map(|c| c.split(';'))
-        .find_map(|c| {
-            c.trim()
-                .strip_prefix(&format!("{COOKIE}="))
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
+    let offered = zapper_client::gateway::cookie_token(req.headers(), COOKIE).unwrap_or_default();
     ctx.tokens.grant(&offered).ok_or_else(|| {
         Error(
             StatusCode::UNAUTHORIZED,
@@ -943,7 +876,7 @@ async fn login(State(ctx): State<Ctx>, headers: HeaderMap, Json(s): Json<SignIn>
     let Some(g) = ctx.tokens.grant(token) else {
         return Err(Error(StatusCode::UNAUTHORIZED, "not a token".into()));
     };
-    let cookie = format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/");
+    let cookie = zapper_client::gateway::set_cookie(COOKIE, token);
     Ok((
         [(header::SET_COOKIE, cookie)],
         Json(json!({ "token": g.name })),
@@ -954,7 +887,7 @@ async fn login(State(ctx): State<Ctx>, headers: HeaderMap, Json(s): Json<SignIn>
 /// Signs the browser out: its cookie gone.
 async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> R<Response> {
     from_the_ui(&ctx, &Method::POST, &headers)?;
-    let cookie = format!("{COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/");
+    let cookie = zapper_client::gateway::clear_cookie(COOKIE);
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({}))).into_response())
 }
 
@@ -998,6 +931,7 @@ mod tests {
 
     #[test]
     fn a_loopback_ui_takes_local_names_only() {
+        use zapper_client::gateway::{host_ok, origin_ok};
         assert!(host_ok("127.0.0.1:7880", 7880, false));
         assert!(host_ok("localhost:7880", 7880, false));
         assert!(!host_ok("evil.example:7880", 7880, false), "DNS rebinding");

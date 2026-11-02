@@ -125,11 +125,9 @@ async function pollSecurity() {
   if (!live() || S.tab !== 'security' || !S.info || !S.info.run) return;
   const gen = S.gen;
   try { S.security = await api(F() + '/security'); } catch (e) { S.security = null; }
-  const sessions = [];
-  for (const w of arr(S.info.run.workers)) if (w.session) sessions.push([w.name, w.session]);
-  const lists = await Promise.all(sessions.map(([name, id]) => api('/sessions/' + enc(id) + '/requests').then((l) => arr(l).map((r) => Object.assign({}, r, { worker: name })), () => [])));
+  const traffic = await api(F() + '/requests').then(arr, () => []);
   if (gen !== S.gen) return;
-  SEC.traffic = lists.flat().sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0)).slice(0, 1000);
+  SEC.traffic = traffic.sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0)).slice(0, 1000);
   SEC.trafficAt = Date.now();
   SEC.stSig = null;
   scheduleRender();

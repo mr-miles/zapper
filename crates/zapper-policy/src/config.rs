@@ -318,6 +318,22 @@ pub enum SecretSource {
     },
 }
 
+/// The placeholder an inline secret's value is shown as, so values never
+/// leave the host in a config the API or CLI prints.
+pub const REDACTED: &str = "<redacted>";
+
+/// `c` with every inline secret value replaced by [`REDACTED`], for showing
+/// or diffing a config without leaking values. The core keeps the real
+/// values when a redacted config is written back (`keep_redacted`).
+pub fn redact(mut c: Config) -> Config {
+    for s in c.secrets.values_mut() {
+        if let SecretSource::Value { value } = &mut s.source {
+            *value = REDACTED.into();
+        }
+    }
+    c
+}
+
 impl SecretSource {
     pub fn resolve(&self) -> Result<String> {
         match self {
@@ -1029,48 +1045,62 @@ impl Config {
                 errors.push(format!("{scope}: {e}"));
             }
             for r in &policy.net {
-                let id = r.id.as_deref().unwrap_or("?");
-                let refs: Vec<String> = r
-                    .set_headers
-                    .values()
-                    .flat_map(|v| crate::secret_refs(v))
-                    .collect();
-                for s in r.secrets.iter().chain(&refs) {
-                    if !self.secrets.contains_key(s) {
-                        errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
-                    }
+                self.check_rule_secrets(&scope, r, errors);
+                self.check_rule_db_relay(&scope, r, errors);
+            }
+        }
+    }
+
+    /// A rule's secrets exist, and no aws (request-signing) secret is used as a
+    /// header value.
+    fn check_rule_secrets(&self, scope: &Scope, r: &NetRule, errors: &mut Vec<String>) {
+        let id = r.id.as_deref().unwrap_or("?");
+        let refs: Vec<String> = r
+            .set_headers
+            .values()
+            .flat_map(|v| crate::secret_refs(v))
+            .collect();
+        for s in r.secrets.iter().chain(&refs) {
+            if !self.secrets.contains_key(s) {
+                errors.push(format!("{scope}: rule {id} uses unknown secret {s}"));
+            }
+        }
+        for s in &refs {
+            if matches!(self.secrets.get(s), Some(x) if x.mode == SecretMode::Aws) {
+                errors.push(format!(
+                    "{scope}: rule {id}: aws secret {s} signs requests; it can't be a header's value"
+                ));
+            }
+        }
+    }
+
+    /// A database-relay rule names exactly one dbauth secret and no HTTP
+    /// matching; a dbauth secret is used only on such a rule.
+    fn check_rule_db_relay(&self, scope: &Scope, r: &NetRule, errors: &mut Vec<String>) {
+        let id = r.id.as_deref().unwrap_or("?");
+        let dbauth =
+            |n: &str| matches!(self.secrets.get(n), Some(s) if s.mode == SecretMode::DbAuth);
+        match r.db_relay() {
+            Some(proto) => {
+                // The relay injects exactly one database credential and never
+                // parses HTTP, so method/path/header matching and any secret
+                // but a single dbauth one are nonsense here.
+                if r.secrets.len() != 1 || !r.secrets.iter().all(|s| dbauth(s)) {
+                    errors.push(format!(
+                        "{scope}: rule {id}: a {proto} rule names exactly one dbauth secret"
+                    ));
                 }
-                for s in &refs {
-                    if matches!(self.secrets.get(s), Some(x) if x.mode == SecretMode::Aws) {
-                        errors.push(format!(
-                            "{scope}: rule {id}: aws secret {s} signs requests; it can't be a header's value"
-                        ));
-                    }
+                if !r.methods.is_empty() || r.path.is_some() || !r.set_headers.is_empty() {
+                    errors.push(format!(
+                        "{scope}: rule {id}: a {proto} rule can't carry HTTP method, path or header matching"
+                    ));
                 }
-                let dbauth = |n: &str| matches!(self.secrets.get(n), Some(s) if s.mode == SecretMode::DbAuth);
-                match r.db_relay() {
-                    Some(proto) => {
-                        // The relay injects exactly one database credential and
-                        // never parses HTTP, so method/path/header matching and
-                        // any secret but a single dbauth one are nonsense here.
-                        if r.secrets.len() != 1 || !r.secrets.iter().all(|s| dbauth(s)) {
-                            errors.push(format!(
-                                "{scope}: rule {id}: a {proto} rule names exactly one dbauth secret"
-                            ));
-                        }
-                        if !r.methods.is_empty() || r.path.is_some() || !r.set_headers.is_empty() {
-                            errors.push(format!(
-                                "{scope}: rule {id}: a {proto} rule can't carry HTTP method, path or header matching"
-                            ));
-                        }
-                    }
-                    None => {
-                        if r.secrets.iter().any(|s| dbauth(s)) {
-                            errors.push(format!(
-                                "{scope}: rule {id}: a dbauth secret needs a database protocol (e.g. protocol: postgres)"
-                            ));
-                        }
-                    }
+            }
+            None => {
+                if r.secrets.iter().any(|s| dbauth(s)) {
+                    errors.push(format!(
+                        "{scope}: rule {id}: a dbauth secret needs a database protocol (e.g. protocol: postgres)"
+                    ));
                 }
             }
         }

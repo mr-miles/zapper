@@ -46,7 +46,7 @@ fn run() -> (TestCore, Arc<FirmRun>) {
 fn session_of(run: &FirmRun, worker: &str) -> Arc<Session> {
     run.rt(worker)
         .unwrap()
-        .session
+        .session_arc
         .lock()
         .unwrap()
         .clone()
@@ -97,8 +97,10 @@ async fn refused(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value
 fn give_vm(t: &TestCore, run: &FirmRun, worker: &str) {
     let mut new = NewSession::plain("w".into(), run.dir.join("empty"), Policy::default());
     new.labels = labels(&run.firm, &run.id, worker, "", true);
-    *run.rt(worker).unwrap().session.lock().unwrap() =
-        Some(t.core.test_session(new, true).unwrap());
+    let s = t.core.test_session(new, true).unwrap();
+    let w = run.rt(worker).unwrap();
+    w.set_session(t.core.session_info(&s), s.resolved.agent.kind.clone());
+    *w.session_arc.lock().unwrap() = Some(s);
 }
 
 fn journal(run: &FirmRun) -> Vec<Value> {
@@ -614,7 +616,7 @@ async fn nobody_decides_their_own_access_request() {
     )
     .await;
     let id = asked["requests"][0].as_str().unwrap().to_string();
-    let e = crate::access::decide(&t.core, &run, "pat", &id, true, None, None, "mine")
+    let e = crate::access::decide(&run, "pat", &id, true, None, None, "mine")
         .unwrap_err()
         .to_string();
     assert!(e.contains("your own"), "{e}");
@@ -726,6 +728,64 @@ async fn a_hired_officer_decides_nothing_before_clearance() {
     )
     .await;
     ok(&t, &run, "kim", "access_requests", json!({})).await;
+}
+
+// Nobody decides their own hire's background check: the officer who hired a
+// worker is refused their check, and the board (or another officer) decides it.
+// A firm whose CEO is its sole security officer and does the hiring, so the
+// hirer is an officer.
+const FIRM_CEO_OFFICER: &str = "
+profiles:
+  w: { agent: { kind: claude-code }, policy: { net: [] } }
+firms:
+  acme:
+    budget: { seed: 1000000, security_share: 0.2 }
+    security: { officers: [ceo] }
+    roles:
+      ceo: { profile: w, agent: ceo, hires: [eng], officer: true }
+      eng: { profile: w, agent: software-engineer }
+    workers:
+      - { name: ceo, role: ceo }
+      - { name: pat, role: eng, reports_to: ceo }
+";
+
+#[tokio::test]
+async fn nobody_decides_their_own_hires_background_check() {
+    let t = crate::test_core(FIRM_CEO_OFFICER);
+    let run = test_run(&t.core, "acme");
+    approved(&t, &run).await;
+    let hired = ok(
+        &t,
+        &run,
+        "ceo",
+        "hire",
+        json!({ "role": "eng", "budget": "100k", "subject": "Eng", "brief": "code", "reason": "help", "name": "sam" }),
+    )
+    .await;
+    assert_eq!(hired["worker"], "sam", "{hired}");
+    let id = run
+        .security
+        .lock()
+        .unwrap()
+        .screenings
+        .values()
+        .find(|s| s.worker == "sam")
+        .expect("sam's background check")
+        .id
+        .clone();
+
+    // The CEO hired sam and is the only officer: they cannot decide the check.
+    let err = security::decide_screening(&run, "ceo", &id, false, "I hired them", &json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("you hired"), "{err}");
+
+    // The board can.
+    security::decide_screening(&run, crate::firm::BOARD, &id, true, "ok", &json!([])).unwrap();
+    assert_eq!(
+        run.security.lock().unwrap().screenings[&id].state,
+        "cleared"
+    );
 }
 
 #[tokio::test]
@@ -1196,7 +1256,7 @@ async fn a_manager_lets_their_hire_go_and_gets_the_budget_back() {
 
 /// A tar archive of `files` (name, text), as the VM's tar would write it.
 fn tar_of(files: &[(&str, &str)]) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("zapper-tar-{}", zapper_core::util::random_id(6)));
+    let dir = std::env::temp_dir().join(format!("zapper-tar-{}", zapper_util::random_id(6)));
     std::fs::create_dir_all(&dir).unwrap();
     let mut cmd = std::process::Command::new("tar");
     cmd.args(["-cf", "-", "-C"]).arg(&dir);
@@ -1292,8 +1352,7 @@ async fn work_is_published_from_one_vm_and_fetched_into_another() {
         }
     );
     assert!(fetched.get("error").is_none(), "{fetched}");
-    let out =
-        std::env::temp_dir().join(format!("zapper-untar-{}", zapper_core::util::random_id(6)));
+    let out = std::env::temp_dir().join(format!("zapper-untar-{}", zapper_util::random_id(6)));
     std::fs::create_dir_all(&out).unwrap();
     let mut untar = std::process::Command::new("tar")
         .args(["-xf", "-", "-C"])
