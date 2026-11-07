@@ -84,7 +84,7 @@ Most capabilities map directly onto an OpenShell v0.1.7 RPC. Three need new offi
 | Git server (per-worker password + source VM check) | Same token grant, injected on requests to `git.<domain>` | Drop per-worker passwords; `git http-backend` behind the edge checks the bearer token, then the grant | S |
 | Role-layer rules | None: policy is per sandbox (base + provider rules) or global | Fan out: the office keeps role rules and writes them into every sandbox of the role with `UpdateConfig` | M |
 | Session-layer rules, revocation | `openshell policy update` semantics via `UpdateConfig`; changes load live and close connections opened under old rules | Thin mapping. Rules need a `binaries` list: use the agent image's known binaries, or a glob if v0.1.7 accepts one (to check) | M |
-| `ask` + decider socket | No hold. Denied connections are drafted automatically into per-binary proposals (`GetDraftPolicy`); the policy advisor (`policy.local`) lets agents propose rules with a reason | Officer queue reads drafts; `access_decide` → `ApproveDraftChunk` / `RejectDraftChunk`; `request_access` stays an office MCP tool. zapper also refused at once, so agent behaviour is unchanged | M |
+| `ask` + decider socket | No hold. Denied connections are drafted automatically into per-binary proposals (`GetDraftPolicy`); the policy advisor (`policy.local`) lets agents propose rules with a reason | Officer queue reads drafts; `access_decide` → `ApproveDraftChunk` / `RejectDraftChunk`; workers ask through `policy.local`, and `request_access` is gone. zapper also refused at once | M |
 | `allowed` (would this be allowed?) | Policy prover / effective policy (`GetSandboxConfig`) | Evaluate the host and port against the effective policy in the office | S |
 | `requests` (traffic log) | OCSF `NET:OPEN` / `HTTP:*` events in `WatchSandbox` / `GetSandboxLogs`; the gateway keeps only 2,000 lines per sandbox in memory | **Interim:** `requests()` reads recent events on demand with `GetSandboxLogs`, with no ingest. **Phase 6:** query history from telemetry and the audit extension | S |
 | Services and zones (`*.<firm>.internal`) | No zones. The supervisor resolves names on the host; private addresses are allowed for exact hostnames, and loopback never | Bind the edge on a private host address (a dummy interface); resolve `office.`, `git.` and `cluster.` names on the host (`/etc/hosts` or dnsmasq) | S |
@@ -118,7 +118,7 @@ The office stops depending on the zapper daemon: `zapper-client`, `zapper-driver
 
 ### Behaviour that changes
 
-- **`ask` becomes deny + draft.** The agent sees a 403 with OpenShell's text (`policy_denied`) instead of zapper's request id, and asks by proposing a rule through `policy.local` in place of `request_access`. The officers decide it as before, and the decision still mails the worker.
+- **`ask` becomes deny + draft.** The agent sees a 403 with OpenShell's text (`policy_denied`) instead of zapper's request id, and asks by proposing a rule through `policy.local`. `request_access` is gone. The officers decide it as before, and the decision still mails the worker.
 - **`once` approvals** are approved as worker rules with a 10-minute expiry, which the office removes. Exact once-only semantics need an `HTTP:*` log match, so they're out of scope.
 - **Network rules are binary-scoped.** That's stricter than zapper's host rules, and drafts arrive per binary.
 - **No per-exec record and no terminal recordings.** Transcripts and traffic remain.
@@ -187,7 +187,7 @@ Gate: e2e for delegation, authority, identity (the sender is the sandbox), mail 
 ### Phase 3: Policy, officers, traffic (weeks 6 to 7)
 
 - [x] Role-rule fan-out and worker rules through `UpdateConfig`; expiry timers; revocation (`crates/zapper-office/src/openshell_rules.rs`, `openshell.rs`).
-- [x] Officer queue from drafts; `access_decide` approves (narrowed if the officer says so), rejects or undoes them. Workers ask through `policy.local`, and `request_access` is hidden on OpenShell.
+- [x] Officer queue from drafts; `access_decide` approves (narrowed if the officer says so), rejects or undoes them. Workers ask through `policy.local`; `request_access` is removed.
 - [ ] Interim traffic: `requests()` over `GetSandboxLogs` (recent events only, matched rule parsed from `[policy:<rule>]`); digest wakes.
 - [ ] Run the gate on a gateway (below).
 
@@ -195,7 +195,7 @@ How it works:
 
 - **Rules.** The office keeps a worker's layers as before: its own, its role's, its profile's and the global one. Each sandbox's policy gets the allows among them as rules named `zo_<rule id>`, through `UpdateConfig` merge operations. A change to a role's layer is applied to every sandbox in the role. Rules are applied once a sandbox is up, before its first turn, and again whenever a layer changes; the office diffs against what it last applied, so only changed rules are sent.
 - **What stays out.** OpenShell denies whatever no rule allows, so zapper's `deny` and `ask` rules aren't sent. A nearer layer's deny of the same host and port keeps a wider layer's allow out. Also left out: the firm's own git and cluster rules (the edge serves git, and checks grants itself), rules that inject secrets or headers (the providers hold credentials), database protocols, and hosts OpenShell can't match (`*` alone, or a wildcard name with fewer than three labels). zapper's rules name no programs, so each rule lets through `rule_binaries` from `openshell.yaml`, by default `/**`; the Phase 0 spike confirmed that `binaries` accepts a glob.
-- **Asking.** Every sandbox the office makes has the policy advisor on (`agent_policy_proposals_enabled`, set per sandbox). A worker whose request is refused (`policy_denied`) proposes a rule through `http://policy.local` and can wait on it there. The office-resources skill tells them how when `request_access` isn't among their tools. The sandbox also drafts a rule by itself for every connection it refuses.
+- **Asking.** Every sandbox the office makes has the policy advisor on (`agent_policy_proposals_enabled`, set per sandbox). A worker whose request is refused (`policy_denied`) proposes a rule through `http://policy.local` and can wait on it there. The office-resources skill tells them how. The sandbox also drafts a rule by itself for every connection it refuses.
 - **Officers decide.** The office reads each sandbox's pending drafts every 5 seconds and files each as an access request. The officer sees the draft's origin (proposal or refusal), its programs, the rule as the gateway would apply it, and the gateway's own risk-check findings. `access_decide` maps onto the gateway:
     - **Allow:** `ApproveDraftChunk`, after an `EditDraftChunk` when the officer narrows `methods` or `path` (`methods: []` opens the whole connection, uninspected). A role-scoped allow also puts the rule on the role's layer, so the rest of the role gets it.
     - **Deny:** `RejectDraftChunk` with the officer's reason, which the worker reads. A standing denial refuses later drafts for the same host and port without asking anyone.

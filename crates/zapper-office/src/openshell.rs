@@ -68,8 +68,7 @@ use zapper_api_types::{NewSession, ServiceSpec, SessionInfo, Status};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::{Frame, GuestFile, ShellRequest};
 use zapper_policy::{
-    expand_home, secret_refs, AnyRule, Config, Mount, NetRequest, NetRule, Policy, ResolvedProfile,
-    Scope,
+    expand_home, secret_refs, AnyRule, Config, Mount, NetRule, Policy, ResolvedProfile, Scope,
 };
 
 use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
@@ -1319,29 +1318,6 @@ impl OfficeClient for OpenShell {
 
     fn edge(&self) -> Option<String> {
         Some(self.settings.edge.url.clone())
-    }
-
-    fn allowed(&self, id: &str, req: NetRequest) -> Option<String> {
-        // The layers the daemon would judge by, most specific first: the
-        // session's, its role's, its profile's, the global one.
-        let (own, profile, role) = {
-            let all = self.sandboxes.lock().unwrap();
-            let s = all.get(id)?;
-            let role = s.info.labels.get("firm-role").cloned();
-            (s.rules.clone(), s.info.profile.clone(), role)
-        };
-        let config = self.config();
-        let mut layers: Vec<(Scope, Policy)> = vec![(Scope::Session(id.to_string()), own)];
-        if let Some(role) = role {
-            let p = self.layers.lock().unwrap().get(&role).cloned();
-            layers.push((Scope::Role(role), p.unwrap_or_default()));
-        }
-        layers.extend(config.resolve(&profile).ok()?.layers);
-        layers.push((Scope::Global, config.policy.clone()));
-        let layers: Vec<_> = layers.iter().map(|(s, p)| (s.clone(), p)).collect();
-        let (d, _) = zapper_policy::evaluate_net(&layers, &req);
-        (d.action == zapper_policy::Action::Allow)
-            .then(|| d.rule.clone().unwrap_or_else(|| "default".into()))
     }
 }
 

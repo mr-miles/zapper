@@ -43,7 +43,7 @@ Group sub-questions into strands that can run in parallel without the same sourc
 ## Staffing it
 
 - Hire (or contract, for a one-off question) one researcher per strand, with the strand as the brief: the plan's link, their sub-questions, sources and the hosts they need, the pack they return, the due date.
-- Tell them to ask for their strand's hosts at once, all in their first turn, one `request_access` each, the reason naming the plan and the strand; and to bring new sources to you as suggestions, not to security.
+- Tell them to ask for their strand's hosts at once, all in their first turn, one proposal each through `policy.local` (the office-resources skill), the reason naming the plan and the strand; and to bring new sources to you as suggestions, not to security.
 - Security approves what the plan names. When security asks you about a request, answer in the turn you read it: yes with why, or no with the alternative. A denied host changes the plan: replace the source or narrow the sub-question, and tell the researcher.
 
 ## Suggested sources

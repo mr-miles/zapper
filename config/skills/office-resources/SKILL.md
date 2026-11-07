@@ -35,9 +35,12 @@ You start with no access to the firm's resources. Access is a **grant** per reso
 
 ## Outside sites
 
-Traffic to sites outside the firm is checked by the security officers. Ask ahead for what your work needs: `request_access(host, port?, methods?, path?, reason)`, as narrow as works ("GET registry.npmjs.org to install the dependencies for t-12"). If your machine's rules already allow it, the answer says `allowed` and nobody is asked: go ahead. A 403 that says the request went to security means it's waiting: don't retry in a loop, do other work or end your turn; the decision comes by mail. Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
+Traffic to sites outside the firm is checked by the security officers, and a request your machine's rules don't allow is refused at once. Don't retry it in a loop: ask, then do other work or end your turn; the decision comes by mail.
 
-If you have no `request_access` tool, your machine asks differently: a refused request answers `policy_denied`, and you propose the narrowest rule that would allow it through `http://policy.local`, as `/etc/openshell/skills/policy_advisor.md` explains (read it the first time), with an `intent_summary` that names the work ("GET registry.npmjs.org to install the dependencies for t-12"). The security officers decide it, not the sandbox: wait on `/v1/proposals/{chunk_id}/wait?timeout=300` while you have nothing else to do, otherwise do other work or end your turn; the decision also comes by mail. A rejection carries the officer's reason: ask for less, or not at all. Never propose wildcard hosts or `tls: skip`.
+- If the refusal answers `policy_denied`, ask by proposing the narrowest rule that would allow it through `http://policy.local`, as `/etc/openshell/skills/policy_advisor.md` explains (read it the first time), with an `intent_summary` that names the work ("GET registry.npmjs.org to install the dependencies for t-12"). The security officers decide it, not the sandbox: you can wait on `/v1/proposals/{chunk_id}/wait?timeout=300` while you have nothing else to do. A rejection carries the officer's reason: ask for less, or not at all. Never propose wildcard hosts or `tls: skip`.
+- If the refusal is a 403 that says the request went to security, it already waits for an officer: there is nothing more to ask.
+
+Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
 
 ## git
 
@@ -56,7 +59,7 @@ k3s with Traefik as ingress, and two namespaces: `dev`, where everyone builds an
 - A cluster grant puts a configured `~/.kube/config` on your machine (namespace `dev`); it goes when the grant ends.
 - In `dev`, name everything with your name first (`ada-api`) and leave others' things alone. Reach a service with `kubectl -n dev port-forward svc/ada-api 18080:80`. No Ingress in `dev`.
 - `prod` changes only in a release.
-- Anything the work needs inside the cluster, such as an internal container registry, you deploy yourself with the credentials you hold; a grant is the permission. Nobody approves tools. Ask security (`request_access`, `credentials_request`) only for access you lack.
+- Anything the work needs inside the cluster, such as an internal container registry, you deploy yourself with the credentials you hold; a grant is the permission. Nobody approves tools. Ask security (a rule through `policy.local`, or `credentials_request`) only for access you lack.
 
 ## The shared drive
 

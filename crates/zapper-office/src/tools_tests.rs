@@ -93,6 +93,20 @@ async fn refused(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value
         .to_string()
 }
 
+/// `who`'s refused request for `host` (`methods`, if inspected), filed for
+/// the officers as the decider files it: the request's id.
+fn ask(run: &FirmRun, who: &str, host: &str, port: u16, methods: &[&str], reason: &str) -> String {
+    let methods: Option<Vec<String>> =
+        (!methods.is_empty()).then(|| methods.iter().map(|m| m.to_ascii_uppercase()).collect());
+    let req = NetRequest {
+        host: host.to_ascii_lowercase(),
+        port,
+        method: methods.as_ref().and_then(|m| m.first().cloned()),
+        ..Default::default()
+    };
+    security::ask(run, who, &req, methods, None, reason).unwrap()
+}
+
 /// A worker who joined during the run gets a VM: a session of theirs.
 fn give_vm(t: &TestCore, run: &FirmRun, worker: &str) {
     let mut new = NewSession::plain("w".into(), run.dir.join("empty"), Policy::default());
@@ -290,24 +304,14 @@ async fn a_role_slot_binds_and_reuses_the_same_worker() {
 #[tokio::test]
 async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     let (t, run) = run();
-    let asked = ok(
-        &t,
+    let id = ask(
         &run,
         "pat",
-        "request_access",
-        json!({ "host": "API.Example", "methods": "get, post", "reason": "the docs" }),
-    )
-    .await;
-    let id = asked["request"].as_str().unwrap().to_string();
-    assert!(refused(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "a b", "reason": "x" })
-    )
-    .await
-    .starts_with("host:"));
+        "API.Example",
+        443,
+        &["get", "post"],
+        "the docs",
+    );
 
     let pending = ok(&t, &run, "sec", "access_requests", json!({})).await;
     let r = pending
@@ -371,20 +375,13 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     );
 
     // One more, handed to the board.
-    let again = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "secrets.example", "reason": "keys" }),
-    )
-    .await;
+    let again = ask(&run, "pat", "secrets.example", 443, &[], "keys");
     ok(
         &t,
         &run,
         "sec",
         "escalate",
-        json!({ "request": again["request"], "recommendation": "the board's call" }),
+        json!({ "request": again, "recommendation": "the board's call" }),
     )
     .await;
     let escalated = journal(&run)
@@ -400,37 +397,27 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
 #[tokio::test]
 async fn asking_again_joins_or_replaces_the_request_waiting() {
     let (t, run) = run();
-    let ask = |methods: Value| {
+    let asked = |methods: &'static [&'static str]| {
         let (t, run) = (&t, &run);
         async move {
-            let r = ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
-            )
-            .await;
+            let id = ask(run, "pat", "api.example", 443, methods, "the docs");
             let pending = ok(t, run, "sec", "access_requests", json!({})).await;
             assert_eq!(pending.as_array().unwrap().len(), 1, "one waits: {pending}");
-            (
-                r["request"].as_str().unwrap().to_string(),
-                pending[0].clone(),
-            )
+            (id, pending[0].clone())
         }
     };
-    let (first, _) = ask(json!(["GET"])).await;
-    let (again, _) = ask(json!(["get"])).await;
+    let (first, _) = asked(&["GET"][..]).await;
+    let (again, _) = asked(&["get"][..]).await;
     assert_eq!(again, first, "the same again joins it");
-    let (both, waiting) = ask(json!(["POST", "GET"])).await;
+    let (both, waiting) = asked(&["POST", "GET"][..]).await;
     assert_ne!(both, first, "more replaces it");
     assert_eq!(waiting["methods"], json!(["GET", "POST"]), "{waiting}");
     assert_eq!(waiting["attempts"], 3, "{waiting}");
-    let (whole, waiting) = ask(json!(null)).await;
+    let (whole, waiting) = asked(&[][..]).await;
     assert_ne!(whole, both, "the whole connection is more again");
     assert!(waiting.get("methods").is_none(), "{waiting}");
     assert_eq!(
-        ask(json!(["DELETE"])).await.0,
+        asked(&["DELETE"][..]).await.0,
         whole,
         "the whole connection covers it"
     );
@@ -442,15 +429,8 @@ async fn asking_again_joins_or_replaces_the_request_waiting() {
     };
     assert_eq!((count("requested"), count("merged")), (3, 2));
     // Another port is another request.
-    let other = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "api.example", "port": 8443, "reason": "the admin API" }),
-    )
-    .await;
-    assert_ne!(other["request"], json!(whole));
+    let other = ask(&run, "pat", "api.example", 8443, &[], "the admin API");
+    assert_ne!(other, whole);
 }
 
 /// A decider who saw the GET decides it just as the worker asks for POST
@@ -458,24 +438,8 @@ async fn asking_again_joins_or_replaces_the_request_waiting() {
 #[tokio::test]
 async fn deciding_a_request_that_was_replaced_decides_nothing() {
     let (t, run) = run();
-    let asked = |methods: Value| {
-        let (t, run) = (&t, &run);
-        async move {
-            ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
-            )
-            .await["request"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        }
-    };
-    let seen = asked(json!(["GET"])).await;
-    let now = asked(json!(["POST"])).await;
+    let seen = ask(&run, "pat", "api.example", 443, &["GET"], "the docs");
+    let now = ask(&run, "pat", "api.example", 443, &["POST"], "the docs");
     let e = refused(
         &t,
         &run,
@@ -493,92 +457,13 @@ async fn deciding_a_request_that_was_replaced_decides_nothing() {
     assert_eq!(pending[0]["id"], json!(now), "{pending}");
 }
 
-/// What the worker's rules already allow isn't asked about: the answer
-/// says so, and nobody gets a request to decide.
-#[tokio::test]
-async fn access_already_allowed_is_not_asked_for() {
-    let (t, run) = run();
-    let r = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "registry.npmjs.org", "methods": ["get"], "reason": "npm install" }),
-    )
-    .await;
-    assert_eq!(r["allowed"], true, "{r}");
-    assert!(r["request"].is_null(), "{r}");
-    assert!(
-        r["note"].as_str().unwrap().contains("already allowed"),
-        "{r}"
-    );
-    assert_eq!(
-        ok(&t, &run, "sec", "access_requests", json!({})).await,
-        json!([])
-    );
-    let asked = journal(&run)
-        .into_iter()
-        .any(|e| e["type"] == "access" && e["event"] == "requested");
-    assert!(!asked, "{:?}", journal(&run));
-    // Another port isn't allowed, so it is asked about.
-    let r = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "registry.npmjs.org", "port": 80, "reason": "npm over http" }),
-    )
-    .await;
-    assert!(r["request"].is_string(), "{r}");
-}
-
-/// "Already allowed" is judged as the proxy would judge the worker's
-/// request: a rule for the worker's own folder (`{session}`) allows it
-/// there, and not in another's.
-#[tokio::test]
-async fn already_allowed_is_judged_as_the_workers_request() {
-    let (t, run) = run();
-    let pat = session_of(&run, "pat");
-    pat.put_rule(
-        serde_yaml::from_str(
-            "{ kind: net, id: own-folder, action: allow, host: drive.example, methods: [GET], path: \"/outbox/{session}/**\" }",
-        )
-        .unwrap(),
-    );
-    let ask = |path: String| {
-        let (t, run) = (&t, &run);
-        async move {
-            ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "drive.example", "methods": ["get"], "path": path, "reason": "my files" }),
-            )
-            .await
-        }
-    };
-    let own = ask(format!("/outbox/{}/x", pat.id)).await;
-    assert_eq!(own["allowed"], true, "{own}");
-    let other = ask("/outbox/zz9yy8/x".to_string()).await;
-    assert!(other["request"].is_string(), "{other}");
-}
-
 /// Nobody decides their own access request: an officer's own network or
 /// credential request goes to someone else, and deciding it themselves is
 /// refused.
 #[tokio::test]
 async fn nobody_decides_their_own_access_request() {
     let (t, run) = run();
-    let asked = ok(
-        &t,
-        &run,
-        "sec",
-        "request_access",
-        json!({ "host": "notes.example", "reason": "research" }),
-    )
-    .await;
-    let id = asked["request"].as_str().unwrap().to_string();
+    let id = ask(&run, "sec", "notes.example", 443, &[], "research");
     let r = crate::security::requests(&run, true)
         .into_iter()
         .find(|r| r["id"] == id.as_str())
@@ -634,20 +519,13 @@ async fn an_approval_never_gets_past_a_final_rule() {
     let decide = |host: &'static str| {
         let (t, run) = (&t, &run);
         async move {
-            let asked = ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": host, "reason": "x" }),
-            )
-            .await;
+            let asked = ask(run, "pat", host, 443, &[], "x");
             ok(
                 t,
                 run,
                 "sec",
                 "access_decide",
-                json!({ "request": asked["request"], "allow": true, "scope": "worker", "reason": "fine" }),
+                json!({ "request": asked, "allow": true, "scope": "worker", "reason": "fine" }),
             )
             .await;
         }
@@ -689,15 +567,7 @@ async fn a_hired_officer_decides_nothing_before_clearance() {
     .await;
     assert_eq!(hired["worker"], "kim", "{hired}");
     give_vm(&t, &run, "kim");
-    let asked = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "docs.example", "reason": "the docs" }),
-    )
-    .await;
-    let request = asked["request"].as_str().unwrap().to_string();
+    let request = ask(&run, "pat", "docs.example", 443, &[], "the docs");
     for (tool, args) in [
         ("access_requests", json!({})),
         ("background_checks", json!({})),

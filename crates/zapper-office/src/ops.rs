@@ -10,7 +10,6 @@ use crate::firm::parse_duration;
 use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
@@ -190,9 +189,6 @@ pub struct Powers {
     /// A policy owner (the CEO or a security officer): decides colleagues'
     /// credential requests.
     pub owner: bool,
-    /// Access requests come as the rules the worker's network drafts
-    /// (OpenShell's `policy.local`), not through `request_access`.
-    pub drafts: bool,
 }
 
 pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
@@ -211,7 +207,6 @@ pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
         manages: !contractor && !chart.reports_of(&w.name).is_empty(),
         owner: !contractor && super::access::is_owner(run, &w.name),
         contractor,
-        drafts: run.client.drafts(),
     }
 }
 
@@ -277,40 +272,6 @@ impl<'a> Args<'a> {
 
 /// What a tool's handler gets: who calls, from which session, and with
 /// what.
-/// The rule that already allows a worker's request, if their session's
-/// rules allow it for every method asked for (or the connection, with
-/// none).
-fn allowed_by(
-    c: &Call,
-    host: &str,
-    port: u16,
-    methods: Option<&[String]>,
-    path: Option<&str>,
-) -> Result<Option<String>> {
-    let methods: Vec<Option<String>> = match methods {
-        Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
-        _ => vec![None],
-    };
-    let mut rule = None;
-    for method in methods {
-        // As the proxy would judge it, over the client: the daemon applies the
-        // worker's `{session}`/`{label:…}` rewriting.
-        let req = NetRequest {
-            host: host.to_string(),
-            port,
-            method,
-            path: path.map(str::to_string),
-            session: None,
-            labels: Default::default(),
-        };
-        match c.run.client.allowed(c.sid, req) {
-            Some(r) => rule = Some(r),
-            None => return Ok(None),
-        }
-    }
-    Ok(Some(rule.unwrap_or_else(|| "default".into())))
-}
-
 struct Call<'a> {
     run: &'a Arc<FirmRun>,
     /// The caller's session id, as the daemon named it from the VM (never from
@@ -581,43 +542,6 @@ static TOOLS: &[Tool] = &[
                 }
             }
             Ok(v)
-        }),
-    },
-    Tool {
-        name: "request_access",
-        shown: |p| !p.drafts,
-        description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision. If your machine's rules already allow it, the answer says so and nothing is asked.",
-        props: || json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
-        required: &["host", "reason"],
-        run: Run::Sync(|c| {
-            let host = zapper_policy::names::hostname(&c.args.req("host")?)
-                .map_err(|e| anyhow!("host: {e}"))?;
-            let port = c.args.raw("port").as_u64().unwrap_or(443).min(65535) as u16;
-            let methods = c.args.list_if_array("methods").map(|m| {
-                m.into_iter()
-                    .map(|m| m.to_ascii_uppercase())
-                    .collect::<Vec<_>>()
-            });
-            let path = c.args.opt("path");
-            let reason = c.args.req("reason")?;
-            // What the worker's rules already allow (every method asked
-            // for, on the path if given) needs no one's decision.
-            if let Some(rule) = allowed_by(c, &host, port, methods.as_deref(), path.as_deref())? {
-                return Ok(json!({
-                    "allowed": true,
-                    "rule": rule,
-                    "note": "already allowed by your machine's rules: go ahead, no request needed. If it's still blocked, the error names the rule; ask again with that",
-                }));
-            }
-            let req = NetRequest {
-                host,
-                port,
-                method: methods.as_ref().and_then(|m| m.first().cloned()),
-                path: None, ..Default::default() };
-            let id = security::ask(c.run, c.me, &req, methods, path, &reason)?;
-            Ok(
-                json!({ "request": id, "note": "the security officers will decide; you'll get mail" }),
-            )
         }),
     },
     Tool {
