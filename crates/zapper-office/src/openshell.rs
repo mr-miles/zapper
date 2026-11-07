@@ -22,12 +22,21 @@
 //!   the facilities the daemon would have connected register as ids only,
 //!   Claude Code's `office` MCP server is the edge's Streamable HTTP, and
 //!   every command gets `ZAPPER_OFFICE_URL` for the `office` command.
+//! - **Network rules and the officers** (phase 3,
+//!   `crate::openshell_rules`): the allows among a sandbox's layers (its
+//!   own, its role's, its profile's, the global one) are rules of its
+//!   policy, kept in step through `UpdateConfig`, a role's for every
+//!   sandbox of the role. What no rule allows OpenShell refuses, and drafts
+//!   a rule for; a worker proposes one through `policy.local` (the policy
+//!   advisor, on for every sandbox the office makes). The office reads each
+//!   sandbox's pending drafts, files them as the officers' access requests,
+//!   and applies their decisions: approved (narrowed if they say so),
+//!   rejected with their reason, undone when the approval expires or is
+//!   revoked. The gateway must leave `proposal_approval_mode` unset, so
+//!   nothing is approved without an officer.
 //!
-//! What it does not do yet (later phases): rules are kept, and `allowed`
-//! judges by them, but nothing enforces them at the network (phase 3: the
-//! sandboxes' policy through `UpdateConfig`); the traffic log is empty
-//! (phase 3: `GetSandboxLogs`); the officers' decider is served on its
-//! socket but nothing asks it (phase 3: drafts).
+//! What it does not do yet: the traffic log is empty (phase 3 remainder:
+//! `GetSandboxLogs`), so officers get no digests.
 //!
 //! Differences from zapper a firm can see: commands run as the sandbox user,
 //! never root (`ShellRequest::system` is ignored), so files the office writes
@@ -39,8 +48,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,7 +72,8 @@ use zapper_policy::{
     Scope,
 };
 
-use crate::client::{block, OfficeClient};
+use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
+use crate::openshell_rules as rules;
 
 /// The gateway workspace the office's sandboxes and templates live in.
 const WORKSPACE: &str = "default";
@@ -75,6 +85,14 @@ const PIPE: usize = 256 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 /// The most a setup command may print.
 const SETUP_OUTPUT: u64 = 1 << 20;
+/// How often the office reads the sandboxes' drafted rules.
+const DRAFT_POLL: Duration = Duration::from_secs(5);
+/// The prefix of the ids of the rules approved drafts became.
+const DRAFT_RULE: &str = "draft-";
+/// The gateway settings the office relies on: the policy advisor on, and
+/// approvals left to the officers.
+const PROPOSALS: &str = "agent_policy_proposals_enabled";
+const APPROVAL_MODE: &str = "proposal_approval_mode";
 
 /// Writes stdin to `$1` with mode `$2`, as the sandbox user. A path the user
 /// can't write (outside its home, the work directory and `/tmp`) is accepted
@@ -116,6 +134,9 @@ pub struct Settings {
     /// The office edge: where the firm's workers reach the office's tools
     /// and git, and how it knows them (`crate::edge`).
     pub edge: EdgeSettings,
+    /// The programs the office's rules let through (zapper's rules name
+    /// none); by default any (`/**`).
+    pub rule_binaries: Vec<String>,
 }
 
 /// The office edge's settings (`edge:` in `openshell.yaml`). The defaults
@@ -201,9 +222,14 @@ struct Sandbox {
     workdir: String,
     /// The profile's command, for a shell that names none.
     command: Vec<String>,
-    /// The session's own rule layer (kept, not yet enforced: phase 3).
+    /// The session's own rule layer.
     rules: Policy,
 }
+
+/// A sandbox's drafted rules as last read: as the officers see them, and as
+/// the gateway gave them (the review token an approval needs, the rule an
+/// edit narrows).
+type Drafts = Vec<(DraftRule, proto::PolicyChunk)>;
 
 /// The office's client of an OpenShell gateway.
 pub struct OpenShell {
@@ -215,11 +241,19 @@ pub struct OpenShell {
     /// Templates made by this process: name → what they were made from.
     templates: tokio::sync::Mutex<BTreeMap<String, String>>,
     sandboxes: Mutex<BTreeMap<String, Sandbox>>,
-    /// Firm roles' shared layers, by name (kept, not yet enforced: phase 3).
+    /// Firm roles' shared layers, by name (`firm/role`).
     layers: Mutex<BTreeMap<String, Policy>>,
     /// Ids for the registrations phase 2 replaces.
     next_id: AtomicU64,
-    warned_rules: AtomicBool,
+    /// Itself, for the work its synchronous methods start ([`OpenShell::start`]).
+    me: OnceLock<Weak<OpenShell>>,
+    /// The office's rules each sandbox's policy has, as last applied.
+    applied: Mutex<HashMap<String, BTreeMap<String, proto::NetworkPolicyRule>>>,
+    /// One sandbox's rules are applied at a time, each from the layers as
+    /// they are then, so the last change wins.
+    applying: tokio::sync::Mutex<()>,
+    /// Each sandbox's pending drafts, as last read.
+    drafts: Mutex<HashMap<String, Drafts>>,
 }
 
 impl OpenShell {
@@ -249,6 +283,15 @@ impl OpenShell {
             .await
             .with_context(|| format!("the OpenShell gateway at {}", settings.gateway))?;
         tracing::info!(gateway = %settings.gateway, version = %health.version, "connected to OpenShell");
+        let global = sdk
+            .raw_grpc_fresh()
+            .await?
+            .get_gateway_config(proto::GetGatewayConfigRequest {})
+            .await
+            .context("reading the gateway's settings")?
+            .into_inner()
+            .settings;
+        officers_decide(&global)?;
         let config = load_config(&config_path)?;
         Ok(OpenShell {
             sdk,
@@ -259,8 +302,299 @@ impl OpenShell {
             sandboxes: Default::default(),
             layers: Default::default(),
             next_id: AtomicU64::new(1),
-            warned_rules: AtomicBool::new(false),
+            me: OnceLock::new(),
+            applied: Default::default(),
+            applying: Default::default(),
+            drafts: Default::default(),
         })
+    }
+
+    /// Starts what runs beside the office: reading the sandboxes' drafted
+    /// rules, and applying rules as the layers change. Until it is called,
+    /// the rules are kept but not applied.
+    pub fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let _ = self.me.set(Arc::downgrade(self));
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(DRAFT_POLL).await;
+                let Some(os) = weak.upgrade() else { return };
+                os.read_drafts().await;
+            }
+        })
+    }
+
+    /// Reads every sandbox's pending drafts. A sandbox whose drafts can't be
+    /// read keeps what was last read.
+    async fn read_drafts(&self) {
+        let names: Vec<String> = self.sandboxes.lock().unwrap().keys().cloned().collect();
+        for name in names {
+            let req = proto::GetDraftPolicyRequest {
+                sandbox: name.clone(),
+                status_filter: "pending".into(),
+                workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            };
+            let got = match self.sdk.raw_grpc_fresh().await {
+                Ok(mut g) => g.get_draft_policy(req).await.map_err(anyhow::Error::from),
+                Err(e) => Err(e.into()),
+            };
+            match got {
+                Ok(r) => {
+                    let drafts: Drafts = r
+                        .into_inner()
+                        .chunks
+                        .into_iter()
+                        .filter(|c| c.status == "pending")
+                        .filter_map(|c| rules::draft(&name, &c).map(|d| (d, c)))
+                        .collect();
+                    // Only for a sandbox the office still has.
+                    if self.sandboxes.lock().unwrap().contains_key(&name) {
+                        self.drafts.lock().unwrap().insert(name, drafts);
+                    }
+                }
+                Err(e) => tracing::debug!(sandbox = %name, "reading its drafts: {e:#}"),
+            }
+        }
+    }
+
+    /// Applies the rules of sandbox `name` (every sandbox, if `None`) from
+    /// the layers as they are by then, in the background.
+    fn reapply(&self, name: Option<&str>) {
+        let Some(me) = self.me.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let name = name.map(str::to_string);
+        tokio::spawn(async move {
+            let _one = me.applying.lock().await;
+            let names: Vec<String> = match name {
+                Some(n) => vec![n],
+                None => me.sandboxes.lock().unwrap().keys().cloned().collect(),
+            };
+            for n in names {
+                if let Err(e) = me.apply(&n).await {
+                    tracing::warn!(sandbox = %n, "applying its network rules: {e:#}");
+                }
+            }
+        });
+    }
+
+    /// The office's rules for sandbox `name`, from its layers; `None` for a
+    /// sandbox it doesn't have.
+    fn wanted(&self, name: &str) -> Option<BTreeMap<String, proto::NetworkPolicyRule>> {
+        let (own, profile, role, labels) = {
+            let all = self.sandboxes.lock().unwrap();
+            let s = all.get(name)?;
+            (
+                s.rules.clone(),
+                s.info.profile.clone(),
+                s.info.labels.get("firm-role").cloned(),
+                s.info.labels.clone(),
+            )
+        };
+        let config = self.config();
+        let role_layer = role
+            .as_ref()
+            .and_then(|r| self.layers.lock().unwrap().get(r).cloned())
+            .unwrap_or_default();
+        let profile_layers = config
+            .resolve(&profile)
+            .map(|p| p.layers)
+            .unwrap_or_default();
+        let mut layers: Vec<(String, &Policy)> = vec![("session".into(), &own)];
+        if role.is_some() {
+            layers.push(("role".into(), &role_layer));
+        }
+        for (scope, p) in &profile_layers {
+            layers.push((format!("{scope:?}"), p));
+        }
+        layers.push(("global".into(), &config.policy));
+        Some(rules::sandbox_rules(&rules::Layers {
+            layers,
+            session: name,
+            labels: &labels,
+            binaries: &self.settings.rule_binaries,
+        }))
+    }
+
+    /// Brings sandbox `name`'s policy in step with its layers: removes the
+    /// office's rules that went or changed, adds those that came or changed.
+    async fn apply(&self, name: &str) -> Result<()> {
+        let Some(want) = self.wanted(name) else {
+            return Ok(());
+        };
+        let have = self
+            .applied
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        use proto::policy_merge_operation::Operation;
+        let mut ops = Vec::new();
+        for (k, r) in &have {
+            if want.get(k) != Some(r) {
+                ops.push(Operation::RemoveRule(proto::RemoveNetworkRule {
+                    rule_name: k.clone(),
+                }));
+            }
+        }
+        for (k, r) in &want {
+            if have.get(k) != Some(r) {
+                ops.push(Operation::AddRule(proto::AddNetworkRule {
+                    rule_name: k.clone(),
+                    rule: Some(r.clone()),
+                }));
+            }
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let n = ops.len();
+        let req = proto::UpdateConfigRequest {
+            sandbox: name.to_string(),
+            workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            merge_operations: ops
+                .into_iter()
+                .map(|o| proto::PolicyMergeOperation { operation: Some(o) })
+                .collect(),
+            ..Default::default()
+        };
+        self.sdk
+            .raw_grpc_fresh()
+            .await?
+            .update_config(req)
+            .await
+            .context("UpdateConfig")?;
+        tracing::debug!(sandbox = name, changes = n, "network rules applied");
+        // Only for a sandbox the office still has.
+        if self.sandboxes.lock().unwrap().contains_key(name) {
+            self.applied.lock().unwrap().insert(name.to_string(), want);
+        }
+        Ok(())
+    }
+
+    /// Turns the policy advisor on for sandbox `name`: its workers propose
+    /// rules through `policy.local`.
+    async fn advisor_on(&self, name: &str) -> Result<()> {
+        let req = proto::UpdateConfigRequest {
+            sandbox: name.to_string(),
+            workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            setting_key: PROPOSALS.into(),
+            setting_value: Some(proto::SettingValue {
+                value: Some(proto::setting_value::Value::BoolValue(true)),
+            }),
+            ..Default::default()
+        };
+        self.sdk
+            .raw_grpc_fresh()
+            .await?
+            .update_config(req)
+            .await
+            .with_context(|| format!("setting {PROPOSALS} on sandbox {name}"))?;
+        Ok(())
+    }
+
+    /// Decides draft `chunk` of sandbox `name` at the gateway.
+    async fn decide(&self, name: &str, chunk: &str, d: DraftDecision) -> Result<Option<String>> {
+        let ws = || Some(proto::workspace_selector(WORKSPACE));
+        let mut grpc = self.sdk.raw_grpc_fresh().await?;
+        let known = self.drafts.lock().unwrap().get(name).and_then(|all| {
+            all.iter()
+                .find(|(d, _)| d.chunk == chunk)
+                .map(|(_, c)| c.clone())
+        });
+        let result = match d {
+            DraftDecision::Reject(reason) => {
+                grpc.reject_draft_chunk(proto::RejectDraftChunkRequest {
+                    sandbox: name.to_string(),
+                    chunk_id: chunk.to_string(),
+                    reason,
+                    workspace_scope: ws(),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("rejecting draft {chunk} of {name}"))?;
+                None
+            }
+            DraftDecision::Approve { methods, path } => {
+                let mut c = known.ok_or_else(|| {
+                    anyhow!("draft {chunk} of {name} is no longer pending at the gateway")
+                })?;
+                if methods.is_some() || path.is_some() {
+                    let rule = c
+                        .proposed_rule
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("draft {chunk} has no rule"))?;
+                    let narrowed = rules::narrow(rule, methods.as_deref(), path.as_deref());
+                    grpc.edit_draft_chunk(proto::EditDraftChunkRequest {
+                        sandbox: name.to_string(),
+                        chunk_id: chunk.to_string(),
+                        proposed_rule: Some(narrowed),
+                        workspace_scope: ws(),
+                        ..Default::default()
+                    })
+                    .await
+                    .with_context(|| format!("narrowing draft {chunk} of {name}"))?;
+                    // The edit is reviewed afresh: its token is the one an
+                    // approval of it takes.
+                    c = grpc
+                        .get_draft_policy(proto::GetDraftPolicyRequest {
+                            sandbox: name.to_string(),
+                            status_filter: "pending".into(),
+                            workspace_scope: ws(),
+                        })
+                        .await
+                        .context("reading the narrowed draft")?
+                        .into_inner()
+                        .chunks
+                        .into_iter()
+                        .find(|x| x.id == chunk)
+                        .ok_or_else(|| anyhow!("draft {chunk} went while it was narrowed"))?;
+                }
+                grpc.approve_draft_chunk(proto::ApproveDraftChunkRequest {
+                    sandbox: name.to_string(),
+                    chunk_id: chunk.to_string(),
+                    review_token: c.review_token.clone(),
+                    workspace_scope: ws(),
+                    ..Default::default()
+                })
+                .await
+                .with_context(|| format!("approving draft {chunk} of {name}"))?;
+                Some(format!("{DRAFT_RULE}{chunk}"))
+            }
+        };
+        if let Some(all) = self.drafts.lock().unwrap().get_mut(name) {
+            all.retain(|(d, _)| d.chunk != chunk);
+        }
+        Ok(result)
+    }
+
+    /// Takes the rule approved draft `chunk` became back out of sandbox
+    /// `name`'s policy, in the background.
+    fn undo(&self, name: &str, chunk: &str) {
+        let Some(me) = self.me.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let (name, chunk) = (name.to_string(), chunk.to_string());
+        tokio::spawn(async move {
+            let req = proto::UndoDraftChunkRequest {
+                sandbox: name.clone(),
+                chunk_id: chunk.clone(),
+                workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+                ..Default::default()
+            };
+            let done = match me.sdk.raw_grpc_fresh().await {
+                Ok(mut g) => g
+                    .undo_draft_chunk(req)
+                    .await
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from),
+                Err(e) => Err(e.into()),
+            };
+            if let Err(e) = done {
+                tracing::warn!(sandbox = %name, "undoing approved draft {chunk}: {e:#}");
+            }
+        });
     }
 
     /// The office's sandboxes, as the VMs view lists them.
@@ -580,15 +914,6 @@ impl OpenShell {
         Ok(Box::new(ours))
     }
 
-    fn warn_rules_once(&self) {
-        if !self.warned_rules.swap(true, Ordering::Relaxed) {
-            tracing::warn!(
-                "network rules are kept but not enforced on OpenShell yet (phase 3): \
-                 the sandboxes' policy is the gateway's"
-            );
-        }
-    }
-
     /// A facility the daemon would have connected the sandboxes to: on
     /// OpenShell the office edge serves it (the tools, git), so registering
     /// it is only an id.
@@ -629,23 +954,28 @@ impl OpenShell {
 
 impl OfficeClient for OpenShell {
     fn add_layer_rule(&self, name: &str, rule: AnyRule) -> AnyRule {
-        self.warn_rules_once();
         self.layers
             .lock()
             .unwrap()
             .entry(name.to_string())
             .or_default()
             .insert(rule.clone(), Some(0));
+        self.reapply(None);
         rule
     }
 
     fn remove_layer_rule(&self, name: &str, id: &str) -> bool {
-        self.layers
+        let removed = self
+            .layers
             .lock()
             .unwrap()
             .get_mut(name)
             .and_then(|p| p.remove(id))
-            .is_some()
+            .is_some();
+        if removed {
+            self.reapply(None);
+        }
+        removed
     }
 
     fn reset_layer(&self, name: &str) {
@@ -653,6 +983,7 @@ impl OfficeClient for OpenShell {
             .lock()
             .unwrap()
             .insert(name.to_string(), Policy::default());
+        self.reapply(None);
     }
 
     fn record_writable(&self) -> bool {
@@ -715,6 +1046,11 @@ impl OfficeClient for OpenShell {
                 .create_sandbox_from_template(spec)
                 .await
                 .with_context(|| format!("creating a sandbox from template {template}"))?;
+            // Before its agent starts, so it finds the advisor's guide: its
+            // workers ask for access through `policy.local`.
+            if let Err(e) = self.advisor_on(&name).await {
+                tracing::warn!(sandbox = %name, "{e:#}; its workers can't propose rules");
+            }
             let (env, workdir) = match self.boot(&name, &profile, &new).await {
                 Ok(booted) => booted,
                 Err(e) => {
@@ -752,9 +1088,6 @@ impl OfficeClient for OpenShell {
                 labels: new.labels.clone(),
                 driver: Value::Null,
             };
-            if !new.policy.is_empty() {
-                self.warn_rules_once();
-            }
             self.sandboxes.lock().unwrap().insert(
                 name,
                 Sandbox {
@@ -766,6 +1099,14 @@ impl OfficeClient for OpenShell {
                     rules: new.policy.clone(),
                 },
             );
+            // Its rules before its first turn: what it lacks, it is refused,
+            // and the officers see the drafts.
+            {
+                let _one = self.applying.lock().await;
+                if let Err(e) = self.apply(&info.id).await {
+                    tracing::warn!(sandbox = %info.id, "applying its network rules: {e:#}");
+                }
+            }
             Ok(info)
         })
     }
@@ -773,6 +1114,8 @@ impl OfficeClient for OpenShell {
     fn stop_session<'a>(&'a self, id: &'a str, reason: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let known = self.sandboxes.lock().unwrap().remove(id).is_some();
+            self.applied.lock().unwrap().remove(id);
+            self.drafts.lock().unwrap().remove(id);
             if !known {
                 bail!("no session {id}");
             }
@@ -924,7 +1267,6 @@ impl OfficeClient for OpenShell {
     }
 
     fn put_session_rule(&self, id: &str, rule: AnyRule) {
-        self.warn_rules_once();
         if let Some(s) = self.sandboxes.lock().unwrap().get_mut(id) {
             if let Some(rule_id) = rule.id() {
                 s.rules.remove(rule_id);
@@ -932,16 +1274,47 @@ impl OfficeClient for OpenShell {
             s.rules.insert(rule, Some(0));
             s.info.rules = s.rules.rules().len();
         }
+        self.reapply(Some(id));
     }
 
     fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool {
-        let mut all = self.sandboxes.lock().unwrap();
-        let Some(s) = all.get_mut(id) else {
-            return false;
+        // An approved draft's rule is the gateway's: its approval is undone.
+        if let Some(chunk) = rule_id.strip_prefix(DRAFT_RULE) {
+            if !self.sandboxes.lock().unwrap().contains_key(id) {
+                return false;
+            }
+            self.undo(id, chunk);
+            return true;
+        }
+        let removed = {
+            let mut all = self.sandboxes.lock().unwrap();
+            let Some(s) = all.get_mut(id) else {
+                return false;
+            };
+            let removed = s.rules.remove(rule_id).is_some();
+            s.info.rules = s.rules.rules().len();
+            removed
         };
-        let removed = s.rules.remove(rule_id).is_some();
-        s.info.rules = s.rules.rules().len();
+        if removed {
+            self.reapply(Some(id));
+        }
         removed
+    }
+
+    fn drafts(&self) -> bool {
+        true
+    }
+
+    fn pending_drafts(&self, id: &str) -> Option<Vec<DraftRule>> {
+        self.drafts
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|all| all.iter().map(|(d, _)| d.clone()).collect())
+    }
+
+    fn decide_draft(&self, id: &str, chunk: &str, d: DraftDecision) -> Result<Option<String>> {
+        block(self.decide(id, chunk, d))
     }
 
     fn edge(&self) -> Option<String> {
@@ -982,6 +1355,32 @@ pub fn routes(os: Arc<OpenShell>) -> axum::Router {
             async move { axum::Json(os.list()) }
         }),
     )
+}
+
+/// Refuses a gateway whose settings would take decisions from the officers:
+/// automatic approval (it approves what its checks pass), or the policy
+/// advisor turned off for every sandbox (workers couldn't propose, and a
+/// sandbox's own setting can't override the gateway's).
+fn officers_decide(global: &HashMap<String, proto::SettingValue>) -> Result<()> {
+    use proto::setting_value::Value;
+    let value = |k: &str| global.get(k).and_then(|v| v.value.clone());
+    match value(APPROVAL_MODE) {
+        None => {}
+        Some(Value::StringValue(m)) if m == "manual" => {}
+        Some(v) => bail!(
+            "the gateway sets {APPROVAL_MODE} ({v:?}): the office's security officers decide \
+             every access request, so leave it unset (`openshell settings delete --global --key \
+             {APPROVAL_MODE} --yes`)"
+        ),
+    }
+    if let Some(Value::BoolValue(false)) = value(PROPOSALS) {
+        bail!(
+            "the gateway turns {PROPOSALS} off for every sandbox: the office's workers ask for \
+             access through policy.local, so leave it unset (`openshell settings delete --global \
+             --key {PROPOSALS} --yes`)"
+        );
+    }
+    Ok(())
 }
 
 fn load_config(path: &Path) -> Result<Config> {

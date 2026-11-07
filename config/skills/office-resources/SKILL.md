@@ -37,6 +37,8 @@ You start with no access to the firm's resources. Access is a **grant** per reso
 
 Traffic to sites outside the firm is checked by the security officers. Ask ahead for what your work needs: `request_access(host, port?, methods?, path?, reason)`, as narrow as works ("GET registry.npmjs.org to install the dependencies for t-12"). If your machine's rules already allow it, the answer says `allowed` and nobody is asked: go ahead. A 403 that says the request went to security means it's waiting: don't retry in a loop, do other work or end your turn; the decision comes by mail. Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
 
+If you have no `request_access` tool, your machine asks differently: a refused request answers `policy_denied`, and you propose the narrowest rule that would allow it through `http://policy.local`, as `/etc/openshell/skills/policy_advisor.md` explains (read it the first time), with an `intent_summary` that names the work ("GET registry.npmjs.org to install the dependencies for t-12"). The security officers decide it, not the sandbox: wait on `/v1/proposals/{chunk_id}/wait?timeout=300` while you have nothing else to do, otherwise do other work or end your turn; the decision also comes by mail. A rejection carries the officer's reason: ask for less, or not at all. Never propose wildcard hosts or `tls: skip`.
+
 ## git
 
 Your preamble lists the firm's repositories and their URLs (`https://git.<domain>/<name>.git`, or the office's own address on some hosts); your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.

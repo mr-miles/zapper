@@ -21,6 +21,8 @@ mod kb;
 pub(crate) mod mail;
 #[cfg(feature = "openshell")]
 pub mod openshell;
+#[cfg(feature = "openshell")]
+mod openshell_rules;
 pub(crate) mod ops;
 pub(crate) mod plan;
 pub(crate) mod product;

@@ -402,6 +402,8 @@ async fn a_worker_may_call_exactly_the_tools_they_are_shown() {
         manages: true,
         contractor: true,
         owner: true,
+        // Drafts hide request_access.
+        drafts: false,
     };
     let officers: Vec<Value> = tools(Powers {
         officer: true,
@@ -447,6 +449,8 @@ fn the_tool_lists_are_as_they_were() {
             manages: b(4),
             contractor: b(5),
             owner: b(6),
+            // The lists as they were: request_access shown.
+            drafts: false,
         };
         ctx.update(serde_json::to_string(&tools(p)).unwrap().as_bytes());
     }
@@ -756,4 +760,23 @@ fn reload_applies_a_valid_office_yaml_and_rejects_a_bad_one() {
         office.firm("beta").is_some(),
         "a failed reload changes nothing"
     );
+}
+
+/// Where a worker's network drafts the rules they need (OpenShell's
+/// `policy.local`), that is how they ask: no `request_access`.
+#[test]
+fn where_the_network_drafts_rules_workers_ask_through_it() {
+    use crate::ops::{tools, Powers};
+    let names = |p: Powers| -> Vec<String> {
+        tools(p)
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(names(Powers::default()).contains(&"request_access".to_string()));
+    let drafts = Powers {
+        drafts: true,
+        ..Default::default()
+    };
+    assert!(!names(drafts).contains(&"request_access".to_string()));
 }

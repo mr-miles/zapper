@@ -12,7 +12,7 @@ The smallest implementation has five parts:
 2. **Office edge**, one HTTP service on a private host address. It serves the office MCP tools (Streamable HTTP), the git server, the Stop-hook endpoint and an OAuth2 token endpoint that turns a sandbox's SPIFFE JWT-SVID into a worker identity.
 3. **An `office` provider profile** with a `client_credentials` token grant. The supervisor injects the worker's short-lived token into every request to the firm's services, so no credential enters the VM. The Claude token uses the stock `anthropic` provider the same way.
 4. **Officer queue on draft policy**: denials become drafts (`GetDraftPolicy`), and officer decisions become `ApproveDraftChunk` / `RejectDraftChunk` or a policy update.
-5. **The k3s cluster moves out of the VM fleet** and runs as a host container that workers reach through an `allowed_ips` rule. OpenShell's single guest kernel and NIC-less guests don't suit k3s.
+5. **The k3s cluster runs in a sandbox of its own** and exposes its API and ingress as an OpenShell service that the workers' sandboxes dial (phase 4).
 
 Rough size: about 10 engineer-weeks to cutover over 6 phases, then about 1 week for durable traffic history (Phase 6). The firm logic (mail, workforce, budgets, drive, contracts, scenarios, UI, journal, replay) stays unchanged. The main risk is that the vendored Firecracker driver hasn't booted a real sandbox yet, so Phase 0 is a de-risking spike with pass/fail gates.
 
@@ -118,7 +118,7 @@ The office stops depending on the zapper daemon: `zapper-client`, `zapper-driver
 
 ### Behaviour that changes
 
-- **`ask` becomes deny + draft.** The agent sees a 403 with OpenShell's text instead of zapper's request id. The office's own `request_access` tool still queues a request with a reason, and the officer decision still mails the worker.
+- **`ask` becomes deny + draft.** The agent sees a 403 with OpenShell's text (`policy_denied`) instead of zapper's request id, and asks by proposing a rule through `policy.local` in place of `request_access`. The officers decide it as before, and the decision still mails the worker.
 - **`once` approvals** are approved as worker rules with a 10-minute expiry, which the office removes. Exact once-only semantics need an `HTTP:*` log match, so they're out of scope.
 - **Network rules are binary-scoped.** That's stricter than zapper's host rules, and drafts arrive per binary.
 - **No per-exec record and no terminal recordings.** Transcripts and traffic remain.
@@ -186,15 +186,28 @@ Gate: e2e for delegation, authority, identity (the sender is the sandbox), mail 
 
 ### Phase 3: Policy, officers, traffic (weeks 6 to 7)
 
-- [ ] Role-rule fan-out and worker rules through `UpdateConfig`; expiry timers; revocation.
-- [ ] Officer queue from drafts; `access_decide` to approve or reject; `request_access` kept.
+- [x] Role-rule fan-out and worker rules through `UpdateConfig`; expiry timers; revocation (`crates/zapper-office/src/openshell_rules.rs`, `openshell.rs`).
+- [x] Officer queue from drafts; `access_decide` approves (narrowed if the officer says so), rejects or undoes them. Workers ask through `policy.local`, and `request_access` is hidden on OpenShell.
 - [ ] Interim traffic: `requests()` over `GetSandboxLogs` (recent events only, matched rule parsed from `[policy:<rule>]`); digest wakes.
+- [ ] Run the gate on a gateway (below).
 
-Gate: e2e for a request refused, decided by an officer and retried, plus revocation, passes.
+How it works:
+
+- **Rules.** The office keeps a worker's layers as before: its own, its role's, its profile's and the global one. Each sandbox's policy gets the allows among them as rules named `zo_<rule id>`, through `UpdateConfig` merge operations. A change to a role's layer is applied to every sandbox in the role. Rules are applied once a sandbox is up, before its first turn, and again whenever a layer changes; the office diffs against what it last applied, so only changed rules are sent.
+- **What stays out.** OpenShell denies whatever no rule allows, so zapper's `deny` and `ask` rules aren't sent. A nearer layer's deny of the same host and port keeps a wider layer's allow out. Also left out: the firm's own git and cluster rules (the edge serves git, and checks grants itself), rules that inject secrets or headers (the providers hold credentials), database protocols, and hosts OpenShell can't match (`*` alone, or a wildcard name with fewer than three labels). zapper's rules name no programs, so each rule lets through `rule_binaries` from `openshell.yaml`, by default `/**`; the Phase 0 spike confirmed that `binaries` accepts a glob.
+- **Asking.** Every sandbox the office makes has the policy advisor on (`agent_policy_proposals_enabled`, set per sandbox). A worker whose request is refused (`policy_denied`) proposes a rule through `http://policy.local` and can wait on it there. The office-resources skill tells them how when `request_access` isn't among their tools. The sandbox also drafts a rule by itself for every connection it refuses.
+- **Officers decide.** The office reads each sandbox's pending drafts every 5 seconds and files each as an access request. The officer sees the draft's origin (proposal or refusal), its programs, the rule as the gateway would apply it, and the gateway's own risk-check findings. `access_decide` maps onto the gateway:
+    - **Allow:** `ApproveDraftChunk`, after an `EditDraftChunk` when the officer narrows `methods` or `path` (`methods: []` opens the whole connection, uninspected). A role-scoped allow also puts the rule on the role's layer, so the rest of the role gets it.
+    - **Deny:** `RejectDraftChunk` with the officer's reason, which the worker reads. A standing denial refuses later drafts for the same host and port without asking anyone.
+    - **Expiry and revocation:** `UndoDraftChunk` takes an approval back out. `once` lasts 10 minutes.
+    - **Drafts that disappear:** a request whose draft leaves the gateway's pending list undecided (for example, replaced by a narrower proposal) is marked withdrawn.
+- **Nobody else approves.** The office refuses to start against a gateway that sets `proposal_approval_mode` (other than `manual`), or that turns `agent_policy_proposals_enabled` off globally, since a sandbox's own setting can't override it.
+
+Gate: e2e for a request refused, decided by an officer and retried, plus revocation, passes. Also check on the gateway: that a `/**` binary glob matches, that `UpdateConfig` merge operations apply live, and that an edited draft is approved with its fresh review token.
 
 ### Phase 4: Cluster and facilities (week 8)
 
-- [ ] k3s host container per run; service accounts and kubeconfig by exec; product and dashboard ports.
+- [ ] k3s in a sandbox of its own per run, exposing its API (and the product's ingress) as an OpenShell service that the workers' sandboxes dial; service accounts and kubeconfig by exec; product and dashboard ports.
 - [ ] GitHub remote and knowledge base unchanged; re-test `publish_branch`.
 
 Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) passes.
@@ -231,7 +244,7 @@ The biggest risk is maturity rather than design. openshell-firecracker's own ver
 **Decisions needed:**
 
 - [ ] Accept losing per-exec host approval and exec audit, or require it (that would mean a supervisor change upstream).
-- [ ] Cluster: k3s as a host container (recommended, smallest) or a k3s-capable sandbox (needs a second guest kernel and a NIC-less k3s setup).
+- [x] Cluster: k3s runs in a sandbox, exposing a service other sandboxes dial (decided; phase 4 settles how k3s runs without a NIC on the shared guest kernel).
 - [ ] Keep `zapper` as an alternative backend behind `OfficeClient` during the transition, or cut over in one go.
 
 ## Sources

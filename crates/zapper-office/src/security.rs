@@ -19,6 +19,7 @@ use zapper_policy::{Action, AnyRule, NetRequest, NetRule, Scope};
 
 use super::mail::{Draft, Kind};
 use super::{now, prompts, FirmRun, WorkerRt};
+use crate::client::{DraftDecision, DraftRule};
 
 /// Requests one worker may have pending.
 const MAX_PENDING: usize = 32;
@@ -34,6 +35,9 @@ pub enum State {
     Denied,
     /// Asked again for more while waiting: replaced by `merged_into`.
     Merged,
+    /// A drafted rule no longer pending at the gateway before anyone here
+    /// decided it: replaced by a narrower proposal, or withdrawn.
+    Withdrawn,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +67,10 @@ pub struct Request {
     pub decision: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_into: Option<String>,
+    /// The rule the worker's network drafted, where requests come so
+    /// (OpenShell): what deciding it approves or rejects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftRule>,
 }
 
 /// An approval or denial that stays: a rule at a worker's or role's layer.
@@ -77,6 +85,10 @@ pub struct Standing {
     pub created: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<f64>,
+    /// The session and rule an approved draft became, taken out with this
+    /// one (a role's approval: the role's rule, and the requester's draft).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_rule: Option<(String, String)>,
 }
 
 /// A background check on a new hire, before they start.
@@ -257,6 +269,7 @@ pub fn ask(
         board_asked: board,
         decision: None,
         merged_into: None,
+        draft: None,
     };
     if let Some(old) = merged {
         let old = sec.requests.get_mut(&old.id).unwrap();
@@ -269,13 +282,166 @@ pub fn ask(
     let text = request_text(&r);
     sec.requests.insert(id.clone(), r);
     drop(sec);
-    if board {
-        run.notice(BOARD, &format!("Access request {id}"), &format!("[Automatic notice] An access request needs the board's decision (no officer can decide it).\n\n{text}\nDecide it in the UI's Security tab.\n"));
-    } else if let Some(o) = officer.and_then(|o| run.rt(&o)) {
-        o.access_queue.lock().unwrap().push(id.clone());
-        o.wake.notify_one();
-    }
+    route(run, &id, officer, &text);
     Ok(id)
+}
+
+/// A new request to its officer's queue, or, with none, to the board.
+fn route(run: &FirmRun, id: &str, officer: Option<String>, text: &str) {
+    match officer {
+        None => run.notice(BOARD, &format!("Access request {id}"), &format!("[Automatic notice] An access request needs the board's decision (no officer can decide it).\n\n{text}\nDecide it in the UI's Security tab.\n")),
+        Some(o) => {
+            if let Some(o) = run.rt(&o) {
+                o.access_queue.lock().unwrap().push(id.to_string());
+                o.wake.notify_one();
+            }
+        }
+    }
+}
+
+/// Files a rule `worker`'s network drafted (OpenShell: a proposal through
+/// `policy.local`, or a refused connection) as an access request; its id.
+/// Each draft is a request of its own: the gateway, not the office, merges
+/// a narrower proposal with the draft it replaces.
+fn ask_draft(run: &FirmRun, worker: &str, d: DraftRule) -> Result<String> {
+    let assignment = run
+        .post
+        .with(|po| po.desk(worker))
+        .owed
+        .first()
+        .map(|o| o.subject.clone());
+    let mut sec = run.security.lock().unwrap();
+    let pending = sec
+        .requests
+        .values()
+        .filter(|r| r.worker == worker && matches!(r.state, State::Pending | State::Escalated))
+        .count();
+    if pending >= MAX_PENDING {
+        bail!("{worker} has {MAX_PENDING} access requests pending");
+    }
+    sec.counter += 1;
+    let id = format!("r-{}", sec.counter);
+    let officer = pick_officer(run, &mut sec, worker);
+    let board = officer.is_none();
+    // `*` (any method) is zapper's none.
+    let methods: Option<Vec<String>> =
+        (!d.methods.is_empty() && !d.methods.iter().any(|m| m == "*")).then(|| d.methods.clone());
+    let r = Request {
+        id: id.clone(),
+        worker: worker.to_string(),
+        title: run.chart().title_of(worker),
+        host: d.host.clone(),
+        port: d.port,
+        method: methods.as_ref().and_then(|m| m.first().cloned()),
+        path: d.path.clone(),
+        methods,
+        reason: d.rationale.clone(),
+        created: now(),
+        attempts: 1,
+        state: if board {
+            State::Escalated
+        } else {
+            State::Pending
+        },
+        officer: officer.clone(),
+        assignment,
+        board_asked: board,
+        decision: None,
+        merged_into: None,
+        draft: Some(d),
+    };
+    run.journal
+        .append("access", json!({ "event": "requested", "request": r }));
+    let text = request_text(&r);
+    sec.requests.insert(id.clone(), r);
+    drop(sec);
+    route(run, &id, officer, &text);
+    Ok(id)
+}
+
+/// A standing denial of `worker`'s (or their role's) that covers draft `d`.
+fn denied_before(sec: &Security, worker: &WorkerRt, d: &DraftRule) -> Option<Standing> {
+    let mine = format!("worker:{}", worker.name);
+    let role = format!("role:{}", worker.role);
+    sec.standing
+        .values()
+        .find(|st| {
+            st.rule.action == Action::Deny
+                && (st.scope == mine || st.scope == role)
+                && st.rule.host.eq_ignore_ascii_case(&d.host)
+                && (st.rule.ports.is_empty() || st.rule.ports.contains(&d.port))
+        })
+        .cloned()
+}
+
+/// Brings the officers' requests in step with the rules the workers'
+/// networks drafted: a new draft is filed (or refused at once, if a standing
+/// denial covers it); a request whose draft is no longer pending at the
+/// gateway, undecided here, is withdrawn.
+fn file_drafts(run: &FirmRun) {
+    if !run.client.drafts() {
+        return;
+    }
+    for w in run.rts() {
+        let Some(s) = w.session() else { continue };
+        let Some(pending) = run.client.pending_drafts(s.id()) else {
+            continue;
+        };
+        let live: BTreeSet<&str> = pending.iter().map(|d| d.chunk.as_str()).collect();
+        let gone: Vec<Request> = {
+            let mut sec = run.security.lock().unwrap();
+            sec.requests
+                .values_mut()
+                .filter(|r| {
+                    matches!(r.state, State::Pending | State::Escalated)
+                        && r.draft.as_ref().is_some_and(|d| {
+                            d.session == s.id() && !live.contains(d.chunk.as_str())
+                        })
+                })
+                .map(|r| {
+                    r.state = State::Withdrawn;
+                    r.clone()
+                })
+                .collect()
+        };
+        for r in gone {
+            run.journal
+                .append("access", json!({ "event": "withdrawn", "request": r }));
+        }
+        for d in pending.iter() {
+            let (known, denied) = {
+                let sec = run.security.lock().unwrap();
+                let known = sec.requests.values().any(|r| {
+                    r.draft
+                        .as_ref()
+                        .is_some_and(|x| x.chunk == d.chunk && x.session == d.session)
+                });
+                (known, denied_before(&sec, &w, d))
+            };
+            if known {
+                continue;
+            }
+            if let Some(st) = denied {
+                let reason = format!("denied before, by {}: {}", st.by, st.reason);
+                match run
+                    .client
+                    .decide_draft(&d.session, &d.chunk, DraftDecision::Reject(reason))
+                {
+                    Ok(_) => {
+                        run.journal.append(
+                            "access",
+                            json!({ "event": "refused", "worker": w.name, "draft": d, "standing": st }),
+                        );
+                    }
+                    Err(e) => tracing::warn!(worker = %w.name, "refusing draft {}: {e:#}", d.chunk),
+                }
+                continue;
+            }
+            if let Err(e) = ask_draft(run, &w.name, d.clone()) {
+                tracing::debug!(worker = %w.name, "draft {} waits: {e:#}", d.chunk);
+            }
+        }
+    }
 }
 
 /// Starts a background check on a new hire: an officer (other than the
@@ -738,6 +904,9 @@ fn request_text(r: &Request) -> String {
                 .collect::<String>()
         );
     }
+    if let Some(d) = &r.draft {
+        s.push_str(&prompts::draft_text(d));
+    }
     s
 }
 
@@ -923,7 +1092,11 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
         .clone()
         .or_else(|| r.methods.clone())
         .unwrap_or_default();
-    let path = a.path.clone();
+    // A drafted rule's path, unless the officer narrows it.
+    let path = a
+        .path
+        .clone()
+        .or_else(|| r.draft.as_ref().and_then(|d| d.path.clone()));
     let rule = NetRule {
         id: None,
         action: if a.allow { Action::Allow } else { Action::Deny },
@@ -942,6 +1115,32 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
     };
     let worker = run.rt(&r.worker);
     let mut rule_id = None;
+    // A drafted rule is decided at the gateway as well: rejected there with
+    // the reason (the worker waiting on its proposal reads it), or approved,
+    // narrowed as the officer says, as the rule that then lets the worker
+    // through (a role's approval reaches the rest of the role through the
+    // role's layer). Where its standing rule goes is checked first, so an
+    // approval at the gateway always has its record here.
+    let mut draft_rule = None;
+    if let Some(d) = &r.draft {
+        if scope == "role" && worker.is_none() {
+            bail!("{} has no role", r.worker);
+        }
+        let decision = if a.allow {
+            DraftDecision::Approve {
+                methods: a.methods.clone(),
+                path: a.path.clone(),
+            }
+        } else {
+            DraftDecision::Reject(a.reason.chars().take(2000).collect())
+        };
+        if let Some(got) = run.client.decide_draft(&d.session, &d.chunk, decision)? {
+            draft_rule = Some((d.session.clone(), got));
+        }
+    }
+    // An approved draft's rule is already the worker's: no session rule of
+    // the office's besides it.
+    let drafted = draft_rule.is_some();
     // A once-denial needs no rule: the request was already refused.
     if a.allow || scope != "once" {
         // Where the standing rule goes: a role's layer, or a worker's
@@ -984,6 +1183,7 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 run.client
                     .add_layer_rule(&format!("{}/{}", run.firm, role), AnyRule::Net(rl.clone()));
             }
+            RuleTarget::Session(_) if drafted => {}
             RuleTarget::Session(s) => {
                 run.client
                     .put_session_rule(s.id(), AnyRule::Net(rl.clone()));
@@ -999,6 +1199,7 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 request: Some(id.into()),
                 created: now(),
                 expires,
+                draft_rule: draft_rule.clone(),
             },
         );
     }
@@ -1033,7 +1234,9 @@ pub fn decide(run: &FirmRun, by: &str, id: &str, a: DecideArgs) -> Result<Value>
                 .map(|e| format!(", until {}", prompts::when(e)))
                 .unwrap_or_default()
         );
-        if a.allow && scope == "once" {
+        if a.allow && scope == "once" && drafted {
+            body.push_str("Retry within 10 minutes; the approval lasts that long.\n");
+        } else if a.allow && scope == "once" {
             body.push_str("Retry within 10 minutes; the approval covers one matching connection or request.\n");
         } else if a.allow {
             body.push_str("Retry now.\n");
@@ -1128,6 +1331,9 @@ pub fn forget_standing(run: &FirmRun, rule: &str) {
 }
 
 fn remove_rule(run: &FirmRun, st: &Standing) {
+    if let Some((session, rule)) = &st.draft_rule {
+        run.client.remove_session_rule(session, rule);
+    }
     let Some(id) = st.rule.id.as_deref() else {
         return;
     };
@@ -1434,6 +1640,7 @@ fn digest_text(run: &FirmRun) -> Option<String> {
 
 /// Expiries, unanswered requests, and digests.
 pub fn tick(run: &FirmRun, last_digest: &mut f64) {
+    file_drafts(run);
     let t = now();
     // Expired approvals.
     let expired: Vec<(String, Standing)> = {

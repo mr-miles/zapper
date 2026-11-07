@@ -36,3 +36,11 @@ providers: [anthropic, office-edge]
 # The most sandboxes at once (default: daemon.max_sessions of zapper.yaml).
 # max_sessions: 16
 # ready_timeout_secs: 300
+
+# The programs the office's network rules let through. zapper's rules name
+# none, so by default any: /**. List the image's programs to narrow them,
+# e.g. [/usr/local/bin/node, /usr/bin/curl, /usr/lib/git-core/git-remote-http].
+# The gateway must leave proposal_approval_mode and
+# agent_policy_proposals_enabled unset: the office turns the policy advisor on
+# per sandbox, and its security officers decide every proposal.
+# rule_binaries: ["/**"]

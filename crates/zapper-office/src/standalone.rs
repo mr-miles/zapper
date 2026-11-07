@@ -338,9 +338,13 @@ pub async fn serve_openshell(
         os.edge_settings().url
     );
 
+    // The sandboxes' rules and drafted rules, read and applied beside it.
+    let policy_task = os.start();
+
     let extra = crate::openshell::routes(os);
     let served = serve_office(listener, office, extra, office_config, remote).await;
     edge_task.abort();
+    policy_task.abort();
     served
 }
 

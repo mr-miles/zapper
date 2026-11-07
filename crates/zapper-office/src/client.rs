@@ -152,6 +152,65 @@ pub trait OfficeClient: Send + Sync {
     fn edge(&self) -> Option<String> {
         None
     }
+
+    // --- drafted rules (OpenShell's policy advisor) -------------------------
+    // Where the sandboxes' network drafts rules for review (a worker's
+    // proposal through `policy.local`, or a connection it refused), the
+    // officers review them in place of the daemon's `ask` referrals and
+    // `request_access`.
+
+    /// Whether access requests come as drafted rules.
+    fn drafts(&self) -> bool {
+        false
+    }
+    /// The rules session `id`'s network drafted that wait for review, as last
+    /// read from the gateway; `None` before they were first read.
+    fn pending_drafts(&self, _id: &str) -> Option<Vec<DraftRule>> {
+        None
+    }
+    /// Approves (narrowed to `methods` and `path` if given) or rejects draft
+    /// `chunk` of session `id`. An approval returns the id of the rule it
+    /// became, which [`OfficeClient::remove_session_rule`] takes back out.
+    fn decide_draft(&self, _id: &str, _chunk: &str, _d: DraftDecision) -> Result<Option<String>> {
+        anyhow::bail!("this office's sessions draft no rules")
+    }
+}
+
+/// A rule a session's network drafted for review: a worker's proposal (its
+/// `intent_summary` the rationale), or OpenShell's own from a connection it
+/// refused. The first endpoint is the host and port the request shows; `rule`
+/// is all of it, as the gateway will apply it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DraftRule {
+    /// The session it is for.
+    pub session: String,
+    pub chunk: String,
+    pub host: String,
+    pub port: u16,
+    /// The methods its rules allow (empty: the whole connection, or every
+    /// method of its access preset).
+    pub methods: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The programs it lets through.
+    pub binaries: Vec<String>,
+    /// Why, as the worker put it (or the gateway, for a refusal).
+    pub rationale: String,
+    /// What the gateway's checks found (its prover, its security notes).
+    pub findings: String,
+    /// Proposed by the worker, rather than drafted from a refusal.
+    pub proposed: bool,
+    pub rule: Value,
+}
+
+/// An officer's answer to a [`DraftRule`].
+#[derive(Debug, Clone)]
+pub enum DraftDecision {
+    Approve {
+        methods: Option<Vec<String>>,
+        path: Option<String>,
+    },
+    Reject(String),
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.

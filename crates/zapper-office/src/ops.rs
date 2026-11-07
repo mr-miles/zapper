@@ -190,6 +190,9 @@ pub struct Powers {
     /// A policy owner (the CEO or a security officer): decides colleagues'
     /// credential requests.
     pub owner: bool,
+    /// Access requests come as the rules the worker's network drafts
+    /// (OpenShell's `policy.local`), not through `request_access`.
+    pub drafts: bool,
 }
 
 pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
@@ -208,6 +211,7 @@ pub fn powers(run: &FirmRun, w: &super::WorkerRt) -> Powers {
         manages: !contractor && !chart.reports_of(&w.name).is_empty(),
         owner: !contractor && super::access::is_owner(run, &w.name),
         contractor,
+        drafts: run.client.drafts(),
     }
 }
 
@@ -581,7 +585,7 @@ static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "request_access",
-        shown: |_| true,
+        shown: |p| !p.drafts,
         description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision. If your machine's rules already allow it, the answer says so and nothing is asked.",
         props: || json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
         required: &["host", "reason"],
