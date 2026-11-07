@@ -18,12 +18,12 @@
 //!   work over it unchanged; `connect_port` is `ForwardTcp`.
 //! - **Host room.** `admit` keeps the session limit and the memory check.
 //! - **The office's tools and git** (phase 2) are the office edge's
-//!   (`crate::edge`), which knows each sandbox by the UUID recorded here:
+//!   (the office's `edge`), which knows each sandbox by the UUID recorded here:
 //!   the facilities the daemon would have connected register as ids only,
 //!   Claude Code's `office` MCP server is the edge's Streamable HTTP, and
 //!   every command gets `ZAPPER_OFFICE_URL` for the `office` command.
 //! - **Network rules and the officers** (phase 3,
-//!   `crate::openshell_rules`): the allows among a sandbox's layers (its
+//!   `crate::rules`): the allows among a sandbox's layers (its
 //!   own, its role's, its profile's, the global one) are rules of its
 //!   policy, kept in step through `UpdateConfig`, a role's for every
 //!   sandbox of the role. What no rule allows OpenShell refuses, and drafts
@@ -72,7 +72,7 @@ use zapper_policy::{
 };
 
 use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
-use crate::openshell_rules as rules;
+use crate::rules;
 
 /// The gateway workspace the office's sandboxes and templates live in.
 const WORKSPACE: &str = "default";
@@ -131,7 +131,7 @@ pub struct Settings {
     /// How long a sandbox may take to become ready; by default 300.
     pub ready_timeout_secs: Option<u64>,
     /// The office edge: where the firm's workers reach the office's tools
-    /// and git, and how it knows them (`crate::edge`).
+    /// and git, and how it knows them (the office's `edge`).
     pub edge: EdgeSettings,
     /// The programs the office's rules let through (zapper's rules name
     /// none); by default any (`/**`).
@@ -887,7 +887,8 @@ impl OpenShell {
             .await?;
         let mut out = Vec::new();
         let input = Some(std::io::Cursor::new(stdin));
-        let (code, err) = crate::drive::pump_command(stream, input, &mut out, limit).await?;
+        let (code, err) =
+            zapper_driver::process::pump_command(stream, input, &mut out, limit).await?;
         Ok((code, out, err))
     }
 
@@ -1404,9 +1405,9 @@ fn office_over_http(profile: &mut ResolvedProfile, mcp_url: &str) {
         return;
     }
     if let Some(Value::Object(servers)) = &mut profile.agent.mcp_servers {
-        if servers.contains_key(crate::ops::SERVER) {
+        if servers.contains_key(crate::OFFICE_MCP) {
             servers.insert(
-                crate::ops::SERVER.into(),
+                crate::OFFICE_MCP.into(),
                 json!({ "type": "http", "url": mcp_url }),
             );
         }
@@ -1645,7 +1646,7 @@ mod tests {
         let office = tokio::spawn(async move {
             let mut out = Vec::new();
             let input = Some(std::io::Cursor::new(b"hello".to_vec()));
-            let r = crate::drive::pump_command(ours, input, &mut out, 1 << 20).await;
+            let r = zapper_driver::process::pump_command(ours, input, &mut out, 1 << 20).await;
             (r.unwrap(), out)
         });
         // The stdin, then its end.
@@ -1730,7 +1731,7 @@ mod tests {
         )
         .unwrap();
         let bridge =
-            json!({ "office": { "command": crate::ops::AGENT_PATH, "args": ["office", "mcp"] } });
+            json!({ "office": { "command": crate::AGENT_PATH, "args": ["office", "mcp"] } });
         let url = "http://host.openshell.internal:8970/mcp";
 
         let mut claude = config.resolve("c").unwrap();

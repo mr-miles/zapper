@@ -4352,9 +4352,30 @@ dependencies = [
  "zapper-git",
  "zapper-github",
  "zapper-mint",
+ "zapper-openshell",
  "zapper-policy",
  "zapper-record",
  "zapper-runs",
+ "zapper-util",
+]
+
+[[package]]
+name = "zapper-openshell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "openshell-sdk",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "zapper-api-types",
+ "zapper-driver",
+ "zapper-policy",
  "zapper-util",
 ]
 

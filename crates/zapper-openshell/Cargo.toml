@@ -1,0 +1,26 @@
+[package]
+name = "zapper-openshell"
+description = "Sandboxes of an OpenShell gateway for zapper's layers: made from zapper profiles, driven over exec, their policy kept from zapper's rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zapper-api-types = { path = "../zapper-api-types" }
+zapper-driver = { path = "../zapper-driver" }
+zapper-policy = { path = "../zapper-policy" }
+zapper-util = { path = "../zapper-util" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+axum = "0.8"
+futures-util = "0.3"
+rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+# Its proto build uses a vendored protoc, so no system one is needed.
+openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.7" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

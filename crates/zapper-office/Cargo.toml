@@ -38,6 +38,7 @@ tracing = "0.1"
 # The OpenShell gateway the office runs its firms on (docs/openshell-migration.md).
 # Its proto build uses a vendored protoc, so no system one is needed.
 openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.7" }
+zapper-openshell = { path = "../zapper-openshell" }
 
 [[bin]]
 name = "zapper-office"

@@ -17,7 +17,7 @@ use crate::{access, contracts, workforce};
 use zapper_policy::facility::McpCall;
 
 /// Where the agent copies itself in every guest.
-pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
+pub use zapper_openshell::AGENT_PATH;
 
 /// The office's tools, an MCP server in the gateway for the run's workers.
 /// Who calls is the session's member label; the role is checked on every
@@ -83,7 +83,7 @@ pub(crate) fn instructions() -> Option<String> {
 }
 
 /// The MCP server's name, as the workers' harnesses know it.
-pub const SERVER: &str = "office";
+pub const SERVER: &str = zapper_openshell::OFFICE_MCP;
 
 /// Serves the office's tools to the firm's workers, from a socket in the
 /// daemon's `state/services/` directory that the gateway asks for each
