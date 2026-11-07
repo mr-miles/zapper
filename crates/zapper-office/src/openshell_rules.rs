@@ -108,11 +108,11 @@ fn expand(s: &str, session: &str, labels: &BTreeMap<String, String>) -> Option<S
         let name = &tail[1..end];
         if name == "session" {
             out.push_str(session);
-        } else if let Some(k) = name.strip_prefix("label:") {
-            out.push_str(labels.get(k)?);
         } else {
-            // A glob's alternatives, which OpenShell's globs don't have.
-            return None;
+            // A label; anything else is a glob's alternatives, which
+            // OpenShell's globs don't have.
+            let k = name.strip_prefix("label:")?;
+            out.push_str(labels.get(k)?);
         }
         rest = &tail[end + 1..];
     }
