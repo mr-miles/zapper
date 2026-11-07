@@ -7,7 +7,7 @@ description: Review a firm's run from outside the VMs to find avoidable waste. U
 
 This is the board's half of process improvement: an analysis of what actually happened, from the record the host kept. A worker inside a VM can't do it — transcripts, audit logs and stats are on the host, sealed off from the guests by design (the record is sensitive; workers can't read it). So you run this from the host, over a run's files, after it ends (or on a live run, read-only). It sits alongside the in-firm [retrospective](../../config/agents/process-improvement/) run by the `process-improvement` role: that is the workers' own account; this is the record's.
 
-Operate the daemon by the [zapper](../zapper/SKILL.md) skill. Runs and their records are **sensitive**: summarise them in the report, don't paste them wholesale, and don't prune or delete them unasked.
+Use the `zapper-office` and `zapper-inspect` commands. Runs and their records are **sensitive**: summarise them in the report, don't paste them wholesale, and don't prune or delete them unasked.
 
 ## 1. Find the run and its people
 
@@ -18,7 +18,7 @@ zapper-office firm status acme                    # a live run: states, turns an
 zapper-office firm budget acme                    # budget, balances, what was asked and approved
 ```
 
-`RUN` is an id or a prefix. A run's files are under the daemon's `state` (`~/.local/state/zapper` in the examples):
+`RUN` is an id or a prefix. A run's files are under the office's `state` (`~/.local/state/zapper` in the examples):
 
 ```
 state/firms/acme/runs/<run-id>/
@@ -27,6 +27,8 @@ state/firms/acme/runs/<run-id>/
   transcripts/<worker>.jsonl   each worker's agent events
 state/sessions/<id>/audit.jsonl            per-worker host decisions: net, dns, exec, mcp, driver, exit, ask
 ```
+
+On OpenShell there are no `state/sessions/` audit logs: a sandbox's network decisions are in the gateway's logs of the sandbox (`GetSandboxLogs`), and nothing records its execs. The rest is as above.
 
 `run.json` maps each worker's name to its session id; that id is the `state/sessions/<id>/` directory with its audit log. Read a worker's reasoning and actions as Markdown without the daemon:
 

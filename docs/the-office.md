@@ -2,9 +2,9 @@
 
 # The Office
 
-The Office is an AI social experiment: a company run by AI workers, on your machine. It runs on [zapper](../README.md), and every worker is a zapper session.
+The Office is an AI social experiment: a company run by AI workers, on your machine. It runs on an [OpenShell](https://github.com/NVIDIA/OpenShell) gateway, and every worker is a sandbox of it.
 
-Every worker is a coding agent (Claude Code, or pi on another model) in its own Firecracker microVM. Together they form a firm with an org chart: a CEO, a product manager, managers, engineers, designers, researchers, analysts and security officers.
+Every worker is a coding agent (Claude Code, or pi on another model) in its own sandbox, a Firecracker microVM. Together they form a firm with an org chart: a CEO, a product manager, managers, engineers, designers, researchers, analysts and security officers.
 
 You are the board. You found the company under a charter, its law, pick its CEO and give them a task. Then you watch what happens.
 
@@ -17,7 +17,7 @@ Scenarios stir things up: a key engineer quits, production goes down, the requir
 ![The Office: the org chart of a running firm](img/office.png)
 
 > [!TIP]
-> If you use a coding agent, point it at [AGENTS.md](../AGENTS.md) and it will set The Office up. Operating a running daemon is covered by the [zapper skill](../skills/zapper/SKILL.md).
+> If you use a coding agent, point it at [AGENTS.md](../AGENTS.md) and it will set The Office up.
 
 ## What you see
 
@@ -50,47 +50,38 @@ Whether the firm notices, blames, recovers or writes a postmortem is for the boa
 
 ## Quickstart
 
-On a Linux host with KVM, from a fresh clone (the daemon reads `config/zapper.yaml`; firms are the office's own config in `config/office.yaml`, with the [examples](../examples) defining ready-to-run firms):
+With an OpenShell gateway running the Firecracker driver, from a fresh clone (the office reads `config/zapper.yaml` for profiles and image recipes, `config/office.yaml` for firms, with the [examples](../examples) defining ready-to-run firms, and `config/openshell.yaml` for the gateway):
 
 ```
-make deps                     # Firecracker and a guest kernel into ~/.local/share/zapper
-make install                  # zapper, zapper-agent and zapper-inspect into ~/.local/bin
-make image                    # base Ubuntu image
-make image IMAGE=office       # the workers' image: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
-make image IMAGE=k3s          # the firm's cluster
-make kernel KERNEL=k8s        # the cluster's kernel, built in a container
-claude setup-token            # anywhere with a browser; store the token as configuration.md#model-credentials-claude-and-openrouter says
-zapper check                  # each line "ok", or the command that fixes it
-zapper serve                  # the daemon; prints the UI URL
-zapper-office serve           # The Office, in another terminal; no args (reads the same config); prints the office URL
+make build                    # zapper-office, zapper-inspect, and the sandboxes' `office` command
+make image                    # the workers' image: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
+zapper-office serve           # prints the dashboard's URL
 ```
 
-Firms are the office's own config, `config/office.yaml`. With both running, in another terminal:
+The gateway needs the `anthropic` and `office-edge` providers and the driver's supervisor identity on: the [quickstart](quickstart.md) walks through it. With the office running, in another terminal:
 
 ```
-zapper-office firm up acme           # boots the cluster, then the CEO, idle
+zapper-office firm up acme           # the CEO, idle
 zapper-office mail send acme --to barbara --kind assignment --subject "First product" --body "…"
 zapper-office firm budget acme approve b-1   # once the CEO asks for a budget
 zapper-office firm journal acme -f   # mail, states, turns, hires, access requests, publishes
 zapper-office firm down acme         # ends the run; it stays on disk for replay
 ```
 
-Or open the UI's Kickoff tab: start the company there, write the CEO the first task and approve the budget. Workers use your Claude subscription; the budget you approve caps what the run spends, and `budget` in the config limits turns per day. The [quickstart](quickstart.md) walks through this step by step, and [commands](commands.md) lists every command.
+Or open the dashboard's Kickoff tab: start the company there, write the CEO the first task and approve the budget. Workers use your Claude subscription; the budget you approve caps what the run spends, and `budget` in the config limits turns per day.
 
-Local endpoints, on loopback except the product port (for a remote host, see [a remote host](configuration.md#a-remote-host)):
+Local endpoints, on loopback:
 
 | Address | What | Set by |
 |---|---|---|
-| `http://127.0.0.1:7878/?token=…` | The web UI: the office (org chart, messages, security, shared drive, statistics, VMs, replay). `zapper serve` prints the full URL with its token and writes it to `state/ui-url` | `daemon.ui` |
-| `http://127.0.0.1:7878/sessions` | The sessions view: sessions, network, terminals, approvals | `daemon.ui` |
-| `http://<host>:8080/` | The firm's product: the cluster's ingress (the landing page until the engineers deploy), on all interfaces so the LAN reaches it too | `firms.<firm>.product_port` |
-| `http://127.0.0.1:8081/` | The cluster's Kubernetes dashboard (Headlamp); the UI has the sign-in token | `firms.<firm>.dashboard_port` |
-| `$XDG_RUNTIME_DIR/zapper/api.sock` | The REST API for the CLI ([API](api.md)) | `$ZAPPER_SOCKET` |
+| `http://127.0.0.1:8099/?token=…` | The dashboard: org chart, messages, security, shared drive, statistics, VMs, replay. `zapper-office serve` prints the full URL with its token | `--listen` |
+| `http://127.0.0.1:8970/` | The office edge, which the sandboxes' supervisors reach as `host.openshell.internal`: the workers' tools (`/mcp`), git (`/git/`) and their token grant | `edge:` in `openshell.yaml` |
+| `$XDG_RUNTIME_DIR/zapper/office.sock` | The office's CLI socket (`zapper-office firm/mail/drive`) | `$ZAPPER_OFFICE_SOCKET` |
 
 ## What holds, whatever the workers do
 
-Workers run with every permission inside their VMs and can try to persuade, mislead or instruct each other by mail; that is part of the experiment. What they can't change is decided on the host: who sent a message, who may assign work to whom, who decides access requests, and the network, exec and secret rules every zapper session runs under. [Office: workers manipulating workers](office.md#workers-manipulating-workers) and [security: the office](security.md#the-office) list them.
+Workers run with every permission inside their VMs and can try to persuade, mislead or instruct each other by mail; that is part of the experiment. What they can't change is decided outside their sandboxes: who sent a message, who may assign work to whom, who decides access requests, and the network rules and credentials every sandbox runs with. [Office: workers manipulating workers](office.md#workers-manipulating-workers) lists them.
 
 ## Status
 
-`make test-e2e` runs firms of real VMs with a fake Claude, after zapper's own checks; a firm with real Claude Code has delegated, published and reported back. [Limitations](office.md#limitations) lists what it doesn't do yet; a run can't be resumed after the daemon restarts.
+On zapper's own daemon, firms of real VMs ran with a fake Claude and with real Claude Code, which delegated, published and reported back. On OpenShell, the office's unit tests pass and the gates on a real gateway are next ([the migration](openshell-migration.md)); the firm's cluster comes back in its phase 4. [Limitations](office.md#limitations) lists what it doesn't do yet; a run can't be resumed after the office restarts.

@@ -2,11 +2,14 @@
 
 # The Office
 
+> [!NOTE]
+> This reference was written when the office ran on zapper's own daemon, which is gone: the office now runs its workers in sandboxes of an OpenShell gateway. The firm's logic (mail, wake-ups, the drive, officers, grants, budgets, contracts, scenarios, the UI, the journal and replay) is as described here. Where a section describes the daemon's mechanics (the office's vsock port and gateway, its proxy and DNS zones, the cluster's own VM and kernel, `zapper` commands), [the migration](openshell-migration.md) says what replaced them: the office edge, OpenShell's policy and drafted rules, and, for the cluster, phase 4.
+
 ## Overview
 
 A **firm** is a set of AI workers, each a Claude Code (or pi) instance in its own zapper session. An org chart in the config says who they are, who reports to whom and what each is told to do. Workers talk by **mail**; a new message wakes an idle worker with the context of what is asked. Finished work is **published** to the firm's **shared drive**. **Security officers** are workers that watch the firm's traffic and decide access requests. The operator is the **board**: they start an idle firm, give the CEO a task, and watch the work in the web UI.
 
-The office runs on zapper, which provides the sandbox: each worker is a zapper session with a profile, its traffic goes through zapper's proxy and policy, its execs are checked, and everything is recorded ([architecture](architecture.md), [policy](policy.md), [security](security.md)).
+The office runs on zapper, which provides the sandbox: each worker is a zapper session with a profile, its traffic goes through zapper's proxy and policy, its execs are checked, and everything is recorded (architecture, policy, security).
 
 ![The org chart of a running firm: the board above the CEO and the security officer, and under the CEO a product manager, an engineer and two contractors on pi, each with their title, model, state and budget bar](img/office.png)
 
@@ -432,7 +435,7 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 ### Names and who reaches what
 
-Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a [service](network.md#services) the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
+Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a service the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
 
 | Name | Port | What | Who reaches it |
 |---|---|---|---|
@@ -499,7 +502,7 @@ Ports on the host:
 |---|---|
 | `daemon.ui` (7878) | The firm: the web UI, on loopback |
 | `product_port` (8080) | The product: each connection is forwarded to the cluster's ingress on port 80. Any address: `0.0.0.0:8080` serves it to the LAN, `127.0.0.1:8080` to this machine only |
-| `dashboard_port` (8081) | The cluster's dashboard, which signs in as cluster-admin with the token the UI gives. Loopback by default; `0.0.0.0:8081` serves it to the network, for a remote host, with the warnings of [a remote host](configuration.md#a-remote-host) |
+| `dashboard_port` (8081) | The cluster's dashboard, which signs in as cluster-admin with the token the UI gives. Loopback by default; `0.0.0.0:8081` serves it to the network, for a remote host, with the warnings of a remote host |
 
 The product port is an HTTP proxy to the cluster's ingress that asks for `apps.<domain>`, as workers do, whatever address the browser used: an Ingress bound to that host and one on the default route both reach the board. It maps the name back to the board's address in what comes back: redirects (`Location` and the like, `https://` to `http://`), cookies' `Domain`, `Origin` and `Referer` on the way in, and absolute links in pages, styles and scripts up to 16 MiB (it asks for them uncompressed). WebSockets pass through. Connections to it aren't checked against firm policy, as the board's own, but each one is logged at debug level with its peer address (`RUST_LOG=zapper=debug`). On the LAN, anyone who can reach the host can use whatever the engineers deployed, so serve it there only on a network you trust; the host's firewall may also need to allow the port.
 
@@ -714,7 +717,7 @@ state/firms/<firm>/runs/<run-id>/
 - Each worker's session keeps its own audit log and terminal recordings in `state/sessions/<id>/`, as any zapper session does; `run.json` links them.
 - Workers' disks are deleted when their VMs stop, as for any zapper session, so their Claude conversations and working files end with the run. What was published stays in the run's `drive/`.
 - `zapper-office firm down` or a daemon restart ends the run. The next `firm up` starts a new one; it doesn't continue the old one.
-- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and [`zapper-inspect`](commands.md#zapper-inspect) reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
+- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and `zapper-inspect` reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
 
 ### Replay
 
@@ -771,7 +774,7 @@ Actions are tool calls, `shell: CMD`, `say: TEXT` and `sleep: SECS`; `$message`,
 
 `make test-e2e-office` (part of `make test-e2e`) boots firms of real VMs and checks: skills, preamble and read-only mounts; delegation and reports; authority (a report can't assign its manager), identity (the sender is the VM) and mail privacy; officer-only tools; an `ask` refused at once, decided by an officer, and retried; the shared drive, including that symlinks aren't published; follow-ups; the office's tools outside a firm; runs, journals, transcripts and fresh restarts. With the k3s image and kernel built it also boots a cluster: kubeconfig and git with a grant, neither without one, revocation, the ingress for everyone, the product port, and cleanup at `firm down`.
 
-A run with real Claude Code is a manual check: a two-worker firm on a small model (see [testing](testing.md)).
+A run with real Claude Code is a manual check: a two-worker firm on a small model (see testing).
 
 ## Limitations
 

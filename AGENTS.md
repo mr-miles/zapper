@@ -1,168 +1,92 @@
 # Instructions for coding agents
 
-People should start with the [README](README.md). Operating a running daemon (starting, attaching to and stopping sessions, answering approvals, changing rules, reading audit logs, and running firms of The Office) is covered by the agent skill [skills/zapper/SKILL.md](skills/zapper/SKILL.md); keep it in step with the CLI and docs.
+People should start with the [README](README.md). The project is The Office: firms of AI workers (CEO, product manager, managers, engineers, designers, researchers, analysts, security officers), each Claude Code (or pi) in its own sandbox of an [OpenShell](https://github.com/NVIDIA/OpenShell) gateway with the openshell-firecracker driver. They mail each other, wake on mail, publish to a shared drive, push to the firm's git repository and deploy to the firm's cluster; security officers decide access; the operator is the board ([docs/the-office.md](docs/the-office.md), [docs/office.md](docs/office.md)). The office moved off zapper's own Firecracker daemon, which is gone; [docs/openshell-migration.md](docs/openshell-migration.md) records how, and what is still to do.
 
-The project is zapper: AI agents in Firecracker microVMs, with what they reach, which credentials they use and which programs they start decided on the host; the daemon, the `zapper` CLI and the sandbox. All guest traffic is captured outside the VM and goes through policy on the host. Credentials are either injected by the host or handed to the guest, per secret. Every exec waits for the host's decision (enforced in the guest, through seccomp), and everything is recorded. Rules are layered (session → profile → global) and managed through a REST API with a running/startup config like a router's.
-
-The Office, built on it, is a separate layer in the same repository ([docs/the-office.md](docs/the-office.md)): firms of AI workers (CEO, product manager, managers, engineers, designers, researchers, analysts, security officers), each Claude Code (or pi) in its own VM, who mail each other, wake on mail, publish to a shared drive, push to the firm's git repository and deploy to the firm's own k3s cluster; security officers watch traffic and decide access requests; the operator is the board ([docs/office.md](docs/office.md)).
-
-## Setting zapper up for a user
+## Setting The Office up for a user
 
 ### 1. Check the host (no changes)
 
-```
-make deps && make build && target/release/zapper check     # every line "ok", or the fix
-```
+- An OpenShell gateway with the Firecracker driver: `openshell gateway info` shows the `firecracker` driver. If there is none, the openshell-firecracker README has the install; it needs root for its prerequisites (KVM access, sub-uids), which the user runs themselves.
+- `cargo`, the static target (`rustup target list --installed | grep musl`), and `podman`.
 
-`check` reports `/dev/kvm` access, Firecracker, the guest kernel, the agent binary, images per profile, unprivileged user and mount namespaces (for VMM confinement), `ip` and `nft` (for NICs), podman and e2fsprogs, config permissions and whether the daemon is up. Report what is missing and let the user decide.
+Report what is missing and let the user decide. Never run `sudo` without the user's explicit consent, and run only what you listed.
 
-### 2. Ask for root once, with reasons
-
-zapper itself never needs root. Only host prerequisites may:
-
-| Command | Why it needs root |
-|---|---|
-| `sudo usermod -aG kvm $USER` | `/dev/kvm` access, if `check` reports none (then log in again) |
-| `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER` and `sudo apt install uidmap` | Each session's Firecracker as a uid of its own, if `check` notes it runs as this user; often both are there already |
-| `sudo apt install podman e2fsprogs` | building images, if missing |
-| `sudo apt install iproute2 nftables` | guest NICs, if missing |
-| `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` | VMM confinement, if user namespaces are restricted |
-| `sudo scripts/install-keeper.sh` | An append-only record kept by a separate user (`zapper-keeper`, a confined systemd service), if the user wants it; then add the `daemon.keeper` lines it prints |
-
-Never run `sudo` without the user's explicit consent, and run only what you listed.
-
-### 3. Build
+### 2. Build
 
 ```
-make deps                       # Firecracker (checksum-verified) and kernel
-make install                    # zapper, zapper-agent, zapper-inspect and zapper-workbench into ~/.local/bin
-make image                      # ubuntu-26.04: the base profiles, and a plain session to check the setup
-make image IMAGE=office         # Claude Code and pi: `zapper run -p claude`, and The Office's workers
+make build                    # zapper-office, zapper-inspect, and the sandboxes' `office` command
+make image                    # the workers' image (IMAGE=office-fake: a fake Claude Code and pi, for tests)
 ```
 
-Run zapper from the repository's root: it uses `config/zapper.yaml` (the daemon's config) and `config/office.yaml` (the office's firms), tracked in the repository, whose paths are relative to them or under `~/`. Downloads, images, kernels and state go under `~/.local`, the Claude token under `~/.config/zapper/`; nothing generated goes into the repository. Outside a checkout, `zapper init` copies the daemon config to `~/.config/zapper/zapper.yaml`, and `zapper-office init` writes the office's `~/.config/zapper/office.yaml` (firms) and the workers' skills to `~/.config/zapper/skills` (firms have no built-in fallback).
+Run the office from the repository's root: it reads `config/zapper.yaml` (profiles and image recipes), `config/office.yaml` (firms) and `config/openshell.yaml` (the gateway), tracked in the repository. Outside a checkout, `zapper-office init` writes all three to `~/.config/zapper`, with the workers' agents and skills. Run image builds in the background with a log (`make image > /tmp/zapper-image.log 2>&1`) and give the user `tail -f /tmp/zapper-image.log`.
 
-Run image builds in the background with a log (`make image > /tmp/zapper-image.log 2>&1`) and give the user `tail -f /tmp/zapper-image.log`.
+### 3. The gateway's side
 
-### 4. Hand over a running zapper
+The user creates the credentials themselves; never ask for a token, read it or print it.
 
-The agent sessions need the Claude token, which the user creates and stores themselves; never ask for it, read it or print it. Give them these steps ([configuration: model credentials](docs/configuration.md#model-credentials-claude-and-openrouter) has the details):
+1. The Claude token as the gateway's `anthropic` provider (`claude setup-token` on any machine with a browser prints a long-lived OAuth token; OpenShell's docs say how to create the provider from it).
+2. The workers' identity at the office: `openshell profile import -f config/openshell-office-edge.yaml` and `openshell provider create --name office-edge --type office-edge --runtime-credentials`.
+3. The driver's supervisor identity on: `OPENSHELL_VM_SUPERVISOR_IDENTITY=true` in its environment, then restart it.
+4. `proposal_approval_mode` and `agent_policy_proposals_enabled` left unset at the gateway: the office decides proposals through its officers and refuses to start otherwise.
 
-1. On any machine with Claude Code and a browser (their laptop will do), `claude setup-token`: it signs in and prints a long-lived OAuth token (`sk-ant-oat…`) for their Claude subscription.
-2. On the zapper host, without the token reaching shell history: `mkdir -p -m 700 ~/.config/zapper && (umask 077; read -rsp 'Claude token: ' t; printf '%s' "$t" > ~/.config/zapper/claude-token); echo`
-3. `zapper check`. No restart is needed: the host reads the file on each request.
+### 4. Hand over a running office
 
-Start `zapper serve` (or tell the user to) and give them the UI URL it prints. `zapper run -C $(mktemp -d) -- cat /etc/os-release` checks that a plain session boots (`-C` gives it an empty directory instead of a copy of the checkout). `zapper run -p claude --keep`, in a project's directory, is Claude Code in a sandbox on a copy of it: the Claude API allowed, every other host an `ask` the user answers (`zapper approvals`, `zapper approve`, or the UI's sessions view); `zapper cp ID:/work ./out` copies the work out. Answer approvals only as the user says.
+Set `gateway:` and its TLS files in `config/openshell.yaml`, then start `zapper-office serve` (or tell the user to) and give them the dashboard URL it prints. On a remote host, an SSH tunnel to its port (`ssh -L 8099:127.0.0.1:8099 user@host`).
 
-### 5. The Office, if the user wants it
-
-A firm needs the cluster's image and kernel too:
-
-```
-make image IMAGE=k3s && make kernel KERNEL=k8s   # the firm's cluster and its kernel
-```
-
-The red-team scenario's contractor runs on pi with DeepSeek through OpenRouter, and so do the other `office-*` profiles on pi. If the user wants them, they create a key at https://openrouter.ai/settings/keys (`sk-or-v1-…`; credits, or `:free` models only; if the key is limited to some models, it must allow the ones those profiles name), and store it like the Claude token: `(umask 077; read -rsp 'OpenRouter key: ' t; printf '%s' "$t" > ~/.config/zapper/openrouter-token); echo`.
-
-The Office runs as its own process beside the daemon (like the workbench): with `zapper serve` running, start `zapper-office serve` (no arguments — it reads the same config to find the daemon's socket and `state` directory, connects, and prints the office's URL and its CLI socket). It serves the office UI (org chart, messages, security, drive, VMs, replay) and the `zapper-office firm/mail/drive` commands. Firms are its own config, `config/office.yaml` (`zapper-office init` writes a starter one outside a checkout); `zapper-office config reload` applies edits to a running office.
-
-With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the UI's Kickoff tab (the company, its CEO, charter terms, their own articles), or `zapper-office firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper-office mail send acme --to barbara --kind assignment …` (barbara is the CEO). The CEO then asks for a budget, which only the user approves (`zapper-office firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
-
-### A remote host
-
-If zapper runs on a machine other than the user's, the UI (`daemon.ui`, `127.0.0.1:7878`) and a firm's dashboard (`dashboard_port`, `127.0.0.1:8081`) are on that machine's loopback. Offer, in this order:
-
-1. An SSH tunnel from the user's machine, no config change: `ssh -L 7878:127.0.0.1:7878 -L 8081:127.0.0.1:8081 user@host`, then the URL `zapper serve` printed.
-2. Serving them to the network: `daemon.ui: 0.0.0.0:7878` and the firm's `dashboard_port: 0.0.0.0:8081` in the config, then restart the daemon (see Rules). Say plainly before changing it: whoever has the token controls zapper, and the dashboard's token is cluster-admin; it is plain HTTP, for a trusted network or behind a TLS proxy; zapper isn't built for production. The VMs can't reach either way. [Configuration: a remote host](docs/configuration.md#a-remote-host) has the details.
+With the user's go-ahead (a firm spends their Claude usage), the user starts the company in the dashboard's Kickoff tab, or `zapper-office firm up acme` starts the example firm with its CEO idle; the user gives the CEO its first task there, or with `zapper-office mail send acme --to barbara --kind assignment …`. The CEO then asks for a budget, which only the user approves (`zapper-office firm budget acme approve b-1`, or Kickoff); never approve budgets, background checks or access requests on the user's behalf.
 
 ### Rules
 
-- Sessions and firms may be in use: before `zapper rm`, `zapper stop`, `zapper-office firm down`, `zapper config reload` or restarting the daemon, check `zapper ps`, `zapper-office firm ls` and `zapper config diff` and say what you are about to change. Unsaved running config is lost on restart, and a restart or `firm down` ends a firm's run, which can't be resumed.
-- `zapper config save` writes the user's startup file: run it when the user asks to keep a change.
-- Do not print `zapper config startup` output into chats when it may hold inline secrets; values are redacted, but names and sources are not.
-- The daemon's `state` directory holds audit logs and terminal recordings of sessions, and firms' runs (mail, transcripts, published files): treat them as sensitive and do not delete them unasked.
+- Firms may be in use: before `zapper-office firm down`, `zapper-office config reload` or restarting the office, check `zapper-office firm ls` and say what you are about to change. A restart or `firm down` ends a firm's run, which can't be resumed.
+- The office's `state` directory holds firms' runs (mail, transcripts, published files, journals): treat them as sensitive and do not delete them unasked.
 
 ## Working on the repository
 
-Architecture: [docs/architecture.md](docs/architecture.md). Network: [docs/network.md](docs/network.md). Security model and the controls that must hold: [docs/security.md](docs/security.md).
-
 ```
-crates/zapper-proto/     the host↔guest protocol, and the exec requests and filesystem rules it carries: all the guest agent shares with the host
-crates/zapper-policy/    config model (image recipes among it), layered rule evaluation (no I/O)
-crates/zapper-core/      the daemon: sessions, proxy, DNS, services, the MCP gateway, approvals, the driver, the record; its interface `Core`, the only way in for the crates below
-  src/interface.rs         `Core`: sessions, config, rules, approvals and deciders, services, MCP servers, events, what clients register
-  src/vmm.rs               `zapper __vmm`: runs Firecracker confined in its own namespaces and root
-  src/netns.rs             the guest's network in the VMM's namespace, and traffic capture
-  src/daemon/harness/      agent harnesses: Claude Code and pi behind `Harness`/`Headless`/`Conversation`; HARNESS.md for both, and opencode
-  src/daemon/session.rs    a session; session/ a module per job: create, run, launch, control, exec, disks, persist, adopt, terminal
-  src/daemon/proxy.rs      egress proxy: tunnels, TLS inspection, secret injection
-  src/daemon/services.rs   names the daemon connects itself (a firm's git and cluster), zones
-  src/daemon/gateway.rs    the MCP gateway: servers registered in the daemon, over each VM's MCP port
-  src/daemon/addr.rs       which destination addresses are reachable at all
-  src/daemon/dns.rs        the guest's resolver: synthetic addresses for allowed names
-  src/daemon/httplog.rs    per-session request log for the UI's network view
-  src/daemon/vm.rs         disks, initramfs, the Firecracker process
-crates/zapper-api/       the REST API (the CLI's, on a unix socket) and the web UI, over `Core`; mounts what it is given (the office's routes and page)
-  src/ui.html              the web UI: state, terminal viewer, answering approvals (textContent only)
-  src/assets/              xterm.js 6.0.0 (MIT) for the terminal viewer; see its README
-crates/zapper-office/    The Office, a client of `Core`: post office, foreman (headless Claude), shared drive, security officers, facilities; the firms config (`firm.rs`), its own `office.yaml` which it parses and validates against the daemon's profiles (not the daemon's config)
-  src/office.html          the office UI (org chart, messages, security, drive, statistics, replay); its stylesheet and scripts, one per tab or part, in src/ui/
-crates/zapper/           the CLI and `serve`: starts the core, the office (feature `office`) and the API and UI
-crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives, transcripts exported; a minimal TUI
-crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only: shared by the office's list of runs and zapper-inspect
-crates/zapper-keeper/    the record's keeper: a separate user's append-only store with hash chains and signed checkpoints, its read-only UI
-crates/zapper-ssh/       the SSH gateway: SSH spoken on one stream (`zapper ssh proxy`, a key's forced command), its channels carried to a sandbox's terminals through the API
-crates/zapper-git/       git over HTTP for guests: `git http-backend` run as a CGI per request, and the pre-receive hook that keeps branches apart from main; the office's git server and the workbench's repository use it
-crates/zapper-workbench/ `zapper-workbench`: a layer for single users (proposal 12, part 2), a client of zapper's API on its socket; its gateway's tokens and grants, the session views it proxies, its facilities and its UI (src/ui.html)
-crates/zapper-agent/     guest PID 1: setup, terminals, seccomp exec supervision, accounting; `office` (MCP server, CLI); depends on zapper-proto alone
-crates/zapper-fake/      a fake Claude Code and pi that play a script (`ZAPPER_FAKE_SCRIPT`): the `office-fake` image's `claude` and `pi`, for the office's e2e tests
-config/                  zapper.yaml: the daemon's config, used when zapper runs in the checkout (relative paths resolve against it), with the image recipes (`images:`);
-  office.yaml              the office's own config: the firms zapper-office runs (not the daemon's — it reads and validates them; `zapper-office config reload` re-reads it)
-  agents/                  office roles' agent definitions: each AGENT.md, the brief in the role's preamble, and the role's own skills/
-  skills/                  office skills any role may use; both built in (`zapper-office init` writes them), read live by firms through `agents_dir` and `skills_dir`
-  kernel/                  kernel config fragments (`make kernel KERNEL=k8s`)
-scripts/fetch-deps.sh    Firecracker and kernel download
-scripts/check-js.sh      syntax of the pages' scripts (needs node; CI runs it)
-tests/e2e.sh             end-to-end tests against real VMs; tests/attack.c probes from inside
-tests/e2e-office.sh      end-to-end tests of firms, on the office-fake image; the scripts its fake workers play are in tests/fake
+crates/zapper-office/    The Office: post office, foreman (headless Claude or pi), shared drive, security officers, facilities; the firms config (`firm.rs`), validated against the profiles of zapper.yaml
+  src/openshell.rs         the OfficeClient over an OpenShell gateway: sandboxes from profiles, exec, policy and drafted rules
+  src/openshell_rules.rs   zapper's rules as a sandbox's network policy, and drafted rules as the officers see them
+  src/edge.rs              the office edge: /oauth/token (SVID → token), MCP over Streamable HTTP at /mcp, git at /git/
+  src/client.rs            OfficeClient: what the firm logic needs from where its workers run
+  src/fake.rs              an in-memory OfficeClient for the tests
+  src/image.rs             `zapper-office image`: a recipe of zapper.yaml as the sandboxes' image
+  src/office.html          the office UI; its stylesheet and scripts, one per tab or part, in src/ui/
+crates/zapper-agent/     the sandboxes' `office` command: the workers' CLI, MCP bridge and Stop hook, over HTTP to the edge
+crates/zapper-policy/    config model (profiles, image recipes), layered rule evaluation (no I/O)
+crates/zapper-driver/    the harnesses (Claude Code and pi): their files, and driving them headless
+crates/zapper-git/       git over HTTP: `git http-backend` per request, and the pre-receive hook that keeps branches apart from main
+crates/zapper-record/    the journal's writer, optionally through zapper-keeper (crates/zapper-keeper: a separate user's append-only store)
+crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their people and a scenario's operatives
+crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only
+crates/zapper-github/    the firm's GitHub remote; zapper-mint mints its tokens
+crates/zapper-fake/      a fake Claude Code and pi that play a script: the office-fake image's `claude` and `pi`
+crates/zapper-workbench/, crates/zapper-ssh/   out of the workspace: they ran on the daemon, and wait to be ported onto OpenShell
+config/                  zapper.yaml (profiles, image recipes), office.yaml (firms), openshell.yaml (the gateway), openshell-office-edge.yaml (the edge's provider profile)
+  agents/, skills/         office roles' agent definitions and skills
+tests/fake               the scripts the fake workers play; tests/e2e-office.sh is the daemon-era suite, to be ported
 docs/                    one page per topic; index in docs/README.md
-examples/                configs to run as they are (mini-firm: the smallest company at work); each loads in a test
-skills/zapper/           operating skill, linked from .claude/skills/zapper
+examples/                configs to run as they are; each loads in a test
 ```
 
 Build and test:
 
 ```
-make build        # release: static musl agent + host binary
-make test         # unit tests, no VMs, seconds
-make lint         # rustfmt (defaults, rustfmt.toml) and clippy with warnings as errors (the fuzz entry points too); `make fmt` formats
-make test-e2e     # real VMs, network; must end "all e2e checks passed" and "all office e2e checks passed"
+make build        # release: the office, zapper-inspect, the static guest command
+make test         # unit tests, no gateway, seconds
+make lint         # rustfmt (defaults, rustfmt.toml) and clippy with warnings as errors; `make fmt` formats
 ```
 
-Invariants (a change that breaks one is wrong even if it compiles; [testing](docs/testing.md#invariants-and-their-tests) lists the test for each, and what no test covers yet, which a change to that code should add):
+Invariants (a change that breaks one is wrong even if it compiles):
 
-- The VMM runs in its own user, network and mount namespaces; its root holds the session's `vm/` directory, the kernel, initramfs, its binary and its devices.
-- Guest traffic goes through zapper, also with root in the guest. With a NIC, the VMM's network namespace has loopback and the tap as its interfaces and sends all TCP and DNS to the daemon; in vsock mode, vsock is the guest's only channel to the host.
-- DNS queries and host names from the guest are validated before policy sees them. DNS looks a name up on the host only if some request to it could be allowed (outright or after an `ask`), refuses other names, and never makes up an answer. `ask` decides access, not resolution.
-- `proxy` secret values stay on the host. The proxy adds a value to a request when a rule listing the secret allows it, the destination matches the secret's `hosts`, and the connection uses TLS or the secret sets `plaintext: true`, and masks it in the response. An `aws` secret signs, on the host, the requests its fake key signed that such a rule allows. A `guest` secret goes to sessions whose profile uses it.
-- An inspected request is judged on the path and method the upstream will act on: the path decoded and with dot segments resolved, and forwarded so; a path upstreams may read differently, and an override naming another method, refused.
-- The proxy connects to the address it checked. Loopback, link-local and host addresses are unreachable, and private ranges need `daemon.private_networks`.
-- Passthrough connections are bound to the TLS server name; inspected ones present a per-session CA and override `Host`.
-- A persistent session's VMM outlives the daemon; while no daemon runs, its guest reaches nothing and starts nothing new; a daemon adopts it only after checking that the pid recorded is that session's VMM, and its agent only by its resume token.
-- The host accepts only the first control connection, and afterwards, for a persistent session, only one whose first line carries the session's resume token; the agent accepts terminal connections only from CID 2.
-- A persistent session boots only disks whose hashes match those recorded at its last stop, or whose change (or missing hashes) the operator accepted; both are recorded.
-- A socket service names a file in the daemon's `state/services/` directory, never a path; its program is told the caller in a line the daemon sends first, from the VM the connection came from, before any byte from the guest. So does an MCP server on a socket: the gateway stays the guest's MCP endpoint, and asks it each tool list and call with the caller named by the daemon, from the VM, never from what the guest sent; its answer is bounded and timed.
-- SSH reaches a sandbox only while its SSH is on (enforced by the daemon, which refuses and records the gateway's terminals otherwise, and closes them when it is turned off); the gateway maps SSH only onto terminals run as the workload user, and refuses port, agent and X11 forwarding and subsystems.
-- The workbench's gateway authenticates every request (a token, or the UI's cookie with the UI's `Host`, header and `Origin` checks) and calls zapper itself: a token reaches only sessions with all its labels, with only its rights; sessions it creates get its labels and a directory of the workbench's, never a client's host path; its terminals are never `system`; its rules go only to a session's own layer.
-- The seccomp filter kills foreign-arch and x32 syscalls, so exec checks cannot be bypassed through another syscall table.
-- Anything from the guest is bounded (line, frame, connection and approval limits) and rendered as text in the UI.
-- The UI's writes are answering approvals, prompting a driven session that isn't a firm's, and the board's firm actions (mail and marking it read, start/stop/pause, security decisions and promoting them into the running config, background checks, credential grants and decisions, budget decisions, funding and releasing workers, drive uploads, deleting a past run, notes on runs); each requires the token cookie and `X-Zapper-UI: 1`; on loopback (the default) a local `Host` and `Origin`, and listening elsewhere (`daemon.ui`, for a remote host) an `Origin` naming the `Host` the request came to. Whatever the UI and the dashboard listen on, the VMs can't reach them: the host's own addresses are closed to them.
-- In a firm, the sender of every office request is the VM it came from; roles and the chart are checked on the host; an `ask` is refused at once and decided by officers or the board, never past `final` rules; the firm's service names are routed by the daemon and never resolved on the host.
-- In a firm, security is always held (by officers, else the CEO, else the board), nobody decides their own access request or their own hire's background check, a hire takes no turn before being cleared, and a hired officer decides nothing before being cleared. The charter's articles are the same for every run; only their terms and the board's own articles change. A contractor mails only their hirer and those the hirer added, has no authority, and a contract moves money only from the hirer's balance. Access to the firm's resources (git, the cluster, drive spaces) is a grant decided by the policy owners (officers and the CEO, never the requester), enforced on the host or by the cluster's RBAC, expiring, and revoked when the worker leaves; no role gets access by default.
+- A worker's credentials stay outside its sandbox: the Claude token is the gateway's provider, and a worker's identity at the office is a token the supervisor gets from the edge (`/oauth/token`, the sandbox's JWT-SVID verified against the driver's keys) and adds to its requests.
+- Every request to the edge but the token grant needs a current token the edge issued, for a sandbox the office still runs; the caller is that sandbox's worker, never what the request says. Requests with an `Origin` are refused.
+- In a firm, the sender of every office request is the sandbox it came from; roles and the chart are checked on the office's side; a request no rule allows is refused at once and decided by officers or the board.
+- Nothing approves a worker's drafted rule but an officer or the board: the office refuses a gateway with automatic approval, and `access_decide` is what approves, narrows or rejects at the gateway.
+- In a firm, security is always held (by officers, else the CEO, else the board), nobody decides their own access request or their own hire's background check, a hire takes no turn before being cleared, and a hired officer decides nothing before being cleared. The charter's articles are the same for every run; only their terms and the board's own articles change. A contractor mails only their hirer and those the hirer added, has no authority, and a contract moves money only from the hirer's balance. Access to the firm's resources (git, the cluster, drive spaces) is a grant decided by the policy owners (officers and the CEO, never the requester), enforced by the office (git through the edge) or by the cluster's RBAC, expiring, and revoked when the worker leaves; no role gets access by default.
+- Anything from a sandbox is bounded (message and body limits) and rendered as text in the UI.
+- The dashboard's writes require its token cookie and `X-Zapper-UI: 1`, and, on loopback, a local `Host` and `Origin`; listening elsewhere, an `Origin` naming the `Host` the request came to.
 - A config change is validated as a whole and applied atomically, or not at all.
-- With a keeper, the record is appended through it and nothing else: the keeper takes appends from the configured uid only, has no operation to read back, rewrite or remove, flushes each line before acknowledging, and the daemon takes no firm turns while the record can't be written.
-
-Applying changes: rebuild with `make build` and restart the daemon; sessions do not survive a restart (stop them first, see Rules), but persistent ones keep running through it: the next daemon adopts them. Rule and profile changes need no restart: they apply to running sessions at once.
+- With a keeper, the journal is appended through it and nothing else.
 
 Code style: rustfmt's defaults and a clean clippy. `make hooks` turns on the pre-commit hook in `.githooks/`, which runs both; keep `make lint` passing.
 

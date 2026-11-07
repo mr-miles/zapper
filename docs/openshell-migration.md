@@ -160,7 +160,7 @@ Gate: all five pass. Otherwise stop, or fix in openshell-firecracker first. (Ver
 - [x] File copy for `drive_publish` / `drive_fetch`: the drive's existing `tar` over `attach`, which is `ExecSandboxInteractive` here, so no separate `ExecSandbox` path is needed.
 - [ ] Run the gate on a gateway (below).
 
-How to run it: build the office with `cargo build --release -p zapper-office --features openshell`; `make image IMAGE=office-fake`, then `scripts/openshell-image.sh office-fake`; create the gateway's `anthropic` provider; edit `config/openshell.yaml`; `zapper-office serve --openshell config/openshell.yaml`; then start a firm whose roles use `office-fake` profiles (as `tests/e2e-office.sh` writes them) with `zapper-office firm up`.
+How to run it (as of now): `make build`; `make image IMAGE=office-fake` (the recipe and the OpenShell layer in one build); create the gateway's `anthropic` provider; edit `config/openshell.yaml`; `zapper-office serve` (it reads `config/openshell.yaml`); then start a firm whose roles use `office-fake` profiles (as `tests/e2e-office.sh` writes them) with `zapper-office firm up`.
 
 What phase 1 leaves to later phases: rules are kept and `allowed` judges by them, but nothing enforces them at the network (phase 3); `requests()` is empty (phase 3); the office MCP server, git server and decider are served but no sandbox reaches them, so their registrations are no-ops, and a fake worker's office tool calls fail (phase 2 adds the edge that serves the tools and git); `promote_rule` and port forwards (the cluster) refuse (phases 3 and 4). Commands run as the sandbox user, never root, and `{{secret:…}}` values in profiles are left out, since the gateway's providers hold credentials.
 
@@ -169,7 +169,7 @@ Gate: a fake-Claude firm boots and the foreman takes turns.
 ### Phase 2: Office edge and identity (weeks 4 to 5)
 
 - [x] Office edge (`crates/zapper-office/src/edge.rs`): `/oauth/token`, the office's MCP tools over Streamable HTTP at `/mcp` (the same `ops.rs` handlers), git behind the edge's tokens at `/git/<repo>.git`. The Stop hook is the `stop_check` tool call, so it needs no route of its own.
-- [x] `office-edge` provider profile (`config/openshell-office-edge.yaml`); image update (`scripts/openshell-image.sh` installs `zapper-agent` as `office`, whose CLI, stop hook and stdio bridge speak HTTP to the edge when `ZAPPER_OFFICE_URL` is set; Claude Code's `mcpServers` entry is type `http`).
+- [x] `office-edge` provider profile (`config/openshell-office-edge.yaml`); image update (`zapper-office image` installs `zapper-agent` as `office`, whose CLI, stop hook and stdio bridge speak HTTP to the edge when `ZAPPER_OFFICE_URL` is set; Claude Code's `mcpServers` entry is type `http`).
 - [ ] Run the gate on a gateway (below).
 
 How it works:
@@ -180,7 +180,7 @@ How it works:
 - **Git.** The worker's grant is checked on every request as before; through the edge, the token replaces the per-worker password, so no `.git-credentials` is written.
 - **Not yet:** the officers' decider (phase 3). Network rules are still not enforced, so the profile's endpoint is the only rule for the edge.
 
-How to run it: on top of phase 1's steps, turn on the driver's supervisor identity (`OPENSHELL_VM_SUPERVISOR_IDENTITY=true`); `make build` (for `target/release/zapper-agent`), then `scripts/openshell-image.sh office-fake` again; `openshell profile import -f config/openshell-office-edge.yaml` and `openshell provider create --name office-edge --type office-edge --runtime-credentials`; add `office-edge` to `providers:` in `config/openshell.yaml`; then start the firm as in phase 1.
+How to run it: on top of phase 1's steps, turn on the driver's supervisor identity (`OPENSHELL_VM_SUPERVISOR_IDENTITY=true`); `make image IMAGE=office-fake` again (it installs `zapper-agent` as `office`); `openshell profile import -f config/openshell-office-edge.yaml` and `openshell provider create --name office-edge --type office-edge --runtime-credentials`; add `office-edge` to `providers:` in `config/openshell.yaml`; then start the firm as in phase 1.
 
 Gate: e2e for delegation, authority, identity (the sender is the sandbox), mail privacy and git grants passes.
 
@@ -215,7 +215,8 @@ Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) 
 ### Phase 5: Cutover (weeks 9 to 10)
 
 - [ ] Port `make test-e2e-office`; one real-Claude two-worker run; one red-team scenario run.
-- [ ] Remove the daemon dependencies, update `docs/office.md` and the quickstart.
+- [x] Remove the daemon: zapper-core, zapper-api, the `zapper` CLI and the guest agent's PID 1 are gone; the office runs on OpenShell alone, its tests on an in-memory backend (`fake.rs`), and `zapper-office image` builds the images. The README, AGENTS.md and the quickstart describe the office on OpenShell; `docs/office.md` carries a note where it still describes the daemon's mechanics.
+- [ ] Port the workbench onto OpenShell (out of the build meanwhile).
 
 Gate: the full office e2e suite is green on OpenShell.
 
@@ -245,7 +246,7 @@ The biggest risk is maturity rather than design. openshell-firecracker's own ver
 
 - [ ] Accept losing per-exec host approval and exec audit, or require it (that would mean a supervisor change upstream).
 - [x] Cluster: k3s runs in a sandbox, exposing a service other sandboxes dial (decided; phase 4 settles how k3s runs without a NIC on the shared guest kernel).
-- [ ] Keep `zapper` as an alternative backend behind `OfficeClient` during the transition, or cut over in one go.
+- [x] Cut over in one go: zapper's daemon is removed (decided).
 
 ## Sources
 

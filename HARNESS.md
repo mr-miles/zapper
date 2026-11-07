@@ -1,10 +1,10 @@
 # Agent harnesses
 
-A harness is the coding agent a session runs: Claude Code and pi today, opencode later. zapper sees an agent only through the interfaces in `crates/zapper/src/daemon/harness.rs`, so adding one is an implementation of those interfaces plus a name in `agent.kind` (`zapper_policy::AGENT_KINDS`). This page describes the interfaces, how Claude Code and pi implement them, and how opencode would; opencode isn't implemented yet. The pi and opencode details come from their repositories and documentation as of 2026-10-17 (pi `@earendil-works/pi-coding-agent` 1.3, opencode `@opencode/cli` 2.0); check them again before implementing.
+A harness is the coding agent a session runs: Claude Code and pi today, opencode later. the office sees an agent only through the interfaces in `crates/zapper-driver/src/harness.rs`, so adding one is an implementation of those interfaces plus a name in `agent.kind` (`zapper_policy::AGENT_KINDS`). This page describes the interfaces, how Claude Code and pi implement them, and how opencode would; opencode isn't implemented yet. The pi and opencode details come from their repositories and documentation as of 2026-10-17 (pi `@earendil-works/pi-coding-agent` 1.3, opencode `@opencode/cli` 2.0); check them again before implementing.
 
 ## The interfaces
 
-**Configuration, in neutral terms.** A profile's `agent` section says what the agent should have; the harness says where and how its agent reads it ([configuration](docs/configuration.md#agent)):
+**Configuration, in neutral terms.** A profile's `agent` section says what the agent should have; the harness says where and how its agent reads it (configuration):
 
 | Key | Meaning |
 |---|---|
@@ -124,4 +124,4 @@ opencode is [anomalyco/opencode](https://github.com/anomalyco/opencode), npm `@o
 3. To drive it headless (a driven session, an office worker), implement `Headless` and `Conversation` for its headless protocol, mapping its output to `Session`, `Activity` and `TurnEnd`, and `steer` if it takes messages while it works.
 4. Build an image that installs it at a pinned version, and a profile with `agent.kind` set to it.
 5. Unit-test the mapping of its output (like `harness::tests::claude_output`), and for office workers add an e2e firm that uses it, with a fake that speaks its protocol or with the real agent.
-6. Update [configuration](docs/configuration.md#agent-harnesses) and this page.
+6. Update configuration and this page.

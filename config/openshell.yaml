@@ -1,7 +1,6 @@
-# The office on OpenShell (docs/openshell-migration.md): `zapper-office serve
-# --openshell config/openshell.yaml`, from a zapper-office built with
-# `--features openshell`. Profiles still come from zapper.yaml; this says
-# which gateway makes their sandboxes.
+# The OpenShell gateway the office runs its firms on (docs/openshell-migration.md):
+# `zapper-office serve` reads it beside zapper.yaml (or --openshell PATH).
+# Profiles come from zapper.yaml; this says which gateway makes their sandboxes.
 
 # The gateway's URL (`openshell gateway info` prints it).
 gateway: https://127.0.0.1:8080

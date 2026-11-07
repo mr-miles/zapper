@@ -2,6 +2,9 @@
 
 # The workbench
 
+> [!NOTE]
+> The workbench ran on zapper's daemon, which is gone, and is out of the build until it is ported onto OpenShell: its sessions as sandboxes, its rules as their policy, its SSH as OpenShell's. This page describes it as it was.
+
 A layer for one person's sandboxes ([proposal 12, part 2](proposals/12-single-user-layer.md#part-2-the-workbench)): `zapper-workbench`, a process of its own beside the daemon. It is a client of zapper's API on zapper's socket, so it is zapper's operator, and it serves an API and a UI of its own through a **gateway** that decides who may do what. Built so far: phase 1 (the gateway, its tokens, the session views and the facility interface), phase 2 (the [secrets](#secrets) facility), phase 5 (the [drive](#the-drive)), phase 6 (the [SSH connector](#ssh-keys)), phase 7 (the [repository](#the-repository) served to sessions) and phase 3 (the repository [applied to zapper](#applying-the-repository)). The wizard (phase 4) comes later.
 
 ```
@@ -98,7 +101,7 @@ Presets fill in the hosts and mode, and check what a value looks like (its form,
 | `aws` | `*.amazonaws.com` | `aws` (signed on the host) | credential_process JSON | `AWS_ACCESS_KEY_ID` |
 | `database` | the database's, given | `dbauth` | the password; and `user` | (none: a database `protocol:` rule) |
 
-Without a preset, give `hosts` and `mode` (`proxy`, `guest`, `aws`, `dbauth`); a `guest` secret is readable by everything in the session ([security](security.md#secrets-given-to-a-session-can-be-used-by-it)), and the panel says so. `PUT /w/v1/secrets/{name}` takes `{preset?, value?, hosts?, mode?, plaintext?, user?, database?, mechanism?}`: a value for a new secret, any of them to change one.
+Without a preset, give `hosts` and `mode` (`proxy`, `guest`, `aws`, `dbauth`); a `guest` secret is readable by everything in the session (security), and the panel says so. `PUT /w/v1/secrets/{name}` takes `{preset?, value?, hosts?, mode?, plaintext?, user?, database?, mechanism?}`: a value for a new secret, any of them to change one.
 
 A secret reaches a session through a rule that lists it (and, for a profile's agent, `{{secret:NAME}}` in its `env`), which the wizard (phase 4) will write; until then, through the session's rules (`POST /w/v1/sessions/{id}/rules` with `secrets: [NAME]`, which takes the `secrets` right) or the config.
 
@@ -106,7 +109,7 @@ A secret reaches a session through a rule that lists it (and, for a profile's ag
 
 Files in `~/.local/share/zapper-workbench/drive/` (0700, with `inbox/` and `outbox/`), which you reach through the workbench and sessions reach as `drive.zapper:443`.
 
-- **For sessions it is a [socket service](network.md#socket-services)** for the workbench's sessions (label `workbench=1`): the workbench serves `workbench-drive.sock` in zapper's `state/services/` (`socket_dir` in zapper's status), and zapper terminates the guest's TLS with the session's CA, names the caller in the first line, and decides each request against `net` rules with methods and paths before passing it on. The drive decides no access itself. It registers the service at start and again whenever zapper has lost it (a restart).
+- **For sessions it is a socket service** for the workbench's sessions (label `workbench=1`): the workbench serves `workbench-drive.sock` in zapper's `state/services/` (`socket_dir` in zapper's status), and zapper terminates the guest's TLS with the session's CA, names the caller in the first line, and decides each request against `net` rules with methods and paths before passing it on. The drive decides no access itself. It registers the service at start and again whenever zapper has lost it (a restart).
 - **The usual rules**, which **Let workbench sessions use it…** adds to zapper's global layer (`POST /w/v1/drive/rules`; running config, saved when you save it): read the inbox, and read and write the session's own outbox.
 
   ```yaml
@@ -162,7 +165,7 @@ Since an apply replaces the config, what lives only in zapper's running config i
 
 ## SSH keys
 
-The SSH connector ([SSH](ssh.md) has how SSH reaches a sandbox): your public keys, each with a name and the sandboxes it reaches, which the host's sshd checks.
+The SSH connector (SSH has how SSH reaches a sandbox): your public keys, each with a name and the sandboxes it reaches, which the host's sshd checks.
 
 ```
 zapper-workbench ssh-proxy --key NAME [ID.zapper]   # what sshd runs for a key; the sandbox from $SSH_ORIGINAL_COMMAND
