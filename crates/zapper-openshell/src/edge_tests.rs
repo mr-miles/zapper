@@ -8,6 +8,14 @@ const UUID: &str = "6f1c2d3e-0000-4000-8000-000000000001";
 struct Fake;
 
 impl Backend for Fake {
+    fn name(&self) -> &str {
+        "office"
+    }
+
+    fn serves_mcp(&self) -> bool {
+        true
+    }
+
     fn caller(&self, uuid: &str) -> Option<Caller> {
         (uuid == UUID).then(|| Caller {
             session: "zo-000000000001".into(),

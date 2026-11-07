@@ -4,6 +4,7 @@
 //! with zapper's rules (`rules`); it implements [`client::OfficeClient`].
 
 pub mod client;
+pub mod edge;
 pub mod rules;
 mod sandboxes;
 

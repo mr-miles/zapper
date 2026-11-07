@@ -154,7 +154,7 @@ pub async fn serve(
     let edge_listener = tokio::net::TcpListener::bind(edge_addr)
         .await
         .with_context(|| format!("binding the office edge on {edge_addr}"))?;
-    let edge = Arc::new(crate::edge::Edge::for_office(office.clone(), os.clone()));
+    let edge = Arc::new(crate::edge::for_office(office.clone(), os.clone()));
     let edge_task = tokio::spawn(edge.serve(edge_listener));
     eprintln!(
         "zapper-office: the office edge on http://{edge_addr} (workers: {})",
