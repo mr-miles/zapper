@@ -23,3 +23,4 @@ The Office, a company of AI workers built on zapper:
 - [Quickstart](quickstart.md): from a fresh clone to a running firm, step by step.
 - [Office reference](office.md): firms of AI workers, one VM each: mail and wake-ups, the shared drive, security officers, the cluster, the UI, replay.
 - [Office prompts](office-prompts.md): the preamble, wake prompts, follow-ups, officers' prompts and an example kickoff.
+- [OpenShell migration](openshell-migration.md): moving the office from the zapper daemon onto OpenShell and openshell-firecracker: the changes, the phases, and where the work is.

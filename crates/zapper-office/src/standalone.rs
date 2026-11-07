@@ -146,6 +146,12 @@ fn proxy_routes(zapper: Zapper) -> Router {
 /// marker). `remote`: the listener is not loopback (served to a network),
 /// which loosens the `Host` check as `daemon.ui` does.
 pub fn app(office: Arc<Office>, zapper: Zapper, token: String, port: u16, remote: bool) -> Router {
+    app_with(office, proxy_routes(zapper), token, port, remote)
+}
+
+/// As [`app`], with `extra` (the reads the office's backend serves: the
+/// daemon's proxied, or OpenShell's sessions) beside the firm routes.
+fn app_with(office: Arc<Office>, extra: Router, token: String, port: u16, remote: bool) -> Router {
     let mut page = Router::new()
         .route("/", get(serve_page))
         .route("/favicon.ico", get(serve_favicon));
@@ -155,7 +161,7 @@ pub fn app(office: Arc<Office>, zapper: Zapper, token: String, port: u16, remote
             get(move || serve_asset(name, body)),
         );
     }
-    page.nest("/api", crate::routes(office).merge(proxy_routes(zapper)))
+    page.nest("/api", crate::routes(office).merge(extra))
         .layer(middleware::from_fn_with_state(
             (token, port, remote),
             ui_guard,
@@ -279,10 +285,61 @@ pub async fn serve(
     office_config: PathBuf,
     remote: bool,
 ) -> Result<()> {
+    let office = bootstrap(zapper.clone(), state_dir, socket_dir);
+    // Keep the office's standing-approval record in step with the operator's
+    // edits by following the daemon's `/v1/events` SSE (the standalone
+    // counterpart of the co-host in-process `follow_rules`).
+    let follower = {
+        let (zapper, office) = (zapper.clone(), office.clone());
+        tokio::spawn(async move { follow_rules(zapper, office).await })
+    };
+    let served = serve_office(
+        listener,
+        office,
+        proxy_routes(zapper),
+        office_config,
+        remote,
+    )
+    .await;
+    follower.abort();
+    served
+}
+
+/// Serves the office on `listener` as a client of the OpenShell gateway `os`
+/// connects to (feature `openshell`), until a shutdown signal, then takes its
+/// running firms down. `state_dir` and `socket_dir` are the office's own: no
+/// daemon shares them.
+#[cfg(feature = "openshell")]
+pub async fn serve_openshell(
+    listener: tokio::net::TcpListener,
+    os: Arc<crate::openshell::OpenShell>,
+    state_dir: PathBuf,
+    socket_dir: PathBuf,
+    office_config: PathBuf,
+    remote: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(&socket_dir)
+        .with_context(|| format!("creating {}", socket_dir.display()))?;
+    let office = Arc::new(Office::default());
+    let _ = office.client.set(os.clone());
+    let _ = office.state_dir.set(state_dir);
+    let _ = office.socket_dir.set(socket_dir);
+    let extra = crate::openshell::routes(os);
+    serve_office(listener, office, extra, office_config, remote).await
+}
+
+/// The serving both backends share: the firm config, the CLI socket, the
+/// dashboard (the firm routes and `extra`), and taking firms down at the end.
+async fn serve_office(
+    listener: tokio::net::TcpListener,
+    office: Arc<Office>,
+    extra: Router,
+    office_config: PathBuf,
+    remote: bool,
+) -> Result<()> {
     let local = listener
         .local_addr()
         .context("the office listener's address")?;
-    let office = bootstrap(zapper.clone(), state_dir, socket_dir);
 
     // The office's own firm config (`office.yaml`), validated against the
     // daemon's profiles; a bad firm config stops the office starting.
@@ -293,14 +350,6 @@ pub async fn serve(
         "zapper-office: {n} firm(s) from {}",
         office_config.display()
     );
-
-    // Keep the office's standing-approval record in step with the operator's
-    // edits by following the daemon's `/v1/events` SSE (the standalone
-    // counterpart of the co-host in-process `follow_rules`).
-    let follower = {
-        let (zapper, office) = (zapper.clone(), office.clone());
-        tokio::spawn(async move { follow_rules(zapper, office).await })
-    };
 
     // The office's own CLI socket (no gateway: a local unix socket, as the
     // daemon serves the `zapper` CLI). It serves the bare firm routes that the
@@ -323,7 +372,7 @@ pub async fn serve(
 
     let token = random_id(32);
     eprintln!("zapper-office: dashboard on http://{local}/?token={token}");
-    let app = app(office.clone(), zapper, token, local.port(), remote);
+    let app = app_with(office.clone(), extra, token, local.port(), remote);
     let shutdown = {
         let office = office.clone();
         async move {
@@ -339,7 +388,6 @@ pub async fn serve(
         .await
         .context("serving the office")?;
     cli.abort();
-    follower.abort();
     let _ = std::fs::remove_file(&sock);
     Ok(())
 }

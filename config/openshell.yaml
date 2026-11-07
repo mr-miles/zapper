@@ -1,0 +1,24 @@
+# The office on OpenShell (docs/openshell-migration.md): `zapper-office serve
+# --openshell config/openshell.yaml`, from a zapper-office built with
+# `--features openshell`. Profiles still come from zapper.yaml; this says
+# which gateway makes their sandboxes.
+
+# The gateway's URL (`openshell gateway info` prints it).
+gateway: https://127.0.0.1:8080
+# Its CA, and the office's client certificate for mutual TLS, as PEM files.
+# ca_cert: ~/.config/openshell/gateways/local/mtls/ca.crt
+# client_cert: ~/.config/openshell/gateways/local/mtls/tls.crt
+# client_key: ~/.config/openshell/gateways/local/mtls/tls.key
+
+# Providers attached to every sandbox: `anthropic` carries the Claude token,
+# injected outside the VM (`openshell provider create --type anthropic ...`).
+providers: [anthropic]
+
+# The OCI image for each zapper image the profiles name. By default
+# localhost/zapper-openshell-<image>, which scripts/openshell-image.sh builds.
+# images:
+#   office: localhost/zapper-openshell-office
+
+# The most sandboxes at once (default: daemon.max_sessions of zapper.yaml).
+# max_sessions: 16
+# ready_timeout_secs: 300

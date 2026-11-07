@@ -676,7 +676,7 @@ pub(crate) async fn run_command(
 
 /// Runs a client call to completion from the office's synchronous firm
 /// logic. Requires a multi-threaded runtime (the `zapper-office` binary's).
-fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
+pub(crate) fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
