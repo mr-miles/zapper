@@ -1,4 +1,8 @@
 #!/bin/sh
+# NOTE: this suite drove firms through the zapper daemon (`zapper exec`, its
+# sessions and journal), which is gone. It is kept as the checklist for its
+# port onto OpenShell (docs/openshell-migration.md, phase 5) and does not run
+# as it stands.
 # End-to-end tests of the office: a small firm of real VMs whose workers run
 # a fake Claude Code and pi (the office-fake image's `claude` and `pi`), which
 # play the script their profile names, so runs are deterministic and cost no

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Packages a release build for running zapper without the source: the
-# binaries, the deps script, the image recipes as scripts, and an installer.
-# `zapper init` writes the example config and the workers' skills.
+# Packages a release build for running The Office without the source: its
+# binaries, the static guest `office` command its images install, and an
+# installer. `zapper-office init` writes the example configs and the
+# workers' agents and skills.
 #
 #   make build && scripts/package.sh v0.1.0    # dist/zapper-v0.1.0-x86_64-linux.tar.gz
 set -eu
@@ -13,47 +14,33 @@ NAME=zapper-$VERSION-$ARCH-linux
 OUT=$HERE/dist
 ROOT=$OUT/$NAME
 
-# As the Makefile builds them: zapper-inspect reads firms' runs, and
-# zapper-office is The Office's binary (serve, the firm CLI, and `init`,
-# which installs the workers' agents and skills).
-BINS="zapper zapper-agent zapper-inspect zapper-office"
+# zapper-office is The Office (serve, the firm CLI, image builds, init);
+# zapper-inspect reads firms' past runs; zapper-agent is the sandboxes'
+# `office` command.
+BINS="zapper-office zapper-inspect zapper-agent"
 for b in $BINS; do
     [ -x "$HERE/target/release/$b" ] || { echo "no target/release/$b: run make build first" >&2; exit 1; }
 done
-# The agent runs as PID 1 in any image: it must not need a dynamic loader.
+# The images copy the guest command into any base: it must not need a
+# dynamic loader.
 if readelf -l "$HERE/target/release/zapper-agent" | grep -q INTERP; then
     echo "target/release/zapper-agent is not static" >&2
     exit 1
 fi
 
 rm -rf "$ROOT"
-mkdir -p "$ROOT/bin" "$ROOT/images" "$ROOT/scripts"
+mkdir -p "$ROOT/bin"
 for b in $BINS; do
     install -m 0755 "$HERE/target/release/$b" "$ROOT/bin/"
 done
-install -m 0755 "$HERE/scripts/fetch-deps.sh" "$ROOT/scripts/"
 cp "$HERE/LICENSE" "$ROOT/"
 
-# The Makefile's image recipes, one script each, run with the installed zapper.
-for image in $(sed -n 's/^IMAGE_FROM_\([^ :]*\) *:=.*/\1/p' "$HERE/Makefile"); do
-    # make would expand ${ZAPPER} itself: a placeholder goes through instead.
-    # shellcheck disable=SC2016
-    cmd=$(make -s -n -C "$HERE" image IMAGE="$image" ZAPPER=__ZAPPER__ |
-        sed -n 's/^__ZAPPER__ image build /"${ZAPPER:-zapper}" image build /p')
-    [ -n "$cmd" ] || { echo "no image build command for $image" >&2; exit 1; }
-    printf '#!/bin/sh\n# The %s image, as `make image IMAGE=%s` builds it.\nset -eu\n%s\n' \
-        "$image" "$image" "$cmd" > "$ROOT/images/$image.sh"
-    chmod 0755 "$ROOT/images/$image.sh"
-done
-
-cat > "$ROOT/install.sh" <<'EOF'
+cat > "$ROOT/install.sh" <<'INSTALL'
 #!/bin/sh
-# Installs zapper, zapper-agent and (with the office) zapper-inspect and
-# zapper-office into ~/.local/bin (set PREFIX for another place); runs
-# `zapper init`, which writes the example config as ~/.config/zapper/zapper.yaml,
-# and (with the office) `zapper-office init`, which installs the workers' agents
-# and skills into ~/.config/zapper, keeping what is there; then puts Firecracker
-# and a guest kernel into ~/.local/share/zapper.
+# Installs zapper-office, zapper-inspect and zapper-agent into ~/.local/bin
+# (set PREFIX for another place), then runs `zapper-office init`, which
+# writes the example configs into ~/.config/zapper and the workers' agents
+# and skills beside them, keeping what is there.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 PREFIX=${PREFIX:-$HOME/.local}
@@ -66,25 +53,18 @@ for b in "$HERE"/bin/*; do
 done
 
 install -d -m 0700 "$CONF"
-"$PREFIX/bin/zapper" init --config "$CONF/zapper.yaml"
-# The office's agents and skills, installed beside the config by the office's
-# own binary (the office is a separate process). ZAPPER_CONFIG pins the target
-# to this home, so it is written here even when run from inside a checkout.
-if [ -x "$PREFIX/bin/zapper-office" ]; then
-    ZAPPER_CONFIG="$CONF/zapper.yaml" "$PREFIX/bin/zapper-office" init
-fi
-
-"$HERE/scripts/fetch-deps.sh"
+# ZAPPER_CONFIG pins the target to this home, even when run from a checkout.
+ZAPPER_CONFIG="$CONF/zapper.yaml" "$PREFIX/bin/zapper-office" init
 
 case ":$PATH:" in
 *":$PREFIX/bin:"*) ;;
 *) echo "add $PREFIX/bin to PATH" ;;
 esac
 echo
-echo "Next, build images (needs podman or docker); the base profiles use the ubuntu one, zapper run -p claude the office one:"
-for f in "$HERE"/images/*.sh; do echo "  $f"; done
-echo "then: zapper check (each line ok, or the fix), and zapper serve (prints the UI URL)"
-EOF
+echo "Next: point $CONF/openshell.yaml at your OpenShell gateway, build the"
+echo "workers' image (zapper-office image office --agent $PREFIX/bin/zapper-agent),"
+echo "and start the office: zapper-office serve (it prints the dashboard's URL)."
+INSTALL
 chmod 0755 "$ROOT/install.sh"
 
 tar -C "$OUT" -czf "$OUT/$NAME.tar.gz" "$NAME"

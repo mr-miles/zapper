@@ -14,9 +14,17 @@ mod firm_cli;
 
 use cli::Client;
 
-/// The starter `office.yaml` `init` writes: the firm config (empty), as the
-/// checkout's `config/office.yaml`.
-const OFFICE_EXAMPLE: &str = include_str!("../../../config/office.yaml");
+/// The starter configs `init` writes, as the checkout's: the profiles and
+/// image recipes (`zapper.yaml`), the firms (`office.yaml`) and the gateway
+/// (`openshell.yaml`).
+const EXAMPLES: &[(&str, &str)] = &[
+    ("zapper.yaml", include_str!("../../../config/zapper.yaml")),
+    ("office.yaml", include_str!("../../../config/office.yaml")),
+    (
+        "openshell.yaml",
+        include_str!("../../../config/openshell.yaml"),
+    ),
+];
 
 #[derive(Parser)]
 #[command(
@@ -77,9 +85,9 @@ enum Cmd {
         #[arg(long)]
         listen: Option<SocketAddr>,
     },
-    /// Install the office workers' default agents and skills beside the
-    /// config file (what firms read through `agents_dir`/`skills_dir`),
-    /// keeping any file already there.
+    /// Write the example configs (`zapper.yaml`, `office.yaml`,
+    /// `openshell.yaml`) and the workers' default agents and skills into the
+    /// config directory, keeping any file already there.
     Init,
     /// Firms of workers: start, stop, watch, replay.
     Firm {
@@ -151,17 +159,20 @@ async fn main() -> Result<()> {
                     written.join(", ")
                 );
             }
-            // The office's own firm config, kept if already there (like
-            // `zapper init` keeps zapper.yaml).
-            let office_yaml = cli::office_config_path();
-            if office_yaml.exists() {
-                println!("{} exists; not touching it", office_yaml.display());
-            } else {
-                if let Some(parent) = office_yaml.parent() {
-                    std::fs::create_dir_all(parent)?;
+            // The configs, each kept if already there.
+            std::fs::create_dir_all(&dir)?;
+            for (name, text) in EXAMPLES {
+                let path = if *name == "office.yaml" {
+                    cli::office_config_path()
+                } else {
+                    dir.join(name)
+                };
+                if path.exists() {
+                    println!("{} exists; not touching it", path.display());
+                } else {
+                    std::fs::write(&path, text)?;
+                    println!("wrote {}", path.display());
                 }
-                std::fs::write(&office_yaml, OFFICE_EXAMPLE)?;
-                println!("wrote {}", office_yaml.display());
             }
             Ok(())
         }

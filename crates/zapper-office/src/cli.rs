@@ -83,16 +83,11 @@ impl Client {
     }
 }
 
-/// The config file zapper and the office read: `$ZAPPER_CONFIG`, else the
-/// checkout's `config/zapper.yaml`, else `~/.config/zapper/zapper.yaml` — the
-/// same file the daemon reads. Sets CONFIG_DIR to its directory so relative
-/// paths (a firm's `agents_dir`/`skills_dir`, the daemon's `state`) resolve
-/// against it, as they do for the daemon.
-///
-/// This mirrors `zapper`'s own `config_path`. The two are deliberately not
-/// shared: the logic needs `zapper-policy` and encodes zapper's layout, so it
-/// belongs in neither `zapper-util` (no zapper-crate deps, nothing
-/// zapper-specific) nor `zapper-policy` (no I/O) — each binary keeps its own.
+/// The config file the office reads (the profiles and image recipes):
+/// `$ZAPPER_CONFIG`, else the checkout's `config/zapper.yaml`, else
+/// `~/.config/zapper/zapper.yaml`. Sets CONFIG_DIR to its directory so
+/// relative paths (a firm's `agents_dir`/`skills_dir`, `daemon.state`)
+/// resolve against it.
 pub fn config_path() -> std::path::PathBuf {
     use zapper_policy::expand_home;
     let path = match std::env::var("ZAPPER_CONFIG") {
@@ -114,7 +109,7 @@ pub fn config_path() -> std::path::PathBuf {
 }
 
 /// The directory the config file lives in: where the office's workers' agents
-/// and skills are installed, beside the config (as `zapper init` wrote them).
+/// and skills are installed, beside the config (as `zapper-office init` writes them).
 pub fn config_dir() -> std::path::PathBuf {
     config_path()
         .parent()
