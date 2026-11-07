@@ -1284,9 +1284,8 @@ impl OfficeClient for OpenShell {
             if new.persistent {
                 bail!("persistent sessions aren't supported on OpenShell");
             }
-            if !new.forwards.is_empty() {
-                bail!("port forwards aren't supported on OpenShell yet (phase 4)");
-            }
+            // A forward is the daemon's: here the office reaches a sandbox's
+            // ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
             let config = self.has_room(&new.profile).await?;
             let mut profile = config.resolve(&new.profile)?;
             if let Some(overlay) = &new.agent_overlay {

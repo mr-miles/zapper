@@ -14,7 +14,7 @@
 # host loopback, which the supervisors reach as host.openshell.internal.
 id: office-edge
 display_name: Office edge
-description: The office's tools (MCP) and git server, for the firm's workers
+description: The office's tools (MCP), git server and cluster, for the firm's workers
 category: other
 credentials:
   - name: access_token
@@ -36,9 +36,13 @@ endpoints:
     enforcement: enforce
 # The programs that talk to the office: Claude Code (MCP over HTTP), pi
 # (through `office mcp`, as node runs it), the `office` command and stop
-# hook, and git's HTTP transport.
+# hook, git's HTTP transport, and, for the cluster (`/cluster` and
+# `/apps`), kubectl, curl and the headless browser.
 binaries:
   - /usr/local/bin/claude
   - /usr/local/bin/node
   - /usr/local/bin/zapper-agent
   - /usr/lib/git-core/git-remote-http
+  - /usr/local/bin/kubectl
+  - /usr/bin/curl
+  - /opt/ms-playwright/**

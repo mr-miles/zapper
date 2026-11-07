@@ -603,3 +603,85 @@ fn reload_applies_a_valid_office_yaml_and_rejects_a_bad_one() {
         "a failed reload changes nothing"
     );
 }
+
+/// k3s starts rootless, its images and Traefik's ports set up first.
+#[test]
+fn the_cluster_starts_k3s_rootless_with_ingress_on_unprivileged_ports() {
+    let s = facility::k3s_start("cluster.acme.internal");
+    assert!(s.contains("k3s server --rootless"), "{s}");
+    assert!(s.contains("--tls-san cluster.acme.internal"), "{s}");
+    assert!(
+        s.contains("ln -s /var/lib/rancher/k3s/agent/images $d/agent/images"),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!("exposedPort: {}", facility::HTTP_PORT)),
+        "{s}"
+    );
+    assert!(s.contains("$d/server/manifests/traefik-ports.yaml"), "{s}");
+}
+
+/// Through the office edge, a cluster grant leaves the worker a kubeconfig
+/// naming the edge's `/cluster` and no credential: the office keeps their
+/// service account's token, and drops it when the grant goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cluster_grant_keeps_the_token_with_the_office() {
+    let (t, run) = run();
+    t.core.set_edge("http://host.openshell.internal:8970");
+    let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
+    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
+    let cluster = t.core.test_session(new, true).unwrap();
+    *run.facility.cluster.lock().unwrap() = Some(t.core.session_info(&cluster));
+    *run.facility.kubeconfig.lock().unwrap() =
+        Some("clusters:\n- cluster:\n    certificate-authority-data: Q0E=\n".into());
+    // The cluster's VM: each command answers with a token.
+    let mut cvm = crate::fake::shell_vm(&cluster);
+    tokio::spawn(async move {
+        while let Some(mut sh) = cvm.recv().await {
+            sh.say("sa-token-1").await;
+            sh.exit(0).await;
+        }
+    });
+    // pat's VM: the kubeconfig it is given.
+    let pat = session_of(&run, "pat");
+    let mut pvm = crate::fake::shell_vm(&pat);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(mut sh) = pvm.recv().await {
+            let input = sh.input().await;
+            let _ = tx.send(String::from_utf8_lossy(&input).into_owned());
+            sh.exit(0).await;
+        }
+    });
+    facility::cluster_access(&run, "pat", Level::Write, None)
+        .await
+        .unwrap();
+    let kube = rx.recv().await.unwrap();
+    assert!(
+        kube.contains("server: http://host.openshell.internal:8970/cluster"),
+        "{kube}"
+    );
+    assert!(
+        !kube.contains("sa-token-1"),
+        "no credential in the VM: {kube}"
+    );
+    assert_eq!(
+        run.facility
+            .cluster_tokens
+            .lock()
+            .unwrap()
+            .get("pat")
+            .map(String::as_str),
+        Some("sa-token-1")
+    );
+    facility::cluster_access(&run, "pat", Level::None, None)
+        .await
+        .unwrap();
+    assert!(run
+        .facility
+        .cluster_tokens
+        .lock()
+        .unwrap()
+        .get("pat")
+        .is_none());
+}

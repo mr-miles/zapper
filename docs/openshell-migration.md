@@ -207,10 +207,14 @@ Gate: e2e for a request refused, decided by an officer and retried, plus revocat
 
 ### Phase 4: Cluster and facilities (week 8)
 
-- [ ] k3s in a sandbox of its own per run, exposing its API (and the product's ingress) as an OpenShell service that the workers' sandboxes dial; service accounts and kubeconfig by exec; product and dashboard ports.
+- [x] k3s in a sandbox of its own per run (the `k3s` profile), started by the office rootless (OpenShell runs nothing as root), its air-gap images from the image and Traefik on ports 8080 and 8443. The office reaches its API, ingress and dashboard over the gateway (`connect_port`, OpenShell's `ForwardTcp`); the board's product and dashboard ports work as before.
+- [x] Workers reach it through the office edge: the API at `/cluster` (each worker's kubeconfig names it, and holds no credential; the edge adds the worker's own service-account token, which the office keeps while the grant lasts, so RBAC still decides), and the ingress at `/apps/` (as `apps.<domain>`). `exec`, `attach` and `port-forward` aren't served through the edge.
 - [ ] GitHub remote and knowledge base unchanged; re-test `publish_branch`.
+- [ ] Run the gate on a gateway (below).
 
-Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) passes.
+Why not an OpenShell service URL for the workers: a sandbox's network refuses loopback destinations even when a rule declares them (OpenShell's own test: "declared loopback must remain denied"), so a loopback gateway's service URLs can't be dialled from another sandbox; only `host.openshell.internal` is exempt, which is where the office edge listens. Service exposure suits the board's browser instead.
+
+Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) passes. Also check on a gateway: that k3s runs rootless in a Firecracker sandbox (user namespaces, cgroup v2 with its controllers, slirp4netns), that Traefik binds 8080/8443 and the dashboard's LoadBalancer 30466 through rootlesskit, and that `ForwardTcp` reaches them on the sandbox's loopback.
 
 ### Phase 5: Cutover (weeks 9 to 10)
 

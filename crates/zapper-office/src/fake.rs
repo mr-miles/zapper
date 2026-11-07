@@ -64,6 +64,7 @@ impl TestCore {
             sessions: Default::default(),
             layers: Default::default(),
             mcp: Default::default(),
+            edge: Default::default(),
             next: AtomicU64::new(1),
         }));
         TestCore { core, dir }
@@ -99,6 +100,8 @@ struct Inner {
     layers: Mutex<BTreeMap<String, Policy>>,
     /// The MCP servers registered: their names and the sessions they serve.
     mcp: Mutex<BTreeMap<u64, (String, Labels)>>,
+    /// The office edge's URL, when a test plays one.
+    edge: Mutex<Option<String>>,
     next: AtomicU64,
 }
 
@@ -168,6 +171,7 @@ impl Core {
             sessions: Default::default(),
             layers: Default::default(),
             mcp: Default::default(),
+            edge: Default::default(),
             next: AtomicU64::new(1),
         }))
     }
@@ -301,6 +305,12 @@ impl Core {
             .unwrap()
             .values()
             .any(|(n, sel)| n == name && sel.iter().all(|(k, v)| s.labels.get(k) == Some(v)))
+    }
+
+    /// Plays an office edge at `url`: the office then works as it does on
+    /// OpenShell (git, the cluster and the tools through it).
+    pub fn set_edge(&self, url: &str) {
+        *self.0.edge.lock().unwrap() = Some(url.to_string());
     }
 
     /// Takes the office's runs down, as a shutdown would.
@@ -512,6 +522,10 @@ impl OfficeClient for Fake {
         self.0
             .session(id)
             .is_some_and(|s| s.remove_rule(rule_id).is_some())
+    }
+
+    fn edge(&self) -> Option<String> {
+        self.0 .0.edge.lock().unwrap().clone()
     }
 }
 

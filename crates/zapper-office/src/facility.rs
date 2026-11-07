@@ -16,7 +16,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
-use zapper_policy::proto::{Forward, GuestFile};
+use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
@@ -24,11 +24,13 @@ use super::FirmRun;
 use zapper_api_types::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
 use zapper_util::random_id;
 
-/// Ports the cluster VM forwards from vsock to itself.
+/// The cluster sandbox's ports, on its loopback, which the office reaches
+/// over the gateway (`connect_port`, OpenShell's `ForwardTcp`): the API, and
+/// the ingress (Traefik) on ports a rootless k3s may bind.
 pub const API_PORT: u32 = 6443;
-pub const HTTP_PORT: u32 = 80;
-pub const HTTPS_PORT: u32 = 443;
-/// The dashboard's NodePort, forwarded for the board only.
+pub const HTTP_PORT: u32 = 8080;
+pub const HTTPS_PORT: u32 = 8443;
+/// The dashboard's port, for the board only.
 pub const DASHBOARD_PORT: u32 = 30466;
 /// Headlamp, pinned in the k3s image (`HEADLAMP_IMAGE` in the Makefile).
 const HEADLAMP_IMAGE: &str = "ghcr.io/headlamp-k8s/headlamp:v0.46.0";
@@ -42,6 +44,10 @@ pub struct Facilities {
     /// over `run.client` by this id, holding no `Session`.
     pub cluster: Mutex<Option<SessionInfo>>,
     pub kubeconfig: Mutex<Option<String>>,
+    /// Per worker with a grant on the cluster, their service account's
+    /// token: the office edge adds it to their requests to the API, so it
+    /// never enters their sandbox.
+    pub cluster_tokens: Mutex<HashMap<String, String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
     /// What the daemon knows of the firm's git remote.
@@ -450,6 +456,7 @@ pub async fn cluster_access(
             "k3s kubectl -n {WORKER_NS} delete serviceaccount {sa} --ignore-not-found >/dev/null"
         ));
         sh(run, c.id(), &script).await?;
+        run.facility.cluster_tokens.lock().unwrap().remove(worker);
         if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
             let home = format!("/home/{}", s.user());
             let _ = sh(run, s.id(), &format!("rm -f {home}/.kube/config")).await;
@@ -475,6 +482,21 @@ pub async fn cluster_access(
         bail!("RBAC for {worker}: {out}");
     }
     let token = out.lines().last().unwrap_or("").trim().to_string();
+    // Through the office edge (OpenShell): the API at the edge's `/cluster`,
+    // the token kept here and added on the way; the worker's kubeconfig
+    // names the server alone.
+    if let Some(edge) = run.client.edge() {
+        run.facility
+            .cluster_tokens
+            .lock()
+            .unwrap()
+            .insert(worker.to_string(), token);
+        let kube = format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: {CLUSTER}\n  cluster:\n    server: {}/cluster\nusers:\n- name: {worker}\n  user: {{}}\ncontexts:\n- name: {worker}\n  context:\n    cluster: {CLUSTER}\n    user: {worker}\n    namespace: dev\ncurrent-context: {worker}\n",
+            edge.trim_end_matches('/')
+        );
+        return write_kubeconfig(run, worker, kube).await;
+    }
     let ca = run
         .facility
         .kubeconfig
@@ -493,6 +515,11 @@ pub async fn cluster_access(
         "apiVersion: v1\nkind: Config\nclusters:\n- name: {CLUSTER}\n  cluster:\n    server: https://{CLUSTER}.{d}:{API_PORT}\n    certificate-authority-data: {ca}\nusers:\n- name: {worker}\n  user:\n    token: {token}\ncontexts:\n- name: {worker}\n  context:\n    cluster: {CLUSTER}\n    user: {worker}\n    namespace: dev\ncurrent-context: {worker}\n",
         d = run.domain
     );
+    write_kubeconfig(run, worker, kube).await
+}
+
+/// Writes `kube` as `worker`'s `~/.kube/config`.
+async fn write_kubeconfig(run: &FirmRun, worker: &str, kube: String) -> Result<()> {
     if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
         let home = format!("/home/{}", s.user());
         let (code, _out, err) = crate::client::run_command(
@@ -510,7 +537,6 @@ pub async fn cluster_access(
     Ok(())
 }
 
-/// Runs a shell command as root in a session's VM; its stdout.
 /// Runs a shell command in session `id` over the office's client; its exit
 /// code and output (stdout, then stderr if it failed).
 pub(super) async fn sh(run: &FirmRun, id: &str, script: &str) -> Result<(i32, String)> {
@@ -581,14 +607,13 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     };
     run.journal
         .append("facility", json!({ "name": name, "state": "booting" }));
-    let forwards = [API_PORT, HTTP_PORT, HTTPS_PORT, DASHBOARD_PORT]
-        .iter()
-        .map(|p| Forward {
-            vsock_port: *p,
-            tcp_port: *p as u16,
-            nic: true,
-        })
-        .collect();
+    // k3s runs rootless, as the sandbox's user (OpenShell runs nothing as
+    // root): its kubeconfig is in that user's home.
+    let user = config
+        .resolve(&f.profile)
+        .map(|p| p.agent.user.clone())
+        .unwrap_or_else(|_| "agent".into());
+    let kubeconfig = format!("/home/{user}/.kube/k3s.yaml");
     let new = NewSession {
         profile: f.profile.clone(),
         workdir: run.dir.join("empty"),
@@ -597,14 +622,14 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
         shared_layers: vec![],
         files: vec![],
         mounts: vec![],
-        // For the operator's `zapper exec --system`: kubectl as k3s's admin.
-        agent_overlay: Some(json!({ "env": { "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml" } })),
-        forwards,
+        // kubectl as k3s's admin, in the sandbox.
+        agent_overlay: Some(json!({ "env": { "KUBECONFIG": kubeconfig } })),
+        // The office reaches its ports over the gateway (`connect_port`).
+        forwards: vec![],
         persistent: false,
         accept_changed_image: false,
         ssh: false,
     };
-    let _ = config;
     let s = run
         .client
         .create_session(new)
@@ -618,9 +643,7 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
         json!({ "name": name, "state": "starting", "session": cid.clone() }),
     );
     let san = format!("{CLUSTER}.{}", run.domain);
-    let script = format!(
-        "mkdir -p /var/log && nohup k3s server --node-name {CLUSTER} --tls-san {san} --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &"
-    );
+    let script = k3s_start(&san);
     let (code, out) = sh(run, &cid, &script).await?;
     if code != 0 {
         bail!("starting k3s: {out}");
@@ -635,14 +658,14 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
             break;
         }
         if tokio::time::Instant::now() > deadline {
-            let (_, log) = sh(run, &cid, "tail -30 /var/log/k3s.log")
+            let (_, log) = sh(run, &cid, "tail -30 ~/k3s.log")
                 .await
                 .unwrap_or_default();
             bail!("k3s did not become ready in 5 minutes; its log ends:\n{log}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let (code, kube) = sh(run, &cid, "cat /etc/rancher/k3s/k3s.yaml").await?;
+    let (code, kube) = sh(run, &cid, "cat \"$KUBECONFIG\"").await?;
     if code != 0 {
         bail!("reading the kubeconfig: {kube}");
     }
@@ -691,6 +714,22 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
         tokio::spawn(async move { deploy_dashboard(&run, &id).await });
     }
     Ok(())
+}
+
+/// What starts k3s in the cluster's sandbox: rootless (OpenShell runs
+/// nothing as root), with its air-gap images from the image, the API's
+/// certificate naming `san` too, and Traefik on ports a rootless k3s may
+/// bind (`HTTP_PORT`, `HTTPS_PORT`). Its log is `~/k3s.log`.
+pub fn k3s_start(san: &str) -> String {
+    let traefik = format!(
+        "apiVersion: helm.cattle.io/v1\nkind: HelmChartConfig\nmetadata:\n  name: traefik\n  namespace: kube-system\nspec:\n  valuesContent: |-\n    ports:\n      web:\n        exposedPort: {HTTP_PORT}\n      websecure:\n        exposedPort: {HTTPS_PORT}\n"
+    );
+    format!(
+        "set -e; d=~/.rancher/k3s; mkdir -p $d/agent $d/server/manifests ~/.kube; \
+         [ -e $d/agent/images ] || ln -s /var/lib/rancher/k3s/agent/images $d/agent/images; \
+         printf '%s' '{traefik}' > $d/server/manifests/traefik-ports.yaml; \
+         nohup k3s server --rootless --node-name {CLUSTER} --tls-san {san} --disable metrics-server --write-kubeconfig-mode 600 > ~/k3s.log 2>&1 &"
+    )
 }
 
 /// The product port: an HTTP proxy to the cluster's ingress, which asks for
@@ -767,7 +806,7 @@ fn dashboard_manifest() -> String {
                     "containers": [{ "name": "headlamp", "image": HEADLAMP_IMAGE, "imagePullPolicy": "IfNotPresent",
                         "args": ["-in-cluster"], "ports": [{ "containerPort": 4466 }] }] } } } },
             { "apiVersion": "v1", "kind": "Service", "metadata": { "name": "headlamp", "namespace": "dashboard" },
-              "spec": { "type": "NodePort", "selector": labels, "ports": [{ "port": 80, "targetPort": 4466, "nodePort": DASHBOARD_PORT }] } },
+              "spec": { "type": "LoadBalancer", "selector": labels, "ports": [{ "port": DASHBOARD_PORT, "targetPort": 4466 }] } },
         ]
     });
     serde_json::to_string(&list).unwrap()
@@ -1002,8 +1041,14 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .into_iter()
             .filter(|r| run.config.git_remote().is_some() && run.config.main_is_local(r))
             .collect(),
-        kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
-        product: cluster.then(|| format!("http://apps.{d}")),
+        kube: kube.then(|| match run.client.edge() {
+            Some(e) => format!("{}/cluster", e.trim_end_matches('/')),
+            None => format!("https://{CLUSTER}.{d}:{API_PORT}"),
+        }),
+        product: cluster.then(|| match run.client.edge() {
+            Some(e) => format!("{}/apps/", e.trim_end_matches('/')),
+            None => format!("http://apps.{d}"),
+        }),
     }
 }
 

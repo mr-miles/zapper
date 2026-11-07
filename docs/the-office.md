@@ -84,4 +84,4 @@ Workers run with every permission inside their VMs and can try to persuade, misl
 
 ## Status
 
-On zapper's own daemon, firms of real VMs ran with a fake Claude and with real Claude Code, which delegated, published and reported back. On OpenShell, the office's unit tests pass and the gates on a real gateway are next ([the migration](openshell-migration.md)); the firm's cluster comes back in its phase 4. [Limitations](office.md#limitations) lists what it doesn't do yet; a run can't be resumed after the office restarts.
+On zapper's own daemon, firms of real VMs ran with a fake Claude and with real Claude Code, which delegated, published and reported back. On OpenShell, the office's unit tests pass and the gates on a real gateway are next ([the migration](openshell-migration.md)); the firm's cluster runs in a sandbox of its own (phase 4). [Limitations](office.md#limitations) lists what it doesn't do yet; a run can't be resumed after the office restarts.
