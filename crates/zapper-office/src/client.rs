@@ -14,7 +14,7 @@ use serde_json::Value;
 use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
 pub use zapper_client::{url_encode, Zapper};
 #[cfg(test)]
-use zapper_core::{ApprovalApi, RuleApi, ServiceApi, SessionApi};
+use zapper_core::{ApprovalApi, ServiceApi, SessionApi};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRule, Scope};
