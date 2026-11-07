@@ -15,6 +15,7 @@ pub(crate) mod firm;
 pub(crate) mod foreman;
 pub(crate) mod git;
 pub(crate) mod http;
+pub mod image;
 pub(crate) mod journal;
 mod kb;
 pub(crate) mod mail;

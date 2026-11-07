@@ -57,6 +57,21 @@ enum Cmd {
         #[arg(long)]
         openshell: Option<PathBuf>,
     },
+    /// Build the image of a recipe in the config's `images:`, for the
+    /// sandboxes (`localhost/zapper-openshell-NAME`).
+    Image {
+        /// The recipe.
+        name: String,
+        /// A file or directory for one of the recipe's arguments: NAME=PATH.
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        /// The account commands run as (the profiles' `agent.user`).
+        #[arg(long, default_value = "agent")]
+        user: String,
+        /// The static guest binary installed as `office`.
+        #[arg(long, default_value = "target/release/zapper-agent")]
+        agent: PathBuf,
+    },
     /// Print the dashboard's address.
     Url {
         #[arg(long)]
@@ -96,6 +111,27 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
     match cli.cmd {
+        Cmd::Image {
+            name,
+            args,
+            user,
+            agent,
+        } => {
+            let path = cli::config_path();
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let config = zapper_policy::Config::from_yaml(&text)
+                .with_context(|| format!("loading {}", path.display()))?;
+            let b = zapper_office::image::Build {
+                name,
+                args,
+                user,
+                agent,
+            };
+            let tag = zapper_office::image::build(&config, &b, &|l| eprintln!("{l}"))?;
+            println!("{tag}");
+            Ok(())
+        }
         Cmd::Url { listen } => {
             println!("http://{}", listen.unwrap_or_else(default_listen));
             Ok(())

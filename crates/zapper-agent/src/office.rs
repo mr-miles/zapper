@@ -1,59 +1,38 @@
-//! `office`: a firm worker's way to the office's tools, the MCP server
-//! `office` in the daemon's gateway, over the VM's MCP port. As `office mcp`
-//! it bridges the harness's stdio to it line by line; otherwise it is a
+//! `office`: a firm worker's way to the office's tools, at the office edge
+//! (`ZAPPER_OFFICE_URL`, its MCP endpoint over Streamable HTTP). As `office
+//! mcp` it bridges a harness's stdio to it line by line; otherwise it is a
 //! command line for scripts and people, and Claude Code's stop hook.
 //!
-//! The host knows which worker is asking from the VM the connection comes
-//! from, and checks the role on every call; this side only carries lines.
+//! The sandbox's supervisor adds the worker's token to each request on its
+//! way out, so nothing here carries a credential; the office checks who is
+//! asking, and their role, on every call.
 
-use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
-use zapper_proto::proto::{HOST_CID, MAX_MCP_LINE, MCP_PORT};
 
-use crate::sys;
-
-/// The office's server in the gateway.
-const SERVER: &str = "office";
-
-/// A connection to the office's tools: the server named, ready for MCP.
-fn connect() -> Result<File> {
-    let mut conn = sys::vsock_connect(HOST_CID, MCP_PORT)
-        .context("connecting to the daemon's MCP gateway (is this a firm worker?)")?;
-    conn.write_all(format!("{SERVER}\n").as_bytes())?;
-    Ok(conn)
-}
+/// The longest MCP message a harness may send, as the office takes them.
+const MAX_MCP_LINE: usize = 1 << 20;
 
 /// The office edge's MCP endpoint, where this worker reaches the office over
 /// HTTP (a sandbox on OpenShell): its supervisor adds the worker's token on
 /// the way, so nothing here carries a credential.
-fn edge_url() -> Option<String> {
+fn edge_url() -> Result<String> {
     std::env::var("ZAPPER_OFFICE_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| anyhow!("ZAPPER_OFFICE_URL isn't set: is this a firm worker's sandbox?"))
 }
 
 /// Calls one of the office's tools and returns its answer.
 pub fn call(op: &str, args: &Value) -> Result<Value> {
     let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": op, "arguments": args } });
-    if let Some(url) = edge_url() {
-        let reply = http::post(&url, &serde_json::to_vec(&request)?)?;
-        return answer(&reply);
-    }
-    let mut conn = connect()?;
-    let mut line = serde_json::to_vec(&request)?;
-    line.push(b'\n');
-    if line.len() > MAX_MCP_LINE {
+    let body = serde_json::to_vec(&request)?;
+    if body.len() > MAX_MCP_LINE {
         bail!("request longer than {MAX_MCP_LINE} bytes");
     }
-    conn.write_all(&line)?;
-    let mut reply = Vec::new();
-    BufReader::new(conn)
-        .take(16 << 20)
-        .read_until(b'\n', &mut reply)?;
-    answer(&reply)
+    answer(&http::post(&edge_url()?, &body)?)
 }
 
 /// A tool call's answer: the tool's result, or why it failed.
@@ -158,31 +137,10 @@ fn stop_hook() {
     }
 }
 
-/// The MCP server the harness runs: stdin and stdout bridged to the office's
-/// server in the gateway, line by line; MCP's stdio framing is the
-/// gateway's too.
+/// The MCP server a harness runs as a command: its stdio bridged to the
+/// office edge.
 fn mcp() -> Result<()> {
-    if let Some(url) = edge_url() {
-        return mcp_over_http(&url);
-    }
-    let conn = connect()?;
-    let mut up = conn.try_clone()?;
-    std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut up);
-        // The harness hung up: so does the bridge.
-        std::process::exit(0);
-    });
-    let mut down = conn;
-    let mut out = std::io::stdout().lock();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = down.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        out.write_all(&buf[..n])?;
-        out.flush()?;
-    }
+    mcp_over_http(&edge_url()?)
 }
 
 /// The stdio bridge to the office edge, for a harness that runs MCP servers
