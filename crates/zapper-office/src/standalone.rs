@@ -324,8 +324,24 @@ pub async fn serve_openshell(
     let _ = office.client.set(os.clone());
     let _ = office.state_dir.set(state_dir);
     let _ = office.socket_dir.set(socket_dir);
+
+    // The office edge: where the sandboxes' supervisors reach the office's
+    // tools and git, for the workers, with their tokens.
+    let edge_addr = os.edge_settings().listen;
+    let edge_listener = tokio::net::TcpListener::bind(edge_addr)
+        .await
+        .with_context(|| format!("binding the office edge on {edge_addr}"))?;
+    let edge = Arc::new(crate::edge::Edge::for_office(office.clone(), os.clone()));
+    let edge_task = tokio::spawn(edge.serve(edge_listener));
+    eprintln!(
+        "zapper-office: the office edge on http://{edge_addr} (workers: {})",
+        os.edge_settings().url
+    );
+
     let extra = crate::openshell::routes(os);
-    serve_office(listener, office, extra, office_config, remote).await
+    let served = serve_office(listener, office, extra, office_config, remote).await;
+    edge_task.abort();
+    served
 }
 
 /// The serving both backends share: the firm config, the CLI socket, the

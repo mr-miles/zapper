@@ -39,9 +39,9 @@ Traffic to sites outside the firm is checked by the security officers. Ask ahead
 
 ## git
 
-Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
+Your preamble lists the firm's repositories and their URLs (`https://git.<domain>/<name>.git`, or the office's own address on some hosts); your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
-- `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
+- `git clone <url> /work/<name>`, with the URL from your preamble; `git pull` to stay current.
 - Ask for write, not merge or admin. Branches, review and who merges to `main`: the office-git skill.
 - Code lives in git, never on the drive.
 

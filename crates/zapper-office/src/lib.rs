@@ -9,6 +9,8 @@ pub(crate) mod access;
 pub(crate) mod client;
 pub(crate) mod contracts;
 pub(crate) mod drive;
+#[cfg(feature = "openshell")]
+pub mod edge;
 pub(crate) mod facility;
 pub(crate) mod firm;
 pub(crate) mod foreman;

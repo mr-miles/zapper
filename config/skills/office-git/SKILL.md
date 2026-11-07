@@ -38,7 +38,7 @@ Never push to someone else's branch unless they ask, never force-push a branch s
 
 # A repository whose main is on the remote
 
-Your preamble says which repositories' `main` is merged by the board on the firm's remote (GitHub). For those, this section replaces the merging above. You still work only with the firm's server, `https://git.<domain>/<name>.git`, with the same grants; you never talk to GitHub, and have no `gh`. The daemon keeps the firm's server in step with the remote.
+Your preamble says which repositories' `main` is merged by the board on the firm's remote (GitHub). For those, this section replaces the merging above. You still work only with the firm's server, at the URLs your preamble lists, with the same grants; you never talk to GitHub, and have no `gh`. The daemon keeps the firm's server in step with the remote.
 
 - **Nobody pushes `main`**, whatever their grant: the firm's server refuses it. All work reaches `main` through a pull request, and **the board merges it** on GitHub. Nobody in the firm merges.
 - **Never change `.github/workflows/`.** Changes to GitHub Actions workflows are the board's, and a branch that touches them can't be published. If your work needs one, keep it out of your branch and send it to the board: a `question` to `board` with the pull request, why the workflow must change, and the change as a patch (`git diff` of the workflow files, in the body or attached). Tell whoever gave you the work that it waits on the board.

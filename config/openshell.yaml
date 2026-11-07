@@ -11,8 +11,22 @@ gateway: https://127.0.0.1:8080
 # client_key: ~/.config/openshell/gateways/local/mtls/tls.key
 
 # Providers attached to every sandbox: `anthropic` carries the Claude token,
-# injected outside the VM (`openshell provider create --type anthropic ...`).
-providers: [anthropic]
+# injected outside the VM (`openshell provider create --type anthropic ...`);
+# `office-edge` is the workers' identity at the office edge
+# (config/openshell-office-edge.yaml says how to create it).
+providers: [anthropic, office-edge]
+
+# The office edge, where the workers reach the office's tools (MCP over
+# Streamable HTTP, at /mcp) and git (/git/<repo>.git). The defaults suit the
+# Firecracker driver on this host with supervisor identity on; they must
+# match the office-edge provider profile.
+# edge:
+#   listen: 127.0.0.1:8970                       # loopback: the token endpoint must be, for plain HTTP
+#   url: http://host.openshell.internal:8970     # the edge as the workers reach it
+#   token_url: http://127.0.0.1:8970/oauth/token # the profile's token_endpoint: the SVIDs' audience
+#   jwks: http://127.0.0.1:8961/.well-known/jwks.json  # the driver's (OPENSHELL_VM_SUPERVISOR_IDENTITY_JWKS_BIND)
+#   issuer: http://127.0.0.1:8961
+#   trust_domain: openshell.local                # OPENSHELL_VM_SUPERVISOR_IDENTITY_TRUST_DOMAIN
 
 # The OCI image for each zapper image the profiles name. By default
 # localhost/zapper-openshell-<image>, which scripts/openshell-image.sh builds.

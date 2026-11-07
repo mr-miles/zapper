@@ -162,14 +162,25 @@ Gate: all five pass. Otherwise stop, or fix in openshell-firecracker first. (Ver
 
 How to run it: build the office with `cargo build --release -p zapper-office --features openshell`; `make image IMAGE=office-fake`, then `scripts/openshell-image.sh office-fake`; create the gateway's `anthropic` provider; edit `config/openshell.yaml`; `zapper-office serve --openshell config/openshell.yaml`; then start a firm whose roles use `office-fake` profiles (as `tests/e2e-office.sh` writes them) with `zapper-office firm up`.
 
-What phase 1 leaves to later phases: rules are kept and `allowed` judges by them, but nothing enforces them at the network (phase 3); `requests()` is empty (phase 3); the office MCP server, git server and decider are served but no sandbox reaches them, so their registrations are no-ops (phase 2), and a fake worker's office tool calls fail until then; `promote_rule` and port forwards (the cluster) refuse (phases 3 and 4). Commands run as the sandbox user, never root, and `{{secret:…}}` values in profiles are left out, since the gateway's providers hold credentials.
+What phase 1 leaves to later phases: rules are kept and `allowed` judges by them, but nothing enforces them at the network (phase 3); `requests()` is empty (phase 3); the office MCP server, git server and decider are served but no sandbox reaches them, so their registrations are no-ops, and a fake worker's office tool calls fail (phase 2 adds the edge that serves the tools and git); `promote_rule` and port forwards (the cluster) refuse (phases 3 and 4). Commands run as the sandbox user, never root, and `{{secret:…}}` values in profiles are left out, since the gateway's providers hold credentials.
 
 Gate: a fake-Claude firm boots and the foreman takes turns.
 
 ### Phase 2: Office edge and identity (weeks 4 to 5)
 
-- [ ] `office-edge`: `/oauth/token`, MCP Streamable HTTP over `ops.rs`, `/stop-hook`, git behind bearer tokens.
-- [ ] `office` provider profile; host DNS for `<firm>.internal`; image update (HTTP `office` CLI, `mcpServers` type `http`).
+- [x] Office edge (`crates/zapper-office/src/edge.rs`): `/oauth/token`, the office's MCP tools over Streamable HTTP at `/mcp` (the same `ops.rs` handlers), git behind the edge's tokens at `/git/<repo>.git`. The Stop hook is the `stop_check` tool call, so it needs no route of its own.
+- [x] `office-edge` provider profile (`config/openshell-office-edge.yaml`); image update (`scripts/openshell-image.sh` installs `zapper-agent` as `office`, whose CLI, stop hook and stdio bridge speak HTTP to the edge when `ZAPPER_OFFICE_URL` is set; Claude Code's `mcpServers` entry is type `http`).
+- [ ] Run the gate on a gateway (below).
+
+How it works:
+
+- **One address, no host DNS.** The edge listens on host loopback (`127.0.0.1:8970`), which the supervisors reach for `host.openshell.internal` (the Firecracker driver's host alias). A token endpoint may be plain HTTP only on loopback, so this is also what lets the whole edge be plain HTTP with no certificate. Git is path-routed (`/git/<repo>.git`) rather than at `git.<firm domain>`, so no names under `<firm>.internal` are needed on the host; workers get the edge's URLs in their preamble.
+- **Identity.** Each supervisor posts its sandbox's JWT-SVID to `/oauth/token` as a `client_credentials` client assertion. The edge checks it against the driver's JWKS (ES256, issuer, audience = the token endpoint, expiry, `jti` not reused) and takes the sandbox UUID from `spiffe://<trust domain>/openshell/sandbox/<uuid>`. The OpenShell client records each sandbox's UUID when it creates it, so the edge maps it to the worker's labels (firm, run, member); a sandbox the office doesn't run gets no token. The edge issues an opaque 5-minute token, which the supervisor adds to the worker's requests to the edge, replacing any `Authorization` the guest sent.
+- **Every request is checked.** The supervisor only injects for the profile's endpoint and binaries; any other request reaches the edge with whatever the guest sent, so `/mcp` and `/git/` refuse anything but a current token the edge issued, for a sandbox the office still runs. Requests that name an `Origin` are refused.
+- **Git.** The worker's grant is checked on every request as before; through the edge, the token replaces the per-worker password, so no `.git-credentials` is written.
+- **Not yet:** the officers' decider (phase 3). Network rules are still not enforced, so the profile's endpoint is the only rule for the edge.
+
+How to run it: on top of phase 1's steps, turn on the driver's supervisor identity (`OPENSHELL_VM_SUPERVISOR_IDENTITY=true`); `make build` (for `target/release/zapper-agent`), then `scripts/openshell-image.sh office-fake` again; `openshell profile import -f config/openshell-office-edge.yaml` and `openshell provider create --name office-edge --type office-edge --runtime-credentials`; add `office-edge` to `providers:` in `config/openshell.yaml`; then start the firm as in phase 1.
 
 Gate: e2e for delegation, authority, identity (the sender is the sandbox), mail privacy and git grants passes.
 

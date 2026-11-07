@@ -17,13 +17,17 @@
 //!   from the frames the foreman and the drive's tar copies speak, so both
 //!   work over it unchanged; `connect_port` is `ForwardTcp`.
 //! - **Host room.** `admit` keeps the session limit and the memory check.
+//! - **The office's tools and git** (phase 2) are the office edge's
+//!   (`crate::edge`), which knows each sandbox by the UUID recorded here:
+//!   the facilities the daemon would have connected register as ids only,
+//!   Claude Code's `office` MCP server is the edge's Streamable HTTP, and
+//!   every command gets `ZAPPER_OFFICE_URL` for the `office` command.
 //!
 //! What it does not do yet (later phases): rules are kept, and `allowed`
 //! judges by them, but nothing enforces them at the network (phase 3: the
 //! sandboxes' policy through `UpdateConfig`); the traffic log is empty
-//! (phase 3: `GetSandboxLogs`); the office's MCP server, git server and
-//! decider are served on their sockets but no sandbox reaches them (phase 2:
-//! the office edge), so they register as no-ops here.
+//! (phase 3: `GetSandboxLogs`); the officers' decider is served on its
+//! socket but nothing asks it (phase 3: drafts).
 //!
 //! Differences from zapper a firm can see: commands run as the sandbox user,
 //! never root (`ShellRequest::system` is ignored), so files the office writes
@@ -109,6 +113,46 @@ pub struct Settings {
     pub max_sessions: Option<usize>,
     /// How long a sandbox may take to become ready; by default 300.
     pub ready_timeout_secs: Option<u64>,
+    /// The office edge: where the firm's workers reach the office's tools
+    /// and git, and how it knows them (`crate::edge`).
+    pub edge: EdgeSettings,
+}
+
+/// The office edge's settings (`edge:` in `openshell.yaml`). The defaults
+/// suit a gateway with the Firecracker driver on this host, with supervisor
+/// identity on and the `office-edge` provider (`config/openshell-office-edge.yaml`)
+/// attached to the sandboxes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EdgeSettings {
+    /// Where the edge listens: on loopback, as the supervisors dial
+    /// `host.openshell.internal` there, and the token endpoint must be
+    /// loopback to be plain HTTP.
+    pub listen: std::net::SocketAddr,
+    /// The edge's URL as the workers use it.
+    pub url: String,
+    /// The token endpoint's URL as the provider profile names it: the
+    /// audience the supervisors' SVIDs carry.
+    pub token_url: String,
+    /// The driver's JWKS, whose keys sign the SVIDs.
+    pub jwks: String,
+    /// The SVIDs' issuer.
+    pub issuer: String,
+    /// The SPIFFE trust domain of the sandboxes' IDs.
+    pub trust_domain: String,
+}
+
+impl Default for EdgeSettings {
+    fn default() -> Self {
+        EdgeSettings {
+            listen: "127.0.0.1:8970".parse().unwrap(),
+            url: "http://host.openshell.internal:8970".into(),
+            token_url: "http://127.0.0.1:8970/oauth/token".into(),
+            jwks: "http://127.0.0.1:8961/.well-known/jwks.json".into(),
+            issuer: "http://127.0.0.1:8961".into(),
+            trust_domain: "openshell.local".into(),
+        }
+    }
 }
 
 impl Settings {
@@ -148,6 +192,9 @@ impl Settings {
 /// command in it needs.
 struct Sandbox {
     info: SessionInfo,
+    /// The gateway's id for it (a UUID): what its supervisor's SPIFFE ID
+    /// names, and so how the edge knows the caller.
+    uuid: String,
     /// The environment every command gets (the guest's, in zapper).
     env: HashMap<String, String>,
     /// Where the agent's commands start.
@@ -362,6 +409,9 @@ impl OpenShell {
             }
         }
         env.insert("ZAPPER_SESSION".into(), name.to_string());
+        // `office` (the CLI, the stop hook, the stdio bridge for harnesses
+        // without HTTP MCP) reaches the edge here.
+        env.insert("ZAPPER_OFFICE_URL".into(), self.mcp_url());
         let mut files = Vec::new();
         harness.guest(profile, &home, &mut env, &mut files);
 
@@ -539,9 +589,41 @@ impl OpenShell {
         }
     }
 
+    /// A facility the daemon would have connected the sandboxes to: on
+    /// OpenShell the office edge serves it (the tools, git), so registering
+    /// it is only an id.
     fn registered(&self, what: &str) -> u64 {
-        tracing::debug!("{what}: no sandbox reaches it on OpenShell yet (phase 2)");
+        tracing::debug!("{what}: served through the office edge");
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The edge's settings.
+    pub fn edge_settings(&self) -> &EdgeSettings {
+        &self.settings.edge
+    }
+
+    /// The office's MCP tools as the workers reach them (Streamable HTTP).
+    fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.settings.edge.url.trim_end_matches('/'))
+    }
+
+    /// Points the profile's `office` MCP server at the edge: Claude Code
+    /// speaks Streamable HTTP to it itself (its requests get the worker's
+    /// token outside the VM); other harnesses keep `office mcp`, which
+    /// bridges their stdio to it (`ZAPPER_OFFICE_URL`).
+    fn office_over_http(&self, profile: &mut ResolvedProfile) {
+        office_over_http(profile, &self.mcp_url());
+    }
+
+    /// The office's sandbox the gateway knows as `uuid` (a supervisor's
+    /// SPIFFE ID names it): its name and the labels the office gave it.
+    pub fn caller(&self, uuid: &str) -> Option<(String, BTreeMap<String, String>)> {
+        self.sandboxes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, s)| s.uuid == uuid)
+            .map(|(name, s)| (name.clone(), s.info.labels.clone()))
     }
 }
 
@@ -618,6 +700,7 @@ impl OfficeClient for OpenShell {
                 zapper_policy::merge(&mut agent, overlay);
                 profile.agent = serde_json::from_value(agent).context("agent overlay")?;
             }
+            self.office_over_http(&mut profile);
             let template = self.template(&profile).await?;
             let name = format!("zo-{:012x}", rand::random::<u64>() >> 16);
             let spec = SandboxTemplateCreateSpec {
@@ -627,7 +710,8 @@ impl OfficeClient for OpenShell {
                 providers: self.settings.providers.clone(),
                 ..Default::default()
             };
-            self.sdk
+            let created = self
+                .sdk
                 .create_sandbox_from_template(spec)
                 .await
                 .with_context(|| format!("creating a sandbox from template {template}"))?;
@@ -675,6 +759,7 @@ impl OfficeClient for OpenShell {
                 name,
                 Sandbox {
                     info: info.clone(),
+                    uuid: created.id,
                     env,
                     workdir,
                     command: profile.agent.command.clone(),
@@ -859,6 +944,10 @@ impl OfficeClient for OpenShell {
         removed
     }
 
+    fn edge(&self) -> Option<String> {
+        Some(self.settings.edge.url.clone())
+    }
+
     fn allowed(&self, id: &str, req: NetRequest) -> Option<String> {
         // The layers the daemon would judge by, most specific first: the
         // session's, its role's, its profile's, the global one.
@@ -934,6 +1023,21 @@ fn status_of(phase: SandboxPhase) -> Status {
 }
 
 /// A template's name for profile `profile`: a DNS label.
+/// [`OpenShell::office_over_http`], with the tools at `mcp_url`.
+fn office_over_http(profile: &mut ResolvedProfile, mcp_url: &str) {
+    if profile.agent.kind != "claude-code" {
+        return;
+    }
+    if let Some(Value::Object(servers)) = &mut profile.agent.mcp_servers {
+        if servers.contains_key(crate::ops::SERVER) {
+            servers.insert(
+                crate::ops::SERVER.into(),
+                json!({ "type": "http", "url": mcp_url }),
+            );
+        }
+    }
+}
+
 fn template_name(profile: &str) -> String {
     let s: String = profile
         .chars()
@@ -1242,6 +1346,45 @@ mod tests {
         ]));
         assert_eq!(l["zapper-firm"], "acme");
         assert!(!l.contains_key("zapper-firm-role"));
+    }
+
+    #[test]
+    fn claude_reaches_the_office_tools_over_http_and_pi_through_the_bridge() {
+        let config = Config::from_yaml(
+            "profiles:\n  c: { agent: { kind: claude-code, command: [claude] } }\n  p: { agent: { kind: pi, command: [pi] } }\n",
+        )
+        .unwrap();
+        let bridge =
+            json!({ "office": { "command": crate::ops::AGENT_PATH, "args": ["office", "mcp"] } });
+        let url = "http://host.openshell.internal:8970/mcp";
+
+        let mut claude = config.resolve("c").unwrap();
+        claude.agent.mcp_servers = Some(bridge.clone());
+        office_over_http(&mut claude, url);
+        assert_eq!(
+            claude.agent.mcp_servers,
+            Some(json!({ "office": { "type": "http", "url": url } }))
+        );
+
+        let mut pi = config.resolve("p").unwrap();
+        pi.agent.mcp_servers = Some(bridge.clone());
+        office_over_http(&mut pi, url);
+        assert_eq!(pi.agent.mcp_servers, Some(bridge));
+    }
+
+    #[test]
+    fn the_edge_defaults_to_host_loopback_and_the_drivers_identity() {
+        let s = Settings::from_yaml("gateway: https://gw\n").unwrap();
+        assert_eq!(s.edge.listen.to_string(), "127.0.0.1:8970");
+        assert_eq!(s.edge.url, "http://host.openshell.internal:8970");
+        assert_eq!(s.edge.jwks, "http://127.0.0.1:8961/.well-known/jwks.json");
+        let s = Settings::from_yaml(
+            "gateway: https://gw\nedge: { listen: 127.0.0.1:9000, url: http://host.openshell.internal:9000 }\n",
+        )
+        .unwrap();
+        assert_eq!(s.edge.listen.port(), 9000);
+        assert_eq!(s.edge.trust_domain, "openshell.local");
+        assert!(Settings::from_yaml("gateway: https://gw\nedge: { nope: 1 }\n").is_err());
     }
 
     #[test]

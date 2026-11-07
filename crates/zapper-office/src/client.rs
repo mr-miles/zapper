@@ -145,6 +145,13 @@ pub trait OfficeClient: Send + Sync {
     /// rule that did — `None` if it would not be allowed. The officers' tools
     /// use this to see if a host is already reachable before granting.
     fn allowed(&self, id: &str, req: NetRequest) -> Option<String>;
+    /// Where the firm's workers reach the office over HTTP, as a URL they
+    /// can use (the office edge on OpenShell: its MCP tools at `/mcp`, git
+    /// at `/git/`), with their identity added outside the VM; `None` where
+    /// the daemon carries them (its MCP gateway, `git.<firm domain>`).
+    fn edge(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The in-process office, linked into the daemon: calls `Core` directly.

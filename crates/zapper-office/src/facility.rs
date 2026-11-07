@@ -226,6 +226,7 @@ fn basic_auth(h: &hyper::HeaderMap) -> Option<(String, String)> {
 /// rights, then runs `git http-backend`.
 /// Whether `member` may make this git request, and their grant's level:
 /// their password, the repository the path names, and their grant on it.
+#[cfg(test)]
 pub(super) fn authorize(
     run: &FirmRun,
     member: &str,
@@ -233,6 +234,32 @@ pub(super) fn authorize(
     path: &str,
     query: &str,
 ) -> Result<super::access::Level, Box<Response<Full<Bytes>>>> {
+    authorize_as(run, member, false, headers, path, query)
+}
+
+/// [`authorize`], for a caller already known to be `member` when `verified`
+/// (the office edge checked the token the gateway added outside the VM): no
+/// password then; the repository and the grant are checked as for anyone.
+pub(super) fn authorize_as(
+    run: &FirmRun,
+    member: &str,
+    verified: bool,
+    headers: &hyper::HeaderMap,
+    path: &str,
+    query: &str,
+) -> Result<super::access::Level, Box<Response<Full<Bytes>>>> {
+    if !verified {
+        check_password(run, member, headers)?;
+    }
+    check_repo_and_grant(run, member, path, query)
+}
+
+/// The worker's git password (HTTP Basic), on the daemon's path.
+fn check_password(
+    run: &FirmRun,
+    member: &str,
+    headers: &hyper::HeaderMap,
+) -> Result<(), Box<Response<Full<Bytes>>>> {
     let Some((user, pass)) = basic_auth(headers) else {
         let mut r = plain(StatusCode::UNAUTHORIZED, "credentials required");
         r.headers_mut()
@@ -256,16 +283,24 @@ pub(super) fn authorize(
             .insert("www-authenticate", "Basic realm=\"git\"".parse().unwrap());
         return Err(Box::new(r));
     }
+    Ok(())
+}
+
+/// Whether `member` may make this request of the repository `path` names:
+/// it is one of the firm's, and their grant on it allows it.
+fn check_repo_and_grant(
+    run: &FirmRun,
+    member: &str,
+    path: &str,
+    query: &str,
+) -> Result<super::access::Level, Box<Response<Full<Bytes>>>> {
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
     if path.split('/').any(|c| c == "..") {
         return Err(Box::new(plain(StatusCode::BAD_REQUEST, "bad path")));
     }
     let repos = run.config.git_repos();
     let Some(repo) = repo_of(path).filter(|r| repos.iter().any(|x| x == r)) else {
-        let urls: Vec<String> = repos
-            .iter()
-            .map(|r| format!("https://git.{}/{r}.git", run.domain))
-            .collect();
+        let urls: Vec<String> = repos.iter().map(|r| git_url(run, r)).collect();
         return Err(Box::new(plain(
             StatusCode::NOT_FOUND,
             &format!("no such repository; the firm's: {}", urls.join(", ")),
@@ -296,10 +331,21 @@ pub(crate) async fn git_request(
     member: &str,
     req: Request<hyper::body::Incoming>,
 ) -> Response<Full<Bytes>> {
+    git_request_as(run, member, false, req).await
+}
+
+/// [`git_request`], for a caller already known to be `member` when
+/// `verified` (the office edge): no password asked.
+pub(crate) async fn git_request_as(
+    run: &Arc<FirmRun>,
+    member: &str,
+    verified: bool,
+    req: Request<hyper::body::Incoming>,
+) -> Response<Full<Bytes>> {
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
-    let level = match authorize(run, member, req.headers(), &path, &query) {
+    let level = match authorize_as(run, member, verified, req.headers(), &path, &query) {
         Ok(level) => level,
         Err(refused) => return *refused,
     };
@@ -955,7 +1001,7 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .config
             .git_repos()
             .iter()
-            .map(|r| format!("https://git.{d}/{r}.git"))
+            .map(|r| git_url(run, r))
             .collect(),
         remote_main: run
             .config
@@ -974,6 +1020,26 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
     }
 }
 
+/// Where the firm's workers clone repository `repo`: through the office
+/// edge where there is one (OpenShell), else `git.<firm domain>`.
+pub fn git_url(run: &FirmRun, repo: &str) -> String {
+    match run.client.edge() {
+        Some(edge) => format!("{}/git/{repo}.git", edge.trim_end_matches('/')),
+        None => format!("https://git.{}/{repo}.git", run.domain),
+    }
+}
+
+/// The `.gitconfig` the firm's workers get: who they are in commits, and
+/// with `store` the helper for their password when they have one.
+fn gitconfig(worker: &str, domain: &str, store: bool) -> String {
+    let helper = if store {
+        "[credential]\n\thelper = store\n"
+    } else {
+        ""
+    };
+    format!("[user]\n\tname = {worker}\n\temail = {worker}@{domain}\n{helper}[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n")
+}
+
 /// Files that give a worker its credentials for the firm's services.
 pub fn credentials_for(
     run: &FirmRun,
@@ -984,6 +1050,17 @@ pub fn credentials_for(
     // The kubeconfig comes with a cluster grant (cluster_access); the git
     // password is the worker's identity, and their grant decides the rest.
     let mut files = Vec::new();
+    if run.client.edge().is_some() {
+        // Through the office edge the worker's identity is the token the
+        // gateway adds outside the VM: no password comes in.
+        files.push(GuestFile {
+            path: format!("{home}/.gitconfig"),
+            content: gitconfig(worker, &run.domain, false),
+            mode: 0o644,
+            user_owned: true,
+        });
+        return Ok(files);
+    }
     if let Some(pw) = run.facility.git_passwords.lock().unwrap().get(worker) {
         let d = &run.domain;
         files.push(GuestFile {
@@ -994,7 +1071,7 @@ pub fn credentials_for(
         });
         files.push(GuestFile {
             path: format!("{home}/.gitconfig"),
-            content: format!("[user]\n\tname = {worker}\n\temail = {worker}@{d}\n[credential]\n\thelper = store\n[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n"),
+            content: gitconfig(worker, d, true),
             mode: 0o644,
             user_owned: true,
         });
