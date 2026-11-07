@@ -59,8 +59,13 @@ const ASSERTION_TYPES: [&str; 2] = [
     "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
 ];
 
-/// A response's body.
-pub type Body = Full<Bytes>;
+/// A response's body: whole, or read as it goes.
+pub type Body = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
+
+/// `b` as a whole body.
+pub fn full(b: impl Into<Bytes>) -> Body {
+    Full::new(b.into()).map_err(|n| match n {}).boxed()
+}
 
 /// A sandbox as the edge knows it: its name and its labels.
 #[derive(Debug, Clone, PartialEq)]
@@ -425,7 +430,7 @@ impl Edge {
             Some(reply) => json_response(StatusCode::OK, &reply),
             None => Response::builder()
                 .status(StatusCode::ACCEPTED)
-                .body(Body::default())
+                .body(full(Bytes::new()))
                 .unwrap(),
         }
     }
@@ -579,7 +584,7 @@ async fn http_get(url: &str) -> Result<Vec<u8>> {
     tokio::spawn(conn);
     let req = Request::get(path)
         .header(hyper::header::HOST, authority)
-        .body(Body::default())?;
+        .body(Full::<Bytes>::default())?;
     let resp = tokio::time::timeout(Duration::from_secs(10), sender.send_request(req))
         .await
         .map_err(|_| anyhow!("{url}: timed out"))??;
@@ -617,7 +622,7 @@ pub fn json_response(status: StatusCode, v: &Value) -> Response<Body> {
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::CACHE_CONTROL, "no-store")
-        .body(Body::from(serde_json::to_vec(v).unwrap_or_default()))
+        .body(full(serde_json::to_vec(v).unwrap_or_default()))
         .unwrap()
 }
 
@@ -629,7 +634,7 @@ pub fn plain(status: StatusCode, text: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from(format!("{text}\n")))
+        .body(full(format!("{text}\n")))
         .unwrap()
 }
 

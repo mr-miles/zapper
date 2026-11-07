@@ -17,7 +17,7 @@ ROOT=$OUT/$NAME
 # zapper-office is The Office (serve, the firm CLI, image builds, init);
 # zapper-inspect reads firms' past runs; zapper-agent is the sandboxes'
 # `office` command.
-BINS="zapper-office zapper-inspect zapper-agent"
+BINS="zapper-office zapper-workbench zapper-inspect zapper-agent"
 for b in $BINS; do
     [ -x "$HERE/target/release/$b" ] || { echo "no target/release/$b: run make build first" >&2; exit 1; }
 done

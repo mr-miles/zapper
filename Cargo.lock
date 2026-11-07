@@ -4434,6 +4434,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-workbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "libc",
+ "ring",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zapper-driver",
+ "zapper-git",
+ "zapper-openshell",
+ "zapper-policy",
+ "zapper-util",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"

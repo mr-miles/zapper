@@ -282,15 +282,6 @@ impl OpenShell {
             .await
             .with_context(|| format!("the OpenShell gateway at {}", settings.gateway))?;
         tracing::info!(gateway = %settings.gateway, version = %health.version, "connected to OpenShell");
-        let global = sdk
-            .raw_grpc_fresh()
-            .await?
-            .get_gateway_config(proto::GetGatewayConfigRequest {})
-            .await
-            .context("reading the gateway's settings")?
-            .into_inner()
-            .settings;
-        officers_decide(&global)?;
         let config = load_config(&config_path)?;
         Ok(OpenShell {
             sdk,
@@ -656,6 +647,26 @@ impl OpenShell {
         Ok(config)
     }
 
+    /// The OCI image profile `p`'s sandboxes run.
+    pub fn image_of(&self, p: &ResolvedProfile) -> String {
+        self.settings.image(&p.engine.image)
+    }
+
+    /// Refuses a gateway whose settings would take access decisions from the
+    /// office's officers ([`officers_decide`]).
+    pub async fn require_officers(&self) -> Result<()> {
+        let global = self
+            .sdk
+            .raw_grpc_fresh()
+            .await?
+            .get_gateway_config(proto::GetGatewayConfigRequest {})
+            .await
+            .context("reading the gateway's settings")?
+            .into_inner()
+            .settings;
+        officers_decide(&global)
+    }
+
     /// The template for `profile`, made (again) if this process hasn't made
     /// it from the profile as it is now.
     async fn template(&self, profile: &ResolvedProfile) -> Result<String> {
@@ -669,18 +680,41 @@ impl OpenShell {
         if made.get(&name) == Some(&from) {
             return Ok(name);
         }
+        let labels = BTreeMap::from([("zapper-office".to_string(), "1".to_string())]);
+        self.put_template(
+            &name,
+            &image,
+            profile.engine.vcpus,
+            profile.engine.memory_mib,
+            &labels,
+        )
+        .await?;
+        made.insert(name.clone(), from);
+        Ok(name)
+    }
+
+    /// Makes template `name` on the gateway (again, if there is one): the
+    /// OCI `image`, `vcpus` and `memory_mib`, with `labels`.
+    pub async fn put_template(
+        &self,
+        name: &str,
+        image: &str,
+        vcpus: u8,
+        memory_mib: u32,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<()> {
         let template = proto::SandboxWorkloadTemplate {
             metadata: Some(proto::ObjectMeta {
-                name: name.clone(),
-                labels: HashMap::from([("zapper-office".to_string(), "1".to_string())]),
+                name: name.to_string(),
+                labels: labels.clone().into_iter().collect(),
                 ..Default::default()
             }),
             spec: Some(proto::SandboxWorkloadTemplateSpec {
                 workload: Some(proto::SandboxWorkloadConfig {
-                    image,
+                    image: image.to_string(),
                     resources: Some(proto::SandboxResources {
-                        cpu: profile.engine.vcpus.to_string(),
-                        memory: format!("{}Mi", profile.engine.memory_mib),
+                        cpu: vcpus.to_string(),
+                        memory: format!("{memory_mib}Mi"),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -689,13 +723,12 @@ impl OpenShell {
             }),
         };
         match self.sdk.create_sandbox_template(template.clone()).await {
-            Ok(_) => {}
-            // Made by an earlier office, perhaps from the profile as it was:
-            // made again from it as it is.
+            Ok(_) => Ok(()),
+            // Made before, perhaps from another image: made again.
             Err(SdkError::AlreadyExists { .. }) => {
                 self.sdk
                     .delete_sandbox_template(
-                        &name,
+                        name,
                         DeleteOptions {
                             allow_missing: true,
                         },
@@ -706,11 +739,23 @@ impl OpenShell {
                     .create_sandbox_template(template)
                     .await
                     .with_context(|| format!("replacing template {name}"))?;
+                Ok(())
             }
-            Err(e) => return Err(anyhow::Error::from(e).context(format!("making template {name}"))),
+            Err(e) => Err(anyhow::Error::from(e).context(format!("making template {name}"))),
         }
-        made.insert(name.clone(), from);
-        Ok(name)
+    }
+
+    /// The gateway's sandbox whose id is `uuid` (what its supervisor's SPIFFE
+    /// ID names), of any maker: its name and labels.
+    pub async fn sandbox_by_id(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<(String, BTreeMap<String, String>)>> {
+        let all = self.sdk.list_all_sandboxes(ListOptions::default()).await?;
+        Ok(all
+            .into_iter()
+            .find(|s| s.id == uuid)
+            .map(|s| (s.name, s.labels.into_iter().collect())))
     }
 
     /// Waits for sandbox `name` and sets it up as zapper's guest agent would

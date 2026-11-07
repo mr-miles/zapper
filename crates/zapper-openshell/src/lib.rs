@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod edge;
+pub mod image;
 pub mod rules;
 mod sandboxes;
 

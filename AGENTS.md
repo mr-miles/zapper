@@ -44,12 +44,9 @@ With the user's go-ahead (a firm spends their Claude usage), the user starts the
 
 ```
 crates/zapper-office/    The Office: post office, foreman (headless Claude or pi), shared drive, security officers, facilities; the firms config (`firm.rs`), validated against the profiles of zapper.yaml
-  src/openshell.rs         the OfficeClient over an OpenShell gateway: sandboxes from profiles, exec, policy and drafted rules
-  src/openshell_rules.rs   zapper's rules as a sandbox's network policy, and drafted rules as the officers see them
-  src/edge.rs              the office edge: /oauth/token (SVID → token), MCP over Streamable HTTP at /mcp, git at /git/
-  src/client.rs            OfficeClient: what the firm logic needs from where its workers run
+  src/edge.rs              the office's backend on the edge: its tools at /mcp, the firm's git at /git/
+  src/client.rs            facilities on sockets, and commands over the client (OfficeClient is zapper-openshell's)
   src/fake.rs              an in-memory OfficeClient for the tests
-  src/image.rs             `zapper-office image`: a recipe of zapper.yaml as the sandboxes' image
   src/office.html          the office UI; its stylesheet and scripts, one per tab or part, in src/ui/
 crates/zapper-agent/     the sandboxes' `office` command: the workers' CLI, MCP bridge and Stop hook, over HTTP to the edge
 crates/zapper-policy/    config model (profiles, image recipes), layered rule evaluation (no I/O)
@@ -60,8 +57,9 @@ crates/zapper-inspect/   `zapper-inspect`: past runs read from disk, their peopl
 crates/zapper-runs/      the files a firm's run leaves and what its journal says, read-only
 crates/zapper-github/    the firm's GitHub remote; zapper-mint mints its tokens
 crates/zapper-fake/      a fake Claude Code and pi that play a script: the office-fake image's `claude` and `pi`
-crates/zapper-workbench/, crates/zapper-ssh/   out of the workspace: they ran on the daemon, and wait to be ported onto OpenShell
-config/                  zapper.yaml (profiles, image recipes), office.yaml (firms), openshell.yaml (the gateway), openshell-office-edge.yaml (the edge's provider profile)
+crates/zapper-openshell/ the OpenShell client both use: sandboxes from profiles, exec, policy and drafted rules (`rules.rs`), the edge sandboxes reach a layer through (`edge.rs`: SVID → token, then the backend's routes), image builds (`image.rs`)
+crates/zapper-workbench/ one person's drive and repository for OpenShell sandboxes, on an edge of its own, and the repository applied as sandbox templates
+config/                  zapper.yaml (profiles, image recipes), office.yaml (firms), openshell.yaml (the gateway), openshell-office-edge.yaml and openshell-workbench-edge.yaml (the edges' provider profiles)
   agents/, skills/         office roles' agent definitions and skills
 tests/fake               the scripts the fake workers play; tests/e2e-office.sh is the daemon-era suite, to be ported
 docs/                    one page per topic; index in docs/README.md

@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, bail, Context, Result};
 
 /// The `browse` command, installed in every image.
-const BROWSE: &str = include_str!("browse.js");
+const BROWSE: &str = include_str!("../../zapper-office/src/browse.js");
 
 /// What to build.
 pub struct Build {

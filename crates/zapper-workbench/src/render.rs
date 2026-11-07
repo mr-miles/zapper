@@ -3,7 +3,6 @@
 //!
 //! ```text
 //! policy.yaml                  policy
-//! secrets.yaml                 secrets (their hosts and modes; values are the secrets facility's)
 //! images/NAME.yaml             images.NAME
 //! profiles/NAME.yaml           profiles.NAME
 //! agents/NAME/AGENT.md         a profile's CLAUDE.md, for one that says `agent.definition: NAME`
@@ -16,9 +15,9 @@
 //! `instructions`, the definition's `AGENT.md` without its front matter;
 //! every profile gets a skills directory of its own, `skills/` with its
 //! agent's own laid over it; a path relative to the repository (in mounts,
-//! config mounts and image arguments) becomes the checkout's; a secret with
-//! no source gets the secrets facility's file. The `daemon` section isn't
-//! the repository's: it is given.
+//! config mounts and image arguments) becomes the checkout's. Secrets are
+//! the gateway's providers, never the repository's: a `secrets.yaml` is
+//! refused.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -130,42 +129,19 @@ fn hash(bytes: &[u8], paths: &[PathBuf]) -> Result<String> {
         .collect())
 }
 
-/// Renders the checkout `repo` as zapper's config, with `daemon` as its
-/// daemon section, the profiles' skills directories made under `out`, and
-/// secrets without a source taking their files from `secrets`.
-pub fn render(repo: &Path, out: &Path, secrets: &Path, daemon: Value) -> Result<Rendered> {
+/// Renders the checkout `repo` as zapper's config, the profiles' skills
+/// directories made under `out`.
+pub fn render(repo: &Path, out: &Path) -> Result<Rendered> {
     let mut config = Map::new();
-    config.insert("daemon".into(), daemon);
 
     let policy = repo.join("policy.yaml");
     if policy.exists() {
         config.insert("policy".into(), load(&policy)?);
     }
 
-    let mut secret_map = Map::new();
-    let file = repo.join("secrets.yaml");
-    if file.exists() {
-        let s = load(&file)?;
-        for (name, mut entry) in s.as_object().cloned().unwrap_or_default() {
-            let e = entry
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("secrets.yaml: {name} isn't a map"))?;
-            if e.contains_key("value") {
-                bail!("secrets.yaml: {name} has its value inline: values never go in the repository, set it in the secrets facility");
-            }
-            let sourced = ["file", "env", "command"]
-                .iter()
-                .any(|k| e.contains_key(*k));
-            if !sourced {
-                e.insert(
-                    "file".into(),
-                    json!(secrets.join(&name).display().to_string()),
-                );
-            }
-            secret_map.insert(name, entry);
-        }
+    if repo.join("secrets.yaml").exists() {
+        bail!("secrets.yaml: secrets are the gateway's providers (openshell provider create), never the repository's");
     }
-    config.insert("secrets".into(), Value::Object(secret_map));
 
     let mut images = Map::new();
     let mut hashes = BTreeMap::new();
@@ -271,7 +247,6 @@ mod tests {
             std::fs::write(f, s).unwrap();
         };
         w("policy.yaml", "defaults: { net: deny, exec: allow }\n");
-        w("secrets.yaml", "claude: { hosts: [api.anthropic.com] }\nminted: { command: [mint], hosts: [h.example] }\n");
         w("images/office.yaml", "from: docker.io/library/ubuntu:26.04\nargs:\n  tools: { default: files/tools }\ncopy: [{ from: tools, to: /opt/tools }]\n");
         w("files/tools/x.sh", "echo 1\n");
         w("profiles/claude.yaml", "engine: { image: office }\nagent: { kind: claude-code }\nmounts:\n  - { host: \"{workdir}\", guest: /work, mode: rw }\n  - { host: files, guest: /files }\n");
@@ -298,7 +273,7 @@ mod tests {
 
     fn rendered(name: &str) -> (Rendered, PathBuf, PathBuf) {
         let (r, out) = repo(name);
-        let x = render(&r, &out, Path::new("/s"), json!({ "state": "~/s" })).unwrap();
+        let x = render(&r, &out).unwrap();
         (x, r, out)
     }
 
@@ -306,18 +281,7 @@ mod tests {
     fn each_file_goes_under_its_section_and_the_result_is_zappers_config() {
         let (x, r, _) = rendered("sections");
         let c = &x.config;
-        assert_eq!(c["daemon"]["state"], "~/s");
         assert_eq!(c["policy"]["defaults"]["net"], "deny");
-        assert_eq!(
-            c["secrets"]["claude"]["file"], "/s/claude",
-            "the facility's file"
-        );
-        assert_eq!(
-            c["secrets"]["minted"]["command"],
-            json!(["mint"]),
-            "a source of its own kept"
-        );
-        assert!(c["secrets"]["minted"].get("file").is_none());
         assert_eq!(
             c["images"]["office"]["args"]["tools"]["default"],
             r.join("files/tools").display().to_string()
@@ -363,13 +327,13 @@ mod tests {
     fn an_images_hash_follows_its_recipe_and_its_files() {
         let (x, r, out) = rendered("hash");
         let before = x.images["office"].clone();
-        let again = render(&r, &out, Path::new("/s"), json!({})).unwrap();
+        let again = render(&r, &out).unwrap();
         assert_eq!(
             again.images["office"], before,
             "the same commit, the same hash"
         );
         std::fs::write(r.join("files/tools/x.sh"), "echo 2\n").unwrap();
-        let changed = render(&r, &out, Path::new("/s"), json!({})).unwrap();
+        let changed = render(&r, &out).unwrap();
         assert_ne!(changed.images["office"], before, "a file it copies changed");
     }
 
@@ -378,8 +342,8 @@ mod tests {
         let cases = [
             (
                 "secrets.yaml",
-                "x: { value: s3cret, hosts: [h] }\n",
-                "values never go in the repository",
+                "x: { hosts: [h] }\n",
+                "secrets are the gateway's providers",
             ),
             (
                 "profiles/bad.yaml",
@@ -405,7 +369,7 @@ mod tests {
         for (i, (file, text, why)) in cases.iter().enumerate() {
             let (r, out) = repo(&format!("bad{i}"));
             std::fs::write(r.join(file), text).unwrap();
-            let e = render(&r, &out, Path::new("/s"), json!({})).err().unwrap();
+            let e = render(&r, &out).err().unwrap();
             assert!(format!("{e:#}").contains(why), "{file}: {e:#}");
         }
     }

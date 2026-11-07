@@ -42,7 +42,7 @@ Then start the example firm in the dashboard's Kickoff tab, or with `zapper-offi
 
 ## Status
 
-The office's unit tests run on an in-memory backend (`make test`). On a real gateway, phases 1 to 3 of [the migration](docs/openshell-migration.md) are built (sandboxes, the office edge and identity, the officers on drafted rules) and their gates are still to run; the cluster (phase 4: k3s in a sandbox of its own) and the end-to-end suite's port (phase 5) are next. The workbench, which ran on zapper's daemon, is out of the build until it is ported onto OpenShell ([workbench](docs/workbench.md)).
+The office's unit tests run on an in-memory backend (`make test`). On a real gateway, phases 1 to 3 of [the migration](docs/openshell-migration.md) are built (sandboxes, the office edge and identity, the officers on drafted rules) and their gates are still to run; the cluster (phase 4: k3s in a sandbox of its own) and the end-to-end suite's port (phase 5) are next. The [workbench](docs/workbench.md) is one person's drive, repository and sandbox templates beside OpenShell's own UI.
 
 ## License
 

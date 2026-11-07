@@ -198,7 +198,7 @@ async fn request(
         req = req.header(*k, *v);
     }
     let resp = sender
-        .send_request(req.body(Body::from(body.to_string())).unwrap())
+        .send_request(req.body(Full::<Bytes>::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let status = resp.status();

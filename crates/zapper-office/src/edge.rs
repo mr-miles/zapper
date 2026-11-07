@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::future::BoxFuture;
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde_json::Value;
@@ -91,7 +92,9 @@ impl Backend for OfficeBackend {
                 return plain(StatusCode::NOT_FOUND, "the firm has no git server");
             }
             let member = caller.labels.get("member").cloned().unwrap_or_default();
-            crate::facility::git_request_as(&run, &member, true, req).await
+            crate::facility::git_request_as(&run, &member, true, req)
+                .await
+                .map(|b| b.map_err(|n| match n {}).boxed())
         })
     }
 }

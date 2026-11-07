@@ -7,4 +7,4 @@
 - [Office reference](office.md): firms of AI workers, one sandbox each: mail and wake-ups, the shared drive, security officers, the cluster, the UI, replay.
 - [Office prompts](office-prompts.md): the preamble, wake prompts, follow-ups, officers' prompts and an example kickoff.
 - [OpenShell migration](openshell-migration.md): how the office moved from zapper's daemon onto OpenShell: the edge and identity, rules and drafted rules, the phases still to come.
-- [Workbench](workbench.md): `zapper-workbench`, which ran on zapper's daemon and waits to be ported onto OpenShell.
+- [Workbench](workbench.md): `zapper-workbench`, a drive and a repository for one person's OpenShell sandboxes, and the repository applied as their templates.

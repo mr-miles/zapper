@@ -1,3 +1,0 @@
-# The global policy layer: below every profile, for every session the
-# workbench applies this config to. Nothing leaves without a rule.
-defaults: { net: deny, exec: allow }
