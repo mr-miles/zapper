@@ -55,8 +55,8 @@ use zapper_api_types::{NewSession, ServiceSpec, SessionInfo, Status};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::{Frame, GuestFile, ShellRequest};
 use zapper_policy::{
-    expand_home, secret_refs, AnyRule, Config, Mount, NetRequest, NetRule, Policy,
-    ResolvedProfile, Scope,
+    expand_home, secret_refs, AnyRule, Config, Mount, NetRequest, NetRule, Policy, ResolvedProfile,
+    Scope,
 };
 
 use crate::client::{block, OfficeClient};
@@ -124,8 +124,8 @@ impl Settings {
     }
 
     pub fn load(path: &Path) -> Result<Settings> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Settings::from_yaml(&text).with_context(|| format!("loading {}", path.display()))
     }
 
@@ -191,9 +191,12 @@ impl OpenShell {
             cc.client_identity = Some(ClientIdentity::new(read(c)?, read(k)?));
         }
         cc.insecure_skip_verify = settings.insecure_skip_verify;
-        let sdk = OpenShellClient::connect(cc)
-            .await
-            .with_context(|| format!("connecting to the OpenShell gateway at {}", settings.gateway))?;
+        let sdk = OpenShellClient::connect(cc).await.with_context(|| {
+            format!(
+                "connecting to the OpenShell gateway at {}",
+                settings.gateway
+            )
+        })?;
         let health = sdk
             .health()
             .await
@@ -258,10 +261,9 @@ impl OpenShell {
             .map(|s| s.info.memory_mib as u64)
             .sum::<u64>()
             + resolved.engine.memory_mib as u64;
-        if let (Some(ratio), Some(total)) = (
-            config.daemon.memory_overcommit,
-            host_memory_mib("MemTotal"),
-        ) {
+        if let (Some(ratio), Some(total)) =
+            (config.daemon.memory_overcommit, host_memory_mib("MemTotal"))
+        {
             let limit = (total as f64 * ratio) as u64;
             if given > limit {
                 bail!(
@@ -312,7 +314,12 @@ impl OpenShell {
             // made again from it as it is.
             Err(SdkError::AlreadyExists { .. }) => {
                 self.sdk
-                    .delete_sandbox_template(&name, DeleteOptions { allow_missing: true })
+                    .delete_sandbox_template(
+                        &name,
+                        DeleteOptions {
+                            allow_missing: true,
+                        },
+                    )
                     .await
                     .with_context(|| format!("replacing template {name}"))?;
                 self.sdk
@@ -320,9 +327,7 @@ impl OpenShell {
                     .await
                     .with_context(|| format!("replacing template {name}"))?;
             }
-            Err(e) => {
-                return Err(anyhow::Error::from(e).context(format!("making template {name}")))
-            }
+            Err(e) => return Err(anyhow::Error::from(e).context(format!("making template {name}"))),
         }
         made.insert(name.clone(), from);
         Ok(name)
@@ -421,7 +426,14 @@ impl OpenShell {
         for cmd in &profile.setup {
             let argv = vec!["bash".to_string(), "-c".to_string(), cmd.clone()];
             let (code, _, err) = self
-                .exec(name, argv, env.clone(), String::new(), Vec::new(), SETUP_OUTPUT)
+                .exec(
+                    name,
+                    argv,
+                    env.clone(),
+                    String::new(),
+                    Vec::new(),
+                    SETUP_OUTPUT,
+                )
                 .await?;
             if code != 0 {
                 bail!("setup {cmd:?} exited {code}: {}", err.trim());
@@ -461,7 +473,14 @@ impl OpenShell {
         }
         let argv = ["sh", "-c", UNPACK, "sh", guest].map(String::from).to_vec();
         let (code, _, err) = self
-            .exec(name, argv, HashMap::new(), String::new(), tar.stdout, SETUP_OUTPUT)
+            .exec(
+                name,
+                argv,
+                HashMap::new(),
+                String::new(),
+                tar.stdout,
+                SETUP_OUTPUT,
+            )
             .await?;
         if code != 0 {
             bail!("exit {code}: {}", err.trim());
@@ -615,7 +634,9 @@ impl OfficeClient for OpenShell {
             let (env, workdir) = match self.boot(&name, &profile, &new).await {
                 Ok(booted) => booted,
                 Err(e) => {
-                    let gone = DeleteOptions { allow_missing: true };
+                    let gone = DeleteOptions {
+                        allow_missing: true,
+                    };
                     if let Err(d) = self.sdk.delete_sandbox(&name, gone).await {
                         tracing::warn!(sandbox = %name, "deleting it after a failed boot: {d}");
                     }
@@ -672,7 +693,12 @@ impl OfficeClient for OpenShell {
             }
             tracing::info!(sandbox = id, reason, "deleting the sandbox");
             self.sdk
-                .delete_sandbox(id, DeleteOptions { allow_missing: true })
+                .delete_sandbox(
+                    id,
+                    DeleteOptions {
+                        allow_missing: true,
+                    },
+                )
                 .await
                 .with_context(|| format!("deleting sandbox {id}"))?;
             Ok(())
@@ -780,7 +806,11 @@ impl OfficeClient for OpenShell {
         true
     }
 
-    fn add_decider_socket(&self, _sessions: BTreeMap<String, String>, _socket: &str) -> Result<u64> {
+    fn add_decider_socket(
+        &self,
+        _sessions: BTreeMap<String, String>,
+        _socket: &str,
+    ) -> Result<u64> {
         Ok(self.registered("the officers' decider"))
     }
 
@@ -1013,12 +1043,10 @@ where
         loop {
             let payload = match zapper_driver::read_frame(&mut r).await {
                 Ok(Some(Frame::Data(d))) => In::Stdin(d),
-                Ok(Some(Frame::Resize(rows, cols))) => {
-                    In::Resize(proto::ExecSandboxWindowResize {
-                        cols: cols.into(),
-                        rows: rows.into(),
-                    })
-                }
+                Ok(Some(Frame::Resize(rows, cols))) => In::Resize(proto::ExecSandboxWindowResize {
+                    cols: cols.into(),
+                    rows: rows.into(),
+                }),
                 Ok(Some(Frame::Eof)) => {
                     tx = None;
                     continue;
@@ -1147,12 +1175,16 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(rx.recv().await.is_none(), "Eof closes the command's stdin");
-        etx.send(event(Out::Stdout(proto::ExecSandboxStdout { data: big.clone() })))
-            .await
-            .unwrap();
-        etx.send(event(Out::Stderr(proto::ExecSandboxStderr { data: b"warn".to_vec() })))
-            .await
-            .unwrap();
+        etx.send(event(Out::Stdout(proto::ExecSandboxStdout {
+            data: big.clone(),
+        })))
+        .await
+        .unwrap();
+        etx.send(event(Out::Stderr(proto::ExecSandboxStderr {
+            data: b"warn".to_vec(),
+        })))
+        .await
+        .unwrap();
         etx.send(event(Out::Exit(proto::ExecSandboxExit { exit_code: 3 })))
             .await
             .unwrap();
@@ -1222,7 +1254,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.image("office"), "ghcr.io/acme/office:1");
-        assert_eq!(s.image("office-fake"), "localhost/zapper-openshell-office-fake");
+        assert_eq!(
+            s.image("office-fake"),
+            "localhost/zapper-openshell-office-fake"
+        );
         assert_eq!(s.ready_timeout(), READY_TIMEOUT);
     }
 
