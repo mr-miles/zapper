@@ -1,15 +1,14 @@
 # Lint, unit tests and the release build, as `make lint`, `make test` and
-# `make build` run them (the office with its OpenShell client); the release's
-# package, installed under a fresh home; and the pages' scripts.
-# The end-to-end tests need KVM, images and network, and stay local
-# (`make test-e2e`).
+# `make build` run them; the release's package, installed under a fresh
+# home; and the pages' scripts. End-to-end runs need an OpenShell gateway
+# and stay local.
 name: ci
 
 on:
   pull_request:
   push:
     # overlay is this fork's main line; main mirrors upstream.
-    branches: [main, overlay, feat/office-openshell]
+    branches: [main, overlay]
   workflow_dispatch:
 
 permissions:
@@ -59,11 +58,11 @@ jobs:
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
       - run: make build
-      # It runs as PID 1 in any image, so it must not need a dynamic loader.
-      - name: The guest agent is static
+      # The images copy it into any base, so it must not need a dynamic loader.
+      - name: The guest office command is static
         run: "! readelf -l target/release/zapper-agent | grep -q INTERP"
       # As the release job packages it, installed as a user would: under a
-      # home of its own, with Firecracker and the kernel downloaded.
+      # home of its own.
       - name: Package, and install under a fresh home
         run: |
           scripts/package.sh ci
@@ -75,21 +74,14 @@ jobs:
           sh "$pkg"/zapper-ci-*/install.sh
           conf="$HOME/.config/zapper"
           bin="$HOME/.local/bin"
-          "$bin/zapper" --version
-          test "$(stat -c %a "$conf/zapper.yaml")" = 600
-          test -x "$HOME/.local/share/zapper/bin/firecracker"
-          test -s "$HOME/.local/share/zapper/kernels/vmlinux-6.1"
+          "$bin/zapper-office" --help > /dev/null
           test -x "$bin/zapper-inspect"
-          test -x "$bin/zapper-office"
+          test -x "$bin/zapper-agent"
+          test -s "$conf/zapper.yaml"
+          test -s "$conf/office.yaml"
+          test -s "$conf/openshell.yaml"
           ls "$conf"/skills/*/SKILL.md
-          # No KVM or images here: check fails, but finds what was installed.
-          # Out of the checkout, whose config it would take.
-          (cd "$HOME" && "$bin/zapper" check) > "$RUNNER_TEMP/check.txt" || true
-          cat "$RUNNER_TEMP/check.txt"
-          grep -q "^ok     config $conf/zapper.yaml" "$RUNNER_TEMP/check.txt"
-          grep -q "^ok     firecracker at " "$RUNNER_TEMP/check.txt"
-          grep -q "^ok     zapper-agent next to zapper" "$RUNNER_TEMP/check.txt"
-          # Installing again keeps the config.
+          # Installing again keeps the configs.
           echo "# mine" >> "$conf/zapper.yaml"
           sh "$pkg"/zapper-ci-*/install.sh | tee "$RUNNER_TEMP/again.txt"
           grep -q "exists; not touching it" "$RUNNER_TEMP/again.txt"
@@ -98,7 +90,6 @@ jobs:
         with:
           name: zapper-${{ github.sha }}
           path: |
-            target/release/zapper
             target/release/zapper-agent
             target/release/zapper-inspect
             target/release/zapper-keeper
