@@ -1,17 +1,12 @@
 [package]
 name = "zapper-office"
-description = "The Office: firms of AI workers on zapper, a client of zapper-core's interface"
+description = "The Office: firms of AI workers in OpenShell sandboxes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 zapper-git = { path = "../zapper-git" }
-# zapper-core is a dev-dependency only: the office is a client of the daemon's
-# API (proposal 13, step 4), so production code reaches it through the socket
-# (client::Remote) and the serializable API types, never the in-process `Core`.
-# The in-process adapter (client::Local), the co-host `start`/`follow_rules`
-# and the `OfficeOf` trait are all `#[cfg(test)]`, exercised against a TestCore.
 zapper-client = { path = "../zapper-client" }
 zapper-util = { path = "../zapper-util" }
 zapper-driver = { path = "../zapper-driver" }
@@ -40,21 +35,15 @@ ring = "0.17"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-# The office on an OpenShell gateway instead of the zapper daemon (feature
-# `openshell`; docs/openshell-migration.md). Its proto build uses a vendored
-# protoc, so no system one is needed.
-openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.7", optional = true }
-
-[features]
-openshell = ["dep:openshell-sdk"]
+# The OpenShell gateway the office runs its firms on (docs/openshell-migration.md).
+# Its proto build uses a vendored protoc, so no system one is needed.
+openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.7" }
 
 [[bin]]
 name = "zapper-office"
 path = "src/main.rs"
 
 [dev-dependencies]
-zapper-core = { path = "../zapper-core", features = ["test-util"] }
-zapper-api = { path = "../zapper-api" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

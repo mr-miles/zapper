@@ -2,10 +2,8 @@
 //! fit beside the running ones, and the list of runs says how the live one
 //! is doing.
 
-use crate::OfficeOf;
-use zapper_core::prelude::*;
-use zapper_core::testing::TestCore;
-use zapper_core::NewSession;
+use crate::fake::TestCore;
+use zapper_api_types::NewSession;
 use zapper_policy::Policy;
 
 const FIRM: &str = "

@@ -64,7 +64,6 @@ impl Tools {
 /// Answers one tool list (`op` "tools") or call for a caller the office edge
 /// has verified: `call` names the sandbox and its labels as the office made
 /// them, never as the guest said.
-#[cfg(feature = "openshell")]
 pub(crate) async fn answer_verified(
     office: &Arc<crate::Office>,
     call: &McpCall,
@@ -79,7 +78,6 @@ pub(crate) async fn answer_verified(
 }
 
 /// What the office's MCP server tells a worker's harness about itself.
-#[cfg(feature = "openshell")]
 pub(crate) fn instructions() -> Option<String> {
     Tools::instructions_text()
 }

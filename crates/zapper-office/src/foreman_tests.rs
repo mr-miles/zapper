@@ -7,11 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::fake::Session;
+use crate::fake::{shell_vm, Shell, TestCore};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use zapper_core::testing::{shell_vm, Shell, TestCore};
-use zapper_core::Session;
 
 use crate::{test_run, FirmRun, WorkerState};
 
@@ -56,7 +56,7 @@ fn pats_foreman(run: &Arc<FirmRun>) -> tokio::sync::mpsc::UnboundedReceiver<Shel
 async fn tool(t: &TestCore, s: &Arc<Session>, name: &str, args: Value) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
     let (d, vm) = (t.core.clone(), s.clone());
-    tokio::spawn(async move { zapper_core::testing::mcp(&d, &vm, host).await });
+    tokio::spawn(async move { crate::fake::mcp(&d, &vm, host).await });
     let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
     guest
         .write_all(format!("office\n{call}\n").as_bytes())

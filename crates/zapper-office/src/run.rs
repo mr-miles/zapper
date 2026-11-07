@@ -4,15 +4,13 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-#[cfg(test)]
-use zapper_core::prelude::*;
 
+#[cfg(test)]
+use crate::fake::Core;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 use zapper_api_types::NewSession;
-#[cfg(test)]
-use zapper_core::Core;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 use zapper_util::now;
@@ -21,8 +19,6 @@ use crate::firm::{Firm, BOARD};
 use crate::history::RUN_CONFIG;
 use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
-#[cfg(test)]
-use crate::OfficeOf;
 use crate::{
     access, contracts, drive, facility, foreman, labels, ops, prompts, run_id, scenario, security,
     skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,

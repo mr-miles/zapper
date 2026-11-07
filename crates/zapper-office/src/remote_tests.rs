@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::fake::TestCore;
 use serde_json::{json, Value};
-use zapper_core::testing::TestCore;
 
 use super::{access, remote, test_run_remote, FirmRun};
 

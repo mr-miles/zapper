@@ -9,7 +9,6 @@ pub(crate) mod access;
 pub(crate) mod client;
 pub(crate) mod contracts;
 pub(crate) mod drive;
-#[cfg(feature = "openshell")]
 pub mod edge;
 pub(crate) mod facility;
 pub(crate) mod firm;
@@ -19,9 +18,7 @@ pub(crate) mod http;
 pub(crate) mod journal;
 mod kb;
 pub(crate) mod mail;
-#[cfg(feature = "openshell")]
 pub mod openshell;
-#[cfg(feature = "openshell")]
 mod openshell_rules;
 pub(crate) mod ops;
 pub(crate) mod plan;
@@ -53,8 +50,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-#[cfg(test)]
-use zapper_core::prelude::*;
 
 use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Result};
@@ -62,31 +57,13 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
 
-#[cfg(test)]
-use zapper_core::{Core, EventBody};
 use zapper_util::{now, random_id};
 
-/// The office's state in the core: its registry of runs. The co-host mount
-/// (`zapper::office`) used it to hand the office's own state to [`routes`];
-/// now the office is its own process (proposal 13, step 4) it builds its
-/// `Office` directly (`standalone::bootstrap`), so this is test-only — the
-/// office's unit tests reach the state a `TestCore` holds.
 #[cfg(test)]
-pub trait OfficeOf {
-    fn office(&self) -> Arc<Office>;
-}
-
-#[cfg(test)]
-impl OfficeOf for Core {
-    fn office(&self) -> Arc<Office> {
-        self.client()
-    }
-}
+use crate::fake::{Core, Session};
 use journal::Journal;
 use mail::{Draft, Kind};
 use zapper_api_types::SessionInfo;
-#[cfg(test)]
-use zapper_core::Session;
 
 /// Every firm's current or last run. `pub` as the office's own HTTP state
 /// (the axum `State` the firm routes extract), replacing `Core`; its fields
@@ -448,8 +425,13 @@ pub(crate) fn labels(
 /// the one that started the session.
 #[cfg(test)]
 pub(crate) fn run_of(office: &Office, s: &Session) -> Option<Arc<FirmRun>> {
-    let run = office.runs.read().unwrap().get(s.label("firm")?)?.clone();
-    (Some(run.id.as_str()) == s.label("run")).then_some(run)
+    let run = office
+        .runs
+        .read()
+        .unwrap()
+        .get(s.labels.get("firm")?)?
+        .clone();
+    (s.labels.get("run") == Some(&run.id)).then_some(run)
 }
 
 /// `20261016-140501-k3z`, sortable by time.
@@ -879,112 +861,20 @@ pub const ASSETS: &[(&str, &str)] = &[
     ("main.js", include_str!("ui/main.js")),
 ];
 
-/// The office in a starting daemon: runs a previous daemon left running are
-/// ended; the firms' role layers and their officers' standing approvals are
-/// rules the office keeps; the daemon stopping stops the firms.
-///
-/// This is the in-process (co-host) entry. Now the office is its own process
-/// (proposal 13, step 4), `zapper serve` no longer calls it; a standalone
-/// office boots over a `Remote` client instead (`standalone::serve`). Kept for
-/// the office's unit tests, which start it on a `TestCore`.
+/// An office on the in-memory backend (`fake`), for tests. Firms are the
+/// office's own config, so `firms:` is split out of the combined test YAML
+/// and written to `office.yaml` beside the zapper config, where the office
+/// loads it, as production does.
 #[cfg(test)]
-pub fn start(d: &Core) {
-    let office = d.office();
-    let _ = office.client.set(Arc::new(client::Local(d.clone())));
-    let _ = office.state_dir.set(d.state_dir().to_path_buf());
-    let _ = office.socket_dir.set(d.socket_dir());
-    // Firms are the office's own config: load them from `office.yaml` beside
-    // the daemon's config, as `standalone::serve` does in production (tests
-    // write it there — see `test_core`). A restart reloads it the same way.
-    let _ = office
-        .config_path
-        .set(d.startup_path().with_file_name("office.yaml"));
-    office.reload_firms().expect("loading the test office.yaml");
-    close_orphans(d.state_dir());
-    follow_rules(d);
-    d.on_shutdown(|d| {
-        Box::pin(async move {
-            let runs: Vec<_> = d.office().runs.read().unwrap().values().cloned().collect();
-            for r in runs {
-                down(&r, "daemon shutdown").await;
-            }
-        })
-    });
-}
-
-/// Applies a core `rule` event to the office's standing-approval record: a
-/// rule removed from a role's layer (`role:<firm>/…`) — by the operator, or
-/// `zapper` without the office — is dropped from that firm's run, so the two
-/// agree. The office's own revocations keep their records directly, so a
-/// `removed` event for a rule it no longer tracks is a no-op; so is any event
-/// that is not a role rule's removal.
-///
-/// Shared by the two followers of the same stream: the co-host
-/// [`follow_rules`] (the core's in-process broadcast) and the standalone
-/// [`standalone::follow_rules`] (the daemon's `/v1/events` SSE).
-pub(crate) fn forget_removed_role_rule(office: &Office, state: &str, id: &str, scope: &str) {
-    if state != "removed" {
-        return;
-    }
-    let Some(firm) = scope
-        .strip_prefix("role:")
-        .and_then(|r| r.split('/').next())
-    else {
-        return;
-    };
-    let run = office.runs.read().unwrap().get(firm).cloned();
-    if let Some(run) = run {
-        security::forget_standing(&run, id);
-    }
-}
-
-/// Follows the core's `rule` events in process (the co-host office), keeping
-/// the office's standing-approval record in step with the operator's edits
-/// through [`forget_removed_role_rule`].
-///
-/// Co-host only (called by [`start`]); test-gated with it. A standalone office
-/// follows the daemon's `/v1/events` SSE stream instead
-/// ([`standalone::follow_rules`]).
-#[cfg(test)]
-fn follow_rules(d: &Core) {
-    let Ok(h) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    let mut events = d.subscribe();
-    let office = d.office();
-    h.spawn(async move {
-        use tokio::sync::broadcast::error::RecvError;
-        loop {
-            match events.recv().await {
-                Ok(e) => {
-                    if let EventBody::Rule {
-                        state, id, scope, ..
-                    } = &e.body
-                    {
-                        forget_removed_role_rule(&office, state, id, scope);
-                    }
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
-}
-
-/// A core without VMs with the office started on it, for tests. Firms are the
-/// office's own config now, so `firms:` is split out of the combined test YAML
-/// (the daemon's `Config` no longer carries it) and written to `office.yaml`
-/// beside the daemon config, where `start` loads it — as production does.
-#[cfg(test)]
-pub(crate) fn test_core(yaml: &str) -> zapper_core::testing::TestCore {
+pub(crate) fn test_core(yaml: &str) -> fake::TestCore {
     test_core_daemon("", yaml)
 }
 
 /// `test_core` with extra `daemon:` lines (as `TestCore::with_daemon`).
 #[cfg(test)]
-pub(crate) fn test_core_daemon(daemon: &str, yaml: &str) -> zapper_core::testing::TestCore {
+pub(crate) fn test_core_daemon(daemon: &str, yaml: &str) -> fake::TestCore {
     let (daemon_yaml, office_yaml) = crate::firm::split_office_yaml(yaml);
-    let t = zapper_core::testing::TestCore::with_daemon(daemon, &daemon_yaml);
+    let t = fake::TestCore::with_daemon(daemon, &daemon_yaml);
     if let Some(office_yaml) = office_yaml {
         std::fs::write(t.startup().with_file_name("office.yaml"), office_yaml).unwrap();
     }
@@ -992,17 +882,26 @@ pub(crate) fn test_core_daemon(daemon: &str, yaml: &str) -> zapper_core::testing
     t
 }
 
+/// Starts the office on `d`: runs a previous office left running are ended,
+/// and the firms are loaded from `office.yaml` beside the zapper config.
 #[cfg(test)]
-mod approval_tests;
+pub(crate) fn start(d: &Core) {
+    let office = d.office();
+    let _ = office
+        .config_path
+        .set(d.startup_path().with_file_name("office.yaml"));
+    office.reload_firms().expect("loading the test office.yaml");
+    close_orphans(d.state_dir());
+}
+
+#[cfg(test)]
+pub(crate) mod fake;
 
 #[cfg(test)]
 mod examples_tests;
 
 #[cfg(test)]
 mod remote_tests;
-
-#[cfg(test)]
-mod names_tests;
 
 #[cfg(test)]
 mod run_tests;
@@ -1024,18 +923,18 @@ mod board_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::OfficeOf;
 
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {
         let t = super::test_core("profiles:\n  w: {}\n");
-        let mut new = zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default());
+        let mut new =
+            zapper_api_types::NewSession::plain("w".into(), t.workdir(), Default::default());
         new.labels = super::labels("acme", "r1", "pat", "", true);
         let worker = t.core.test_session(new, true).unwrap();
         let plain = t
             .core
             .test_session(
-                zapper_core::NewSession::plain("w".into(), t.workdir(), Default::default()),
+                zapper_api_types::NewSession::plain("w".into(), t.workdir(), Default::default()),
                 true,
             )
             .unwrap();

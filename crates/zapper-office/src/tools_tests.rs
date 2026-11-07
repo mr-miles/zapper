@@ -4,13 +4,13 @@
 //! money: the board's budget, a hire, funding, and a contract paid for.
 
 use std::sync::Arc;
-use zapper_core::prelude::*;
 
+use crate::fake::Session;
+use crate::fake::TestCore;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use zapper_core::testing::TestCore;
-use zapper_core::{NewSession, Session};
+use zapper_api_types::NewSession;
 use zapper_policy::{NetRequest, Policy};
 
 use crate::{labels, security, test_run, FirmRun};
@@ -59,7 +59,7 @@ async fn call(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value) -
     let s = session_of(run, who);
     let (host, mut guest) = UnixStream::pair().unwrap();
     let (d, vm) = (t.core.clone(), s.clone());
-    tokio::spawn(async move { zapper_core::testing::mcp(&d, &vm, host).await });
+    tokio::spawn(async move { crate::fake::mcp(&d, &vm, host).await });
     let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
     guest
         .write_all(format!("office\n{line}\n").as_bytes())
@@ -1142,7 +1142,7 @@ fn tar_of(files: &[(&str, &str)]) -> Vec<u8> {
 #[tokio::test]
 async fn work_is_published_from_one_vm_and_fetched_into_another() {
     let (t, run) = run();
-    let mut vm = zapper_core::testing::shell_vm(&session_of(&run, "pat"));
+    let mut vm = crate::fake::shell_vm(&session_of(&run, "pat"));
     // Publishing needs write on the space.
     let refused_first = refused(
         &t,
@@ -1244,7 +1244,7 @@ async fn work_is_published_from_one_vm_and_fetched_into_another() {
 async fn publish(
     t: &TestCore,
     run: &FirmRun,
-    vm: &mut tokio::sync::mpsc::UnboundedReceiver<zapper_core::testing::Shell>,
+    vm: &mut tokio::sync::mpsc::UnboundedReceiver<crate::fake::Shell>,
     who: &str,
     thread: &str,
     title: &str,
@@ -1269,7 +1269,7 @@ async fn publish(
 #[tokio::test]
 async fn a_tasks_work_is_found_by_its_thread_delegated_work_included() {
     let (t, run) = run();
-    let mut vm = zapper_core::testing::shell_vm(&session_of(&run, "ceo"));
+    let mut vm = crate::fake::shell_vm(&session_of(&run, "ceo"));
     // Task A: the CEO assigns pat, who delegates part of it to sec while
     // working on it (the new thread's context is task A's).
     let a = ok(

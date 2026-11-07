@@ -10,7 +10,7 @@ use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use zapper_core::testing::TestCore;
+use crate::fake::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -34,10 +34,7 @@ async fn call(t: &TestCore, method: Method, uri: &str, body: &str) -> (StatusCod
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let r = crate::routes(crate::OfficeOf::office(&t.core))
-        .oneshot(req)
-        .await
-        .unwrap();
+    let r = crate::routes(t.core.office()).oneshot(req).await.unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await

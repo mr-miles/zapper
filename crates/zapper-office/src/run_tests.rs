@@ -3,7 +3,6 @@
 //! firm's services and zone, and the office port's requests.
 
 use std::sync::Arc;
-use zapper_core::prelude::*;
 
 use crate::firm::BOARD;
 use base64::Engine as _;
@@ -15,9 +14,9 @@ use zapper_policy::{AnyRule, Policy};
 use super::access::{self, Level};
 use super::facility;
 use super::{labels, run_of, test_run, FirmRun};
-use crate::OfficeOf;
-use zapper_core::testing::TestCore;
-use zapper_core::{NewSession, Session};
+use crate::fake::Session;
+use crate::fake::TestCore;
+use zapper_api_types::NewSession;
 
 const FIRM: &str = "
 profiles:
@@ -217,91 +216,13 @@ fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     );
 }
 
-/// Where `host:port` goes for `s`, in words.
-fn route(t: &TestCore, s: &Session, host: &str, port: u16) -> String {
-    use zapper_core::ServiceTarget as Target;
-    match zapper_core::testing::route(&t.core, s, host, port) {
-        // The git server is now a TLS socket service the office serves.
-        Some(Some(Target::Socket { tls: true, .. })) => "git server".into(),
-        Some(Some(Target::Session { id, port })) => format!("session {id}:{port}"),
-        Some(Some(_)) => "other".into(),
-        Some(None) => "unserved".into(),
-        None => "host".into(),
-    }
-}
-
-#[test]
-fn the_firms_names_are_its_own() {
-    let (t, run) = run();
-    let d = run.domain.clone();
-    let pat = session_of(&run, "pat");
-    assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "git server");
-    assert_eq!(route(&t, &pat, &format!("git.{d}"), 80), "unserved");
-    // No cluster yet: its names are in the domain, unserved.
-    assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 6443), "unserved");
-    assert_eq!(route(&t, &pat, &format!("x.{d}"), 443), "unserved");
-    assert_eq!(route(&t, &pat, "example.com", 443), "host");
-
-    assert_eq!(
-        zapper_core::testing::resolves(&t.core, &pat, &format!("git.{d}")),
-        Some(true)
-    );
-    assert_eq!(
-        zapper_core::testing::resolves(&t.core, &pat, &format!("nope.{d}")),
-        Some(false)
-    );
-    assert_eq!(
-        zapper_core::testing::resolves(&t.core, &pat, "example.com"),
-        None
-    );
-
-    // Not a session of the run: the names are nothing to it.
-    let plain = t
-        .core
-        .test_session(
-            NewSession::plain("w".into(), t.workdir(), Policy::default()),
-            true,
-        )
-        .unwrap();
-    assert_eq!(route(&t, &plain, &format!("git.{d}"), 443), "host");
-}
-
-#[tokio::test]
-async fn the_cluster_serves_its_api_and_apps_until_the_run_stops() {
-    let (t, run) = run();
-    let d = run.domain.clone();
-    let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
-    new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
-    let cluster = t.core.test_session(new, true).unwrap();
-    facility::test_cluster(&t.core, &run, &cluster);
-    let pat = session_of(&run, "pat");
-    let c = &cluster.id;
-    assert_eq!(
-        route(&t, &pat, &format!("cluster.{d}"), 6443),
-        format!("session {c}:6443")
-    );
-    assert_eq!(
-        route(&t, &pat, &format!("apps.{d}"), 80),
-        format!("session {c}:80")
-    );
-    assert_eq!(
-        route(&t, &pat, &format!("shop.apps.{d}"), 443),
-        format!("session {c}:443")
-    );
-    assert_eq!(route(&t, &pat, &format!("cluster.{d}"), 443), "unserved");
-
-    facility::stop(&run).await;
-    assert!(t.core.services().is_empty(), "{:?}", t.core.services());
-    assert_eq!(route(&t, &pat, &format!("git.{d}"), 443), "host");
-}
-
 /// One request to the office's tools, as `s`'s VM makes it through the
 /// gateway: `{"op", "args"}` as a call of that tool (anything else as the
 /// line itself). The answer as `{"ok": ...}` or `{"error": "..."}`.
 async fn office(t: &TestCore, s: &Arc<Session>, request: &str) -> Value {
     let (host, mut guest) = UnixStream::pair().unwrap();
     let (d, vm) = (t.core.clone(), s.clone());
-    tokio::spawn(async move { zapper_core::testing::mcp(&d, &vm, host).await });
+    tokio::spawn(async move { crate::fake::mcp(&d, &vm, host).await });
     let line = match serde_json::from_str::<Value>(request) {
         Ok(v) if v.get("op").is_some() => json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -509,7 +430,7 @@ async fn the_office_server_introduces_itself() {
     let (t, run) = run();
     let (host, guest) = UnixStream::pair().unwrap();
     let (d, s) = (t.core.clone(), session_of(&run, "pat"));
-    tokio::spawn(async move { zapper_core::testing::mcp(&d, &s, host).await });
+    tokio::spawn(async move { crate::fake::mcp(&d, &s, host).await });
     let (r, mut w) = tokio::io::split(guest);
     w.write_all(
         b"office\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
@@ -532,9 +453,9 @@ async fn the_office_server_introduces_itself() {
 // Where the office meets the core: a restart, the operator's rule changes,
 // and the daemon stopping.
 
-/// A daemon started again on `t`'s config and state, as after a restart.
-fn restart(t: &TestCore) -> zapper_core::Core {
-    let d = zapper_core::Core::start(t.startup()).unwrap();
+/// An office started again on `t`'s config and state, as after a restart.
+fn restart(t: &TestCore) -> crate::fake::Core {
+    let d = t.core.reopen();
     crate::start(&d);
     d
 }
@@ -559,66 +480,8 @@ fn a_restart_ends_the_runs_the_daemon_left_running() {
     assert_eq!(last["reason"], "the daemon stopped", "{last}");
 }
 
-/// The `config` events of `worker`'s session: what changed in its rules.
-fn rule_changes(t: &TestCore, run: &FirmRun, worker: &str) -> Vec<String> {
-    let s = session_of(run, worker);
-    t.core
-        .recent_events(Some(&s.id))
-        .into_iter()
-        .map(|e| e.view())
-        .filter(|e| e["type"] == "rule")
-        .map(|e| e["summary"].as_str().unwrap_or_default().to_string())
-        .collect()
-}
-
-/// What the office puts in a worker's own rules (an officer's approval for
-/// them, the network a credential grant needs) is in their session's audit
-/// log, added and removed, like any session rule.
-#[test]
-fn a_workers_own_rules_from_the_office_are_in_their_audit_log() {
-    use super::access::Level;
-    use super::security::{self, DecideArgs};
-    let (t, run) = run();
-    let session = format!("session:{}", session_of(&run, "pat").id);
-    let req = zapper_policy::NetRequest {
-        host: "api.example".into(),
-        port: 443,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
-    let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
-    let decide = DecideArgs {
-        allow: true,
-        scope: "worker".into(),
-        reason: "pat's work".into(),
-        methods: None,
-        path: None,
-        expires_in: None,
-    };
-    security::decide(&run, BOARD, &id, decide).unwrap();
-    let rule = security::standing(&run)[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    security::revoke(&run, BOARD, &rule, "done").unwrap();
-
-    facility::network_follows_grant(&run, "pat", "git:api", Level::Write);
-    facility::network_follows_grant(&run, "pat", "git:api", Level::None);
-
-    assert_eq!(
-        rule_changes(&t, &run, "pat"),
-        [
-            format!("rule {rule} added to {session}"),
-            format!("rule {rule} removed from {session}"),
-            format!("rule credentials-git-api added to {session}"),
-            format!("rule credentials-git-api removed from {session}"),
-        ]
-    );
-}
-
 #[tokio::test]
-async fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
+async fn an_officers_approval_for_a_role_is_a_rule_of_the_roles_until_revoked() {
     use super::security::{self, DecideArgs};
     let (t, run) = run();
     let req = zapper_policy::NetRequest {
@@ -647,34 +510,17 @@ async fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
         .as_str()
         .unwrap()
         .to_string();
-    let role = zapper_policy::Scope::Role("acme/eng".into());
-    let in_layers = |t: &TestCore| {
+    let in_layer = |t: &TestCore| {
         t.core
-            .rule_layers()
-            .into_iter()
-            .any(|(s, p)| s == role && p.rules().iter().any(|r| r.id() == Some(rule.as_str())))
+            .layer("acme/eng")
+            .rules()
+            .iter()
+            .any(|r| r.id() == Some(rule.as_str()))
     };
-    assert!(in_layers(&t), "listed with the role's layer");
-
-    // The operator (or `zapper` without the office) removes it through the
-    // core: gone from the layer at once (enforcement),
-    assert!(matches!(
-        t.core.remove_rule(&rule).unwrap(),
-        zapper_core::RuleRemoval::Revoked
-    ));
-    assert!(!in_layers(&t));
-    // and the office, following the core's `rule` event, drops its own
-    // record of it so the two agree (eventually, across the stream).
-    for _ in 0..200 {
-        if security::standing(&run).is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(
-        security::standing(&run).is_empty(),
-        "the office forgot the standing approval"
-    );
+    assert!(in_layer(&t), "in the role's layer");
+    security::revoke(&run, BOARD, &rule, "done").unwrap();
+    assert!(!in_layer(&t), "gone from it");
+    assert!(security::standing(&run).is_empty());
     let revoked = journal(&run)
         .into_iter()
         .any(|e| e["type"] == "access" && e["event"] == "revoked" && e["rule"] == rule.as_str());
@@ -682,7 +528,7 @@ async fn an_officers_approval_for_a_role_is_a_rule_the_operator_can_revoke() {
 }
 
 #[tokio::test]
-async fn the_daemon_stopping_ends_its_firms() {
+async fn the_office_stopping_ends_its_firms() {
     let (t, run) = run();
     t.core.shutdown().await;
     assert!(run.ended());

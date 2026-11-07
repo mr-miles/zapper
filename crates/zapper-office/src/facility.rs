@@ -22,10 +22,6 @@ use zapper_policy::{Config, Policy};
 use super::prompts::Services;
 use super::FirmRun;
 use zapper_api_types::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
-#[cfg(test)]
-use zapper_core::Core;
-#[cfg(test)]
-use zapper_core::Session;
 use zapper_util::random_id;
 
 /// Ports the cluster VM forwards from vsock to itself.
@@ -158,15 +154,6 @@ pub fn register(run: &Arc<FirmRun>) -> Result<()> {
         *run.facility.git.lock().unwrap() = Some(guard);
     }
     Ok(())
-}
-
-/// For tests: `cluster` as the run's cluster, as `start` makes it once it
-/// has booted.
-#[cfg(test)]
-pub(crate) fn test_cluster(core: &Core, run: &FirmRun, cluster: &Arc<Session>) {
-    use zapper_core::SessionApi;
-    *run.facility.cluster.lock().unwrap() = Some(core.session_info(cluster));
-    register_cluster(run, &cluster.id).unwrap();
 }
 
 /// The cluster's API and the apps it serves, as services of the firm's
@@ -1158,43 +1145,6 @@ mod tests {
             v["items"][4]["metadata"]["annotations"]
                 ["traefik.ingress.kubernetes.io/router.priority"],
             "1"
-        );
-    }
-
-    const FIRM: &str = "
-profiles:
-  w:
-    agent: { kind: claude-code }
-firms:
-  acme:
-    roles:
-      ceo: { profile: w, agent: ceo }
-    workers:
-      - { name: ceo, role: ceo }
-    git: { repos: [api] }
-";
-
-    /// Starting the run wires the firm's zone and git service through the
-    /// office's client; the daemon's registry holds them.
-    #[tokio::test]
-    async fn register_wires_the_firms_zone_and_git_service() {
-        use zapper_core::ServiceApi;
-        let t = crate::test_core(FIRM);
-        let run = crate::test_run(&t.core, "acme");
-        let services = t.core.services();
-        assert!(
-            services.iter().any(|s| s.name == run.domain),
-            "zone {} not registered: {:?}",
-            run.domain,
-            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        );
-        let git = format!("git.{}", run.domain);
-        assert!(
-            services
-                .iter()
-                .any(|s| s.name == git && s.port == Some(443)),
-            "git service {git} missing: {:?}",
-            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
     }
 }

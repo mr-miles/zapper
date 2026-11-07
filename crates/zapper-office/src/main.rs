@@ -1,20 +1,13 @@
-//! `zapper-office`: the office as a process of its own, a client of the
-//! zapper daemon's API over its unix socket (proposal 13, step 4), the way
-//! `zapper-workbench` is. It drives firms over the daemon's API (`Remote`
-//! `OfficeClient`) and serves its own dashboard; `zapper serve` spawns it
-//! under `OFFICE=1` (P4-d).
-//!
-//! The office never crosses the VM boundary — it is a client of the daemon's
-//! API — so this path is validated by unit tests against a `TestCore`-backed
-//! API, not KVM. `make test-e2e-office` on a real host is the final gate.
+//! `zapper-office`: The Office, its firms' workers in sandboxes of an
+//! OpenShell gateway (`docs/openshell-migration.md`). It serves its
+//! dashboard, the board's actions and its CLI's socket, and the office edge
+//! the workers reach its tools and git through.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use hyper::Method;
-use zapper_client::{socket_path, Zapper};
 
 mod cli;
 mod firm_cli;
@@ -26,7 +19,10 @@ use cli::Client;
 const OFFICE_EXAMPLE: &str = include_str!("../../../config/office.yaml");
 
 #[derive(Parser)]
-#[command(name = "zapper-office", about = "The Office as a process of its own")]
+#[command(
+    name = "zapper-office",
+    about = "The Office: firms of AI workers on OpenShell"
+)]
 struct Cli {
     /// Print API responses as JSON.
     #[arg(long, global = true)]
@@ -41,25 +37,23 @@ fn default_listen() -> SocketAddr {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the office's own dashboard and board actions, driving firms over
-    /// the zapper daemon's socket.
+    /// Serve the office: its dashboard and the board's actions, with firms
+    /// run on the OpenShell gateway `openshell.yaml` names.
     Serve {
         /// Where to listen. Default: 127.0.0.1:8099.
         #[arg(long)]
         listen: Option<SocketAddr>,
-        /// The daemon's `state` directory (firms' runs live under
-        /// `state/firms/`). The office and daemon share it by convention.
-        /// Default: the `daemon.state` of the config (`config/zapper.yaml`,
-        /// else `~/.config/zapper/zapper.yaml`; `$ZAPPER_CONFIG` overrides).
+        /// The office's `state` directory (firms' runs live under
+        /// `state/firms/`). Default: the `daemon.state` of the config
+        /// (`config/zapper.yaml`, else `~/.config/zapper/zapper.yaml`;
+        /// `$ZAPPER_CONFIG` overrides).
         #[arg(long)]
         state_dir: Option<PathBuf>,
-        /// The daemon's `state/services` directory, where the office binds its
-        /// facilities' sockets. Default: `<state_dir>/services`.
+        /// Where the office binds its sockets. Default: `<state_dir>/services`.
         #[arg(long)]
         socket_dir: Option<PathBuf>,
-        /// Drive firms on an OpenShell gateway instead of the zapper daemon,
-        /// with the settings in this file (`openshell.yaml`: the gateway,
-        /// its TLS, images and providers). Needs the `openshell` feature.
+        /// The OpenShell settings: the gateway, its TLS, images, providers
+        /// and the edge. Default: `openshell.yaml` beside the config.
         #[arg(long)]
         openshell: Option<PathBuf>,
     },
@@ -141,19 +135,14 @@ async fn main() -> Result<()> {
             socket_dir,
             openshell,
         } => {
-            // Default to the daemon's config: its `state` dir, and `services`
-            // under it — so `zapper-office serve` needs no args beside the same
-            // config the daemon reads.
             let state_dir = match state_dir {
                 Some(d) => d,
                 None => cli::daemon_state_dir()?,
             };
             let socket_dir = socket_dir.unwrap_or_else(|| state_dir.join("services"));
             let listen = listen.unwrap_or_else(default_listen);
-            match openshell {
-                Some(settings) => serve_openshell(listen, &settings, state_dir, socket_dir).await,
-                None => serve(listen, state_dir, socket_dir).await,
-            }
+            let settings = openshell.unwrap_or_else(|| cli::config_dir().join("openshell.yaml"));
+            serve(listen, &settings, state_dir, socket_dir).await
         }
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
@@ -164,10 +153,9 @@ async fn main() -> Result<()> {
     }
 }
 
-/// The office on an OpenShell gateway: profiles from the zapper config (as
-/// the daemon would read it), sandboxes from the gateway in `settings`.
-#[cfg(feature = "openshell")]
-async fn serve_openshell(
+/// The office on an OpenShell gateway: profiles from the zapper config,
+/// sandboxes from the gateway in `settings`.
+async fn serve(
     listen: SocketAddr,
     settings: &std::path::Path,
     state_dir: PathBuf,
@@ -181,9 +169,10 @@ async fn serve_openshell(
     let tcp = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
+    // Loopback listeners get the strict Host check; off-loopback loosens it.
     let remote = !listen.ip().is_loopback();
     let office_config = cli::office_config_path();
-    zapper_office::standalone::serve_openshell(
+    zapper_office::standalone::serve(
         tcp,
         std::sync::Arc::new(os),
         state_dir,
@@ -192,43 +181,4 @@ async fn serve_openshell(
         remote,
     )
     .await
-}
-
-#[cfg(not(feature = "openshell"))]
-async fn serve_openshell(
-    _listen: SocketAddr,
-    _settings: &std::path::Path,
-    _state_dir: PathBuf,
-    _socket_dir: PathBuf,
-) -> Result<()> {
-    bail!("this zapper-office was built without OpenShell: build it with `--features openshell`")
-}
-
-async fn serve(listen: SocketAddr, state_dir: PathBuf, socket_dir: PathBuf) -> Result<()> {
-    // Confirm the daemon is reachable over its socket before serving.
-    let zapper = Zapper::new(socket_path());
-    let answer = zapper
-        .call(Method::GET, "/v1/sessions", None)
-        .await
-        .context("reaching the zapper daemon")?;
-    if !answer.status.is_success() {
-        bail!(
-            "the zapper daemon answered {} for /v1/sessions",
-            answer.status
-        );
-    }
-    eprintln!(
-        "zapper-office: connected to the daemon at {}",
-        socket_path().display()
-    );
-
-    let tcp = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding {listen}"))?;
-    // Loopback listeners get the strict Host check; off-loopback loosens it,
-    // as the daemon's `daemon.ui` does.
-    let remote = !listen.ip().is_loopback();
-    let office_config = cli::office_config_path();
-    zapper_office::standalone::serve(tcp, zapper, state_dir, socket_dir, office_config, remote)
-        .await
 }

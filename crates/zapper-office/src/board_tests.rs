@@ -1,12 +1,11 @@
 //! The board's mail through the office's routes, as the UI and the CLI
 //! use them: sending, its inbox and anyone's, a thread, marking mail read.
 
+use crate::fake::TestCore;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
-use zapper_core::prelude::*;
-use zapper_core::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -27,10 +26,7 @@ async fn call(t: &TestCore, method: Method, uri: &str, body: Value) -> (StatusCo
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let r = crate::routes(crate::OfficeOf::office(&t.core))
-        .oneshot(req)
-        .await
-        .unwrap();
+    let r = crate::routes(t.core.office()).oneshot(req).await.unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await
