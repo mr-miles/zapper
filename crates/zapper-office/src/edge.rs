@@ -165,8 +165,8 @@ impl Edge {
                 return not_allowed("POST");
             }
             return match read_body(req, MAX_FORM).await {
-                Ok(body) => self.grant(&body).await,
-                Err(r) => r,
+                Some(body) => self.grant(&body).await,
+                None => plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
             };
         }
         let mcp = path == "/mcp";
@@ -203,8 +203,8 @@ impl Edge {
                 return not_allowed("POST");
             }
             return match read_body(req, MAX_MCP).await {
-                Ok(body) => self.mcp(&caller, &body).await,
-                Err(r) => r,
+                Some(body) => self.mcp(&caller, &body).await,
+                None => plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
             };
         }
         // `/git/<repo>.git/...` is `/<repo>.git/...` to the git server.
@@ -539,18 +539,13 @@ impl Backend for OfficeBackend {
     }
 }
 
-/// Reads a request's body, up to `max` bytes.
-async fn read_body(
-    req: Request<Incoming>,
-    max: usize,
-) -> std::result::Result<Bytes, Response<Body>> {
-    match http_body_util::Limited::new(req.into_body(), max)
+/// Reads a request's body, up to `max` bytes; `None` past that.
+async fn read_body(req: Request<Incoming>, max: usize) -> Option<Bytes> {
+    http_body_util::Limited::new(req.into_body(), max)
         .collect()
         .await
-    {
-        Ok(b) => Ok(b.to_bytes()),
-        Err(_) => Err(plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large")),
-    }
+        .ok()
+        .map(|b| b.to_bytes())
 }
 
 /// An `application/x-www-form-urlencoded` body's fields.
