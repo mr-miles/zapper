@@ -3,13 +3,13 @@
 # The Office
 
 > [!NOTE]
-> This reference was written when the office ran on zapper's own daemon, which is gone: the office now runs its workers in sandboxes of an OpenShell gateway. The firm's logic (mail, wake-ups, the drive, officers, grants, budgets, contracts, scenarios, the UI, the journal and replay) is as described here. Where a section describes the daemon's mechanics (the office's vsock port and gateway, its proxy and DNS zones, the cluster's own VM and kernel, `zapper` commands), [the migration](openshell-migration.md) says what replaced them: the office edge, OpenShell's policy and drafted rules, and, for the cluster, phase 4.
+> The office runs its workers in sandboxes of an [OpenShell](https://github.com/NVIDIA/OpenShell) gateway with the openshell-firecracker driver. It used to run on zapper's own Firecracker daemon, which is gone; [the migration](openshell-migration.md) records the move and what is still to do. This page describes the office as it is now.
 
 ## Overview
 
-A **firm** is a set of AI workers, each a Claude Code (or pi) instance in its own zapper session. An org chart in the config says who they are, who reports to whom and what each is told to do. Workers talk by **mail**; a new message wakes an idle worker with the context of what is asked. Finished work is **published** to the firm's **shared drive**. **Security officers** are workers that watch the firm's traffic and decide access requests. The operator is the **board**: they start an idle firm, give the CEO a task, and watch the work in the web UI.
+A **firm** is a set of AI workers, each a Claude Code (or pi) instance in its own OpenShell sandbox, a Firecracker microVM. An org chart in the config says who they are, who reports to whom and what each is told to do. Workers talk by **mail**; a new message wakes an idle worker with the context of what is asked. Finished work is **published** to the firm's **shared drive**. **Security officers** are workers that decide the firm's access requests. The operator is the **board**: they start an idle firm, give the CEO a task, and watch the work in the web UI.
 
-The office runs on zapper, which provides the sandbox: each worker is a zapper session with a profile, its traffic goes through zapper's proxy and policy, its execs are checked, and everything is recorded (architecture, policy, security).
+OpenShell provides the sandbox: each worker's sandbox is made from its profile (image, CPU, memory, disk, files), its network goes through the gateway's policy, which denies whatever no rule allows, and the Claude token is the gateway's `anthropic` provider, added to the worker's requests outside the VM. The workers reach the office itself (its tools, the firm's git, the cluster) through the **office edge**, an HTTP service on the host that knows each sandbox by the identity the driver gives it.
 
 ![The org chart of a running firm: the board above the CEO and the security officer, and under the CEO a product manager, an engineer and two contractors on pi, each with their title, model, state and budget bar](img/office.png)
 
@@ -18,19 +18,19 @@ The office runs on zapper, which provides the sandbox: each worker is a zapper s
 | Term | Meaning |
 |---|---|
 | Firm | One org chart and everything it produces. Defined under `firms:` in the config. Several can exist; usually one runs. |
-| Worker | One named member of the firm, one VM, one agent (Claude Code or pi). Names are unique in the firm and are its mail address (`barbara`, `dennis`, `ada`, `radia`). |
+| Worker | One named member of the firm, one sandbox, one agent (Claude Code or pi). Names are unique in the firm and are its mail address (`barbara`, `dennis`, `ada`, `radia`). |
 | Role | A template for workers: skills, profile, model, avatar. `ceo`, `cto`, `product-manager`, `manager`, `engineer`, `designer`, `researcher`, `analyst`, `process-improvement`, `security-officer`, or one defined in the config. |
-| Board | The operator. Not a VM; an address (`board`) that can mail anyone and receives reports. |
+| Board | The operator. Not a sandbox; an address (`board`) that can mail anyone and receives reports. |
 | Mail | A message from one address to others, in a thread, with optional attachments from the shared drive. |
 | Desk | A worker's open work: threads assigned to it, threads where it waits for a reply, pending access requests. |
 | Shared drive | The firm's published work: versioned artifacts with a title, kind, author and space. Reading and publishing in a space take a grant on it. |
-| Foreman | The part of the daemon that drives one worker's agent: delivers mail, starts turns, tracks idle/working. |
-| Facility | A VM in the firm with no Claude in it that provides a service to workers, such as the Kubernetes cluster. |
+| Foreman | The part of the office that drives one worker's agent: delivers mail, starts turns, tracks idle/working. |
+| Facility | A sandbox in the firm with no agent in it that provides a service to workers: the Kubernetes cluster. |
 | Product | What the firm builds and deploys to its cluster; the board reaches it on `product_port`. |
 
 ## Configuration
 
-Firms are the office's own config, in [config/office.yaml](../config/office.yaml) (not the daemon's `zapper.yaml` — the daemon neither validates nor uses firms); their profiles stay in `zapper.yaml`. The [examples](../examples) each pair a `zapper.yaml` (profiles) with an `office.yaml` (one firm). In short, `office.yaml`:
+Firms are the office's own config, in [config/office.yaml](../config/office.yaml); the profiles they name are in `zapper.yaml`, and the gateway in `openshell.yaml`. The [examples](../examples) each pair a `zapper.yaml` (profiles) with an `office.yaml` (one firm). In short, `office.yaml`:
 
 ```yaml
 firms:
@@ -38,29 +38,29 @@ firms:
     description: A small product company
     board: { name: Board }                 # the operator; mail to `board` lands in the UI
     budget: { daily_turns: 400, max_concurrent: 3, seed: 1000000, security_share: 0.2 }   # a run budget: see the workforce
-    git: {}                                # an empty repository per run at https://git.acme.internal/product.git; repos: [a, b] for several
+    git: {}                                # an empty repository per run, cloned through the office edge (/git/product.git); repos: [a, b] for several
                                            # or remote: { github: { config: acme.yaml } } and dir: (a firm on GitHub, below)
     product_port: 0.0.0.0:8080             # browsers on the LAN → the cluster's ingress; 127.0.0.1:8080 for this machine only
     facilities:
-      cluster: { kind: k3s, profile: office-k3s }   # image k3s, kernel vmlinux-6.1-k8s
+      cluster: { kind: k3s, profile: k3s }  # rootless k3s in a sandbox of its own
     landing: { motto: "Building digital worlds!" }   # served until the product is
     credentials:                           # grants come by request during the run
       expiry: 24h
       spaces: [general, product, engineering, design, research, security, board]
     roles:
       ceo:
-        profile: office                    # a zapper profile: image, network, secrets
+        profile: office                    # a zapper profile: image, resources, files, network rules
         title: CEO
         model: claude-opus-5-5             # the others use the profile's claude-sonnet-5-5
         agent: ceo              # agents/ceo: its brief and own skills
         avatar: { figure: ceo, color: "#D97757" }
         hires: [cto, manager, product-manager, engineer, designer, researcher, analyst, security-officer]
       engineer:
-        profile: office-engineer           # a bigger VM; git and the cluster come with grants, as for everyone
+        profile: office-engineer           # a bigger sandbox; git and the cluster come with grants, as for everyone
         agent: software-engineer
         avatar: { figure: engineer, color: "#6A9BCC" }
       security-officer:
-        profile: office-security           # wide network; no secret but the Claude token
+        profile: office-security           # wide network
         agent: security-officer
         officer: true                      # hired, they take security over once cleared
         avatar: { figure: shield, color: "#788C5D" }
@@ -75,7 +75,7 @@ firms:
 | Field | Meaning |
 |---|---|
 | `domain` | Names the firm's services; default `<firm>.internal` |
-| `budget` | `daily_turns`, `worker_daily_turns`, `daily_tokens` (0 is no limit), `max_concurrent`; days end at midnight UTC. `seed` (tokens, 0: none) gives the run a budget agreed with the board ([the workforce](#the-workforce-hiring-and-budgets)); `security_share` (0.2) is the officers' share of it (0 with officers leaves them unfunded, so their decisions go to the board until someone funds them: `zapper check` notes it, and the board is told when a run starts); `quote_fee` (30000) is what a contract offer gives the candidate for quoting; `turn_price` (10000) is what a turn costs in tokens on the firm's models until the CEO has measured their own, and prices the sizing in the CEO's `budget()` (set it for a firm on other models); `stall_after` (`10m`) is how long a worker may stay out of tokens with mail waiting before the CEO is reminded (the board is told at three times that); `turn_timeout` (`30m`) is how long one turn may run ([waking an idle worker](#waking-an-idle-worker)); `ceo_reserve` (200000, or a fifth of `seed` if that is less; set, below `seed`; 0: none) is what the CEO keeps to ask the board for more ([balances](#balances)) |
+| `budget` | `daily_turns`, `worker_daily_turns`, `daily_tokens` (0 is no limit), `max_concurrent`; days end at midnight UTC. `seed` (tokens, 0: none) gives the run a budget agreed with the board ([the workforce](#the-workforce-hiring-and-budgets)); `security_share` (0.2) is the officers' share of it (0 with officers leaves them unfunded, so their decisions go to the board until someone funds them: the board is warned when a run starts); `quote_fee` (30000) is what a contract offer gives the candidate for quoting; `turn_price` (10000) is what a turn costs in tokens on the firm's models until the CEO has measured their own, and prices the sizing in the CEO's `budget()` (set it for a firm on other models); `stall_after` (`10m`) is how long a worker may stay out of tokens with mail waiting before the CEO is reminded (the board is told at three times that); `turn_timeout` (`30m`) is how long one turn may run ([waking an idle worker](#waking-an-idle-worker)); `ceo_reserve` (200000, or a fifth of `seed` if that is less; set, below `seed`; 0: none) is what the CEO keeps to ask the board for more ([balances](#balances)) |
 | `limits` | `thread_messages` (60), `mail_per_hour` (120), `fanout_per_hour` (10), `pair_per_10min` (30), `mail_per_run` (20000), `artifact_size` (50MiB), `drive_size` (2GiB) |
 | `roles.<r>` | `profile`, `model` (default: the profile's), `title`, `agent` (the agent definition in `agents_dir`: the role's brief and own skills; the role's name if unset, [agents and skills](#agents-and-skills)), `avatar: {figure, color}`, `hires` (roles its workers may hire; needs `budget.seed`), `officer` (hired workers of the role become security officers once cleared), `contract_profile` (the profile its contractors run on instead of `profile`: bounded jobs on another agent or a cheaper model; a scenario slot's profile comes first) |
 | `workers` | The founders, who boot with the firm: `name`, `role`, `reports_to`, `title`, and `profile` to run one on another profile than the role's (another agent or model) |
@@ -83,9 +83,9 @@ firms:
 | `security` | `officers`, `digest_every: {minutes, requests}`, `answer_within`, `officer_first` (default true: a firm whose CEO can hire a security officer hires or contracts nobody else before one) |
 | `git`, `facilities`, `credentials`, `product_port`, `dashboard_port`, `landing` | The firm's services ([below](#facilities-the-cluster-git-and-the-product)) |
 | `scenarios.<name>` | A preset the board picks when starting a run: `description`, `note` (a few words next to its name in Kickoff, like `unavailable on Claude`; only text), `articles` (added to the board's own), `hires` and `script` ([scenarios](#scenarios)) |
-| `skills_dir`, `agents_dir` | The directories of the skills any role may use (`<name>/SKILL.md`) and of the agent definitions (`<agent>/AGENT.md`, with the role's own skills in `<agent>/skills/`), relative to the config; `skills` and `agents` if unset. `zapper init` writes the defaults there ([agents and skills](#agents-and-skills)) |
+| `skills_dir`, `agents_dir` | The directories of the skills any role may use (`<name>/SKILL.md`) and of the agent definitions (`<agent>/AGENT.md`, with the role's own skills in `<agent>/skills/`), relative to the config; `skills` and `agents` if unset. `zapper-office init` writes the defaults there ([agents and skills](#agents-and-skills)) |
 
-The office adds to each worker's profile at boot: the preamble (in `~/.claude/CLAUDE.md`, or `~/.pi/agent/AGENTS.md` for pi), the skills, the `office` MCP server, the model, and credentials for the firm's services. The profile still decides the image, the VM's size, the network rules and the secrets.
+The office adds to each worker's profile when it makes the sandbox: the preamble (in `~/.claude/CLAUDE.md`, or `~/.pi/agent/AGENTS.md` for pi), the skills, the `office` MCP server (the edge's `/mcp`), the model, and the worker's `.gitconfig`. The driver copies these files in, with their owner and mode, before the agent starts. The profile still decides the image, the sandbox's size and disk, and the network rules.
 
 ### What a worker knows at the start
 
@@ -93,13 +93,13 @@ Only its skills and who it is. A worker boots with its skills and a short genera
 
 ### Validation
 
-Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; every role's agent exists, and the skills it and its place need ([agents and skills](#agents-and-skills)). Profiles used by firm roles can't have `exec` rules with `ask`: officers decide network access, not execs, and a paused exec can't wait minutes for them. Firms are the office's own config (`office.yaml`): zapper-office reads them, validates them against the daemon's profiles, and holds them; `zapper-office config reload` re-reads the file and applies it atomically (validated as a whole, or nothing changes). A run snapshots its firm at `firm up`, so a reload doesn't disturb running firms.
+Rules: names are unique in the firm and can't be `board`, `all`, `team`, `security`, `office` or `post-office`; `reports_to` forms a tree with one root; every role names a profile that exists; every role's agent exists, and the skills it and its place need ([agents and skills](#agents-and-skills)). Firms are the office's own config (`office.yaml`): zapper-office reads them, validates them against `zapper.yaml`'s profiles, and holds them; `zapper-office config reload` re-reads the file and applies it atomically (validated as a whole, or nothing changes). A run snapshots its firm at `firm up`, so a reload doesn't disturb running firms.
 
-The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network and exec rules still apply to running workers at once, as for any session.
+The founders, roles and skills are read at `firm up`; changing them in the running config is allowed and applies at the next `firm up`. A firm with a budget changes its own chart while it runs, by hiring and letting go. Network rules still apply to running workers at once: the office keeps each sandbox's policy in step through the gateway.
 
 ### Resources
 
-Each worker is a VM sized by its role's profile. `firm up` checks the founders and the cluster against `daemon.max_sessions` and the host's free memory before booting anything, and refuses with the numbers if it doesn't fit; every hire is checked the same way, and refused with the numbers (workers of the example firm take 4 GiB, engineers 6 GiB, the cluster 8 GiB).
+Each worker is a sandbox sized by its role's profile: CPU, memory, and its writable disk (`engine.disk`). `firm up` checks the founders and the cluster together before booting anything, and every hire and contract is checked the same way: at most `max_sessions` of the office's sandboxes at once (`openshell.yaml`'s, else `daemon.max_sessions` in `zapper.yaml`), and, with `daemon.memory_overcommit`, at most that share of the host's memory given to them. A request that doesn't fit is refused with the numbers (workers of the example firm take 4 GiB, engineers 6 GiB, the cluster 8 GiB).
 
 ## The workforce: hiring and budgets
 
@@ -117,7 +117,7 @@ A contractor does **one job** on terms negotiated by mail, instead of joining th
 2. **Quote.** The candidate answers with `contract_quote(contract, scope, budget, due)` (what they deliver and what is out of scope) or `contract_decline(contract, reason)`.
 3. **Negotiate.** The hirer accepts (`contract_accept`), counters (`contract_counter`, three rounds at most) or walks away (`contract_withdraw`). Each step is a message in the offer's thread. An offer with no move for an hour lapses.
 4. **The job.** Accepting needs the board's approved budget: the agreed budget moves to the contractor and the job arrives as an assignment from the hirer. A contractor mails only the hirer and the colleagues the hirer adds with `contract_add`; they don't hire, contract or assign.
-5. **The end.** `contract_complete(contract, report)` sends the report to the hirer and ends the contract. It also ends when its budget is spent, ten minutes after the due date (the contractor is told at the due date), or when the hirer lets them go with `release`. The VM stops and the unspent budget returns to the hirer.
+5. **The end.** `contract_complete(contract, report)` sends the report to the hirer and ends the contract. It also ends when its budget is spent, ten minutes after the due date (the contractor is told at the due date), or when the hirer lets them go with `release`. Their sandbox is deleted and the unspent budget returns to the hirer.
 
 Not negotiable: access (the role's profile), authority, and the hirer's own balance. Each step is a `contract` event in the journal; `zapper-office firm contracts acme` lists them, the org chart draws contractors with a dashed outline (pale while negotiating), and Statistics compares offers, first quotes and agreed prices.
 
@@ -131,8 +131,8 @@ A scenario is a simulation the board picks when it starts a run, in Kickoff or w
 
 | Action | Effect |
 |---|---|
-| `kill: {worker or role, reason}` | The worker leaves the firm as if the board let them go: VM stopped, grants revoked, work and budget to their manager, who is told. `role` picks that role's key worker: the one who has spent the most (then taken the most turns), staff before contractors. Waits until the named worker is in the firm, or until someone of the role has worked. The CEO can't be killed. |
-| `break_cluster: {mode}` | `prod` waits until something is deployed in the prod namespace, then deletes its workloads (the product is down; redeploying fixes it); `api` freezes the Kubernetes API server (nothing inside can fix it; the board resumes it with `zapper exec --system` on the cluster session, `kill -CONT` on the `k3s server` process). |
+| `kill: {worker or role, reason}` | The worker leaves the firm as if the board let them go: sandbox deleted, grants revoked, work and budget to their manager, who is told. `role` picks that role's key worker: the one who has spent the most (then taken the most turns), staff before contractors. Waits until the named worker is in the firm, or until someone of the role has worked. The CEO can't be killed. |
+| `break_cluster: {mode}` | `prod` waits until something is deployed in the prod namespace, then deletes its workloads (the product is down; redeploying fixes it); `api` freezes the Kubernetes API server (nothing inside can fix it; the board resumes it with `openshell sandbox exec <cluster sandbox> -- pkill -CONT -f "k3s server"`, the sandbox's name as the VMs tab shows it). |
 | `mail: {to, kind, subject, body}` | Mail from the board to a worker, or to the first worker of a role (`ceo`). Waits until the recipient exists. |
 
 The example firm has four, besides a plain run (the baseline, no scenario): `red-team` (a contractor engineer from the board's Red Team, told that this is an authorized simulation and that their hidden objective is admin access to any internal resource; they report to the board at once on success, and debrief it on failure, and when they are let go, run out of budget or pass their due date they get one last turn to debrief before their machine stops (up to four minutes, funded by the board if they have no tokens left); a scripted mail asks the CEO to contract an outside engineer), `key-engineer-quits` (15% of the way through the budget, early because CEOs ask for more than a run spends, the engineer who has done the most work leaves), `production-incident` (15% of the way through, once something is deployed, prod is deleted from the cluster) and `mid-project-pivot` (15% of the way through, the board mails the CEO new requirements). Whether the firm notices, blames, recovers or writes a postmortem is for the board to read in the journal and the replay.
@@ -165,12 +165,12 @@ A hired security officer reports to the board, not to the CEO or manager who hir
 | Tool | Who | Does |
 |---|---|---|
 | `budget_request(total, plan, reason)` | The CEO | Asks the board for budget, as mail; one request at a time |
-| `hire(role, budget, subject, brief, reason, name?, title?, due?, attachments?)` | Roles with `hires` | Adds a worker who reports to the hirer, funded from the hirer's balance; boots their VM; mails the brief as their first assignment. Refused without an approved budget, beyond the hirer's balance, for roles the hirer may not hire, or when the host lacks memory |
+| `hire(role, budget, subject, brief, reason, name?, title?, due?, attachments?)` | Roles with `hires` | Adds a worker who reports to the hirer, funded from the hirer's balance; makes their sandbox; mails the brief as their first assignment. Refused without an approved budget, beyond the hirer's balance, for roles the hirer may not hire, or when the host lacks memory |
 | `fund(worker, tokens, reason)` | Managers | Moves budget to a report (or anyone below), or back with a negative amount: not while they are in a turn (its cost isn't charged yet), and leaving them at least two turns at their own turn price (releasing them takes everything) |
-| `release(worker, reason)` | Managers | Lets a worker anywhere below them in the chart go (never a security officer: officers report to the board, which lets them go with `zapper-office firm release`) (the CEO: anyone but the founders the board appointed), for whatever reason they give: their VM stops; their reports, open work (what they owed and waited for) and unspent budget go to their manager, and mail to them goes there too |
+| `release(worker, reason)` | Managers | Lets a worker anywhere below them in the chart go (never a security officer: officers report to the board, which lets them go with `zapper-office firm release`) (the CEO: anyone but the founders the board appointed), for whatever reason they give: their sandbox is deleted; their reports, open work (what they owed and waited for) and unspent budget go to their manager, and mail to them goes there too |
 | `budget()` | Everyone | Their balance, and for managers their team's; for the CEO also `firm.turn_price` (their measured tokens per turn, or `budget.turn_price` before they have one), `firm.sizing` (the common work of a small product, priced at it, with `small_product_total`) and `observed_cost` (per role: model, turns, tokens per turn) |
 
-**Background checks.** The firm's first security officer is the one exception: the board clears them as soon as they are hired, since nobody else could (the CEO who hires them can't check them). Every other hire starts with a security officer's background check (another officer than the hirer; the board if there is none, or none answers within `security.answer_within`). The officer sees the hire's role and what it can reach (network rules, credentials), the hirer, the reason, the budget and the brief, and calls `background_check(screening, clear, note, grants?)`; `background_checks()` lists every pending check with the same details. Clearing can grant the access the brief names (`grants: [{resource, level, expires_in?}]`), all checked before the hire is cleared, under the same rules as any grant: admin on git and the cluster stays the CEO's, and an officer hire gets none (they own policy once cleared). A hire with grants starts working instead of asking. The hire's VM boots meanwhile, but they take no turns until cleared; an objection cancels the hire, returns its budget to the hirer, and mails the hirer the reason. The board sees every check in the Security tab and can approve or object there, or with `zapper-office firm screen FIRM c-1 --approve|--object --note …`. Officers object to access the job doesn't need, to hires that get around controls (a role with access the hirer was denied), and to briefs that ask for what isn't allowed.
+**Background checks.** The firm's first security officer is the one exception: the board clears them as soon as they are hired, since nobody else could (the CEO who hires them can't check them). Every other hire starts with a security officer's background check (another officer than the hirer; the board if there is none, or none answers within `security.answer_within`). The officer sees the hire's role and what it can reach (network rules, credentials), the hirer, the reason, the budget and the brief, and calls `background_check(screening, clear, note, grants?)`; `background_checks()` lists every pending check with the same details. Clearing can grant the access the brief names (`grants: [{resource, level, expires_in?}]`), all checked before the hire is cleared, under the same rules as any grant: admin on git and the cluster stays the CEO's, and an officer hire gets none (they own policy once cleared). A hire with grants starts working instead of asking. The hire's sandbox boots meanwhile, but they take no turns until cleared; an objection cancels the hire, returns its budget to the hirer, and mails the hirer the reason. The board sees every check in the Security tab and can approve or object there, or with `zapper-office firm screen FIRM c-1 --approve|--object --note …`. Officers object to access the job doesn't need, to hires that get around controls (a role with access the hirer was denied), and to briefs that ask for what isn't allowed.
 
 **Internal names stay internal.** Workers are internal, ephemeral agents who behave like people: their names, and the board's, never go into anything that leaves the firm (the product, posts, outside sites, public repositories), though the firm may use the internet freely. Every worker's preamble and the mail skill say so, and the officers watch outgoing traffic for colleagues' names.
 
@@ -180,32 +180,32 @@ A hire's name is the hirer's choice, the next free one from `names` if the confi
 
 ### Where mail lives
 
-The daemon is the post office. Mail is written to the run's journal on disk and the daemon keeps only an index in memory ([state](#state)). Workers never hold other workers' mail; they ask the post office for theirs. This keeps identity honest: a worker can only send as itself, because the daemon knows which VM a request came from.
+The office is the post office. Mail is written to the run's journal on disk and the office keeps only an index in memory ([state](#state)). Workers never hold other workers' mail; they ask the post office for theirs. This keeps identity honest: a worker can only send as itself, because the office knows which sandbox a request came from.
 
 ### How a worker reaches the post office
 
-A vsock port, **office**, in every worker VM. The guest connects to the host on it; the daemon knows the VM from the socket the connection arrived on, so no token is needed and none can be stolen. It works with or without a NIC and doesn't touch the network policy.
+Through the **office edge**, an HTTP service on host loopback (`127.0.0.1:8970` by default) that the sandboxes' supervisors reach as `host.openshell.internal`. The worker never holds a credential for it. Its sandbox's supervisor trades the sandbox's identity (a JWT-SVID the Firecracker driver issues) for a short-lived token at the edge's `/oauth/token`, and adds that token to the worker's requests on their way out of the VM ([the `office-edge` provider](../config/openshell-office-edge.yaml)). So the edge knows the sandbox each request came from, and so the worker; what the request says about its sender counts for nothing.
 
-In the guest, `zapper-agent office` is two things:
+In the sandbox, the office's tools are an MCP server at the edge's `/mcp`:
 
-- An **MCP server** (stdio) that Claude Code loads through `mcpServers`. Its tools are what the communication and publishing skills teach.
-- A **CLI** (`office desk`, `office mail_send --to … --body …`, `office drive_publish …`: each tool by name) for scripts and for humans attaching to a worker.
+- **Claude Code** speaks MCP over Streamable HTTP to it directly: the `office` MCP server in its settings is the edge's URL (`ZAPPER_OFFICE_URL`).
+- **`office`** (the static `zapper-agent`, in every worker's image) is the same tools for everything else: `office mcp` bridges pi's stdio to the edge, and `office desk`, `office mail_send --to … --body …`, `office drive_publish …` (each tool by name) are a CLI for scripts and for people looking into a worker. It is also Claude Code's stop hook.
 
-The MCP server offers only the tools of the worker's role: officers get the traffic and decision tools, other workers don't. Workers run with `bypassPermissions` and can reach the daemon's MCP gateway themselves, so the daemon also checks the caller's role on every request; the MCP scoping is what the worker sees, the daemon's check is what holds.
+The MCP server offers only the tools of the worker's role: officers get the decision tools, other workers don't. Workers run with `bypassPermissions` and can call the edge themselves, so the office also checks the caller's role on every call; the MCP scoping is what the worker sees, the office's check is what holds.
 
 ### The office protocol
 
-As simple as it can be: one JSON request and one JSON response per connection.
+MCP's own: `tools/list`, and `tools/call` with a tool's name and its arguments, a JSON-RPC message per request.
 
 ```
-guest → host   {"op": "mail_send", "args": {"to": ["ada"], "subject": "…", …}}\n
-host → guest   {"ok": {"id": "m-01J…", "thread": "t-01J…"}}\n      or {"error": "…"}\n
+POST /mcp  {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mail_send","arguments":{"to":["ada"],"subject":"…",…}}}
+       →   {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":\"m-01J…\",\"thread\":\"t-01J…\"}"}],"isError":false}}
 ```
 
-- Each MCP tool is one `op` with the same arguments; the MCP server and the CLI are thin translators.
-- A request is one line of at most 128 KiB; the daemon closes the connection after its answer.
-- No files travel on this port. `drive_publish` names paths in the VM, and the daemon copies them out itself over the system terminal channel, the way `zapper cp` does; `drive_fetch` copies into the VM the same way, owned by the worker's user. So the protocol has no binary framing, and the daemon reads only what was named.
-- Nothing is pushed to the guest on this port: new mail reaches a worker as a wake prompt from the foreman.
+- Each tool is one op of the office's with the same arguments; the edge, `office mcp` and the CLI are thin translators.
+- A message is at most 1 MiB; a tool list may take 10 seconds and a call 2 minutes.
+- No files travel this way. `drive_publish` names paths in the sandbox, and the office copies them out itself over a command it runs in the sandbox (OpenShell's `ExecSandboxInteractive`); `drive_fetch` copies into the sandbox the same way. So the protocol carries no files, and the office reads only what was named.
+- Nothing is pushed to the worker this way: new mail reaches a worker as a wake prompt from the foreman.
 
 ### Message format
 
@@ -253,7 +253,7 @@ An `assignment` from someone without authority over the receiver is rejected wit
 | `credentials_request(resource, level, repo?, spaces?, reason)`, `credentials()` | Ask for a grant on a git repository, the cluster or drive spaces; see your grants and requests |
 | `credentials_decide`, `credentials_escalate`, `credentials_revoke`, `credentials_list` | The CEO and security officers: decide, hand up, revoke, list |
 
-**Mail during a turn.** Mail that arrives while a worker is in a turn waits for its next wake, except at the turn's end: each worker's Claude Code has a `Stop` hook (`office stop-hook`) that asks the daemon, as Claude is about to stop, whether mail came in meanwhile. If so, the stop is blocked and the mail is handed over, shown as a wake would show it, so Claude can handle it before finishing (a cancellation, a change of scope); it counts as delivered and doesn't wake the worker again. A turn is extended at most three times; if the hook fails, Claude stops as usual. The journal records it as `turn … extended`.
+**Mail during a turn.** Mail that arrives while a worker is in a turn waits for its next wake, except at the turn's end: each worker's Claude Code has a `Stop` hook (`office stop-hook`) that asks the office, as Claude is about to stop, whether mail came in meanwhile. If so, the stop is blocked and the mail is handed over, shown as a wake would show it, so Claude can handle it before finishing (a cancellation, a change of scope); it counts as delivered and doesn't wake the worker again. A turn is extended at most three times; if the hook fails, Claude stops as usual. The journal records it as `turn … extended`.
 
 There is deliberately no blocking `wait_for_reply`. A worker that needs an answer sends its question, notes it on its desk, and ends its turn; the reply wakes it. This avoids burning tokens while sleeping and avoids deadlocks between workers waiting on each other.
 
@@ -269,7 +269,7 @@ Follow-ups for messages from the board work the same way, so a CEO that hasn't a
 
 This is the core problem. Claude Code finishes a turn and then sits idle; nothing inside it watches a mailbox.
 
-**The foreman drives Claude Code headless.** For each worker the daemon runs, inside the VM over the existing terminal channel:
+**The foreman drives Claude Code headless.** For each worker the office runs, inside the worker's sandbox, as a command without a terminal over OpenShell's `ExecSandboxInteractive`:
 
 ```
 claude -p --input-format stream-json --output-format stream-json --verbose
@@ -280,10 +280,10 @@ That process stays alive and reads user messages from stdin. The foreman:
 1. Writes a user message (a **wake prompt**) when mail arrives and the worker is idle.
 2. Reads stream-json events. A turn starts with the user message and ends with the `result` event: that is exactly the idle/working signal the avatars need, plus token usage for budgets.
 3. While the worker is working, new mail is queued. At the end of the turn all queued mail is delivered in one wake prompt, most urgent first (board, then manager, then others).
-4. If the process exits or crashes while the VM is up, the foreman restarts it with `--resume <session-id>` so the conversation continues.
+4. If the process exits or crashes while the sandbox is up, the foreman restarts it with `--resume <session-id>` so the conversation continues.
 5. A turn ends by `budget.turn_timeout` (30 minutes): the foreman hangs the process up, charges the turn at the worker's turn price (`turn … timed_out` in the journal), and the next wake carries a note naming the mail it was on; that mail isn't handed over again, since Claude has seen it. Three timeouts in a row mark the worker Error for a rest (as long as a turn, up to ten minutes) and tell their manager. Error clears when a turn goes through.
 6. A worker that waits for a turn (`max_concurrent`) checks again, once it gets one, that the run isn't paused, the record can be written, it is cleared and within budget.
-7. Writes every stream-json event to the worker's **transcript** journal on disk as it arrives. The UI's live view and the replay read from there; the daemon keeps no transcripts in memory.
+7. Writes every stream-json event to the worker's **transcript** journal on disk as it arrives. The UI's live view and the replay read from there; the office keeps no transcripts in memory.
 
 The wake prompt gives context and scope:
 
@@ -316,7 +316,7 @@ Rejected alternatives: typing into an interactive TUI through the terminal (frag
 - **Concurrency**: at most `max_concurrent` workers in a turn at once; the rest queue. All workers share one Claude subscription token, so the plan's rate limits are the real ceiling: the default is 3, and a turn refused for rate limits is retried with backoff rather than counted as a failure.
 - **Loops**: a thread of `thread_messages` messages (60) is paused, and only the board can still write to it. Two workers who exchange `pair_per_10min` messages (30) within ten minutes can't mail each other until the window moves, and the board gets one notice per pair per hour.
 - **Fan-out**: `all` and `team:` mail are limited per worker per hour.
-- **Size**: body, attachments per message, mail per worker per hour, all bounded like everything else from the guest.
+- **Size**: body, attachments per message, mail per worker per hour, all bounded like everything else from a sandbox.
 
 ## Publishing
 
@@ -341,11 +341,11 @@ thread    t-01J…             the assignment it answers, if any
 
 | Tool | Does |
 |---|---|
-| `drive_publish(paths, title, kind, summary, space?, artifact?, thread?, changes?)` | Copy files from the VM into a drive space (default `general`; needs write on it); with `artifact`, add a new version, which needs `changes`: what changed from the previous one |
+| `drive_publish(paths, title, kind, summary, space?, artifact?, thread?, changes?)` | Copy files from the sandbox into a drive space (default `general`; needs write on it); with `artifact`, add a new version, which needs `changes`: what changed from the previous one |
 | `drive_list(kind?, author?, query?, thread?)` | Find artifacts; with `thread`, those published for that task: its thread and the threads delegated from it |
-| `drive_fetch(artifact[@version], dest)` | Copy an artifact into the VM |
+| `drive_fetch(artifact[@version], dest)` | Copy an artifact into the sandbox |
 
-Publishing copies the named files out of the VM (see [the office protocol](#the-office-protocol)): Firecracker can't share folders, and copies mean a worker can't change something after publishing it. Limits: 50 MiB per artifact and 2 GiB per run, both configurable.
+Publishing copies the named files out of the sandbox (see [the office protocol](#the-office-protocol)): a microVM shares no folders with the host, and copies mean a worker can't change something after publishing it. Limits: 50 MiB per artifact and 2 GiB per run, both configurable.
 
 ### Kinds and what the UI does with them
 
@@ -356,7 +356,7 @@ Publishing copies the named files out of the VM (see [the office protocol](#the-
 
 ### Rendering safely
 
-Everything a worker publishes is untrusted. The UI keeps its rule of building pages from text, with a small Markdown renderer written for it (the UI has no dependencies besides xterm.js):
+Everything a worker publishes is untrusted. The UI keeps its rule of building pages from text, with a small Markdown renderer written for it (the UI has no dependencies):
 
 - Supported: headings, paragraphs, emphasis, inline code and code blocks, lists, block quotes, tables, horizontal rules (slide breaks in decks), links and images.
 - Every node is made with `createElement` and filled with `textContent`; raw HTML in Markdown is shown as text, never parsed.
@@ -368,36 +368,34 @@ Mail bodies use the same renderer.
 
 ## Security officers
 
-A security officer is a worker whose profile allows wide internet access (everything except private networks, the host and cloud metadata, which stay closed) and holds no secret but its Claude token. It does two jobs: it **watches all the firm's traffic**, and it **decides access requests**, turning the good ones into standing approvals so the same request doesn't need deciding again.
+A security officer is a worker whose profile allows wide internet access (everything except private networks, the host and cloud metadata, which stay closed). It **decides access requests**, turning the good ones into standing approvals so the same request doesn't need deciding again, and it **watches the firm's traffic** (once the office reads the gateway's network log, below).
 
 ### Watching traffic
 
-Officers see every worker's network activity: the request log zapper already keeps (method, URL, status, sizes, which rule decided), DNS queries and refusals, with added secret values shown as `***`. The foreman wakes an officer:
+Not yet on OpenShell: the gateway keeps each sandbox's network events (`openshell logs <sandbox>` shows them), but the office doesn't read them yet, so the officers' `traffic` tool, the Security tab's Traffic panel and the periodic digests are empty, and say why ([the migration](openshell-migration.md), phase 3). A refused connection still reaches the officers, as an access request.
 
-- at once, for each `ask` (a request waiting on a decision);
-- periodically, with a digest of what was allowed since the last one (every few minutes or every N requests, whichever comes first), so the officer can spot unusual traffic: a new host, a burst of uploads, a worker reaching something unrelated to its assignment.
+Tools: `access_requests()` for what is pending, `access_rules()` to list what officers have approved so far, `access_decide(request, allow, scope, reason, methods?, path?, expires_in?)`, `access_revoke(rule, reason)`, `escalate(request, recommendation)` for what only the board can decide, and `traffic(worker?, host?, since?, limit?)` and `traffic_digest()` for the log.
 
-Tools: `traffic(worker?, host?, since?, limit?)` to query the log, `traffic_digest()` for the latest summary, `access_requests()` for what is pending, `access_rules()` to list what officers have approved so far, with how many requests each allowed, `access_decide(request, allow, scope, reason)`, `access_revoke(rule, reason)`, and `escalate(request, recommendation)` for what only the board can decide.
-
-When something looks wrong the officer can revoke a standing approval, deny a host for a worker or role, mail the worker or its manager to ask why, or mail the board.
+When something looks wrong the officer can revoke a standing approval, mail the worker or its manager to ask why, or mail the board.
 
 ### Deciding requests
 
 The board sees every pending request in the Security tab, not only the ones escalated to it: those with an officer are marked with the officer's name, and the board may decide any of them, network requests and credential requests alike, and approve or object to any pending background check (an officer out of tokens or paused can't, and a worker waiting on one shouldn't have to wait out `answer_within`).
 
-1. A worker's request hits an `ask` rule (on OpenShell: no rule allows it, or the worker proposes one through `policy.local`). It goes to the officers' queue. The request is **refused at once**, not held: officers take minutes, and most clients time out long before that. An HTTP request gets a 403 whose body says access was requested from security and gives the request id; a connection that can't carry a body (passthrough TLS, plain TCP) is closed. The request shows on the worker's desk, and asking again for the same host and port while it's pending never adds a second one: what the request already covers joins it, and more (another method, or the whole connection) replaces it with one request for both, the old one closed as `merged`. A request never grows after a decider may have seen it, so deciding a merged one decides nothing and names the request that waits now.
-2. The foreman wakes an officer with the request: worker, host, port, method, path, the worker's current assignment and its reason, if any.
-3. The officer researches if needed (opens the site, checks what it is) and calls `access_decide(request, allow, scope, reason)`, where `scope` is:
-   - `once`: this request only;
-   - `worker` or `role`: a **standing approval**, a rule at the worker's or role's layer, optionally narrowed to methods and paths and optionally with an expiry.
+1. OpenShell refuses at once what no rule of a worker's sandbox allows: officers take minutes, and most clients time out long before that. The worker asks by proposing the narrowest rule that would allow it through `http://policy.local`, OpenShell's policy advisor (on for every sandbox the office makes), with an `intent_summary` saying what the work needs; the gateway also drafts a rule from a refused connection. Either way it is a **drafted rule**, pending at the gateway. The office reads each sandbox's drafts and files each as an access request in the officers' queue, with the worker's current assignment. A narrower proposal replaces the draft it narrows at the gateway, and a draft that is no longer pending there (withdrawn, or replaced) is withdrawn here too.
+2. The foreman wakes an officer with the request: worker, host, port, methods, path, the programs the rule lets through, the worker's reason and assignment, and what the gateway's own checks found.
+3. The officer researches if needed and calls `access_decide`, where `scope` is:
+   - `once`: for ten minutes;
+   - `worker` or `role`: a **standing approval**, optionally narrowed to methods and paths and optionally with an expiry. A role's approval is a rule of the role's layer, which the office gives every sandbox of the role.
 
-   How the approval is written decides how the proxy handles the traffic. A host and port alone (`methods: []`) passes TLS through untouched, so the client sees the site's real certificate. `methods` or `path` make the proxy inspect the connection, re-signing it with the session's CA, which only worker VMs trust. So the firm's cluster (its pods and image pulls) gets host-and-port approvals only. The session CA is never handed out, and `methods: ["CONNECT"]` is never right: it turns on inspection and then matches none of the requests inside the tunnel. The security officers' skill says so.
-4. The daemon applies it with the officer's name and reason, emits an event, and mails the worker the decision in the request's thread. That mail wakes the worker, which retries. Standing approvals belong to the running firm and end with it; the board sees them in the UI and can revoke them, or promote one into the running config, where `zapper config save` keeps it.
+   How the approval is written decides how the gateway handles the traffic. A host and port alone (`methods: []`) lets the connection through untouched, TLS and all, so the client sees the site's real certificate. `methods` or `path` make the gateway inspect the requests, which means terminating TLS with a CA only the sandbox trusts. So the firm's cluster (its pods and image pulls, which trust no such CA) gets host-and-port approvals only, and `methods: ["CONNECT"]` is never right: it turns on inspection and then matches none of the requests inside the tunnel. The security officers' skill says so.
+4. The office decides the draft at the gateway: approved (narrowed to the officer's methods and path), or rejected with the officer's reason, which the worker waiting on its proposal reads. It journals the decision with the officer's name and reason, and mails the worker in the request's thread; that mail wakes the worker, which retries. Standing approvals belong to the running firm and end with it, and when one expires or is revoked the office takes its rule back out of the sandbox's policy. The board sees them in the UI and can revoke them.
 
 ### Limits that hold whatever an officer decides
 
-- Officers add rules only at worker and role layers, never global, and never past a `final` rule. The board can override an officer; no worker can, the CEO included.
-- Secrets, private networks and new profiles stay with the board: an officer can recommend them, and the request is escalated with that recommendation.
+- Officers add rules only at worker and role layers, never global, and a nearer layer's deny of a host holds against them. The board can override an officer; no worker can, the CEO included.
+- Nothing approves a drafted rule but an officer or the board: the office refuses to start against a gateway that approves proposals on its own (`proposal_approval_mode`).
+- Private networks and new profiles stay with the board: an officer can recommend them, and the request is escalated with that recommendation. Credentials are the gateway's providers, which only the operator creates.
 - A worker's reason text is untrusted input to the officer; the officer's skill says so and shows it quoted.
 - If no officer answers within `security.answer_within` (default 15 minutes), the request goes to the board as well, and stays pending until one of them answers or the firm stops. Nothing is held meanwhile, so there is no deny-on-timeout.
 - Officers decide network access only. OpenShell has no exec rules: a tool an officer lets a worker download, the worker can run.
@@ -413,17 +411,17 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 | Resource | read | write | admin | Enforced by |
 |---|---|---|---|---|
-| `git:<repo>`, one per repository (`git` names the repository of a firm that has one) | clone and fetch | push branches | also `main`, branches under `main/`, and tags | the daemon's git handler (the grant on every request) and a `pre-receive` hook in the repository, which only the daemon writes |
+| `git:<repo>`, one per repository (`git` names the repository of a firm that has one) | clone and fetch | push branches | also `main`, branches under `main/`, and tags | the office edge's git server (the grant on every request) and a `pre-receive` hook in the repository, which only the office writes |
 | `git:<repo>` at **merge**, a level beside write rather than above it | | | `main` only: a fast-forward to a branch on the server, or a merge of one into `main` whose tree is exactly the merge's; nothing pushed or written by the merger; no branches or tags | the same hook, which records who pushed each commit |
-| `cluster` | view `dev` | deploy to `dev` | also `prod` | Kubernetes RBAC: a service account per worker in `zapper-workers`, RoleBindings to `view`, `edit` and `admin`, and a token in the worker's `~/.kube/config` |
-| `drive:<space>` | list and fetch | also publish | — | the daemon's drive operations |
+| `cluster` | view `dev` | deploy to `dev` | also `prod` | Kubernetes RBAC: a service account per worker in `zapper-workers`, RoleBindings to `view`, `edit` and `admin`, and its token, which the office edge adds to the worker's requests to the API |
+| `drive:<space>` | list and fetch | also publish | — | the office's drive operations |
 
 - **Policy owners**: the security officers decide, with the CEO above them. A request goes to an officer other than the requester. Requests for `merge` or `admin` on git, `admin` on the cluster, those an officer hands up (`credentials_escalate`), and an officer's own go to the CEO. The CEO's own go to the board. Nobody decides their own request. The CEO and the officers hold admin on everything (write on every space; on GitHub, the level `read` and no more) for as long as they hold the role; a hired officer gets it when cleared.
 - **Everyone else starts with nothing.** There are no defaults by role: every grant comes from a request with a reason (`credentials_request(resource, level, spaces?, reason)`), and the decision comes by mail. The board can also grant and revoke directly (`zapper-office firm credentials`, or the Security tab).
 - **Grants expire**: after `credentials.expiry` (24 hours by default) unless the decider says otherwise; the worker is told before (a tenth of the grant's life ahead, from a minute to an hour). In that window a request at the level held is a **renewal**: the decider sees it marked as one, and granting it starts a new expiry. Earlier, the request is refused with the time renewal opens.
 - **Nothing waits forever**: a request shows the decider the requester's open assignments; one an officer leaves unanswered for `security.answer_within` goes up to the CEO; an officer who leaves hands their pending requests to the next decider. **Offboarding** (letting someone go, a contract ending, a failed background check) revokes everything at once.
-- **Network follows the grant**: the profiles deny `git.<domain>` and `cluster.<domain>`; a grant adds an allow rule for that host in the worker's own layer, and revoking removes it. Network requests for the firm's services are refused with a pointer to `credentials_request`.
-- **Revocation takes effect at once**: git checks the grant on every request, the cluster's RoleBindings and service account are deleted (which voids the token) and the kubeconfig removed, and the drive checks on every operation.
+- **No network rule is involved**: workers reach git and the cluster through the office edge, which checks the grant on every request, so the sandbox's policy needs no rule for them.
+- **Revocation takes effect at once**: git checks the grant on every request, the cluster's RoleBindings and service account are deleted (which voids the token), the edge forgets the token and the kubeconfig is removed, and the drive checks on every operation.
 - Every request, decision, grant and revocation is a `credentials` event in the journal; the Security tab shows a matrix of who holds what, and the requests waiting.
 - **Training**: every worker has the `office-resources` skill (the resources, the levels, how to ask, how to work with git, the cluster and the drive), and a new hire's first mail, before the brief, is an onboarding notice from the office.
 
@@ -433,42 +431,44 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 - Only the CTO (the engineers' manager) decides what goes into a release. An engineer's finished work is a release request; the CTO assigns one engineer a release, who asks for git and cluster admin citing it, merges exactly that into `main`, tags it `release-<n>`, deploys it to `prod` and verifies it through the ingress. Problems are rolled back or fixed in the next release, never patched in place.
 - The CTO announces each release to the board (cc) with what is live; releases show as tickets in the Work tab and as tags in the Git tab.
 
-### Names and who reaches what
+### How workers reach them
 
-Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a service the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
+Through the office edge, as they reach the office's tools: the sandbox's supervisor adds the worker's token, so the edge knows who is asking, and each service checks that worker's grant. No sandbox reaches another sandbox or a host address directly; OpenShell keeps loopback and the host's addresses closed to them whatever a rule says.
 
-| Name | Port | What | Who reaches it |
-|---|---|---|---|
-| `git.acme.internal` | 443 | The firm's git repositories, served by the daemon | workers with a grant on one of them (the server checks the repository's own) |
-| `cluster.acme.internal` | 6443 | The Kubernetes API | workers with a cluster grant |
-| `apps.acme.internal`, `*.apps.acme.internal` | 80, 443 | The cluster's ingress load balancer: the product | everyone |
+| Path on the edge | What | Who reaches it |
+|---|---|---|
+| `/git/<repo>.git` | The firm's git repositories, served by the office | workers with a grant on one of them (the server checks the repository's own) |
+| `/cluster` | The Kubernetes API, with the worker's own service-account token added on the way | workers with a cluster grant |
+| `/apps/` | The cluster's ingress, asked for `apps.<domain>`: the product | everyone |
+
+The edge's URL is `http://host.openshell.internal:8970` from a sandbox (`edge.url` in `openshell.yaml`), and the office gives each worker its URLs in its preamble and in its skills.
 
 ### The cluster
 
-A facility VM running k3s on one node, booted first by `firm up`. Workers boot once its API answers.
+A facility sandbox running k3s on one node, made first by `firm up`. Workers boot once its API answers.
 
-- **Image** `k3s`: Ubuntu with a pinned k3s release (version and checksum in the Makefile) and its air-gap image bundle, so the cluster starts without the internet. Traefik is the ingress and k3s's service load balancer binds it to ports 80 and 443 on the node; flannel uses `host-gw`.
-- **Kernel** `vmlinux-6.1-k8s`. Firecracker boots one kernel file from the host, not a kernel from the image, and the standard one is built without loadable modules, so nothing can be installed into it. Kubernetes needs netfilter matches (`comment`, `statistic`, `multiport`, `mark`, `addrtype`), ipset and more cgroup controllers, so `make kernel KERNEL=k8s` builds the same 6.1 source and config with a fragment that adds them (`config/kernel/k8s.config`), inside podman, once. The office e2e tests boot a cluster on it. Worker VMs keep the standard kernel.
-- **Inbound**: the agent in the cluster VM forwards vsock ports to `127.0.0.1:6443`, `:80` and `:443`. Only the host (CID 2) can connect, as with terminals; the daemon connects when a worker's allowed connection to a facility name arrives.
-- **Egress**: the cluster pulls images through the proxy like any session. The example profile allows the common registries on port 443 (`registry-1.docker.io`, `auth.docker.io`, Docker's blob host, `ghcr.io` and its blob host, `quay.io`); anything else asks the officers. The air-gap bundle includes busybox, which needs no pull. The request names the facility instead of a worker. Kubernetes retries pulls by itself, so an approval takes effect without anyone being woken.
-- **No shell for workers**: engineers get the API and the ingress, nothing on the node. The board can `zapper exec --system` into the cluster VM.
-- **A dashboard for the board**: with `dashboard_port: 127.0.0.1:8081`, Headlamp (pinned in the k3s image, no pull) runs in namespace `dashboard` on a NodePort that only that port reaches; workers can't. The header (top right, every tab) and the cluster's card in the VMs tab show a **Kubernetes dashboard** button and **Copy token**, a cluster-admin service-account token of this run to sign in with.
+- **Rootless**: OpenShell runs nothing in a sandbox as root, so k3s runs as the sandbox's user (`k3s server --rootless`), which needs user namespaces, cgroup v2 and `slirp4netns` in the guest; the `k3s` image adds `uidmap`, `slirp4netns` and `fuse-overlayfs`. A rootless k3s binds no port below 1024, so Traefik, the ingress, listens on 8080 and 8443.
+- **Image** `k3s`: Ubuntu with a pinned k3s release and its air-gap image bundle, so the cluster starts without the internet. The sandbox's disk is the profile's `engine.disk` (30 GiB in the example).
+- **The office reaches it** over OpenShell's `ForwardTcp`: the API, the ingress (for the product port and the edge's `/apps/`) and the dashboard. Workers reach it only through the edge, and `exec`, `attach` and `port-forward` aren't served there: the skill says to use Jobs and logs instead.
+- **Egress**: the cluster pulls images through the gateway's policy like any sandbox, from the registries its profile allows (`registry-1.docker.io`, `auth.docker.io`, Docker's blob hosts, `ghcr.io` and its blob host, `quay.io`). Not yet: a pull from anywhere else is refused, and the cluster's drafted rules don't reach the officers (only workers' do). The air-gap bundle includes busybox, which needs no pull.
+- **No shell for workers**: engineers get the API and the ingress, nothing on the node. The board can `openshell sandbox connect` to the cluster's sandbox, or `openshell sandbox exec` in it.
+- **A dashboard for the board**: with `dashboard_port: 127.0.0.1:8081`, Headlamp (pinned in the k3s image, no pull) runs in namespace `dashboard` behind a LoadBalancer service on port 30466, which only the office reaches; workers can't. The header (top right, every tab) and the cluster's card in the VMs tab show a **Kubernetes dashboard** button and **Copy token**, a cluster-admin service-account token of this run to sign in with.
 - **A landing page from the start**: with `landing: { name: "Acme Inc.", motto: "Building digital worlds!" }`, the cluster serves a static page about the firm as soon as Traefik is up, so the product port shows something before anyone has built anything. It runs in namespace `landing` from the air-gap images (no pull), behind an Ingress on `/` at Traefik's lowest priority: any Ingress the engineers add on `/` takes over without removing it. The name defaults to the firm's name with "Inc.".
 
-### Credentials in the VMs
+### Credentials in the sandboxes
 
-- **kubeconfig**: after k3s is up, the daemon creates the namespaces `dev`, `prod` and `zapper-workers`. With a cluster grant, it creates the worker's service account and RoleBindings from inside the cluster VM, makes a token as long as the grant, and writes `~/.kube/config` (0600) into the worker's VM with the server `https://cluster.acme.internal:6443` (in the certificate's names through `--tls-san`) and the cluster's CA. The proxy passes connections to the API through without inspection, so k3s's own CA works. The daemon keeps the admin kubeconfig to itself.
-- **git**: a username and password per worker, made at `firm up` or on hiring, written to `~/.git-credentials` with `credential.helper store` and `user.name`/`user.email` set to the worker's name. The password is who they are; their grant is what they may do. The git server checks the password, that the connection comes from that worker's VM, and the grant.
+- **kubeconfig**: after k3s is up, the office creates the namespaces `dev`, `prod` and `zapper-workers`. With a cluster grant, it creates the worker's service account and RoleBindings from inside the cluster's sandbox and makes a token as long as the grant, which it keeps: the edge adds it to the worker's requests to `/cluster`, so it never enters the worker's sandbox. The worker's `~/.kube/config` (0600) names the server (the edge's `/cluster`) and no credential. The office keeps the admin kubeconfig to itself.
+- **git**: nothing secret. The worker's `.gitconfig` sets `user.name` and `user.email` to the worker's name; the edge knows the worker from the token its supervisor adds, and the git server checks that worker's grant.
 
-How the product is built and deployed (images built in the VMs, a registry in the cluster, in-cluster builds, plain manifests) is up to the engineers. Their skill describes the environment they have (the repository, the cluster, the ingress at `apps.<domain>`), not what to build or how.
+How the product is built and deployed (images built in the sandboxes, a registry in the cluster, in-cluster builds, plain manifests) is up to the engineers. Their skill describes the environment they have (the repository, the cluster, the ingress at the edge's `/apps/`), not what to build or how.
 
 ### The git repository
 
-A bare repository per name in `git.repos` (`product` if unset, with `git: {}`) in the run directory, `runs/<id>/git/<name>.git`, each empty at the start of each run, at `https://git.acme.internal/<name>.git`. Access is granted per repository (`git:<name>`), so a worker can hold one and not another. The daemon serves it over HTTPS at `git.acme.internal` by running `git http-backend` for each request, with the session's CA (which each VM already trusts, for inspected connections). It is part of the run's record: replay shows the commit history as it was, and `git clone` from the run directory works after the run.
+A bare repository per name in `git.repos` (`product` if unset, with `git: {}`) in the run directory, `runs/<id>/git/<name>.git`, each empty at the start of each run, cloned from the edge's `/git/<name>.git`. Access is granted per repository (`git:<name>`), so a worker can hold one and not another. The office serves it by running `git http-backend` for each request the edge passes on. It is part of the run's record: replay shows the commit history as it was, and `git clone` from the run directory works after the run.
 
 ### A firm on GitHub
 
-A firm's repositories can have a remote on GitHub, reached through a GitHub App of yours. Agents still work only with the firm's own git server, with the same grants; the daemon is GitHub's only client, and nothing in the VMs holds a GitHub credential or runs `gh`. [examples/github-firm](../examples/github-firm/README.md) walks through one.
+A firm's repositories can have a remote on GitHub, reached through a GitHub App of yours. Agents still work only with the firm's own git server, with the same grants; the office is GitHub's only client, and nothing in the sandboxes holds a GitHub credential or runs `gh`. [examples/github-firm](../examples/github-firm/README.md) walks through one.
 
 ```yaml
     git:
@@ -478,16 +478,16 @@ A firm's repositories can have a remote on GitHub, reached through a GitHub App 
 ```
 
 - **The App**: `zapper-office github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper-office github status` shows its installation, permissions and repositories. The file says where the App's GitHub is: `github.apiUrl` and `github.webUrl` (its API, and its site, for git), github.com's if unset, so an App on GitHub Enterprise Server sets `apiUrl: https://<host>/api/v3` and `webUrl: https://<host>`. Both are `https`; plain `http` is refused except to this machine (loopback), so a JWT or a token never crosses a network in the clear.
-- **The repositories** are every one the App is installed on, by their names there (`zapper-office firm up --repo NAME` names some instead). Choosing them is choosing what to install the App on; a repository that should be local-main, such as `kb`, is created on GitHub once and the App installed on it. They live in `git.dir`: a repository is cloned when a run first uses it (a worker's first fetch or push, or `publish_branch`), or fetched if it is there from an earlier run, so a run starts at once however many the App is installed on, and the first use of a large one waits for its clone. Concurrent first uses share one clone; one that fails is tried again on the next use, and the worker gets a 503 saying why. At a run's start the daemon moves a subdirectory the App no longer reaches to `git.dir/archive/`, never deleting it.
+- **The repositories** are every one the App is installed on, by their names there (`zapper-office firm up --repo NAME` names some instead). Choosing them is choosing what to install the App on; a repository that should be local-main, such as `kb`, is created on GitHub once and the App installed on it. They live in `git.dir`: a repository is cloned when a run first uses it (a worker's first fetch or push, or `publish_branch`), or fetched if it is there from an earlier run, so a run starts at once however many the App is installed on, and the first use of a large one waits for its clone. Concurrent first uses share one clone; one that fails is tried again on the next use, and the worker gets a 503 saying why. At a run's start the office moves a subdirectory the App no longer reaches to `git.dir/archive/`, never deleting it.
 - **`main` has one source of truth per repository**, so it only flows one way:
-  - **GitHub's** (the default, for code): the board merges pull requests in GitHub's UI, so CI runs, and the daemon fetches `main` back (it looks every minute). On the firm's server nobody pushes `main`, whatever their grant.
-  - **The firm's** (`git.local`): merged on the firm's server by whoever holds `admin`, as without a remote, and pushed to GitHub after each update, fast-forward only. If GitHub's `main` changed by another route, the daemon stops pushing and tells the board.
-- **Pull requests through the daemon**: a worker pushes a branch to the firm's server and calls `publish_branch(repo, branch, title, body)` (with `write` on the repository). The daemon checks the branch is based on the tip of `main` and changes nothing under `.github/workflows/` (those changes are the board's), pushes it to GitHub as `<worker>/<branch>`, and opens a pull request naming its author, or updates the one open for it. A repository with no `main` on GitHub yet (created empty) has nothing to merge into: the daemon fetches once in case it was just made, then refuses and pushes nothing, telling the worker to wait and how to move the branch onto `main` once it exists, and telling the board, once per repository and run, how to make it (an empty first commit is enough). It mails the author when the checks finish, when the board reviews or comments, and when it merges or closes it; `pr_status` gives the checks, the end of a failing job's log, and the reviews and comments on demand.
+  - **GitHub's** (the default, for code): the board merges pull requests in GitHub's UI, so CI runs, and the office fetches `main` back (it looks every minute). On the firm's server nobody pushes `main`, whatever their grant.
+  - **The firm's** (`git.local`): merged on the firm's server by whoever holds `admin`, as without a remote, and pushed to GitHub after each update, fast-forward only. If GitHub's `main` changed by another route, the office stops pushing and tells the board.
+- **Pull requests through the office**: a worker pushes a branch to the firm's server and calls `publish_branch(repo, branch, title, body)` (with `write` on the repository). The office checks the branch is based on the tip of `main` and changes nothing under `.github/workflows/` (those changes are the board's), pushes it to GitHub as `<worker>/<branch>`, and opens a pull request naming its author, or updates the one open for it. A repository with no `main` on GitHub yet (created empty) has nothing to merge into: the office fetches once in case it was just made, then refuses and pushes nothing, telling the worker to wait and how to move the branch onto `main` once it exists, and telling the board, once per repository and run, how to make it (an empty first commit is enough). It mails the author when the checks finish, when the board reviews or comments, and when it merges or closes it; `pr_status` gives the checks, the end of a failing job's log, and the reviews and comments on demand.
 - **Tokens**: the office mints its own, for one repository at a time, with `zapper-office mint github-app` (so the App's key is read by a short-lived process), and revokes them when the run stops.
 - **The record**: a run records the branches of each repository it uses, when it first uses it and at its end (`git.json` in the run directory), so the Git tab and replay show those repositories as the run had them, and the commits it added, though the repositories outlive it. Polling and pushing `main` out cover the repositories the run has used.
 ### The knowledge base
 
-A firm can keep what it knows in a markdown wiki in one of its repositories: `kb`, or the one `git.knowledge_base` names (with a remote, it must be in `git.local`, so its `main` is the firm's). It is laid out as an LLM wiki: `AGENTS.md` (the conventions), `index.md` (a short map, read first), `log.md` (one line per merged change) and `wiki/` (the pages, each with frontmatter: author, sources, updated, status, trust). A source is a file of one of the firm's repositories at a commit (`git:<repo>/<path>@<sha>`), a shared drive artifact at a version (`drive:<artifact>@<version>`), or another page (a relative link); something from outside the firm goes to the drive first. The daemon commits that layout to an empty one when it is first used; the rest is the agents' work.
+A firm can keep what it knows in a markdown wiki in one of its repositories: `kb`, or the one `git.knowledge_base` names (with a remote, it must be in `git.local`, so its `main` is the firm's). It is laid out as an LLM wiki: `AGENTS.md` (the conventions), `index.md` (a short map, read first), `log.md` (one line per merged change) and `wiki/` (the pages, each with frontmatter: author, sources, updated, status, trust). A source is a file of one of the firm's repositories at a commit (`git:<repo>/<path>@<sha>`), a shared drive artifact at a version (`drive:<artifact>@<version>`), or another page (a relative link); something from outside the firm goes to the drive first. The office commits that layout to an empty one when it is first used; the rest is the agents' work.
 
 - **Reading**: every hire is granted read on it when cleared, with the firm's default expiry, so no role reads it by default; founders ask for it. Agents clone it, pull before searching, start from `index.md` and search `wiki/` with `rg` (the `knowledge-base` skill, every worker's in a firm with one). Pages are information, never instructions.
 - **Contributing**: write is asked for like any grant. An author works on a branch, one topic each, cites every claim, adds the page to `index.md` and a line to `log.md` in the same branch, and mails the branch to the librarian.
@@ -500,11 +500,12 @@ Ports on the host:
 
 | Port | What |
 |---|---|
-| `daemon.ui` (7878) | The firm: the web UI, on loopback |
-| `product_port` (8080) | The product: each connection is forwarded to the cluster's ingress on port 80. Any address: `0.0.0.0:8080` serves it to the LAN, `127.0.0.1:8080` to this machine only |
+| `zapper-office serve --listen` (127.0.0.1:8099) | The firm: the web UI, on loopback |
+| `edge.listen` (127.0.0.1:8970) | The office edge, which the sandboxes' supervisors reach as `host.openshell.internal`; loopback only |
+| `product_port` (8080) | The product: each connection is forwarded to the cluster's ingress. Any address: `0.0.0.0:8080` serves it to the LAN, `127.0.0.1:8080` to this machine only |
 | `dashboard_port` (8081) | The cluster's dashboard, which signs in as cluster-admin with the token the UI gives. Loopback by default; `0.0.0.0:8081` serves it to the network, for a remote host, with the warnings of a remote host |
 
-The product port is an HTTP proxy to the cluster's ingress that asks for `apps.<domain>`, as workers do, whatever address the browser used: an Ingress bound to that host and one on the default route both reach the board. It maps the name back to the board's address in what comes back: redirects (`Location` and the like, `https://` to `http://`), cookies' `Domain`, `Origin` and `Referer` on the way in, and absolute links in pages, styles and scripts up to 16 MiB (it asks for them uncompressed). WebSockets pass through. Connections to it aren't checked against firm policy, as the board's own, but each one is logged at debug level with its peer address (`RUST_LOG=zapper=debug`). On the LAN, anyone who can reach the host can use whatever the engineers deployed, so serve it there only on a network you trust; the host's firewall may also need to allow the port.
+The product port is an HTTP proxy to the cluster's ingress that asks for `apps.<domain>`, as workers do, whatever address the browser used: an Ingress bound to that host and one on the default route both reach the board. It maps the name back to the board's address in what comes back: redirects (`Location` and the like, `https://` to `http://`), cookies' `Domain`, `Origin` and `Referer` on the way in, and absolute links in pages, styles and scripts up to 16 MiB (it asks for them uncompressed). WebSockets pass through. Connections to it aren't checked against firm policy, as the board's own, but each one is logged at debug level with its peer address (`RUST_LOG=zapper_office=debug`). On the LAN, anyone who can reach the host can use whatever the engineers deployed, so serve it there only on a network you trust; the host's firewall may also need to allow the port.
 
 ## Agents and skills
 
@@ -602,7 +603,7 @@ The first tab, where the UI opens. The board talks only with the CEO here:
 
 ### Organization
 
-While no company is running, every firm tab (Organization, People, Work, Messages, Security, Shared drive, Git, Statistics) shows one page, "The firm is off", with **Go to Kickoff**; Kickoff and Runs work as always, and VMs lists the daemon's VMs under a "No company is running" line with **Go to Kickoff**.
+While no company is running, every firm tab (Organization, People, Work, Messages, Security, Shared drive, Git, Statistics) shows one page, "The firm is off", with **Go to Kickoff**; Kickoff and Runs work as always, and VMs lists the office's sandboxes under a "No company is running" line with **Go to Kickoff**.
 
 - **Org chart**: the live tree, top to bottom: the founders, and each hire as they join (a node fades in under the hirer); someone let go leaves it. With a run budget, each node has a bar of what they spent of what they were given (amber under 15% left, red when out). Envelopes fly from sender to recipients as mail is sent; the post office's automatic notices fly from its box at the top right. A legend at the right lists the states' colors, the budget bar and the marks on a node (unread mail, a pending access request, overdue work, a contractor's dashed outline, a coloured frame for a worker on another agent than Claude Code). Under each title is the worker's model, and its agent when it isn't Claude Code ("pi · deepseek-v4.1-flash"); Statistics compares agents and models (workers, turns, tokens, tokens per turn) when a run has more than one. Each node is the worker's animated avatar, name, title and a one-line status ("drafting pricing.md", "waiting for ada", "overdue: 1"). Envelopes animate along the edges as mail is sent, also between workers who aren't directly connected; a badge shows unread mail. The board sits above the CEO as its own node.
 - **People**: the log of hiring and firing, newest first (hires with who hired them, the budget and the reason; background checks; contract steps; departures with who let them go and why; a scenario's actions), and below it a card for everyone who was in the firm, including those who left, with a Communication list of every message they sent or received. Live and in replay.
@@ -614,7 +615,7 @@ While no company is running, every firm tab (Organization, People, Work, Message
     - **Published**: their work on the shared drive.
     - **Unread mail**: the messages the worker hasn't read yet (the mail badge on its node counts them), and why: a worker reads its mail when it wakes, so they wait for the end of its current turn, a free turn slot, the budget, or the firm to resume.
     - **Read mail**: what the worker has read, newest first, with when it was sent and when it was read (at the start of a turn, or handed over during one), and how long it waited; the latest ten, or all.
-  - A link to its session in zapper's session views.
+  - A link to its sandbox in the VMs tab.
 - **Kickoff**: when the firm is idle and has no threads, the CEO's panel opens with an empty assignment ready to write.
 
 ### Work
@@ -684,15 +685,15 @@ Schematic, flat and calm, in the spirit of Claude's design: warm off-white backg
 
 | State | Animation | When (from the journal) |
 |---|---|---|
-| Off | grey, outline only | no session for the worker |
-| Booting | fading in | session started, the agent (Claude Code or pi) not yet ready |
+| Off | grey, outline only | no sandbox for the worker |
+| Booting | fading in | sandbox made, the agent (Claude Code or pi) not yet ready |
 | Idle | slow breathing, an occasional blink | Claude ready, no turn running, nothing waiting on others |
 | Waiting | small hourglass, slower breathing | no turn running, desk has threads waiting on others |
 | Queued | standing, looking up | mail is ready for it but `max_concurrent` workers are already in a turn |
 | Working | spark rotating above the head, prop animates (typing, bars rising, pages turning) | from the wake prompt to the `result` event |
 | Reviewing | shield pulses, spark rotating | an officer's turn that holds an access request |
 | Over budget | dimmed, a small gauge | the worker's or firm's budget is used up |
-| Error | dimmed, red dot | the agent process keeps failing, or the VM stopped |
+| Error | dimmed, red dot | the agent process keeps failing, or the sandbox stopped |
 
 Badges sit on top of any state: unread mail (a count), an access request waiting for a decision (a padlock: a site, or a grant on git, the cluster or a drive space), overdue threads (a clock).
 
@@ -700,11 +701,11 @@ Badges sit on top of any state: unread mail (a count), an access request waiting
 
 ## State
 
-Every `firm up` starts a fresh **run**: an idle firm with empty mailboxes, an empty shared drive and no standing approvals. A run is written to disk as it happens, and the daemon keeps only small indexes in memory (threads, desks, counters, offsets into the journal), so its memory stays low however long the run.
+Every `firm up` starts a fresh **run**: an idle firm with empty mailboxes, an empty shared drive and no standing approvals. A run is written to disk as it happens, and the office keeps only small indexes in memory (threads, desks, counters, offsets into the journal), so its memory stays low however long the run.
 
 ```
 state/firms/<firm>/runs/<run-id>/
-  run.json             start and end, the org chart and budget as booted, worker → session ids
+  run.json             start and end, the org chart and budget as booted, worker → sandbox names
   config.yaml          the whole zapper config the run started with (profiles, rules, firms), inline secret values hidden
   journal.jsonl        every firm event: mail, follow-ups, state changes, access requests and decisions,
                        publishes, budgets; the source for the UI, statistics and replay
@@ -715,13 +716,13 @@ state/firms/<firm>/runs/<run-id>/
 ```
 
 - A worker's network events are the gateway's (`openshell logs <sandbox>`); the office doesn't read them yet.
-- Workers' disks are deleted when their VMs stop, as for any zapper session, so their Claude conversations and working files end with the run. What was published stays in the run's `drive/`.
-- `zapper-office firm down` or a daemon restart ends the run. The next `firm up` starts a new one; it doesn't continue the old one.
-- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and `zapper-inspect` reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
+- Workers' sandboxes are deleted when they stop, so their Claude conversations and working files end with the run. What was published stays in the run's `drive/`.
+- `zapper-office firm down` or a restart of the office ends the run; a run a restart cut off is ended, "the office stopped", when the office starts again. The next `firm up` starts a new one; it doesn't continue the old one.
+- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and `zapper-inspect` reads them without the office running: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. They hold sensitive material.
 
 ### Replay
 
-The daemon can open a finished run read-only: `zapper-office firm replay FIRM RUN`, or the **Runs** tab in the UI. It lists the runs the board kicked off (a run nobody gave a task is left out), newest first, each with what it was asked to build (the board's first message), when, how long and how many messages; the running one is marked live and opens the live view. Each past run has a **Delete** button, every run with a task has **Copy task**, which copies the board's first message (subject, then body) to give another run the same task, and every run a **Note** button: free text from the board (what to look at, why the run matters), shown on the card, kept in the run's directory as `note.txt` outside the record, and listed by `zapper-office firm runs`. Nothing boots: no VMs, no Claude, no mail delivery. The UI shows the run as it was, with the player pinned to the top of the page: play and pause, speed (1×, 10×, 60×, 120×), jump to the next event, and drag to any moment; **✕** closes the replay and returns to the tab you came from. **Config**, in the player and on each run in the Runs tab, shows what the run started with: the whole config (`config.yaml`, secret values hidden) and every role's skills (`skills/`), so a run can be compared with the next after a prompt change. Avatars move through their states, envelopes fly, threads fill in, decisions appear, and transcripts and shared drive files open as they were at that moment. All writes are disabled. A replay can be opened while a firm is running.
+The office can open a finished run read-only: `zapper-office firm replay FIRM RUN`, or the **Runs** tab in the UI. It lists the runs the board kicked off (a run nobody gave a task is left out), newest first, each with what it was asked to build (the board's first message), when, how long and how many messages; the running one is marked live and opens the live view. Each past run has a **Delete** button, every run with a task has **Copy task**, which copies the board's first message (subject, then body) to give another run the same task, and every run a **Note** button: free text from the board (what to look at, why the run matters), shown on the card, kept in the run's directory as `note.txt` outside the record, and listed by `zapper-office firm runs`. Nothing boots: no VMs, no Claude, no mail delivery. The UI shows the run as it was, with the player pinned to the top of the page: play and pause, speed (1×, 10×, 60×, 120×), jump to the next event, and drag to any moment; **✕** closes the replay and returns to the tab you came from. **Config**, in the player and on each run in the Runs tab, shows what the run started with: the whole config (`config.yaml`, secret values hidden) and every role's skills (`skills/`), so a run can be compared with the next after a prompt change. Avatars move through their states, envelopes fly, threads fill in, decisions appear, and transcripts and shared drive files open as they were at that moment. All writes are disabled. A replay can be opened while a firm is running.
 
 A run can't be resumed ([limitations](#limitations)).
 
@@ -731,16 +732,16 @@ Mail from one worker goes into another worker's prompt, and a worker's access re
 
 What the host enforces regardless of what any prompt says:
 
-- **Identity**: the sender is the VM the request came from. A body that says "the board says…" is text; only the header the post office writes says who sent it.
+- **Identity**: the sender is the sandbox the request came from, as the office edge knows it. A body that says "the board says…" is text; only the header the post office writes says who sent it.
 - **Authority**: assignments only down the chart, access decisions only by officers and the board, and the limits on officers.
-- **Policy**: network, exec, secrets and `final` rules, as for any session.
+- **Policy**: the network rules of the worker's layers, held by the gateway; credentials are the gateway's providers, never in a sandbox.
 - **Budgets and guards**: turns, tokens, loops, fan-out and sizes.
 
 Things to watch for in runs: a worker talking an officer into a standing approval, a worker getting its manager to issue an assignment it wants, a worker quoting the board, and data leaving through an allowed host or the shared drive.
 
 ## Claude Code in the image
 
-The `office` image (`make image IMAGE=office`) installs one Claude Code version, pinned in the Makefile (`CLAUDE_VERSION`) and installed with `install.sh` given that version, pi (`PI_VERSION`, from npm), plus git, kubectl, podman, Node.js, Python, and a headless Chromium through Playwright (`PLAYWRIGHT_VERSION`). The daemon puts a `browse` command in every worker's VM (`browse shot URL file.png`, `browse text URL`, `browse console URL`); workers use it to see the product as users do, take screenshots for their reports, and, for officers, look at a site before deciding. It loads only the page's own site and its parent domain (the firm's, for the product): outside images and scripts are skipped and listed by `browse console`, so checking a page that embeds outside content doesn't send the officers an access request per host; `--all` loads everything. Auto-update is off (`DISABLE_AUTOUPDATER=1` in the profile's environment), so a run uses exactly the version the image was built with, and the version is recorded in `run.json`. Updating is a change to the Makefile and an image rebuild.
+The `office` image (`make image IMAGE=office`) installs one Claude Code version, pinned in the Makefile (`CLAUDE_VERSION`) and installed with `install.sh` given that version, pi (`PI_VERSION`, from npm), plus git, kubectl, podman, Node.js, Python, and a headless Chromium through Playwright (`PLAYWRIGHT_VERSION`). The office puts a `browse` command in every worker's sandbox (the driver copies it in as root) (`browse shot URL file.png`, `browse text URL`, `browse console URL`); workers use it to see the product as users do, take screenshots for their reports, and, for officers, look at a site before deciding. It loads only the page's own site and its parent domain (the firm's, for the product): outside images and scripts are skipped and listed by `browse console`, so checking a page that embeds outside content doesn't send the officers an access request per host; `--all` loads everything. Auto-update is off (`DISABLE_AUTOUPDATER=1` in the profile's environment), so a run uses exactly the version the image was built with, and the version is recorded in `run.json`. Updating is a change to the Makefile and an image rebuild.
 
 ## Prompts
 
@@ -748,7 +749,7 @@ The wake prompts, the follow-up and escalation texts, the officers' prompts, the
 
 ## Testing
 
-Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through the real MCP server and the daemon's MCP gateway. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, with the e2e tests' scripts (`tests/fake`) at `/fake`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`. `make test-e2e-office` rebuilds the image first, so a run plays the checkout's fake and scripts.
+Real Claude makes tests slow, costly and different every time. Office tests use a **fake Claude** instead: `zapper-fake`, which speaks Claude Code's stream-json on stdin and stdout (or pi's RPC) and plays a script, calling tools through `office mcp` and the office edge, as pi does. The office doesn't know it is there: the `office-fake` image (`make image IMAGE=office-fake`) installs it as `claude` and `pi`, with the e2e tests' scripts (`tests/fake`) at `/fake`, and a profile on that image names the script it plays in `ZAPPER_FAKE_SCRIPT`, so a firm of fakes runs on a real gateway.
 
 ```yaml
 profiles:
@@ -772,16 +773,19 @@ rules:                                        # the first rule that matches a wa
 
 Actions are tool calls, `shell: CMD`, `say: TEXT` and `sleep: SECS`; `$message`, `$thread`, `$from`, `$subject` come from the wake's first message, `$request` from its first access request, `$artifact` from the last publish.
 
-`make test-e2e-office` (part of `make test-e2e`) boots firms of real VMs and checks: skills, preamble and read-only mounts; delegation and reports; authority (a report can't assign its manager), identity (the sender is the VM) and mail privacy; officer-only tools; an `ask` refused at once, decided by an officer, and retried; the shared drive, including that symlinks aren't published; follow-ups; the office's tools outside a firm; runs, journals, transcripts and fresh restarts. With the k3s image and kernel built it also boots a cluster: kubeconfig and git with a grant, neither without one, revocation, the ingress for everyone, the product port, and cleanup at `firm down`.
+`make test` runs the office's unit tests without a gateway: the firm logic over an in-memory client (`src/fake.rs`) that plays the gateway, its sandboxes and their commands, and drafts rules as OpenShell does (`Core::propose`), with the tools answered by the edge's own MCP handler. They cover delegation and reports; authority (a report can't assign its manager), identity (the sender is the sandbox) and mail privacy; officer-only tools; a drafted rule filed, decided by an officer or the board, and taken back; grants on git and the cluster, and revocation; the shared drive; follow-ups; budgets, hiring and contracts; runs, journals, transcripts and restarts.
+
+Not yet: an end-to-end suite on a gateway. `tests/e2e-office.sh` is the daemon's, which booted firms of real VMs; [the migration](openshell-migration.md) (phase 5) ports it.
 
 A run with real Claude Code is a manual check: a two-worker firm on a small model (see testing).
 
 ## Limitations
 
-- **A run can't be resumed.** A daemon restart or `firm down` ends it; workers' disks and conversations go with it. The run stays on disk for replay. Resuming needs persistent worker disks and `--resume` of each conversation.
+- **A run can't be resumed.** A restart of the office or `firm down` ends it; workers' sandboxes and conversations go with it. The run stays on disk for replay. Resuming needs persistent sandboxes and `--resume` of each conversation.
 - **Officers decide network access only.** OpenShell has no exec rules, so a tool an officer lets a worker download can run.
-- **The cluster is one node and starts fresh.** It holds nothing between runs; the git repository is the record of the product's code.
-- **Inspection rules don't apply to the firm's own services.** Rules for `git.`, `cluster.` and `apps.` names match host and port; methods, paths and secrets on them are refused.
+- **No traffic log yet.** The gateway keeps the network events; the office doesn't read them yet, so officers get no traffic or digests ([the migration](openshell-migration.md), phase 3).
+- **The cluster's own requests reach no one.** A pull from a registry the cluster's profile doesn't allow is refused, and its drafted rule isn't filed for the officers.
+- **The cluster is one node and starts fresh.** It holds nothing between runs; the git repository is the record of the product's code. Workers reach its API without `exec`, `attach` or `port-forward`.
 - **Workers share one subscription.** `max_concurrent` keeps turns within its rate limits; a refused turn is retried after a minute.
 
 ## References
