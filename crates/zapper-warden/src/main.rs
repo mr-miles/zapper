@@ -126,7 +126,10 @@ async fn main() -> Result<()> {
         Cmd::Apply => {
             let os = connect(&c).await?;
             let made = apply::apply(&os, &c.profiles, &|l| eprintln!("{l}")).await?;
-            println!("{}", serde_json::to_string_pretty(&json!({ "templates": made }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "templates": made }))?
+            );
             Ok(())
         }
         Cmd::Status => {

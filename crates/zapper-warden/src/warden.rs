@@ -245,13 +245,7 @@ impl Warden {
             .into());
         }
         let sandbox = names::worker_sandbox(name);
-        if self
-            .gw
-            .sandboxes()
-            .await?
-            .iter()
-            .any(|s| s.name == sandbox)
-        {
+        if self.gw.sandboxes().await?.iter().any(|s| s.name == sandbox) {
             return Err(Refusal::Conflict(format!(
                 "a sandbox {sandbox} is at the gateway that the warden didn't make"
             ))
@@ -404,8 +398,10 @@ impl Warden {
 
     /// Records a refused call.
     fn refused(&self, route: &str, e: &anyhow::Error) {
-        self.audit
-            .record("refused", json!({ "route": route, "error": format!("{e:#}") }));
+        self.audit.record(
+            "refused",
+            json!({ "route": route, "error": format!("{e:#}") }),
+        );
     }
 }
 
@@ -490,7 +486,11 @@ impl Warden {
                 .map(|w| (StatusCode::OK, json!({ "workers": w }))),
             Route::Put(name) => match body::<PutBody>(req).await {
                 Ok(b) => self.put_worker(&name, &b.profile).await.map(|(w, made)| {
-                    let status = if made { StatusCode::CREATED } else { StatusCode::OK };
+                    let status = if made {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::OK
+                    };
                     (status, json!({ "worker": w, "made": made }))
                 }),
                 Err(e) => Err(e),

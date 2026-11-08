@@ -1151,8 +1151,14 @@ impl OpenShell {
         env: BTreeMap<String, String>,
         workdir: String,
     ) -> Result<Box<dyn DriveStream>> {
-        self.open(exec_request(name, argv, env.into_iter().collect(), workdir, None))
-            .await
+        self.open(exec_request(
+            name,
+            argv,
+            env.into_iter().collect(),
+            workdir,
+            None,
+        ))
+        .await
     }
 
     /// A raw byte stream to TCP port `port` on sandbox `name`'s loopback

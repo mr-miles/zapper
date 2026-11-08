@@ -118,7 +118,10 @@ async fn only_offered_profiles_and_good_names_are_made() {
         ("", FAKE),
     ] {
         let e = w.put_worker(name, profile).await.unwrap_err();
-        assert!(matches!(refusal(&e), Refusal::Bad(_)), "{name} {profile}: {e:#}");
+        assert!(
+            matches!(refusal(&e), Refusal::Bad(_)),
+            "{name} {profile}: {e:#}"
+        );
     }
     assert_eq!(fake.calls().len(), 2, "only the office was made");
 }
@@ -129,10 +132,16 @@ async fn the_caps_hold_for_a_profile_and_for_all() {
     w.put_worker("a", FAKE).await.unwrap();
     w.put_worker("b", FAKE).await.unwrap();
     let e = w.put_worker("c", FAKE).await.unwrap_err();
-    assert!(matches!(refusal(&e), Refusal::Full(_)), "the profile's max: {e:#}");
+    assert!(
+        matches!(refusal(&e), Refusal::Full(_)),
+        "the profile's max: {e:#}"
+    );
     w.put_worker("c", "claude").await.unwrap();
     let e = w.put_worker("d", "claude").await.unwrap_err();
-    assert!(matches!(refusal(&e), Refusal::Full(_)), "max_workers: {e:#}");
+    assert!(
+        matches!(refusal(&e), Refusal::Full(_)),
+        "max_workers: {e:#}"
+    );
     w.delete_worker("a").await.unwrap();
     w.put_worker("d", "claude").await.unwrap();
 }
@@ -153,7 +162,11 @@ async fn sandboxes_it_didnt_make_are_neither_listed_nor_touched() {
     fake.add("zcw-eve", Some("wb-dev"), names::worker_labels("eve", FAKE));
     // From the template, but under another name.
     let template = names::profile_template(FAKE);
-    fake.add("eve", Some(template.as_str()), names::worker_labels("eve", FAKE));
+    fake.add(
+        "eve",
+        Some(template.as_str()),
+        names::worker_labels("eve", FAKE),
+    );
     fake.add("other", None, Labels::new());
     assert!(w.workers().await.unwrap().is_empty());
     let e = w.put_worker("eve", FAKE).await.unwrap_err();
@@ -208,7 +221,11 @@ async fn an_agent_starts_only_as_asked_in_plain_terms() {
     let ticket = "ab".repeat(16);
     for (name, t, resume) in [
         ("ada", "short", None),
-        ("ada", ticket.as_str(), Some("--dangerously-skip-permissions")),
+        (
+            "ada",
+            ticket.as_str(),
+            Some("--dangerously-skip-permissions"),
+        ),
         ("ada", ticket.as_str(), Some("a b")),
         ("Ada", ticket.as_str(), None),
     ] {
@@ -234,7 +251,11 @@ async fn a_worker_has_one_agent_at_a_time() {
     let e = w.start_agent("ada", &ticket, None).await.unwrap_err();
     assert!(matches!(refusal(&e), Refusal::Conflict(_)), "{e:#}");
     w.start_agent("bob", &ticket, None).await.unwrap();
-    assert_eq!(fake.execs.lock().unwrap().len(), 2, "ada's second never ran");
+    assert_eq!(
+        fake.execs.lock().unwrap().len(),
+        2,
+        "ada's second never ran"
+    );
     // Both ends of ada's stream close: it ends, and ada may start again.
     let agent = fake.exec_ends.lock().unwrap().remove(0);
     let office = fake.forward_ends.lock().unwrap().remove(0);
@@ -247,7 +268,10 @@ async fn a_worker_has_one_agent_at_a_time() {
             break;
         }
     }
-    assert!(again.is_some(), "ada's agent starts again once its stream ended");
+    assert!(
+        again.is_some(),
+        "ada's agent starts again once its stream ended"
+    );
 }
 
 #[tokio::test]
@@ -272,14 +296,35 @@ fn routes_are_these_five_and_nothing_else() {
     let r = |m: Method, p: &str| route(&m, p);
     assert_eq!(r(Method::GET, "/workers"), Some(Route::List));
     assert_eq!(r(Method::GET, "/workers/"), Some(Route::List));
-    assert_eq!(r(Method::PUT, "/workers/ada"), Some(Route::Put("ada".into())));
-    assert_eq!(r(Method::DELETE, "/workers/ada"), Some(Route::Delete("ada".into())));
-    assert_eq!(r(Method::POST, "/workers/ada/agent"), Some(Route::Agent("ada".into())));
+    assert_eq!(
+        r(Method::PUT, "/workers/ada"),
+        Some(Route::Put("ada".into()))
+    );
+    assert_eq!(
+        r(Method::DELETE, "/workers/ada"),
+        Some(Route::Delete("ada".into()))
+    );
+    assert_eq!(
+        r(Method::POST, "/workers/ada/agent"),
+        Some(Route::Agent("ada".into()))
+    );
     assert_eq!(r(Method::GET, "/jwks"), Some(Route::Jwks));
     assert_eq!(r(Method::POST, "/workers"), Some(Route::Method("GET")));
-    assert_eq!(r(Method::GET, "/workers/ada"), Some(Route::Method("PUT, DELETE")));
-    assert_eq!(r(Method::GET, "/workers/ada/agent"), Some(Route::Method("POST")));
-    for p in ["/", "/mcp", "/workers/ada/exec", "/workers/ada/agent/x", "/oauth"] {
+    assert_eq!(
+        r(Method::GET, "/workers/ada"),
+        Some(Route::Method("PUT, DELETE"))
+    );
+    assert_eq!(
+        r(Method::GET, "/workers/ada/agent"),
+        Some(Route::Method("POST"))
+    );
+    for p in [
+        "/",
+        "/mcp",
+        "/workers/ada/exec",
+        "/workers/ada/agent/x",
+        "/oauth",
+    ] {
         assert_eq!(r(Method::GET, p), None, "{p}");
     }
 }

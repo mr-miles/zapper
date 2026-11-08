@@ -70,16 +70,25 @@ mod tests {
     fn each_call_is_one_private_line() {
         let dir = std::env::temp_dir().join(format!("zc-audit-{}", std::process::id()));
         let a = Audit::open(&dir).unwrap();
-        a.record("worker_made", json!({ "worker": "ada", "profile": "claude" }));
+        a.record(
+            "worker_made",
+            json!({ "worker": "ada", "profile": "claude" }),
+        );
         a.record("refused", json!({ "why": "a\nb" }));
         let text = std::fs::read_to_string(dir.join("warden.jsonl")).unwrap();
-        let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(lines.len(), 2, "a newline in a value stays in its line");
         assert_eq!(lines[0]["op"], "worker_made");
         assert_eq!(lines[0]["worker"], "ada");
         assert!(lines[1]["at"].is_number());
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("warden.jsonl")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(dir.join("warden.jsonl"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o077, 0, "private to its user");
         let _ = std::fs::remove_dir_all(dir);
     }

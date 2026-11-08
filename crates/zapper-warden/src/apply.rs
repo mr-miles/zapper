@@ -14,11 +14,7 @@ use crate::profiles::Profiles;
 const STAGED: &str = "zapperclaw";
 
 /// Makes every template; their names.
-pub async fn apply(
-    os: &OpenShell,
-    profiles: &Profiles,
-    log: &dyn Fn(&str),
-) -> Result<Vec<String>> {
+pub async fn apply(os: &OpenShell, profiles: &Profiles, log: &dyn Fn(&str)) -> Result<Vec<String>> {
     let mut made = Vec::new();
     for p in profiles.all() {
         let staged = format!("{STAGED}/{}", p.template);
@@ -33,7 +29,10 @@ pub async fn apply(
             driver_config: Some(driver),
         };
         os.put_template(&t).await?;
-        log(&format!("template {} (profile {}, image {})", t.name, p.profile.name, t.image));
+        log(&format!(
+            "template {} (profile {}, image {})",
+            t.name, p.profile.name, t.image
+        ));
         made.push(t.name);
     }
     Ok(made)

@@ -103,8 +103,7 @@ fn prepare_worker(
     zapper_driver::harness::headless(&profile.agent.kind)?;
     let instructions = match &w.instructions {
         Some(p) => Some(
-            std::fs::read_to_string(config.path(p))
-                .with_context(|| format!("instructions {p}"))?,
+            std::fs::read_to_string(config.path(p)).with_context(|| format!("instructions {p}"))?,
         ),
         None => None,
     };
@@ -112,7 +111,11 @@ fn prepare_worker(
         .skills
         .as_ref()
         .map(|p| config.path(p).to_string_lossy().into_owned());
-    let overlay = overlay(instructions.as_deref(), skills.as_deref(), w.model.as_deref());
+    let overlay = overlay(
+        instructions.as_deref(),
+        skills.as_deref(),
+        w.model.as_deref(),
+    );
     let mut agent = serde_json::to_value(&profile.agent)?;
     zapper_policy::merge(&mut agent, &overlay);
     profile.agent = serde_json::from_value(agent).context("the office's wiring")?;

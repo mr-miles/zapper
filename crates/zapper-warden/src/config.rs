@@ -154,8 +154,8 @@ impl Config {
 
     /// The config at `path`.
     pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let dir = path
             .parent()
             .map(Path::to_path_buf)
@@ -192,7 +192,9 @@ impl Config {
         // The token endpoint is plain HTTP, which the supervisor dials only
         // on loopback, and the board is a person's: neither leaves the host.
         if !self.listen.ip().is_loopback() {
-            bail!("listen: a loopback address (the supervisors reach it as host.openshell.internal)");
+            bail!(
+                "listen: a loopback address (the supervisors reach it as host.openshell.internal)"
+            );
         }
         if !self.board.ip().is_loopback() {
             bail!("board: a loopback address (reach it from elsewhere with an SSH tunnel)");
@@ -265,14 +267,32 @@ mod tests {
     fn what_cant_work_is_refused_with_why() {
         for (bad, why) in [
             ("office: { profile: o }\nagnet: 1\n", "a misspelling"),
-            ("office: { profile: o, ports: { edge: 1, board: 1 } }\n", "ports shared"),
-            ("office: { profile: o }\nprofiles: { Claude: {} }\n", "a profile name"),
-            ("office: { profile: o }\nprofiles: { c: { max: 0 } }\n", "max 0"),
+            (
+                "office: { profile: o, ports: { edge: 1, board: 1 } }\n",
+                "ports shared",
+            ),
+            (
+                "office: { profile: o }\nprofiles: { Claude: {} }\n",
+                "a profile name",
+            ),
+            (
+                "office: { profile: o }\nprofiles: { c: { max: 0 } }\n",
+                "max 0",
+            ),
             ("office: { profile: o, providers: [] }\n", "no providers"),
-            ("office: { profile: o }\nlisten: 0.0.0.0:8972\n", "routes off loopback"),
-            ("office: { profile: o }\nboard: 192.168.1.2:8974\n", "board off loopback"),
+            (
+                "office: { profile: o }\nlisten: 0.0.0.0:8972\n",
+                "routes off loopback",
+            ),
+            (
+                "office: { profile: o }\nboard: 192.168.1.2:8974\n",
+                "board off loopback",
+            ),
             ("office: { profile: o }\nmax_workers: 0\n", "no workers"),
-            ("office: { profile: o }\nboard: 127.0.0.1:8972\n", "board on listen"),
+            (
+                "office: { profile: o }\nboard: 127.0.0.1:8972\n",
+                "board on listen",
+            ),
         ] {
             assert!(load(bad).is_err(), "{why}");
         }

@@ -37,8 +37,11 @@ pub trait Gateway: Send + Sync {
         workdir: String,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
     /// A byte stream to port `port` on sandbox `name`'s loopback.
-    fn forward<'a>(&'a self, name: &'a str, port: u16)
-        -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
+    fn forward<'a>(
+        &'a self,
+        name: &'a str,
+        port: u16,
+    ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
     /// The driver's JWKS, as it serves it.
     fn jwks(&self) -> BoxFuture<'_, Result<Vec<u8>>>;
 }

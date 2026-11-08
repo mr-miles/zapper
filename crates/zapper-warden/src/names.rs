@@ -117,7 +117,15 @@ mod tests {
             assert!(check("worker", ok).is_ok(), "{ok}");
         }
         for bad in [
-            "", "Ada", "2ada", "ada-", "a--b", "a_b", "a.b", "a b", "../x",
+            "",
+            "Ada",
+            "2ada",
+            "ada-",
+            "a--b",
+            "a_b",
+            "a.b",
+            "a b",
+            "../x",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
             assert!(check("worker", bad).is_err(), "{bad:?}");
