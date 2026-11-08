@@ -48,10 +48,7 @@ impl Provisioner {
     }
 
     fn save(&self, r: &BTreeMap<String, Record>) -> Result<()> {
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(r)?)?;
-        std::fs::rename(tmp, &self.path)?;
-        Ok(())
+        zapper_util::write_private(&self.path, &serde_json::to_vec_pretty(r)?)
     }
 
     /// Makes sandbox `name` from the live commit's profile `profile`'s

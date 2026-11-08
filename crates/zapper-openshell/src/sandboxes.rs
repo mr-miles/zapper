@@ -190,7 +190,7 @@ impl Settings {
         self.images
             .get(name)
             .cloned()
-            .unwrap_or_else(|| format!("localhost/zapper-openshell-{name}"))
+            .unwrap_or_else(|| crate::image::tag(name))
     }
 
     /// The compute driver's name: `driver`, or `firecracker`.

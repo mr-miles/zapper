@@ -6,17 +6,6 @@
 pub mod harness;
 pub mod process;
 
-/// A short random id, for a worker whose
-/// name a harness must invent.
-pub(crate) fn random_id(len: usize) -> String {
-    use rand::Rng;
-    const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| ID_CHARS[rng.gen_range(0..ID_CHARS.len())] as char)
-        .collect()
-}
-
 /// Reads one length-prefixed protocol frame from `r`, or `None` at a clean
 /// end of stream.
 pub async fn read_frame(

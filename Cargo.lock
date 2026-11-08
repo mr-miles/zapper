@@ -4214,11 +4214,11 @@ name = "zapper-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "rand 0.8.8",
  "serde",
  "serde_json",
  "tokio",
  "zapper-policy",
+ "zapper-util",
 ]
 
 [[package]]
@@ -4234,6 +4234,7 @@ dependencies = [
 name = "zapper-git"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "http-body-util",
  "hyper",

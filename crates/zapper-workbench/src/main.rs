@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
         }
         Cmd::New { profile, name } => {
             let os = Arc::new(connect(&c.settings).await?);
-            let name = name.unwrap_or_else(|| format!("{profile}-{}", suffix()));
+            let name = name.unwrap_or_else(|| format!("{profile}-{}", zapper_util::random_id(8)));
             let p = Provisioner::new(os, c.applier.clone(), c.provisioned.clone());
             let r = p.new_sandbox(&profile, &name).await?;
             println!("{}", serde_json::to_string_pretty(&r)?);
@@ -161,12 +161,4 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
-}
-
-/// Eight random hex digits, for a sandbox's default name.
-fn suffix() -> String {
-    let mut b = [0u8; 4];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b)
-        .expect("the system's random numbers");
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }

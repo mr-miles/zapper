@@ -159,10 +159,7 @@ impl Applier {
     }
 
     fn save(&self, s: &State) -> Result<()> {
-        let tmp = self.state_path().with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(s)?)?;
-        std::fs::rename(tmp, self.state_path())?;
-        Ok(())
+        zapper_util::write_private(&self.state_path(), &serde_json::to_vec_pretty(s)?)
     }
 
     /// The commit `r` names, and its subject.

@@ -302,29 +302,9 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     if !repos.is_empty() {
         for name in repos.iter().filter(|_| run.config.git_remote().is_none()) {
             let repo = run.dir.join("git").join(format!("{name}.git"));
-            std::fs::create_dir_all(&repo)?;
-            let ok = tokio::process::Command::new("git")
-                .args(["init", "--quiet", "--bare", "-b", "main"])
-                .arg(&repo)
-                .status()
-                .await
-                .context("git init (is git installed?)")?;
-            if !ok.success() {
-                bail!("git init {name} failed");
-            }
-            let _ = tokio::process::Command::new("git")
-                .arg("--git-dir")
-                .arg(&repo)
-                .args(["config", "http.receivepack", "true"])
-                .status()
-                .await;
-            // Below admin, pushes may not touch `main` or tags. The hook is
-            // the office's: the repository lives on the host, out of
-            // workers' reach.
-            let hook = repo.join("hooks").join("pre-receive");
-            std::fs::create_dir_all(repo.join("hooks"))?;
-            std::fs::write(&hook, zapper_git::PRE_RECEIVE)?;
-            std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+            // Below admin, pushes may not touch `main` or tags.
+            zapper_git::init_bare(&repo, zapper_git::PRE_RECEIVE)
+                .with_context(|| format!("the firm's repository {name}"))?;
         }
         // An empty knowledge base gets its layout.
         super::kb::seed(run).await?;

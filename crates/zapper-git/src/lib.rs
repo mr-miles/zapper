@@ -234,6 +234,57 @@ pub fn pre_receive_with_local_admin() -> String {
     )
 }
 
+/// Makes `repo` a bare repository on `main` that `git http-backend` takes
+/// pushes into (if it isn't one already), with `hook` as its `pre-receive`
+/// hook, which keeps branches apart from `main`. The hook is the host's: the
+/// repository lives out of the workers' reach.
+pub fn init_bare(repo: &std::path::Path, hook: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let git = |args: &[&std::ffi::OsStr]| -> anyhow::Result<()> {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .status()
+            .context("git (is git installed?)")?;
+        if !ok.success() {
+            anyhow::bail!("git {:?} failed", args);
+        }
+        Ok(())
+    };
+    if !repo.join("HEAD").exists() {
+        std::fs::create_dir_all(repo)?;
+        git(&[
+            "init".as_ref(),
+            "--quiet".as_ref(),
+            "--bare".as_ref(),
+            "--initial-branch=main".as_ref(),
+            repo.as_os_str(),
+        ])?;
+    }
+    git(&[
+        "--git-dir".as_ref(),
+        repo.as_os_str(),
+        "config".as_ref(),
+        "http.receivepack".as_ref(),
+        "true".as_ref(),
+    ])?;
+    let path = repo.join("hooks").join("pre-receive");
+    std::fs::create_dir_all(repo.join("hooks"))?;
+    std::fs::write(&path, hook)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// The environment the host's own git commands on a repository run in,
+/// after `env_clear`: `PATH` alone, and no system or user config, so nothing
+/// on the host changes what they do.
+pub fn clean_env() -> [(&'static str, String); 3] {
+    [
+        ("PATH", std::env::var("PATH").unwrap_or_default()),
+        ("GIT_CONFIG_NOSYSTEM", "1".into()),
+        ("HOME", "/nonexistent".into()),
+    ]
+}
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

@@ -9,7 +9,7 @@ zapper-policy = { path = "../zapper-policy" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rand = "0.8"
+zapper-util = { path = "../zapper-util" }
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]

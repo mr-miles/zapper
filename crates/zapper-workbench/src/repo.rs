@@ -26,6 +26,8 @@ pub fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
         .arg("--git-dir")
         .arg(dir)
         .args(args)
+        .env_clear()
+        .envs(zapper_git::clean_env())
         .output()
         .map_err(|e| anyhow::anyhow!("git: {e} (is git installed?)"))?;
     if !out.status.success() {
@@ -47,27 +49,15 @@ impl Repo {
     /// The repository under `root`, made (bare, on `main`, with its hook)
     /// if it isn't there.
     pub fn new(root: PathBuf) -> anyhow::Result<Repo> {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        use std::os::unix::fs::DirBuilderExt as _;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&root)?;
-        let repo = root.join(REPO);
-        if !repo.join("HEAD").exists() {
-            let ok = std::process::Command::new("git")
-                .args(["init", "--bare", "--quiet", "--initial-branch=main"])
-                .arg(&repo)
-                .status()
-                .map_err(|e| anyhow::anyhow!("git init: {e} (is git installed?)"))?;
-            if !ok.success() {
-                anyhow::bail!("git init {} failed", repo.display());
-            }
-        }
-        git(&repo, &["config", "http.receivepack", "true"])?;
-        let hook = repo.join("hooks").join("pre-receive");
-        std::fs::create_dir_all(repo.join("hooks"))?;
-        std::fs::write(&hook, zapper_git::pre_receive_with_local_admin())?;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        zapper_git::init_bare(
+            &root.join(REPO),
+            &zapper_git::pre_receive_with_local_admin(),
+        )?;
         Ok(Repo { root })
     }
 
