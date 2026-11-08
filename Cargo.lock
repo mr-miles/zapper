@@ -4210,31 +4210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zapper-api-types"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "serde",
- "serde_json",
- "zapper-policy",
-]
-
-[[package]]
-name = "zapper-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "zapper-driver"
 version = "0.1.0"
 dependencies = [
@@ -4346,8 +4321,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "zapper-api-types",
- "zapper-client",
  "zapper-driver",
  "zapper-git",
  "zapper-github",
@@ -4380,7 +4353,6 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
- "zapper-api-types",
  "zapper-driver",
  "zapper-policy",
  "zapper-util",
@@ -4396,15 +4368,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "time",
- "zapper-proto",
-]
-
-[[package]]
-name = "zapper-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-zapper-api-types = { path = "../zapper-api-types" }
 zapper-driver = { path = "../zapper-driver" }
 zapper-policy = { path = "../zapper-policy" }
 zapper-util = { path = "../zapper-util" }

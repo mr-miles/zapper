@@ -14,157 +14,46 @@ use serde_json::{json, Value};
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
 use crate::{access, contracts, workforce};
-use zapper_policy::facility::McpCall;
+use zapper_openshell::edge::Caller;
 
 /// Where the agent copies itself in every guest.
 pub use zapper_openshell::AGENT_PATH;
 
-/// The office's tools, an MCP server in the gateway for the run's workers.
-/// Who calls is the session's member label; the role is checked on every
-/// call.
-struct Tools {
-    /// The office registry, to resolve a caller's firm → its run without a
-    /// `Core` (the office owns its own `Office`).
-    office: Arc<crate::Office>,
+/// What the office's MCP server tells a worker's harness about itself.
+pub(crate) fn instructions() -> Option<String> {
+    Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
 }
 
-impl Tools {
-    fn instructions(&self) -> Option<String> {
-        Self::instructions_text()
-    }
-
-    fn instructions_text() -> Option<String> {
-        Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
-    }
-
-    /// Answers one call, for the caller the edge named (the `McpCall`'s
-    /// session id and labels, from its sandbox): the firm's run, the member,
-    /// and the tool.
-    async fn handle(&self, call: &McpCall, op: &str, args: Value) -> Result<Value> {
-        let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
-        // A worker of another (ended) run of the firm is told it isn't running.
-        let run = self
-            .office
-            .run(firm)
-            .ok()
-            .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
-            .ok_or_else(|| anyhow!("the firm isn't running"))?;
-        let member = call.labels.get("member").map(String::as_str).unwrap_or("");
-        dispatch(&run, &call.session, member, op, &args)
-            .await
-            .inspect_err(|e| {
-                run.journal.append(
-                    "op_error",
-                    json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-                );
-            })
-    }
-}
-
-/// Answers one tool list (`op` "tools") or call for a caller the office edge
-/// has verified: `call` names the sandbox and its labels as the office made
-/// them, never as the guest said.
-pub(crate) async fn answer_verified(
+/// Answers one tool list (`op` "tools") or call for `caller`, as the office
+/// edge verified it (its session and labels as the office made them, never
+/// as the guest said): the firm's run, the member, and the tool. A worker of
+/// another (ended) run of the firm is told the firm isn't running.
+pub(crate) async fn answer(
     office: &Arc<crate::Office>,
-    call: &McpCall,
+    caller: &Caller,
     op: &str,
     args: Value,
 ) -> Result<Value> {
-    Tools {
-        office: office.clone(),
-    }
-    .handle(call, op, args)
-    .await
-}
-
-/// What the office's MCP server tells a worker's harness about itself.
-pub(crate) fn instructions() -> Option<String> {
-    Tools::instructions_text()
+    let run = office
+        .run_of(&caller.labels)
+        .ok_or_else(|| anyhow!("the firm isn't running"))?;
+    let member = caller
+        .labels
+        .get("member")
+        .map(String::as_str)
+        .unwrap_or("");
+    dispatch(&run, &caller.session, member, op, &args)
+        .await
+        .inspect_err(|e| {
+            run.journal.append(
+                "op_error",
+                json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+            );
+        })
 }
 
 /// The MCP server's name, as the workers' harnesses know it.
 pub const SERVER: &str = zapper_openshell::OFFICE_MCP;
-
-/// Serves the office's tools to the firm's workers, from a socket in the
-/// daemon's `state/services/` directory that the gateway asks for each
-/// tool list and call (naming the caller from the VM), as a facility in
-/// another process would. A worker of another run of the firm gets the
-/// tools too, and is told on each call that its firm isn't running.
-pub fn register(run: &FirmRun) -> Result<()> {
-    let sessions: std::collections::BTreeMap<String, String> =
-        [("firm", run.firm.as_str()), ("office", "worker")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-    let socket = format!("office-{}.sock", run.firm);
-    // The tools reach the daemon and the registry over the client and the
-    // office's own `Office`; their registration and socket go through the
-    // client. The listener is bound now and served once there is a runtime
-    // (always in the daemon; not in a test that starts a firm without one).
-    let tools = Arc::new(Tools {
-        office: run.office(),
-    });
-    let instructions = tools.instructions();
-    let served_tools = tools.clone();
-    let guard = crate::client::serve_facility(
-        &run.client,
-        &run.socket_dir,
-        &socket,
-        crate::client::Registered::Mcp,
-        move |listener| {
-            zapper_client::serve_socket(listener, move |line, stream| {
-                answer_mcp(served_tools.clone(), line, stream)
-            })
-        },
-        |socket| {
-            run.client
-                .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
-        },
-    )?;
-    *run.tools.lock().unwrap() = Some(guard);
-    Ok(())
-}
-
-/// Stops serving them, when the firm stops (the guard's drop removes the
-/// registration, aborts the serve task and unlinks the socket).
-pub fn unregister(run: &FirmRun) {
-    run.tools.lock().unwrap().take();
-}
-
-/// Answers one request on the tools' socket: the caller is the `McpCall` as
-/// the daemon named it from the VM, never as the guest says.
-async fn answer_mcp(tools: Arc<Tools>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
-    use tokio::io::AsyncWriteExt;
-    use zapper_policy::facility::{McpMethod, McpReply};
-    let answer = async {
-        let call: McpCall = serde_json::from_slice(&line)?;
-        if call.server != SERVER {
-            bail!("this socket serves {SERVER}, not {}", call.server);
-        }
-        let (op, args) = match call.method {
-            McpMethod::ToolsList => ("tools".to_string(), json!({})),
-            McpMethod::ToolsCall => (
-                call.tool.clone().unwrap_or_default(),
-                call.arguments.clone().unwrap_or_else(|| json!({})),
-            ),
-        };
-        tools.handle(&call, &op, args).await
-    };
-    let reply = match answer.await {
-        Ok(v) => McpReply {
-            result: Some(v),
-            error: None,
-        },
-        Err(e) => McpReply {
-            result: None,
-            error: Some(format!("{e:#}")),
-        },
-    };
-    if let Ok(mut b) = serde_json::to_vec(&reply) {
-        b.push(b'\n');
-        let _ = stream.write_all(&b).await;
-    }
-}
 
 fn names() -> Value {
     json!({ "type": "array", "items": { "type": "string" }, "description": "Addresses: a worker's name, board, team:NAME (NAME's direct reports), or all" })

@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::gateway;
 use anyhow::{Context, Result};
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -14,7 +15,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
-use zapper_client::gateway;
 use zapper_util::random_id;
 
 use crate::{Office, ASSETS, PAGE};
@@ -135,16 +135,12 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     os: Arc<crate::openshell::OpenShell>,
     state_dir: PathBuf,
-    socket_dir: PathBuf,
     office_config: PathBuf,
     remote: bool,
 ) -> Result<()> {
-    std::fs::create_dir_all(&socket_dir)
-        .with_context(|| format!("creating {}", socket_dir.display()))?;
     let office = Arc::new(Office::default());
     let _ = office.client.set(os.clone());
     let _ = office.state_dir.set(state_dir);
-    let _ = office.socket_dir.set(socket_dir);
 
     // The office edge: where the sandboxes' supervisors reach the office's
     // tools and git, for the workers, with their tokens.

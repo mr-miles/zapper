@@ -767,9 +767,9 @@ async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     );
 }
 
-/// The git server's answer to `pat` asking for `path` with their password.
+/// The git server's answer to `pat` (as the edge verified them) asking for
+/// `path`.
 async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
-    use base64::Engine as _;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
@@ -792,11 +792,9 @@ async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
         .await
         .unwrap();
     tokio::spawn(conn);
-    let auth = base64::engine::general_purpose::STANDARD.encode("pat:pw");
     let req = hyper::Request::builder()
         .uri(path)
         .header("host", "git.acme")
-        .header(hyper::header::AUTHORIZATION, format!("Basic {auth}"))
         .body(Full::new(Bytes::new()))
         .unwrap();
     let resp = sender.send_request(req).await.unwrap();
@@ -810,11 +808,6 @@ async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
     let w = world();
     let (_t, run, code, _kb) = firm("touch").await;
     remote::prepare(&run).await.unwrap();
-    run.facility
-        .git_passwords
-        .lock()
-        .unwrap()
-        .insert("pat".into(), "pw".into());
     let local = remote::root(&run.config, &run.dir).join(format!("{code}.git"));
     // Without a grant, nothing is cloned for them.
     let (status, _) = git_request(

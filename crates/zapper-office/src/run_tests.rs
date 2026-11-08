@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use crate::firm::BOARD;
-use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -16,7 +15,7 @@ use super::facility;
 use super::{labels, run_of, test_run, FirmRun};
 use crate::fake::Session;
 use crate::fake::TestCore;
-use zapper_api_types::NewSession;
+use zapper_openshell::session::NewSession;
 
 const FIRM: &str = "
 profiles:
@@ -68,10 +67,6 @@ fn credential_rules(run: &FirmRun, worker: &str) -> Vec<(String, String, Vec<u16
     v
 }
 
-fn ids(rules: &[(String, String, Vec<u16>)]) -> Vec<&str> {
-    rules.iter().map(|(i, ..)| i.as_str()).collect()
-}
-
 #[test]
 fn a_session_finds_its_run_by_its_labels() {
     let (t, run) = run();
@@ -88,31 +83,30 @@ fn a_session_finds_its_run_by_its_labels() {
 #[test]
 fn the_ceo_holds_every_repository_and_others_nothing() {
     let (_t, run) = run();
-    let host = format!("git.{}", run.domain);
-    let ceo = credential_rules(&run, "ceo");
-    assert_eq!(ids(&ceo), ["credentials-git-api", "credentials-git-web"]);
-    assert!(ceo.iter().all(|(_, h, p)| *h == host && *p == [443]));
-    assert!(credential_rules(&run, "pat").is_empty());
+    for repo in ["git:api", "git:web"] {
+        assert_eq!(access::level(&run, "ceo", repo), Level::Admin, "{repo}");
+        assert_eq!(access::level(&run, "pat", repo), Level::None, "{repo}");
+    }
+    assert!(
+        credential_rules(&run, "ceo").is_empty(),
+        "no network rules: the edge serves git"
+    );
 }
 
 #[test]
-fn a_git_grant_is_per_repository_with_its_own_network_rule() {
+fn a_git_grant_is_per_repository() {
     let (_t, run) = run();
     access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
-    assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-api"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::Write);
     assert_eq!(access::level(&run, "pat", "git:web"), Level::None);
 
     access::board_grant(&run, "pat", "git:web", "read", None, "test").unwrap();
-    assert_eq!(
-        ids(&credential_rules(&run, "pat")),
-        ["credentials-git-api", "credentials-git-web"]
-    );
+    assert_eq!(access::level(&run, "pat", "git:web"), Level::Read);
 
-    // Revoking one repository leaves the other's rule, and so its host.
+    // Revoking one repository leaves the other.
     access::revoke(&run, BOARD, "pat", "git:api", "done").unwrap();
-    assert_eq!(ids(&credential_rules(&run, "pat")), ["credentials-git-web"]);
     assert_eq!(access::level(&run, "pat", "git:api"), Level::None);
+    assert_eq!(access::level(&run, "pat", "git:web"), Level::Read);
 
     // With two repositories, plain `git` names none of them.
     let e = access::board_grant(&run, "pat", "git", "read", None, "test")
@@ -121,24 +115,11 @@ fn a_git_grant_is_per_repository_with_its_own_network_rule() {
     assert!(e.contains("name the repository"), "{e}");
 }
 
-/// The git server's answer to `member` asking for `path`, with `auth` as
-/// their Basic credentials: their level, or the refusal's status and text.
-fn git(
-    run: &FirmRun,
-    member: &str,
-    auth: Option<&str>,
-    path: &str,
-) -> Result<Level, (u16, String)> {
-    let mut headers = hyper::HeaderMap::new();
-    if let Some(a) = auth {
-        let v = base64::engine::general_purpose::STANDARD.encode(a);
-        headers.insert(
-            hyper::header::AUTHORIZATION,
-            format!("Basic {v}").parse().unwrap(),
-        );
-    }
+/// The git server's answer to `member` (as the edge verified them) asking
+/// for `path`: their level, or the refusal's status and text.
+fn git(run: &FirmRun, member: &str, path: &str) -> Result<Level, (u16, String)> {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
-    facility::authorize(run, member, &headers, path, query).map_err(|r| {
+    facility::authorize(run, member, path, query).map_err(|r| {
         let r = *r;
         let status = r.status().as_u16();
         let body =
@@ -153,65 +134,40 @@ fn git(
 #[test]
 fn the_git_server_checks_who_asks_and_their_grant_on_the_repository() {
     let (_t, run) = run();
-    run.facility
-        .git_passwords
-        .lock()
-        .unwrap()
-        .insert("pat".into(), "pw".into());
     let refs = "/api.git/info/refs?service=git-upload-pack";
     let push = "/api.git/git-receive-pack";
 
-    // Who: the password, for the worker the connection came from.
-    assert_eq!(git(&run, "pat", None, refs).unwrap_err().0, 401);
-    assert_eq!(
-        git(&run, "pat", Some("pat:wrong"), refs).unwrap_err().0,
-        401
-    );
-    assert_eq!(git(&run, "pat", Some("ceo:pw"), refs).unwrap_err().0, 401);
-
     // What: a grant on this repository.
-    let (status, text) = git(&run, "pat", Some("pat:pw"), refs).unwrap_err();
+    let (status, text) = git(&run, "pat", refs).unwrap_err();
     assert_eq!(status, 403);
     assert!(text.contains("no access to api"), "{text}");
 
     access::board_grant(&run, "pat", "git:api", "read", None, "test").unwrap();
-    assert_eq!(git(&run, "pat", Some("pat:pw"), refs), Ok(Level::Read));
-    let (status, text) = git(&run, "pat", Some("pat:pw"), push).unwrap_err();
+    assert_eq!(git(&run, "pat", refs), Ok(Level::Read));
+    let (status, text) = git(&run, "pat", push).unwrap_err();
     assert_eq!(status, 403);
     assert!(text.contains("you can read api"), "{text}");
     assert_eq!(
-        git(
-            &run,
-            "pat",
-            Some("pat:pw"),
-            "/api.git/info/refs?service=git-receive-pack"
-        )
-        .unwrap_err()
-        .0,
+        git(&run, "pat", "/api.git/info/refs?service=git-receive-pack")
+            .unwrap_err()
+            .0,
         403,
         "asking to push is a push"
     );
 
     access::board_grant(&run, "pat", "git:api", "write", None, "test").unwrap();
-    assert_eq!(git(&run, "pat", Some("pat:pw"), push), Ok(Level::Write));
+    assert_eq!(git(&run, "pat", push), Ok(Level::Write));
 
     // Other repositories: their own grant; unknown ones aren't there.
-    assert_eq!(
-        git(&run, "pat", Some("pat:pw"), "/web.git/info/refs")
-            .unwrap_err()
-            .0,
-        403
-    );
-    let (status, text) = git(&run, "pat", Some("pat:pw"), "/other.git/info/refs").unwrap_err();
+    assert_eq!(git(&run, "pat", "/web.git/info/refs").unwrap_err().0, 403);
+    let (status, text) = git(&run, "pat", "/other.git/info/refs").unwrap_err();
     assert_eq!(status, 404);
     assert!(
         text.contains("api.git") && text.contains("web.git"),
         "{text}"
     );
     assert_eq!(
-        git(&run, "pat", Some("pat:pw"), "/api.git/../web.git/HEAD")
-            .unwrap_err()
-            .0,
+        git(&run, "pat", "/api.git/../web.git/HEAD").unwrap_err().0,
         400
     );
 }
@@ -408,21 +364,12 @@ async fn the_stop_hook_asks_whether_mail_came() {
 }
 
 #[tokio::test]
-async fn an_overlong_request_is_refused() {
-    let (t, run) = run();
-    let body = "x".repeat(zapper_policy::proto::MAX_MCP_LINE + 10);
-    let request = format!(r#"{{"op":"mail_send","args":{{"body":"{body}"}}}}"#);
-    let r = office(&t, &session_of(&run, "pat"), &request).await;
-    let e = r["error"].as_str().unwrap_or_default();
-    assert!(e.starts_with("request longer than"), "{e}");
-}
-
-#[tokio::test]
 async fn once_the_firm_stops_its_tools_are_gone() {
     let (t, run) = run();
-    super::ops::unregister(&run);
-    let r = office(&t, &session_of(&run, "pat"), r#"{"op":"desk"}"#).await;
-    assert_eq!(r["error"], "no MCP server office for this session", "{r}");
+    let pat = session_of(&run, "pat");
+    super::run::down(&run, "the test").await;
+    let r = office(&t, &pat, r#"{"op":"desk"}"#).await;
+    assert_eq!(r["error"], "the firm isn't running", "{r}");
 }
 
 #[tokio::test]
@@ -484,14 +431,9 @@ fn a_restart_ends_the_runs_the_daemon_left_running() {
 async fn an_officers_approval_for_a_role_is_a_rule_of_the_roles_until_revoked() {
     use super::security::{self, DecideArgs};
     let (t, run) = run();
-    let req = zapper_policy::NetRequest {
-        host: "api.example".into(),
-        port: 443,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
-    let id = security::ask(&run, "pat", &req, None, None, "for the test").unwrap();
+    let id = t
+        .core
+        .propose(&run, "pat", "api.example", 443, &[], "for the test");
     security::decide(
         &run,
         BOARD,
@@ -627,7 +569,6 @@ fn the_cluster_starts_k3s_rootless_with_ingress_on_unprivileged_ports() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cluster_grant_keeps_the_token_with_the_office() {
     let (t, run) = run();
-    t.core.set_edge("http://host.openshell.internal:8970");
     let mut new = NewSession::plain("w".into(), t.workdir(), Policy::default());
     new.labels = labels(&run.firm, &run.id, facility::CLUSTER, "", false);
     let cluster = t.core.test_session(new, true).unwrap();

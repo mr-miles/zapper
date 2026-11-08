@@ -425,7 +425,7 @@ impl Edge {
                 ),
             );
         }
-        match self.answer(caller, &msg).await {
+        match answer_mcp(self.backend.as_ref(), caller, &msg).await {
             Some(reply) => json_response(StatusCode::OK, &reply),
             None => Response::builder()
                 .status(StatusCode::ACCEPTED)
@@ -433,10 +433,13 @@ impl Edge {
                 .unwrap(),
         }
     }
+}
 
-    /// The answer to MCP message `msg`; none
-    /// for a notification or a response.
-    async fn answer(&self, caller: &Caller, msg: &Value) -> Option<Value> {
+/// The answer of `backend`'s MCP server to message `msg` from `caller`;
+/// none for a notification or a response. The edge's `/mcp`, and the
+/// office's tests.
+pub async fn answer_mcp(backend: &dyn Backend, caller: &Caller, msg: &Value) -> Option<Value> {
+    {
         let id = msg.get("id")?.clone();
         let method = msg["method"].as_str()?;
         let result: std::result::Result<Value, (i64, String)> = match method {
@@ -444,20 +447,17 @@ impl Edge {
                 let mut r = json!({
                     "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": self.backend.name(), "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": { "name": backend.name(), "version": env!("CARGO_PKG_VERSION") },
                 });
-                if let Some(i) = self.backend.instructions() {
+                if let Some(i) = backend.instructions() {
                     r["instructions"] = json!(i);
                 }
                 Ok(r)
             }
             "ping" => Ok(json!({})),
             "tools/list" => {
-                match tokio::time::timeout(
-                    LIST_TIMEOUT,
-                    self.backend.tools(caller, "tools", json!({})),
-                )
-                .await
+                match tokio::time::timeout(LIST_TIMEOUT, backend.tools(caller, "tools", json!({})))
+                    .await
                 {
                     Ok(Ok(t)) => Ok(json!({ "tools": t })),
                     Ok(Err(e)) => Err((-32603, format!("{e:#}"))),
@@ -467,10 +467,9 @@ impl Edge {
             "tools/call" => {
                 let tool = msg["params"]["name"].as_str().unwrap_or("");
                 let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-                let answer =
-                    tokio::time::timeout(CALL_TIMEOUT, self.backend.tools(caller, tool, args))
-                        .await
-                        .unwrap_or_else(|_| Err(anyhow!("{tool} took too long")));
+                let answer = tokio::time::timeout(CALL_TIMEOUT, backend.tools(caller, tool, args))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("{tool} took too long")));
                 Ok(match answer {
                     Ok(v) => json!({
                         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],

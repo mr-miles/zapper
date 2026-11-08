@@ -9,10 +9,8 @@ license.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 zapper-git = { path = "../zapper-git" }
-zapper-client = { path = "../zapper-client" }
 zapper-util = { path = "../zapper-util" }
 zapper-driver = { path = "../zapper-driver" }
-zapper-api-types = { path = "../zapper-api-types" }
 zapper-record = { path = "../zapper-record" }
 zapper-mint = { path = "../zapper-mint" }
 zapper-runs = { path = "../zapper-runs" }

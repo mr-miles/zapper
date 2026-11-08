@@ -9,6 +9,7 @@ pub mod files;
 pub mod image;
 pub mod rules;
 mod sandboxes;
+pub mod session;
 
 pub use sandboxes::*;
 

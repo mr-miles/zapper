@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::ExecRequest;
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
-use zapper_proto::ExecRequest;
 
 use crate::{Action, ExecRule, NetRule, Policy, Scope};
 

@@ -10,7 +10,7 @@ use crate::fake::Core;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_api_types::NewSession;
+use zapper_openshell::session::NewSession;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 use zapper_util::now;
@@ -469,7 +469,6 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
-        socket_dir: office.socket_dir().to_path_buf(),
         post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
@@ -499,7 +498,6 @@ fn create_run(
         state: Mutex::new(RunState::Starting),
         journal,
         workers: RwLock::new(workers),
-        tools: Mutex::new(None),
         plans: Mutex::new(crate::plan::Plans::default()),
         stopping: Notify::new(),
     });
@@ -528,9 +526,6 @@ fn create_run(
             &format!("[Automatic notice] firm {name}: {w}.\n"),
         );
     }
-    facility::register(&run)?;
-    security::register(&run)?;
-    ops::register(&run)?;
     office
         .runs
         .write()
@@ -802,7 +797,7 @@ pub(crate) async fn boot_worker(
         } else {
             ""
         };
-    let mut files = facility::credentials_for(run, &w.name, &w.role, &home)?;
+    let mut files = facility::credentials_for(run, &w.name, &home);
     // A headless browser command, for the image's Playwright.
     files.push(GuestFile {
         path: "/usr/local/bin/browse".into(),
@@ -817,14 +812,9 @@ pub(crate) async fn boot_worker(
         policy: Policy::default(),
         // The role's shared layer is attached by the `firm-role` label.
         labels: labels(&run.firm, &run.id, &w.name, &w.role, true),
-        shared_layers: vec![],
         files,
         mounts: vec![],
         agent_overlay: Some(overlay),
-        forwards: vec![],
-        persistent: false,
-        accept_changed_image: false,
-        ssh: false,
     };
     let info = run.client.create_session(new).await?;
     run.journal.append(
@@ -925,8 +915,6 @@ pub async fn down(run: &Arc<FirmRun>, reason: &str) {
     }
     super::remote::finish(run).await;
     facility::stop(run).await;
-    security::unregister(run);
-    ops::unregister(run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));

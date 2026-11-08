@@ -13,6 +13,7 @@ pub mod edge;
 pub(crate) mod facility;
 pub(crate) mod firm;
 pub(crate) mod foreman;
+pub mod gateway;
 pub(crate) mod git;
 pub(crate) mod http;
 pub(crate) mod journal;
@@ -63,7 +64,7 @@ use zapper_util::{now, random_id};
 use crate::fake::{Core, Session};
 use journal::Journal;
 use mail::{Draft, Kind};
-use zapper_api_types::SessionInfo;
+use zapper_openshell::session::SessionInfo;
 
 /// Every firm's current or last run. `pub` as the office's own HTTP state
 /// (the axum `State` the firm routes extract); its fields
@@ -79,9 +80,6 @@ pub struct Office {
     /// (`state/firms/<firm>/runs/…`). Set in `start`; the read endpoints and
     /// history read run files by it.
     state_dir: std::sync::OnceLock<PathBuf>,
-    /// The office's `state/services/` directory, where the office binds its
-    /// facilities' sockets (`FirmRun.socket_dir`). Set in `start`.
-    socket_dir: std::sync::OnceLock<PathBuf>,
     /// The firms the office runs, its own config (`office.yaml`), parsed and
     /// validated. Loaded at boot and swapped on reload. Read through `firm`/`firms`.
     firms: RwLock<BTreeMap<String, Firm>>,
@@ -111,27 +109,24 @@ impl Office {
         self.state_dir().join("firms").join(firm)
     }
 
-    /// The office's `state/services/` directory (set in `start`), where the
-    /// office binds its facilities' sockets.
-    pub fn socket_dir(&self) -> &std::path::Path {
-        self.socket_dir
-            .get()
-            .expect("the office's socket_dir is set in start()")
+    pub(crate) fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
+        self.runs.read().unwrap().get(firm).cloned().ok_or_else(|| {
+            anyhow!("no run of firm {firm}; start it with `zapper-office firm up {firm}`")
+        })
     }
 
-    pub(crate) fn run(&self, firm: &str) -> Result<Arc<FirmRun>> {
-        self.runs
-            .read()
-            .unwrap()
-            .get(firm)
-            .cloned()
-            .ok_or_else(|| anyhow!("no run of firm {firm}; start it with `zapper firm up {firm}`"))
+    /// The firm's current run a sandbox with `labels` works in, while it
+    /// runs: none for a sandbox of another run of the firm, or of one that
+    /// ended.
+    pub(crate) fn run_of(&self, labels: &BTreeMap<String, String>) -> Option<Arc<FirmRun>> {
+        let run = self.run(labels.get("firm")?).ok()?;
+        (labels.get("run") == Some(&run.id) && !run.ended()).then_some(run)
     }
 
     pub(crate) fn active(&self, firm: &str) -> Result<Arc<FirmRun>> {
         let r = self.run(firm)?;
         if r.ended() {
-            bail!("firm {firm} isn't running; start it with `zapper firm up {firm}`");
+            bail!("firm {firm} isn't running; start it with `zapper-office firm up {firm}`");
         }
         Ok(r)
     }
@@ -323,9 +318,6 @@ pub(crate) struct FirmRun {
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
-    /// The office's `state/services/` directory, where it binds the sockets
-    /// of the facilities it serves (its tools, the officers' decider).
-    pub socket_dir: PathBuf,
     /// The firm's config as the run started: roles, budgets, limits,
     /// services. The chart is in `chart`.
     pub config: Firm,
@@ -376,9 +368,6 @@ pub(crate) struct FirmRun {
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
     pub facility: facility::Facilities,
-    /// The office's tools: their registration in the gateway and the socket
-    /// that serves them, undone when the guard drops.
-    pub tools: Mutex<Option<client::FacilityGuard>>,
     /// Staged plans a worker authored with `plan`, released stage by stage.
     pub plans: Mutex<plan::Plans>,
     pub stopping: Notify,
@@ -446,15 +435,6 @@ pub(crate) fn is_run_id(s: &str) -> bool {
         && b[15] == b'-'
         && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
         && b[16..].iter().all(|c| zapper_util::ID_CHARS.contains(c))
-}
-
-/// A run's sessions, by their labels: what the run registers services, its
-/// zone and its decider for.
-pub(crate) fn run_sessions(run: &FirmRun) -> BTreeMap<String, String> {
-    [("firm", &run.firm), ("run", &run.id)]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
 }
 
 fn utc_day(ts: f64) -> i64 {
@@ -916,14 +896,21 @@ mod tests {
     #[test]
     fn a_session_finds_no_run_its_firm_doesnt_have() {
         let t = super::test_core("profiles:\n  w: {}\n");
-        let mut new =
-            zapper_api_types::NewSession::plain("w".into(), t.workdir(), Default::default());
+        let mut new = zapper_openshell::session::NewSession::plain(
+            "w".into(),
+            t.workdir(),
+            Default::default(),
+        );
         new.labels = super::labels("acme", "r1", "pat", "", true);
         let worker = t.core.test_session(new, true).unwrap();
         let plain = t
             .core
             .test_session(
-                zapper_api_types::NewSession::plain("w".into(), t.workdir(), Default::default()),
+                zapper_openshell::session::NewSession::plain(
+                    "w".into(),
+                    t.workdir(),
+                    Default::default(),
+                ),
                 true,
             )
             .unwrap();

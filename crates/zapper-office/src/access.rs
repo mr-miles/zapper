@@ -382,12 +382,9 @@ fn take(
 }
 
 /// Makes the platform match the grant: the cluster's RBAC and the worker's
-/// kubeconfig, and the network rules for git and the cluster. git and the
-/// drive are checked on every request, so they need nothing more here.
+/// kubeconfig. git and the drive are checked on every request (the office
+/// edge serves both), so they need nothing more here.
 fn enforce(run: &Arc<FirmRun>, worker: &str, resource: &str) {
-    if resource.starts_with("git:") || resource == "cluster" {
-        super::facility::network_follows_grant(run, worker, resource, level(run, worker, resource));
-    }
     if resource == "cluster" {
         let (run, worker) = (run.clone(), worker.to_string());
         tokio::spawn(async move {

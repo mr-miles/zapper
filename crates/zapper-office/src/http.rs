@@ -20,13 +20,35 @@ use serde_json::{json, Value};
 
 use super::{drive, security};
 use crate::Office;
-use zapper_api_types::ApiError;
 
 /// The office's own state: the handlers reach firms, runs and the running
 /// config through it (`run`, `active`, `firm_dir`, `client().config()`),
 /// never through a `Core`. Co-hosted it is `Core::office()`; a standalone
 /// office binds its own (P4-d).
 type S = State<Arc<Office>>;
+/// The error the office's routes answer with: a status and a message, as
+/// `{"error": …}`. An `anyhow::Error` that names what isn't there is a 404,
+/// any other a 400.
+pub struct ApiError(pub StatusCode, pub String);
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        let msg = format!("{e:#}");
+        let code = if msg.starts_with("no ") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        ApiError(code, msg)
+    }
+}
+
 type R<T> = Result<T, ApiError>;
 
 /// A running firm resolved from the request's `{f}` path segment: the

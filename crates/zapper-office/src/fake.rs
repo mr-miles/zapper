@@ -15,17 +15,17 @@ use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::io::{ReadHalf, WriteHalf};
-use zapper_api_types::{NewSession, ServiceSpec, SessionInfo, Status};
 use zapper_driver::process::DriveStream;
-use zapper_policy::facility::{McpCall, McpMethod};
+use zapper_openshell::edge::Caller;
+use zapper_openshell::session::{NewSession, SessionInfo, Status};
 use zapper_policy::proto::{Frame, ShellRequest};
 use zapper_policy::{AnyRule, Config, NetRule, Policy, ResolvedProfile, Scope};
 
-use crate::client::OfficeClient;
+use crate::client::{DraftDecision, DraftRule, OfficeClient};
 use crate::Office;
 
-/// Session labels, or a selector of sessions by them.
-type Labels = BTreeMap<String, String>;
+/// The office edge's URL the fake plays by default.
+pub const EDGE: &str = "http://host.openshell.internal:8970";
 
 /// A temporary config directory with an office started on it.
 pub struct TestCore {
@@ -63,8 +63,7 @@ impl TestCore {
             office: Arc::new(Office::default()),
             sessions: Default::default(),
             layers: Default::default(),
-            mcp: Default::default(),
-            edge: Default::default(),
+            edge: Mutex::new(EDGE.into()),
             next: AtomicU64::new(1),
         }));
         TestCore { core, dir }
@@ -98,10 +97,8 @@ struct Inner {
     office: Arc<Office>,
     sessions: Mutex<BTreeMap<String, Arc<Session>>>,
     layers: Mutex<BTreeMap<String, Policy>>,
-    /// The MCP servers registered: their names and the sessions they serve.
-    mcp: Mutex<BTreeMap<u64, (String, Labels)>>,
-    /// The office edge's URL, when a test plays one.
-    edge: Mutex<Option<String>>,
+    /// The office edge's URL.
+    edge: Mutex<String>,
     next: AtomicU64,
 }
 
@@ -116,6 +113,9 @@ pub struct Session {
     vm: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Shell>>>,
     /// Its traffic, as a test makes it up.
     requests: Mutex<Vec<Value>>,
+    /// The rules its network drafted that wait for review, as the gateway
+    /// keeps them ([`Core::propose`]).
+    drafts: Mutex<Vec<DraftRule>>,
 }
 
 impl Session {
@@ -145,13 +145,60 @@ impl Session {
 }
 
 impl Core {
+    /// `worker` proposes a rule through `policy.local`, as OpenShell drafts
+    /// it: `host`:`port`, for `methods` (none: the whole connection), and why.
+    /// The office files it as the officers' access request: its id.
+    pub fn propose(
+        &self,
+        run: &crate::FirmRun,
+        worker: &str,
+        host: &str,
+        port: u16,
+        methods: &[&str],
+        reason: &str,
+    ) -> String {
+        let s = run
+            .rt(worker)
+            .and_then(|w| w.session())
+            .unwrap_or_else(|| panic!("{worker} has no session"));
+        let chunk = format!("c{}", self.0.next.fetch_add(1, Ordering::Relaxed));
+        let methods: Vec<String> = methods.iter().map(|m| m.to_ascii_uppercase()).collect();
+        let d = DraftRule {
+            session: s.id().to_string(),
+            chunk: chunk.clone(),
+            host: host.to_ascii_lowercase(),
+            port,
+            methods: methods.clone(),
+            path: None,
+            binaries: vec!["/**".into()],
+            rationale: reason.to_string(),
+            findings: String::new(),
+            proposed: true,
+            rule: json!({ "host": host, "port": port, "methods": methods }),
+        };
+        self.session(s.id())
+            .expect("the worker's session")
+            .drafts
+            .lock()
+            .unwrap()
+            .push(d);
+        crate::security::file_drafts(run);
+        run.security
+            .lock()
+            .unwrap()
+            .requests
+            .values()
+            .find(|r| r.draft.as_ref().is_some_and(|d| d.chunk == chunk))
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| panic!("the draft {chunk} wasn't filed"))
+    }
+
     /// The office this backend serves, started on it on first use.
     pub fn office(&self) -> Arc<Office> {
         let office = self.0.office.clone();
         if office.client.get().is_none() {
             let _ = office.client.set(Arc::new(Fake(self.clone())));
             let _ = office.state_dir.set(self.0.state.clone());
-            let _ = office.socket_dir.set(self.socket_dir());
         }
         office
     }
@@ -170,8 +217,7 @@ impl Core {
             office: Arc::new(Office::default()),
             sessions: Default::default(),
             layers: Default::default(),
-            mcp: Default::default(),
-            edge: Default::default(),
+            edge: Mutex::new(EDGE.into()),
             next: AtomicU64::new(1),
         }))
     }
@@ -189,12 +235,6 @@ impl Core {
         &self.0.state
     }
 
-    pub fn socket_dir(&self) -> PathBuf {
-        let d = self.0.state.join("services");
-        let _ = std::fs::create_dir_all(&d);
-        d
-    }
-
     /// A session made from `new`, ready at once (no VM boots).
     pub fn test_session(&self, new: NewSession, _ready: bool) -> Result<Arc<Session>> {
         let resolved = self.config().resolve(&new.profile)?;
@@ -207,6 +247,7 @@ impl Core {
             status: Mutex::new(Status::Running),
             vm: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            drafts: Mutex::new(Vec::new()),
         });
         self.0.sessions.lock().unwrap().insert(id, s.clone());
         Ok(s)
@@ -227,25 +268,15 @@ impl Core {
             profile: p.name.clone(),
             status: s.status.lock().unwrap().clone(),
             created: zapper_util::now(),
-            expires: None,
-            persistent: false,
-            ssh: false,
-            disk_bytes: None,
             image: p.engine.image.clone(),
             vcpus: p.engine.vcpus,
             memory_mib: p.engine.memory_mib,
-            kernel: "fake".into(),
-            network: p.engine.network,
             user: p.agent.user.clone(),
-            root: false,
             workdir: p.agent.workdir.clone(),
-            counters: json!({}),
-            usage: None,
             rules: s.rules().len(),
             firm: s.labels.get("firm").cloned(),
             member: s.labels.get("member").cloned(),
             labels: s.labels.clone(),
-            driver: Value::Null,
         }
     }
 
@@ -295,22 +326,6 @@ impl Core {
         layers.extend(s.resolved.layers.clone());
         layers.push((Scope::Global, self.config().policy));
         Ok(layers)
-    }
-
-    /// Whether an MCP server `name` is registered for session `s`.
-    fn serves(&self, name: &str, s: &Session) -> bool {
-        self.0
-            .mcp
-            .lock()
-            .unwrap()
-            .values()
-            .any(|(n, sel)| n == name && sel.iter().all(|(k, v)| s.labels.get(k) == Some(v)))
-    }
-
-    /// Plays an office edge at `url`: the office then works as it does on
-    /// OpenShell (git, the cluster and the tools through it).
-    pub fn set_edge(&self, url: &str) {
-        *self.0.edge.lock().unwrap() = Some(url.to_string());
     }
 
     /// Takes the office's runs down, as a shutdown would.
@@ -456,55 +471,6 @@ impl OfficeClient for Fake {
         Box::pin(async move { bail!("session {id} serves nothing on port {port}") })
     }
 
-    fn add_mcp_socket(
-        &self,
-        name: &str,
-        sessions: BTreeMap<String, String>,
-        _socket: &str,
-        _instructions: Option<String>,
-        _owner: &str,
-    ) -> Result<u64> {
-        let id = self.0 .0.next.fetch_add(1, Ordering::Relaxed);
-        self.0
-             .0
-            .mcp
-            .lock()
-            .unwrap()
-            .insert(id, (name.to_string(), sessions));
-        Ok(id)
-    }
-
-    fn remove_mcp_server(&self, id: u64) -> bool {
-        self.0 .0.mcp.lock().unwrap().remove(&id).is_some()
-    }
-
-    fn add_decider_socket(
-        &self,
-        _sessions: BTreeMap<String, String>,
-        _socket: &str,
-    ) -> Result<u64> {
-        Ok(self.0 .0.next.fetch_add(1, Ordering::Relaxed))
-    }
-
-    fn remove_decider(&self, _id: u64) -> bool {
-        true
-    }
-
-    fn add_service(&self, _spec: ServiceSpec) -> Result<u64> {
-        Ok(self.0 .0.next.fetch_add(1, Ordering::Relaxed))
-    }
-
-    fn add_zone(
-        &self,
-        _domain: &str,
-        _sessions: BTreeMap<String, String>,
-        _owner: &str,
-    ) -> Result<u64> {
-        Ok(self.0 .0.next.fetch_add(1, Ordering::Relaxed))
-    }
-
-    fn remove_service(&self, _id: u64) {}
-
     fn requests(&self, id: &str) -> Vec<Value> {
         self.0
             .session(id)
@@ -524,8 +490,48 @@ impl OfficeClient for Fake {
             .is_some_and(|s| s.remove_rule(rule_id).is_some())
     }
 
-    fn edge(&self) -> Option<String> {
+    fn edge(&self) -> String {
         self.0 .0.edge.lock().unwrap().clone()
+    }
+
+    fn pending_drafts(&self, id: &str) -> Option<Vec<DraftRule>> {
+        self.0.session(id).map(|s| s.drafts.lock().unwrap().clone())
+    }
+
+    /// As the gateway decides a draft: it leaves the pending list, and an
+    /// approval becomes the session's rule `draft-<chunk>` (narrowed as
+    /// asked), which taking it back out removes.
+    fn decide_draft(&self, id: &str, chunk: &str, d: DraftDecision) -> Result<Option<String>> {
+        let s = self
+            .0
+            .session(id)
+            .ok_or_else(|| anyhow!("no session {id}"))?;
+        let draft = {
+            let mut drafts = s.drafts.lock().unwrap();
+            let i = drafts
+                .iter()
+                .position(|x| x.chunk == chunk)
+                .ok_or_else(|| anyhow!("no pending draft {chunk}"))?;
+            drafts.remove(i)
+        };
+        let DraftDecision::Approve { methods, path } = d else {
+            return Ok(None);
+        };
+        let rule = format!("draft-{chunk}");
+        s.put_rule(AnyRule::Net(NetRule {
+            id: Some(rule.clone()),
+            action: zapper_policy::Action::Allow,
+            host: draft.host,
+            ports: vec![draft.port],
+            methods: methods.unwrap_or(draft.methods),
+            path: path.or(draft.path),
+            protocol: Default::default(),
+            secrets: vec![],
+            set_headers: Default::default(),
+            final_: false,
+            comment: None,
+        }));
+        Ok(Some(rule))
     }
 }
 
@@ -596,9 +602,9 @@ pub fn shell_vm(s: &Session) -> tokio::sync::mpsc::UnboundedReceiver<Shell> {
 }
 
 /// Serves one MCP connection from session `s`, as its harness would make
-/// one to the office: the server's name on the first line, then JSON-RPC,
-/// a message a line. The caller is `s` as the office made it, never what
-/// the stream says; the server must be registered for it.
+/// one to the office edge: the server's name on the first line, then
+/// JSON-RPC, a message a line, answered as the edge answers it. The caller
+/// is `s` as the office made it, never what the stream says.
 pub async fn mcp<S>(core: &Core, s: &Arc<Session>, stream: S) -> Result<()>
 where
     S: tokio::io::AsyncRead + AsyncWrite + Unpin,
@@ -606,91 +612,57 @@ where
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let server = lines.next_line().await?.unwrap_or_default();
-    let server = server.trim().to_string();
-    let office = core.office();
+    let backend = Tools(core.office());
+    let caller = Caller {
+        session: s.id.clone(),
+        labels: s.labels.clone(),
+    };
     while let Some(line) = lines.next_line().await? {
-        let too_long = line.len() > zapper_policy::proto::MAX_MCP_LINE;
-        let reply = if too_long {
-            rpc_error(
-                Value::Null,
-                -32600,
-                format!(
-                    "request longer than {} bytes",
-                    zapper_policy::proto::MAX_MCP_LINE
-                ),
-            )
-        } else {
-            match serde_json::from_str::<Value>(&line) {
-                Err(e) => rpc_error(Value::Null, -32700, format!("bad request: {e}")),
-                Ok(msg) => match answer(core, &office, s, &server, &msg).await {
-                    None => continue,
-                    Some(r) => r,
-                },
-            }
+        let reply = match serde_json::from_str::<Value>(&line) {
+            Err(e) => rpc_error(Value::Null, -32700, format!("bad request: {e}")),
+            Ok(msg) if server.trim() != crate::ops::SERVER => rpc_error(
+                msg.get("id").cloned().unwrap_or(Value::Null),
+                -32601,
+                format!("no MCP server {} here", server.trim()),
+            ),
+            Ok(msg) => match zapper_openshell::edge::answer_mcp(&backend, &caller, &msg).await {
+                None => continue,
+                Some(r) => r,
+            },
         };
         write.write_all(format!("{reply}\n").as_bytes()).await?;
-        if too_long {
-            break;
-        }
     }
     Ok(())
 }
 
-/// The answer to one JSON-RPC message from `s` to MCP server `server`;
-/// `None` for a notification.
-async fn answer(
-    core: &Core,
-    office: &Arc<Office>,
-    s: &Arc<Session>,
-    server: &str,
-    msg: &Value,
-) -> Option<Value> {
-    let id = msg.get("id").cloned()?;
-    if !core.serves(server, s) {
-        return Some(rpc_error(
-            id,
-            -32601,
-            format!("no MCP server {server} for this session"),
-        ));
+/// The office's tools as the edge serves them, for [`mcp`].
+struct Tools(Arc<Office>);
+
+impl zapper_openshell::edge::Backend for Tools {
+    fn name(&self) -> &str {
+        crate::ops::SERVER
     }
-    let method = msg["method"].as_str().unwrap_or("");
-    let call = |m: McpMethod, tool: Option<String>, args: Option<Value>| McpCall {
-        session: s.id.clone(),
-        labels: s.labels.clone(),
-        server: server.to_string(),
-        method: m,
-        tool,
-        arguments: args,
-    };
-    let result = match method {
-        "initialize" => json!({
-            "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-            "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": { "name": server, "version": "0" },
-            "instructions": crate::ops::instructions(),
-        }),
-        "ping" => json!({}),
-        "tools/list" => {
-            let c = call(McpMethod::ToolsList, None, None);
-            match crate::ops::answer_verified(office, &c, "tools", json!({})).await {
-                Ok(tools) => json!({ "tools": tools }),
-                Err(e) => return Some(rpc_error(id, -32603, format!("{e:#}"))),
-            }
-        }
-        "tools/call" => {
-            let tool = msg["params"]["name"].as_str().unwrap_or("").to_string();
-            let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-            let c = call(McpMethod::ToolsCall, Some(tool.clone()), Some(args.clone()));
-            let (text, is_error) = match crate::ops::answer_verified(office, &c, &tool, args).await
-            {
-                Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_default(), false),
-                Err(e) => (format!("{e:#}"), true),
-            };
-            json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
-        }
-        other => return Some(rpc_error(id, -32601, format!("method {other} not found"))),
-    };
-    Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+
+    fn caller(&self, _uuid: &str) -> Option<Caller> {
+        None
+    }
+
+    fn serves_mcp(&self) -> bool {
+        true
+    }
+
+    fn tools<'a>(
+        &'a self,
+        caller: &'a Caller,
+        op: &'a str,
+        args: Value,
+    ) -> BoxFuture<'a, Result<Value>> {
+        Box::pin(crate::ops::answer(&self.0, caller, op, args))
+    }
+
+    fn instructions(&self) -> Option<String> {
+        crate::ops::instructions()
+    }
 }
 
 fn rpc_error(id: Value, code: i64, message: String) -> Value {

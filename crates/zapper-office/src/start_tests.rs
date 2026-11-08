@@ -3,7 +3,7 @@
 //! is doing.
 
 use crate::fake::TestCore;
-use zapper_api_types::NewSession;
+use zapper_openshell::session::NewSession;
 use zapper_policy::Policy;
 
 const FIRM: &str = "

@@ -1393,14 +1393,6 @@ pub(super) fn join(
         "funds",
         json!({ "event": "move", "from": by, "to": name, "tokens": budget, "reason": why }),
     );
-    // Their git identity; their grant decides what it may do.
-    if run.config.git_internal() {
-        run.facility
-            .git_passwords
-            .lock()
-            .unwrap()
-            .insert(name.clone(), zapper_util::random_id(24));
-    }
     Ok((name, firm, rt))
 }
 

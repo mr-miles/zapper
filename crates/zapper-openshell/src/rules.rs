@@ -124,8 +124,6 @@ fn expand(s: &str, session: &str, labels: &BTreeMap<String, String>) -> Option<S
 /// if it doesn't become one:
 ///
 /// - denials and asks (OpenShell denies what no rule allows);
-/// - the firm's git and cluster (`credentials-…`, which follow grants): the
-///   office edge serves git, and its grants are checked there;
 /// - rules that put secrets or headers in requests (the gateway's providers
 ///   hold the credentials) or speak a database's protocol;
 /// - hosts OpenShell's patterns can't say: `*` alone, or a wildcard in a name
@@ -136,10 +134,6 @@ pub fn to_gateway(
     binaries: &[String],
 ) -> Option<proto::NetworkPolicyRule> {
     if rule.action != Action::Allow
-        || rule
-            .id
-            .as_deref()
-            .is_some_and(|i| i.starts_with("credentials-"))
         || !rule.secrets.is_empty()
         || !rule.set_headers.is_empty()
         || rule.protocol != NetProtocol::Tcp
@@ -424,13 +418,6 @@ mod tests {
         for r in [
             deny,
             secret,
-            allow(
-                "credentials-git-api",
-                "git.acme.internal",
-                &[443],
-                &[],
-                None,
-            ),
             allow("w", "*", &[443], &[], None),
             allow("w", "*.com", &[443], &[], None),
         ] {

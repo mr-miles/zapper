@@ -1,6 +1,6 @@
+use crate::FsRule;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use zapper_proto::FsRule;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1218,19 +1218,6 @@ impl Config {
                     continue;
                 }
             };
-            for port in &p.engine.ports {
-                let reserved = [
-                    crate::proto::CONTROL_PORT,
-                    crate::proto::SHELL_PORT,
-                    crate::proto::PROXY_PORT,
-                    crate::proto::MCP_PORT,
-                ];
-                if *port == 0 || reserved.contains(&(*port as u32)) {
-                    errors.push(format!(
-                        "profile {name}: engine.ports: {port} is not a port the guest can offer"
-                    ));
-                }
-            }
             if !p.agent.driven {
                 continue;
             }
@@ -1420,27 +1407,13 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_offers_guest_ports_for_services() {
+    fn a_profiles_ports_are_inherited() {
         use super::Config;
         let c = Config::from_yaml(
             "profiles:\n  k: { engine: { ports: [6443] } }\n  l: { extends: k }\n",
         )
         .unwrap();
         assert_eq!(c.resolve("l").unwrap().engine.ports, [6443], "inherited");
-        for port in [0, 1000, 1024, 1100, 3128] {
-            let e = Config::from_yaml(&format!(
-                "profiles:\n  k: {{ engine: {{ ports: [{port}] }} }}\n"
-            ))
-            .err()
-            .map(|e| format!("{e:#}"))
-            .unwrap_or_default();
-            assert!(
-                e.contains(&format!(
-                    "engine.ports: {port} is not a port the guest can offer"
-                )),
-                "{port}: {e}"
-            );
-        }
     }
 
     #[test]

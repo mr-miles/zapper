@@ -46,10 +46,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
 
+use crate::session::{NewSession, SessionInfo, Status};
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::future::BoxFuture;
 use futures_util::stream::{Stream, StreamExt};
@@ -62,7 +62,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
-use zapper_api_types::{NewSession, ServiceSpec, SessionInfo, Status};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::{Frame, GuestFile, ShellRequest};
 use zapper_policy::{
@@ -371,8 +370,6 @@ pub struct OpenShell {
     sandboxes: Mutex<BTreeMap<String, Sandbox>>,
     /// Firm roles' shared layers, by name (`firm/role`).
     layers: Mutex<BTreeMap<String, Policy>>,
-    /// Ids for the registrations phase 2 replaces.
-    next_id: AtomicU64,
     /// Itself, for the work its synchronous methods start ([`OpenShell::start`]).
     me: OnceLock<Weak<OpenShell>>,
     /// The office's rules each sandbox's policy has, as last applied.
@@ -419,7 +416,6 @@ impl OpenShell {
             config_path,
             sandboxes: Default::default(),
             layers: Default::default(),
-            next_id: AtomicU64::new(1),
             me: OnceLock::new(),
             applied: Default::default(),
             applying: Default::default(),
@@ -1125,13 +1121,6 @@ impl OpenShell {
         Ok(Box::new(ours))
     }
 
-    /// A facility the office registers: the office edge serves it (the
-    /// tools, git), so registering it is only an id.
-    fn registered(&self, what: &str) -> u64 {
-        tracing::debug!("{what}: served through the office edge");
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
     /// The gateway workspace its sandboxes and templates are in.
     pub fn workspace(&self) -> &str {
         self.settings.workspace()
@@ -1237,9 +1226,6 @@ impl OfficeClient for OpenShell {
 
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         Box::pin(async move {
-            if new.persistent {
-                bail!("persistent sessions aren't supported on OpenShell");
-            }
             // The office reaches a sandbox's ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
             let config = self.has_room(&new.profile).await?;
             let mut profile = config.resolve(&new.profile)?;
@@ -1307,25 +1293,15 @@ impl OfficeClient for OpenShell {
                 profile: new.profile.clone(),
                 status: Status::Running,
                 created: zapper_util::now(),
-                expires: None,
-                persistent: false,
-                ssh: false,
-                disk_bytes: None,
                 image: self.settings.image(&profile.engine.image),
                 vcpus: profile.engine.vcpus,
                 memory_mib: profile.engine.memory_mib,
-                kernel: "openshell".into(),
-                network: profile.engine.network,
                 user: profile.agent.user.clone(),
-                root: false,
                 workdir: workdir.clone(),
-                counters: json!({}),
-                usage: None,
                 rules: new.policy.rules().len(),
                 firm: new.labels.get("firm").cloned(),
                 member: new.labels.get("member").cloned(),
                 labels: new.labels.clone(),
-                driver: Value::Null,
             };
             self.sandboxes.lock().unwrap().insert(
                 name,
@@ -1399,9 +1375,6 @@ impl OfficeClient for OpenShell {
         req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
         Box::pin(async move {
-            if req.persist || req.attach.is_some() {
-                bail!("persistent terminals aren't supported on OpenShell");
-            }
             let (mut env, workdir, command) = {
                 let all = self.sandboxes.lock().unwrap();
                 let s = all.get(id).ok_or_else(|| anyhow!("no session {id}"))?;
@@ -1461,48 +1434,6 @@ impl OfficeClient for OpenShell {
         })
     }
 
-    fn add_mcp_socket(
-        &self,
-        name: &str,
-        _sessions: BTreeMap<String, String>,
-        _socket: &str,
-        _instructions: Option<String>,
-        _owner: &str,
-    ) -> Result<u64> {
-        Ok(self.registered(&format!("MCP server {name}")))
-    }
-
-    fn remove_mcp_server(&self, _id: u64) -> bool {
-        true
-    }
-
-    fn add_decider_socket(
-        &self,
-        _sessions: BTreeMap<String, String>,
-        _socket: &str,
-    ) -> Result<u64> {
-        Ok(self.registered("the officers' decider"))
-    }
-
-    fn remove_decider(&self, _id: u64) -> bool {
-        true
-    }
-
-    fn add_service(&self, spec: ServiceSpec) -> Result<u64> {
-        Ok(self.registered(&format!("service {}", spec.name)))
-    }
-
-    fn add_zone(
-        &self,
-        domain: &str,
-        _sessions: BTreeMap<String, String>,
-        _owner: &str,
-    ) -> Result<u64> {
-        Ok(self.registered(&format!("zone {domain}")))
-    }
-
-    fn remove_service(&self, _id: u64) {}
-
     fn requests(&self, _id: &str) -> Vec<Value> {
         // Phase 3 reads the sandbox's network events (`GetSandboxLogs`).
         Vec::new()
@@ -1543,10 +1474,6 @@ impl OfficeClient for OpenShell {
         removed
     }
 
-    fn drafts(&self) -> bool {
-        true
-    }
-
     fn pending_drafts(&self, id: &str) -> Option<Vec<DraftRule>> {
         self.drafts
             .lock()
@@ -1559,8 +1486,8 @@ impl OfficeClient for OpenShell {
         block(self.decide(id, chunk, d))
     }
 
-    fn edge(&self) -> Option<String> {
-        Some(self.settings.edge.url.clone())
+    fn edge(&self) -> String {
+        self.settings.edge.url.clone()
     }
 }
 
@@ -1763,7 +1690,7 @@ where
                     tx = None;
                     continue;
                 }
-                Ok(Some(Frame::Hangup)) | Ok(None) | Err(_) => return,
+                Ok(None) | Err(_) => return,
                 Ok(Some(_)) => continue,
             };
             if let Some(t) = &tx {

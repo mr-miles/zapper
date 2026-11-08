@@ -2,12 +2,10 @@
 //! `OfficeClient` trait: [`crate::OpenShell`] in production, an in-memory
 //! fake in the office's tests.
 
-use std::collections::BTreeMap;
-
+use crate::session::{NewSession, SessionInfo};
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
-use zapper_api_types::{NewSession, ServiceSpec, SessionInfo};
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
 use zapper_policy::{AnyRule, NetRule, Scope};
@@ -72,45 +70,6 @@ pub trait OfficeClient: Send + Sync {
         port: u32,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
 
-    // --- facilities --------------------------------------------------------
-    // The office serves a facility (its tools, the officers' decider) on a
-    // socket in `state/services/` (`run.socket_dir`) and registers it here.
-    // On OpenShell the office edge serves the tools and git instead, so the
-    // registrations are ids only.
-
-    /// Serves the MCP server a facility serves on `socket` as `name` to the
-    /// sessions `sessions` picks; its id.
-    fn add_mcp_socket(
-        &self,
-        name: &str,
-        sessions: BTreeMap<String, String>,
-        socket: &str,
-        instructions: Option<String>,
-        owner: &str,
-    ) -> Result<u64>;
-    /// Stops serving a facility's MCP server.
-    fn remove_mcp_server(&self, id: u64) -> bool;
-    /// Makes the decider a facility serves on `socket` decide the `ask`s of
-    /// the sessions `sessions` picks; its id.
-    fn add_decider_socket(&self, sessions: BTreeMap<String, String>, socket: &str) -> Result<u64>;
-    /// Hands a decider's sessions' `ask`s back to the operator.
-    fn remove_decider(&self, id: u64) -> bool;
-
-    /// Registers a service of the firm (its git server, its cluster's ports);
-    /// its id.
-    fn add_service(&self, spec: ServiceSpec) -> Result<u64>;
-    /// Makes `domain` a zone for the sessions `sessions` picks: its names
-    /// resolve only to the firm's services, never on the host; its id.
-    fn add_zone(
-        &self,
-        domain: &str,
-        sessions: BTreeMap<String, String>,
-        owner: &str,
-    ) -> Result<u64>;
-    /// Removes a service or zone (the office only needs it gone; it ignores
-    /// what it was).
-    fn remove_service(&self, id: u64);
-
     // --- a session's own rule layer and traffic ---------------------------
     // The officers decide access by putting rules on a worker's (or the
     // cluster's) own session layer, and read its traffic; by session id, so
@@ -123,22 +82,16 @@ pub trait OfficeClient: Send + Sync {
     /// Removes rule `rule_id` from session `id`'s own layer; whether it went.
     fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool;
     /// Where the firm's workers reach the office over HTTP, as a URL they
-    /// can use (the office edge on OpenShell: its MCP tools at `/mcp`, git
-    /// at `/git/`), with their identity added outside the VM; `None` for a
-    /// client with no edge (the tests' fake, unless set).
-    fn edge(&self) -> Option<String> {
-        None
-    }
+    /// can use (the office edge: its MCP tools at `/mcp`, git at `/git/`,
+    /// the cluster at `/cluster` and `/apps/`), with their identity added
+    /// outside the VM.
+    fn edge(&self) -> String;
 
     // --- drafted rules (OpenShell's policy advisor) -------------------------
     // Where the sandboxes' network drafts rules for review (a worker's
     // proposal through `policy.local`, or a connection it refused), the
     // officers review them.
 
-    /// Whether access requests come as drafted rules.
-    fn drafts(&self) -> bool {
-        false
-    }
     /// The rules session `id`'s network drafted that wait for review, as last
     /// read from the gateway; `None` before they were first read.
     fn pending_drafts(&self, _id: &str) -> Option<Vec<DraftRule>> {

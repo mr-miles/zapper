@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zapper-util", "crates/zapper-record", "crates/zapper-mint", "crates/zapper-client", "crates/zapper-proto", "crates/zapper-policy", "crates/zapper-api-types", "crates/zapper-driver", "crates/zapper-office", "crates/zapper-openshell", "crates/zapper-agent", "crates/zapper-fake", "crates/zapper-keeper", "crates/zapper-inspect", "crates/zapper-runs", "crates/zapper-github", "crates/zapper-git", "crates/zapper-workbench"]
+members = ["crates/zapper-util", "crates/zapper-record", "crates/zapper-mint", "crates/zapper-policy", "crates/zapper-driver", "crates/zapper-office", "crates/zapper-openshell", "crates/zapper-agent", "crates/zapper-fake", "crates/zapper-keeper", "crates/zapper-inspect", "crates/zapper-runs", "crates/zapper-github", "crates/zapper-git", "crates/zapper-workbench"]
 
 [workspace.package]
 version = "0.1.0"

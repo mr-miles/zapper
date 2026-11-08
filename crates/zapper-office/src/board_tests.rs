@@ -136,14 +136,9 @@ async fn the_board_mails_reads_its_inbox_and_threads_and_marks_them_read() {
 async fn the_board_promotes_a_decision_into_the_running_config() {
     let t = crate::test_core(FIRM);
     let run = crate::test_run(&t.core, "acme");
-    let req = zapper_policy::NetRequest {
-        host: "docs.example".into(),
-        port: 443,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
-    let id = crate::security::ask(&run, "pat", &req, None, None, "the docs").unwrap();
+    let id = t
+        .core
+        .propose(&run, "pat", "docs.example", 443, &[], "the docs");
     let (status, v) = call(
         &t,
         Method::POST,

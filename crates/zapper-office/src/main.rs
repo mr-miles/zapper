@@ -57,9 +57,6 @@ enum Cmd {
         /// `$ZAPPER_CONFIG` overrides).
         #[arg(long)]
         state_dir: Option<PathBuf>,
-        /// Where the office binds its sockets. Default: `<state_dir>/services`.
-        #[arg(long)]
-        socket_dir: Option<PathBuf>,
         /// The OpenShell settings: the gateway, its TLS, images, providers
         /// and the edge. Default: `openshell.yaml` beside the config.
         #[arg(long)]
@@ -179,17 +176,15 @@ async fn main() -> Result<()> {
         Cmd::Serve {
             listen,
             state_dir,
-            socket_dir,
             openshell,
         } => {
             let state_dir = match state_dir {
                 Some(d) => d,
                 None => cli::daemon_state_dir()?,
             };
-            let socket_dir = socket_dir.unwrap_or_else(|| state_dir.join("services"));
             let listen = listen.unwrap_or_else(default_listen);
             let settings = openshell.unwrap_or_else(|| cli::config_dir().join("openshell.yaml"));
-            serve(listen, &settings, state_dir, socket_dir).await
+            serve(listen, &settings, state_dir).await
         }
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
@@ -202,12 +197,7 @@ async fn main() -> Result<()> {
 
 /// The office on an OpenShell gateway: profiles from the zapper config,
 /// sandboxes from the gateway in `settings`.
-async fn serve(
-    listen: SocketAddr,
-    settings: &std::path::Path,
-    state_dir: PathBuf,
-    socket_dir: PathBuf,
-) -> Result<()> {
+async fn serve(listen: SocketAddr, settings: &std::path::Path, state_dir: PathBuf) -> Result<()> {
     use zapper_office::openshell::{OpenShell, Settings};
     let settings = Settings::load(settings)?;
     let gateway = settings.gateway.clone();
@@ -224,7 +214,6 @@ async fn serve(
         tcp,
         std::sync::Arc::new(os),
         state_dir,
-        socket_dir,
         office_config,
         remote,
     )
