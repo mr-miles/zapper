@@ -135,9 +135,7 @@ async fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
         .args(args)
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("HOME", "/nonexistent")
+        .envs(zapper_git::clean_env())
         .output()
         .await?;
     if !out.status.success() {

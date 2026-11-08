@@ -1,14 +1,10 @@
 [package]
 name = "zapper-agent"
-description = "Guest side of zapper: prepares the sandbox and supervises exec"
+description = "The guest side of The Office: the `office` command in its sandboxes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-zapper-proto = { path = "../zapper-proto" }
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-globset.workspace = true
-libc = "0.2"

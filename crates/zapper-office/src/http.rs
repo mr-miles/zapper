@@ -20,13 +20,35 @@ use serde_json::{json, Value};
 
 use super::{drive, security};
 use crate::Office;
-use zapper_api_types::ApiError;
 
 /// The office's own state: the handlers reach firms, runs and the running
 /// config through it (`run`, `active`, `firm_dir`, `client().config()`),
 /// never through a `Core`. Co-hosted it is `Core::office()`; a standalone
 /// office binds its own (P4-d).
 type S = State<Arc<Office>>;
+/// The error the office's routes answer with: a status and a message, as
+/// `{"error": …}`. An `anyhow::Error` that names what isn't there is a 404,
+/// any other a 400.
+pub struct ApiError(pub StatusCode, pub String);
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        let msg = format!("{e:#}");
+        let code = if msg.starts_with("no ") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        ApiError(code, msg)
+    }
+}
+
 type R<T> = Result<T, ApiError>;
 
 /// A running firm resolved from the request's `{f}` path segment: the
@@ -67,7 +89,6 @@ fn body(text: &str) -> R<Value> {
 
 pub fn read_routes() -> Router<Arc<Office>> {
     Router::new()
-        .route("/daemon-ui", get(daemon_ui))
         .route("/firms", get(list))
         .route("/firms/{f}", get(status))
         .route("/firms/{f}/runs", get(runs))
@@ -123,7 +144,6 @@ pub fn board_routes() -> Router<Arc<Office>> {
         )
         .route("/firms/{f}/security/requests/{id}", post(decide))
         .route("/firms/{f}/security/rules/{id}", delete(revoke))
-        .route("/firms/{f}/security/rules/{id}/promote", post(promote))
         .route("/firms/{f}/runs/{run}", delete(prune))
         .route("/firms/{f}/runs/{run}/note", put(run_note))
         .route("/firms/{f}/budget/{id}", post(budget_decide))
@@ -149,19 +169,6 @@ pub fn board_routes() -> Router<Arc<Office>> {
 async fn config_reload(State(office): S) -> R<Json<Value>> {
     let firms = office.reload_firms()?;
     Ok(Json(json!({ "firms": firms })))
-}
-
-/// The daemon's UI URL (with its token), as `zapper serve` wrote it to
-/// `state/ui-url`. The office page's deep links to daemon-only pages (the
-/// sessions view, a terminal viewer) target it, since the office is a separate
-/// origin and does not serve those pages. `null` if the daemon's UI is off or
-/// unreachable from here.
-async fn daemon_ui(State(office): S) -> Json<Value> {
-    let url = std::fs::read_to_string(office.state_dir().join("ui-url"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    Json(json!({ "url": url }))
 }
 
 async fn list(State(office): S) -> Json<Value> {
@@ -791,20 +798,6 @@ async fn revoke(State(office): S, Path((f, id)): Path<(String, String)>) -> R<Js
 
 /// Copies a standing approval into the running config, at the profile of the
 /// role it applies to; `zapper config save` keeps it.
-async fn promote(State(office): S, Path((f, id)): Path<(String, String)>) -> R<Json<Value>> {
-    let run = office.active(&f)?;
-    let (scope, rule) = security::promote_target(&run, &id)?;
-    let added = office.client().promote_rule(
-        &format!("approval {id} of firm {f} promoted to {scope}"),
-        &scope,
-        rule,
-    )?;
-    run.journal.append("access", json!({ "event": "promoted", "rule": id, "to": scope.to_string(), "config_rule": added.id() }));
-    Ok(Json(
-        json!({ "promoted": id, "scope": scope.to_string(), "rule": added }),
-    ))
-}
-
 /// The board's note on a run: `{note}`, empty to remove it.
 async fn run_note(
     State(office): S,

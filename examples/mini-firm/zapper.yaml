@@ -11,20 +11,13 @@
 # state and the Claude token are the main config's, under your home.
 
 daemon:
-  firecracker: ~/.local/share/zapper/bin/firecracker
-  images: ~/.local/share/zapper/images
-  kernels: ~/.local/share/zapper/kernels
+  # Where firms' runs are kept (their mail, transcripts, journals).
   state: ~/.local/state/zapper
-  ui: 127.0.0.1:7878
-  ask_timeout_secs: 60
+  # The most sandboxes at once (openshell.yaml's max_sessions overrides it).
   max_sessions: 16
 
-# Your Claude subscription's token, as config/zapper.yaml sets it up: from
-# `claude setup-token`, in a 0600 file. The VMs never see it.
-secrets:
-  claude:
-    file: ~/.config/zapper/claude-token
-    hosts: [api.anthropic.com]
+# The Claude token is the gateway's `anthropic` provider, which opens
+# api.anthropic.com for the sandboxes (docs/quickstart.md).
 
 policy:
   defaults: { net: deny, exec: allow }
@@ -53,5 +46,5 @@ profiles:
       - { host: "{workdir}", guest: /work, mode: rw }
     policy:
       net:
-        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+        - { action: allow, host: api.anthropic.com, ports: [443] }
       defaults: { net: ask }

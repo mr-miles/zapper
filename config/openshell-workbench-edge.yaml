@@ -1,0 +1,44 @@
+# The `workbench-edge` provider profile: how a sandbox reaches the
+# workbench's drive (/drive/) and repository (/git/config.git), as itself.
+#
+#   openshell profile import -f config/openshell-workbench-edge.yaml
+#   openshell provider create --name workbench-edge --type workbench-edge --runtime-credentials
+#
+# then attach `workbench-edge` to the sandboxes that should reach them
+# (`openshell sandbox create --template wb-<profile> --provider
+# workbench-edge ...`). Needs the Firecracker driver's supervisor identity on
+# (OPENSHELL_VM_SUPERVISOR_IDENTITY=true): each supervisor posts its
+# sandbox's JWT-SVID to the workbench's token endpoint and adds the token it
+# gets to the sandbox's requests to it, outside the VM. The guest never
+# holds it.
+#
+# The addresses match workbench.yaml's `edge:` defaults: the edge listens on
+# host loopback, port 8971, which the supervisors reach as
+# host.openshell.internal.
+id: workbench-edge
+display_name: Workbench edge
+description: The workbench's drive and repository, for one person's sandboxes
+category: other
+credentials:
+  - name: access_token
+    required: false
+    auth_style: bearer
+    header_name: Authorization
+    token_grant:
+      # Plain HTTP only on loopback, which the supervisor dials directly.
+      token_endpoint: http://127.0.0.1:8971/oauth/token
+      # The SVID's audience: the edge checks it is its token endpoint.
+      jwt_svid_audience: http://127.0.0.1:8971/oauth/token
+      scopes: [workbench]
+endpoints:
+  - host: host.openshell.internal
+    port: 8971
+    protocol: rest
+    access: full
+    enforcement: enforce
+# The programs that reach the drive and repository: curl and git's HTTP
+# transport, and any program under /usr (a script's interpreter).
+binaries:
+  - /usr/bin/curl
+  - /usr/lib/git-core/git-remote-http
+  - /usr/**

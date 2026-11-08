@@ -2,11 +2,14 @@
 
 # The Office
 
+> [!NOTE]
+> This reference was written when the office ran on zapper's own daemon, which is gone: the office now runs its workers in sandboxes of an OpenShell gateway. The firm's logic (mail, wake-ups, the drive, officers, grants, budgets, contracts, scenarios, the UI, the journal and replay) is as described here. Where a section describes the daemon's mechanics (the office's vsock port and gateway, its proxy and DNS zones, the cluster's own VM and kernel, `zapper` commands), [the migration](openshell-migration.md) says what replaced them: the office edge, OpenShell's policy and drafted rules, and, for the cluster, phase 4.
+
 ## Overview
 
 A **firm** is a set of AI workers, each a Claude Code (or pi) instance in its own zapper session. An org chart in the config says who they are, who reports to whom and what each is told to do. Workers talk by **mail**; a new message wakes an idle worker with the context of what is asked. Finished work is **published** to the firm's **shared drive**. **Security officers** are workers that watch the firm's traffic and decide access requests. The operator is the **board**: they start an idle firm, give the CEO a task, and watch the work in the web UI.
 
-The office runs on zapper, which provides the sandbox: each worker is a zapper session with a profile, its traffic goes through zapper's proxy and policy, its execs are checked, and everything is recorded ([architecture](architecture.md), [policy](policy.md), [security](security.md)).
+The office runs on zapper, which provides the sandbox: each worker is a zapper session with a profile, its traffic goes through zapper's proxy and policy, its execs are checked, and everything is recorded (architecture, policy, security).
 
 ![The org chart of a running firm: the board above the CEO and the security officer, and under the CEO a product manager, an engineer and two contractors on pi, each with their title, model, state and budget bar](img/office.png)
 
@@ -247,7 +250,6 @@ An `assignment` from someone without authority over the receiver is rejected wit
 | `mail_thread(thread)` | Full thread, oldest first |
 | `desk()` | My open assignments, threads waiting on others, pending access requests |
 | `directory()` | The org chart: names, titles, roles, who reports to whom, who is busy |
-| `request_access(host, port?, methods?, path?, reason)` | Ask the security officers ahead of time, with a reason (outside hosts; the firm's own services are grants). What the worker's rules already allow, for every method asked for, is answered `allowed` with the rule, and nothing is queued |
 | `credentials_request(resource, level, repo?, spaces?, reason)`, `credentials()` | Ask for a grant on a git repository, the cluster or drive spaces; see your grants and requests |
 | `credentials_decide`, `credentials_escalate`, `credentials_revoke`, `credentials_list` | The CEO and security officers: decide, hand up, revoke, list |
 
@@ -383,7 +385,7 @@ When something looks wrong the officer can revoke a standing approval, deny a ho
 
 The board sees every pending request in the Security tab, not only the ones escalated to it: those with an officer are marked with the officer's name, and the board may decide any of them, network requests and credential requests alike, and approve or object to any pending background check (an officer out of tokens or paused can't, and a worker waiting on one shouldn't have to wait out `answer_within`).
 
-1. A worker's request hits an `ask` rule, or the worker asks ahead with `request_access(host, …, reason)`. It goes to the officers' queue. The request is **refused at once**, not held: officers take minutes, and most clients time out long before that. An HTTP request gets a 403 whose body says access was requested from security and gives the request id; a connection that can't carry a body (passthrough TLS, plain TCP) is closed. The request shows on the worker's desk, and asking again for the same host and port while it's pending never adds a second one: what the request already covers joins it, and more (another method, or the whole connection) replaces it with one request for both, the old one closed as `merged`. A request never grows after a decider may have seen it, so deciding a merged one decides nothing and names the request that waits now.
+1. A worker's request hits an `ask` rule (on OpenShell: no rule allows it, or the worker proposes one through `policy.local`). It goes to the officers' queue. The request is **refused at once**, not held: officers take minutes, and most clients time out long before that. An HTTP request gets a 403 whose body says access was requested from security and gives the request id; a connection that can't carry a body (passthrough TLS, plain TCP) is closed. The request shows on the worker's desk, and asking again for the same host and port while it's pending never adds a second one: what the request already covers joins it, and more (another method, or the whole connection) replaces it with one request for both, the old one closed as `merged`. A request never grows after a decider may have seen it, so deciding a merged one decides nothing and names the request that waits now.
 2. The foreman wakes an officer with the request: worker, host, port, method, path, the worker's current assignment and its reason, if any.
 3. The officer researches if needed (opens the site, checks what it is) and calls `access_decide(request, allow, scope, reason)`, where `scope` is:
    - `once`: this request only;
@@ -398,7 +400,7 @@ The board sees every pending request in the Security tab, not only the ones esca
 - Secrets, private networks and new profiles stay with the board: an officer can recommend them, and the request is escalated with that recommendation.
 - A worker's reason text is untrusted input to the officer; the officer's skill says so and shows it quoted.
 - If no officer answers within `security.answer_within` (default 15 minutes), the request goes to the board as well, and stays pending until one of them answers or the firm stops. Nothing is held meanwhile, so there is no deny-on-timeout.
-- Officers decide network access only. Exec rules in firm profiles are `allow` or `deny`, never `ask`. So the officer's decision on a download is in effect the decision on running it: if an officer allows a worker to fetch a tool, the worker can run it unless a profile `deny` rule says otherwise. Every exec is still checked against those rules and recorded, and officers see the download in the traffic log.
+- Officers decide network access only. OpenShell has no exec rules: a tool an officer lets a worker download, the worker can run.
 - Officers can't approve their own requests, and two officers (if configured) can see and revoke each other's approvals.
 
 ## Facilities: the cluster, git and the product
@@ -433,7 +435,7 @@ Next to mail, the platform has a credentials subsystem. Access to the firm's res
 
 ### Names and who reaches what
 
-Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a [service](network.md#services) the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
+Facilities are reached by name under the firm's `domain`, through the same proxy and policy as everything else. The domain is a zone and each facility a service the office registers for the run's sessions (`zapper service ls` lists them): the guest's resolver answers these names only when a rule could allow them, as for any host, and they are never looked up on the host's DNS. The daemon routes connections to them itself, so no VM ever reaches another VM or a host address directly. The office removes them when the firm stops.
 
 | Name | Port | What | Who reaches it |
 |---|---|---|---|
@@ -475,13 +477,13 @@ A firm's repositories can have a remote on GitHub, reached through a GitHub App 
       local: [kb]                                  # main merged on the firm's server and pushed out; every other main is GitHub's
 ```
 
-- **The App**: `zapper github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper github status` shows its installation, permissions and repositories. The file says where the App's GitHub is: `github.apiUrl` and `github.webUrl` (its API, and its site, for git), github.com's if unset, so an App on GitHub Enterprise Server sets `apiUrl: https://<host>/api/v3` and `webUrl: https://<host>`. Both are `https`; plain `http` is refused except to this machine (loopback), so a JWT or a token never crosses a network in the clear.
+- **The App**: `zapper-office github setup --org <account>` (or `--user <login>`) creates it, or finds the one there is, and installs it; it writes `~/.config/zapper/github-apps/<account>.yaml` (0600), which `config` names. An App belongs to one account: a firm in another account has an App, and a credentials file, of its own. `zapper-office github status` shows its installation, permissions and repositories. The file says where the App's GitHub is: `github.apiUrl` and `github.webUrl` (its API, and its site, for git), github.com's if unset, so an App on GitHub Enterprise Server sets `apiUrl: https://<host>/api/v3` and `webUrl: https://<host>`. Both are `https`; plain `http` is refused except to this machine (loopback), so a JWT or a token never crosses a network in the clear.
 - **The repositories** are every one the App is installed on, by their names there (`zapper-office firm up --repo NAME` names some instead). Choosing them is choosing what to install the App on; a repository that should be local-main, such as `kb`, is created on GitHub once and the App installed on it. They live in `git.dir`: a repository is cloned when a run first uses it (a worker's first fetch or push, or `publish_branch`), or fetched if it is there from an earlier run, so a run starts at once however many the App is installed on, and the first use of a large one waits for its clone. Concurrent first uses share one clone; one that fails is tried again on the next use, and the worker gets a 503 saying why. At a run's start the daemon moves a subdirectory the App no longer reaches to `git.dir/archive/`, never deleting it.
 - **`main` has one source of truth per repository**, so it only flows one way:
   - **GitHub's** (the default, for code): the board merges pull requests in GitHub's UI, so CI runs, and the daemon fetches `main` back (it looks every minute). On the firm's server nobody pushes `main`, whatever their grant.
   - **The firm's** (`git.local`): merged on the firm's server by whoever holds `admin`, as without a remote, and pushed to GitHub after each update, fast-forward only. If GitHub's `main` changed by another route, the daemon stops pushing and tells the board.
 - **Pull requests through the daemon**: a worker pushes a branch to the firm's server and calls `publish_branch(repo, branch, title, body)` (with `write` on the repository). The daemon checks the branch is based on the tip of `main` and changes nothing under `.github/workflows/` (those changes are the board's), pushes it to GitHub as `<worker>/<branch>`, and opens a pull request naming its author, or updates the one open for it. A repository with no `main` on GitHub yet (created empty) has nothing to merge into: the daemon fetches once in case it was just made, then refuses and pushes nothing, telling the worker to wait and how to move the branch onto `main` once it exists, and telling the board, once per repository and run, how to make it (an empty first commit is enough). It mails the author when the checks finish, when the board reviews or comments, and when it merges or closes it; `pr_status` gives the checks, the end of a failing job's log, and the reviews and comments on demand.
-- **Tokens**: the daemon mints its own, for one repository at a time, with `zapper mint github-app` (so the App's key is read by a short-lived process), and revokes them when the run stops.
+- **Tokens**: the office mints its own, for one repository at a time, with `zapper-office mint github-app` (so the App's key is read by a short-lived process), and revokes them when the run stops.
 - **The record**: a run records the branches of each repository it uses, when it first uses it and at its end (`git.json` in the run directory), so the Git tab and replay show those repositories as the run had them, and the commits it added, though the repositories outlive it. Polling and pushing `main` out cover the repositories the run has used.
 ### The knowledge base
 
@@ -500,7 +502,7 @@ Ports on the host:
 |---|---|
 | `daemon.ui` (7878) | The firm: the web UI, on loopback |
 | `product_port` (8080) | The product: each connection is forwarded to the cluster's ingress on port 80. Any address: `0.0.0.0:8080` serves it to the LAN, `127.0.0.1:8080` to this machine only |
-| `dashboard_port` (8081) | The cluster's dashboard, which signs in as cluster-admin with the token the UI gives. Loopback by default; `0.0.0.0:8081` serves it to the network, for a remote host, with the warnings of [a remote host](configuration.md#a-remote-host) |
+| `dashboard_port` (8081) | The cluster's dashboard, which signs in as cluster-admin with the token the UI gives. Loopback by default; `0.0.0.0:8081` serves it to the network, for a remote host, with the warnings of a remote host |
 
 The product port is an HTTP proxy to the cluster's ingress that asks for `apps.<domain>`, as workers do, whatever address the browser used: an Ingress bound to that host and one on the default route both reach the board. It maps the name back to the board's address in what comes back: redirects (`Location` and the like, `https://` to `http://`), cookies' `Domain`, `Origin` and `Referer` on the way in, and absolute links in pages, styles and scripts up to 16 MiB (it asks for them uncompressed). WebSockets pass through. Connections to it aren't checked against firm policy, as the board's own, but each one is logged at debug level with its peer address (`RUST_LOG=zapper=debug`). On the LAN, anyone who can reach the host can use whatever the engineers deployed, so serve it there only on a network you trust; the host's firewall may also need to allow the port.
 
@@ -566,7 +568,7 @@ A firm reads its agents from its `agents_dir` and its skills from its `skills_di
 
 ## Web UI
 
-The UI has a tab bar for the office. zapper's own views of sessions (network, terminals, approvals) are a separate page, `/sessions`, linked from the footer and from each worker's panel; its footer leads back to the firm.
+The UI has a tab bar for the office. A sandbox's terminals, logs and policy are OpenShell's (its CLI and UI); the footer and each worker's panel link to the VMs tab.
 
 | Tab | For |
 |---|---|
@@ -578,7 +580,7 @@ The UI has a tab bar for the office. zapper's own views of sessions (network, te
 | Security | What officers approved, what they decided, and why |
 | Shared drive | Published work, including board packs |
 | Git | The firm's repository: branches, files and commits |
-| VMs | Every running VM of the daemon, now: the host, each firm's workers and cluster, other sessions; size, usage and counters; terminals to watch read-only, and each worker's transcript (Claude Code's or pi's) |
+| VMs | Every sandbox the office runs, now: each firm's workers and cluster; their size, image and uptime, and each worker's transcript (Claude Code's or pi's) |
 | Statistics | Activity, throughput and budgets |
 | Runs | The firm's runs, each with what it was asked to build; opens one in replay, or deletes it |
 
@@ -637,7 +639,7 @@ A mail client over the whole firm, read-only except for the board's own mail.
 
 ### Security
 
-- **Standing approvals**: every rule an officer added at a worker or role layer: host, ports, methods, paths, scope, expiry, officer, reason, when, and how many requests it has allowed since. The board can revoke one or promote it into the startup config.
+- **Standing approvals**: every rule an officer added at a worker or role layer: host, ports, methods, paths, scope, expiry, officer, reason, when, and how many requests it has allowed since. The board can revoke one.
 - **Escalations**: requests waiting for the board (secrets, private networks, global rules), with the officer's recommendation; answering here is the board's decision.
 - **Background checks on new hires**: each check with the hire, the hirer, the budget, what the role can reach, the reason and the brief; pending ones first, with **Approve** and **Object** for the board.
 - **Traffic**: the firm's requests across all workers as one live list (allowed, denied, waiting), the latest 25 first with **Load more** for older ones, the officers' digests, and anything an officer flagged.
@@ -712,10 +714,10 @@ state/firms/<firm>/runs/<run-id>/
   git/<name>.git       the firm's repositories (product.git by default)
 ```
 
-- Each worker's session keeps its own audit log and terminal recordings in `state/sessions/<id>/`, as any zapper session does; `run.json` links them.
+- A worker's network events are the gateway's (`openshell logs <sandbox>`); the office doesn't read them yet.
 - Workers' disks are deleted when their VMs stop, as for any zapper session, so their Claude conversations and working files end with the run. What was published stays in the run's `drive/`.
 - `zapper-office firm down` or a daemon restart ends the run. The next `firm up` starts a new one; it doesn't continue the old one.
-- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and [`zapper-inspect`](commands.md#zapper-inspect) reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
+- Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and `zapper-inspect` reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
 
 ### Replay
 
@@ -772,12 +774,12 @@ Actions are tool calls, `shell: CMD`, `say: TEXT` and `sleep: SECS`; `$message`,
 
 `make test-e2e-office` (part of `make test-e2e`) boots firms of real VMs and checks: skills, preamble and read-only mounts; delegation and reports; authority (a report can't assign its manager), identity (the sender is the VM) and mail privacy; officer-only tools; an `ask` refused at once, decided by an officer, and retried; the shared drive, including that symlinks aren't published; follow-ups; the office's tools outside a firm; runs, journals, transcripts and fresh restarts. With the k3s image and kernel built it also boots a cluster: kubeconfig and git with a grant, neither without one, revocation, the ingress for everyone, the product port, and cleanup at `firm down`.
 
-A run with real Claude Code is a manual check: a two-worker firm on a small model (see [testing](testing.md)).
+A run with real Claude Code is a manual check: a two-worker firm on a small model (see testing).
 
 ## Limitations
 
 - **A run can't be resumed.** A daemon restart or `firm down` ends it; workers' disks and conversations go with it. The run stays on disk for replay. Resuming needs persistent worker disks and `--resume` of each conversation.
-- **Officers decide network access only.** Exec rules in firm profiles are allow or deny, so a tool an officer lets a worker download can run unless a profile denies it.
+- **Officers decide network access only.** OpenShell has no exec rules, so a tool an officer lets a worker download can run.
 - **The cluster is one node and starts fresh.** It holds nothing between runs; the git repository is the record of the product's code.
 - **Inspection rules don't apply to the firm's own services.** Rules for `git.`, `cluster.` and `apps.` names match host and port; methods, paths and secrets on them are refused.
 - **Workers share one subscription.** `max_concurrent` keeps turns within its rate limits; a refused turn is retried after a minute.

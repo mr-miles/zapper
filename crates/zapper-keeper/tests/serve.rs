@@ -1,4 +1,4 @@
-//! `zapper-keeper serve`, as the daemon meets it: appends are taken only
+//! `zapper-keeper serve`, as the office meets it: appends are taken only
 //! from the configured writer's uid, and an append is acknowledged only
 //! once its line is in the file.
 

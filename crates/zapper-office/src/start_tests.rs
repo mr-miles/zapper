@@ -2,10 +2,8 @@
 //! fit beside the running ones, and the list of runs says how the live one
 //! is doing.
 
-use crate::OfficeOf;
-use zapper_core::prelude::*;
-use zapper_core::testing::TestCore;
-use zapper_core::NewSession;
+use crate::fake::TestCore;
+use zapper_openshell::session::NewSession;
 use zapper_policy::Policy;
 
 const FIRM: &str = "
@@ -35,8 +33,8 @@ async fn a_firm_starts_only_beside_the_sessions_still_running() {
         .unwrap()
         .to_string();
     // The stopped one doesn't count.
-    assert!(e.contains("and 1 are running"), "{e}");
-    assert!(e.contains("daemon.max_sessions is 2"), "{e}");
+    assert!(e.contains("2 more sandboxes wanted and 1 running"), "{e}");
+    assert!(e.contains("max_sessions is 2"), "{e}");
     drop(a);
 }
 

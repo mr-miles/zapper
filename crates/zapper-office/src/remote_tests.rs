@@ -1,6 +1,6 @@
 //! A firm whose repositories have a remote (proposal 09). The remote's git
 //! is bare repositories on disk (`file://`), its API a local fake that
-//! keeps pull requests, checks and reviews, and the daemon's tokens come
+//! keeps pull requests, checks and reviews, and the office's tokens come
 //! from a script. Agents' pushes go through the firm's server's hooks as
 //! git runs them.
 
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::fake::TestCore;
 use serde_json::{json, Value};
-use zapper_core::testing::TestCore;
 
 use super::{access, remote, test_run_remote, FirmRun};
 
@@ -206,7 +206,7 @@ fn remote_repo(base: &Path, name: &str) {
 /// A commit on the remote's `main`, as the board's merge would make one.
 fn commit_on_remote(base: &Path, name: &str, file: &str) -> String {
     let work = base.join("seed").join(name);
-    // From the remote's main as it is now, which the daemon may have moved.
+    // From the remote's main as it is now, which the office may have moved.
     sh(
         &work,
         &[
@@ -435,7 +435,7 @@ async fn main_comes_from_the_remote_and_nobody_pushes_it() {
         "{e}"
     );
     assert!(push_branch(&run, &code, "pat-work", "x.txt", "write").is_ok());
-    // The board merges on the remote; the daemon fetches main back.
+    // The board merges on the remote; the office fetches main back.
     let merged = commit_on_remote(&w.base, &code, "merged.txt");
     remote::poll(&run).await;
     assert_eq!(
@@ -767,9 +767,9 @@ async fn an_empty_knowledge_base_is_laid_out_and_every_hire_reads_it() {
     );
 }
 
-/// The git server's answer to `pat` asking for `path` with their password.
+/// The git server's answer to `pat` (as the edge verified them) asking for
+/// `path`.
 async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
-    use base64::Engine as _;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
@@ -792,11 +792,9 @@ async fn git_request(run: &Arc<FirmRun>, path: &str) -> (u16, String) {
         .await
         .unwrap();
     tokio::spawn(conn);
-    let auth = base64::engine::general_purpose::STANDARD.encode("pat:pw");
     let req = hyper::Request::builder()
         .uri(path)
         .header("host", "git.acme")
-        .header(hyper::header::AUTHORIZATION, format!("Basic {auth}"))
         .body(Full::new(Bytes::new()))
         .unwrap();
     let resp = sender.send_request(req).await.unwrap();
@@ -810,11 +808,6 @@ async fn a_repository_is_cloned_when_a_worker_first_fetches_it() {
     let w = world();
     let (_t, run, code, _kb) = firm("touch").await;
     remote::prepare(&run).await.unwrap();
-    run.facility
-        .git_passwords
-        .lock()
-        .unwrap()
-        .insert("pat".into(), "pw".into());
     let local = remote::root(&run.config, &run.dir).join(format!("{code}.git"));
     // Without a grant, nothing is cloned for them.
     let (status, _) = git_request(

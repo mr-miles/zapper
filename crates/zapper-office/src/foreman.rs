@@ -1,7 +1,7 @@
 //! The foreman: drives one worker's agent headless, through its harness
-//! (`daemon::harness`; Claude Code today).
+//! (`zapper_driver::harness`: Claude Code or pi).
 //!
-//! The agent runs in the worker's VM over a terminal channel without a tty.
+//! The agent runs in the worker's sandbox over a command stream without a tty.
 //! Mail is delivered as one input line (the wake prompt) when the worker is
 //! idle, and queued while it works; the harness says when a turn ended.
 //! Every output line goes to the worker's transcript on disk.

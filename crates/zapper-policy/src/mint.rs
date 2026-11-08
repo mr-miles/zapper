@@ -1,6 +1,6 @@
 //! Secrets minted by a host command (`command:` in a secret): what to run,
 //! and what it prints, `{"value": "...", "expires_at": "<RFC 3339>"}` or a
-//! bare value that lives for `ttl_secs`. The daemon runs it and keeps the
+//! bare value that lives for `ttl_secs`. The office runs it and keeps the
 //! result (`zapper_core::mint`). The output is the secret: it is parsed here
 //! and never put in an error.
 

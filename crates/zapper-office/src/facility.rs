@@ -1,38 +1,33 @@
-//! A firm's services: its git repository, served by the daemon, and its
-//! cluster, a k3s VM booted before the workers. Workers reach both by name
-//! under the firm's domain through the proxy; the daemon routes those names
-//! itself, so no VM reaches another VM or a host address.
+//! A firm's services: its git repository and its cluster, k3s in a sandbox
+//! of its own booted before the workers. Workers reach both through the
+//! office edge (`/git/`, `/cluster`, `/apps/`), never another sandbox or a
+//! host address directly.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
-use zapper_policy::proto::{Forward, GuestFile};
+use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 
 use super::prompts::Services;
 use super::FirmRun;
-use zapper_api_types::{NewSession, ServiceSpec, ServiceTarget, SessionInfo};
-#[cfg(test)]
-use zapper_core::Core;
-#[cfg(test)]
-use zapper_core::Session;
-use zapper_util::random_id;
+use zapper_openshell::session::{NewSession, SessionInfo};
 
-/// Ports the cluster VM forwards from vsock to itself.
+/// The cluster sandbox's ports, on its loopback, which the office reaches
+/// over the gateway (`connect_port`, OpenShell's `ForwardTcp`): the API, and
+/// the ingress (Traefik) on ports a rootless k3s may bind.
 pub const API_PORT: u32 = 6443;
-pub const HTTP_PORT: u32 = 80;
-pub const HTTPS_PORT: u32 = 443;
-/// The dashboard's NodePort, forwarded for the board only.
+pub const HTTP_PORT: u32 = 8080;
+pub const HTTPS_PORT: u32 = 8443;
+/// The dashboard's port, for the board only.
 pub const DASHBOARD_PORT: u32 = 30466;
 /// Headlamp, pinned in the k3s image (`HEADLAMP_IMAGE` in the Makefile).
 const HEADLAMP_IMAGE: &str = "ghcr.io/headlamp-k8s/headlamp:v0.46.0";
@@ -46,21 +41,16 @@ pub struct Facilities {
     /// over `run.client` by this id, holding no `Session`.
     pub cluster: Mutex<Option<SessionInfo>>,
     pub kubeconfig: Mutex<Option<String>>,
-    /// Per worker, for the git server.
-    pub git_passwords: Mutex<HashMap<String, String>>,
-    /// What the daemon knows of the firm's git remote.
+    /// Per worker with a grant on the cluster, their service account's
+    /// token: the office edge adds it to their requests to the API, so it
+    /// never enters their sandbox.
+    pub cluster_tokens: Mutex<HashMap<String, String>>,
+    /// What the office knows of the firm's git remote.
     pub remote: super::remote::State,
     product: Mutex<Option<JoinHandle<()>>>,
     dashboard: Mutex<Option<JoinHandle<()>>>,
     /// The token the board signs in to the dashboard with.
     pub dashboard_token: Mutex<Option<String>>,
-    /// The run's services and zone, removed when it stops.
-    pub services: Mutex<Vec<u64>>,
-    /// The firm's git server, served by the office on a socket (as its tools
-    /// and decider are) and registered with the daemon as a socket service;
-    /// the guard removes the registration, stops serving and unlinks the
-    /// socket when the run stops.
-    git: Mutex<Option<crate::client::FacilityGuard>>,
 }
 
 impl Facilities {
@@ -80,116 +70,6 @@ impl Facilities {
     }
 }
 
-/// Reads the caller line the daemon sends first on a socket service's
-/// Answers one git connection: the daemon's first line names the caller
-/// (`ServiceCaller`; the member is its `member` label, from the VM), then the
-/// office speaks the guest's HTTP/1.1 — the same server, reachable whether the
-/// office runs in the daemon or as a process of its own.
-async fn answer_git(run: Weak<FirmRun>, line: Vec<u8>, stream: tokio::net::UnixStream) {
-    let Ok(who) = serde_json::from_slice::<zapper_policy::facility::ServiceCaller>(&line) else {
-        return;
-    };
-    let Some(run) = run.upgrade() else {
-        return;
-    };
-    let member = who.labels.get("member").cloned().unwrap_or_default();
-    let svc = hyper::service::service_fn(move |req| {
-        let (run, member) = (run.clone(), member.clone());
-        async move { Ok::<_, Infallible>(git_request(&run, &member, req).await) }
-    });
-    let _ = hyper::server::conn::http1::Builder::new()
-        .serve_connection(TokioIo::new(stream), svc)
-        .await;
-}
-
-fn add_service(run: &FirmRun, name: String, port: u16, target: ServiceTarget) -> Result<()> {
-    let id = run.client.add_service(ServiceSpec {
-        name,
-        port,
-        sessions: super::run_sessions(run),
-        target,
-        owner: format!("firm {}", run.firm),
-    })?;
-    run.facility.services.lock().unwrap().push(id);
-    Ok(())
-}
-
-/// The firm's domain, a zone of the run's sessions (its names are the
-/// firm's services, never looked up on the host), and its git server.
-pub fn register(run: &Arc<FirmRun>) -> Result<()> {
-    let id = run.client.add_zone(
-        &run.domain,
-        super::run_sessions(run),
-        &format!("firm {}", run.firm),
-    )?;
-    run.facility.services.lock().unwrap().push(id);
-    if run.config.git_internal() {
-        // Served on a socket, as the tools and decider are: the daemon
-        // terminates TLS and forwards the plain stream to the socket, so the
-        // office serves git whether it runs in the daemon or on its own.
-        let socket = format!("office-{}-git.sock", run.firm);
-        let name = format!("git.{}", run.domain);
-        let sessions = super::run_sessions(run);
-        let owner = format!("firm {}", run.firm);
-        let weak = Arc::downgrade(run);
-        let guard = crate::client::serve_facility(
-            &run.client,
-            &run.socket_dir,
-            &socket,
-            crate::client::Registered::Service,
-            move |listener| {
-                zapper_client::serve_socket(listener, move |line, stream| {
-                    answer_git(weak.clone(), line, stream)
-                })
-            },
-            |socket| {
-                run.client.add_service(ServiceSpec {
-                    name,
-                    port: 443,
-                    sessions,
-                    target: ServiceTarget::Socket {
-                        name: socket.to_string(),
-                        tls: true,
-                    },
-                    owner,
-                })
-            },
-        )?;
-        *run.facility.git.lock().unwrap() = Some(guard);
-    }
-    Ok(())
-}
-
-/// For tests: `cluster` as the run's cluster, as `start` makes it once it
-/// has booted.
-#[cfg(test)]
-pub(crate) fn test_cluster(core: &Core, run: &FirmRun, cluster: &Arc<Session>) {
-    use zapper_core::SessionApi;
-    *run.facility.cluster.lock().unwrap() = Some(core.session_info(cluster));
-    register_cluster(run, &cluster.id).unwrap();
-}
-
-/// The cluster's API and the apps it serves, as services of the firm's
-/// domain on the cluster VM's ports.
-fn register_cluster(run: &FirmRun, cluster_id: &str) -> Result<()> {
-    let dom = &run.domain;
-    let to = |port: u32| ServiceTarget::Session {
-        id: cluster_id.to_string(),
-        port,
-    };
-    add_service(
-        run,
-        format!("{CLUSTER}.{dom}"),
-        API_PORT as u16,
-        to(API_PORT),
-    )?;
-    for name in [format!("apps.{dom}"), format!("*.apps.{dom}")] {
-        add_service(run, name.clone(), 80, to(HTTP_PORT))?;
-        add_service(run, name, 443, to(HTTPS_PORT))?;
-    }
-    Ok(())
-}
-
 fn plain(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
@@ -207,65 +87,22 @@ fn repo_of(path: &str) -> Option<&str> {
         .filter(|n| super::git::valid_repo_name(n))
 }
 
-fn basic_auth(h: &hyper::HeaderMap) -> Option<(String, String)> {
-    use base64::Engine as _;
-    let v = h
-        .get(hyper::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Basic ")?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(v.trim())
-        .ok()?;
-    let s = String::from_utf8(raw).ok()?;
-    let (u, p) = s.split_once(':')?;
-    Some((u.to_string(), p.to_string()))
-}
-
-/// One request to the firm's git server: checks the worker's password and
-/// rights, then runs `git http-backend`.
-/// Whether `member` may make this git request, and their grant's level:
-/// their password, the repository the path names, and their grant on it.
+/// Whether `member` (as the office edge verified them) may make this request
+/// of the repository `path` names, and their grant's level: it is one of
+/// the firm's, and their grant on it allows it.
 pub(super) fn authorize(
     run: &FirmRun,
     member: &str,
-    headers: &hyper::HeaderMap,
     path: &str,
     query: &str,
 ) -> Result<super::access::Level, Box<Response<Full<Bytes>>>> {
-    let Some((user, pass)) = basic_auth(headers) else {
-        let mut r = plain(StatusCode::UNAUTHORIZED, "credentials required");
-        r.headers_mut()
-            .insert("www-authenticate", "Basic realm=\"git\"".parse().unwrap());
-        return Err(Box::new(r));
-    };
-    let ok = user == member
-        && run
-            .facility
-            .git_passwords
-            .lock()
-            .unwrap()
-            .get(member)
-            .is_some_and(|p| *p == pass);
-    if !ok {
-        let mut r = plain(
-            StatusCode::UNAUTHORIZED,
-            "wrong credentials for this worker",
-        );
-        r.headers_mut()
-            .insert("www-authenticate", "Basic realm=\"git\"".parse().unwrap());
-        return Err(Box::new(r));
-    }
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
     if path.split('/').any(|c| c == "..") {
         return Err(Box::new(plain(StatusCode::BAD_REQUEST, "bad path")));
     }
     let repos = run.config.git_repos();
     let Some(repo) = repo_of(path).filter(|r| repos.iter().any(|x| x == r)) else {
-        let urls: Vec<String> = repos
-            .iter()
-            .map(|r| format!("https://git.{}/{r}.git", run.domain))
-            .collect();
+        let urls: Vec<String> = repos.iter().map(|r| git_url(run, r)).collect();
         return Err(Box::new(plain(
             StatusCode::NOT_FOUND,
             &format!("no such repository; the firm's: {}", urls.join(", ")),
@@ -291,6 +128,8 @@ pub(super) fn authorize(
     Ok(level)
 }
 
+/// One request of `member`'s (as the office edge verified them) to the
+/// firm's git server: their rights checked, then `git http-backend`.
 pub(crate) async fn git_request(
     run: &Arc<FirmRun>,
     member: &str,
@@ -299,7 +138,7 @@ pub(crate) async fn git_request(
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let push = path.ends_with("/git-receive-pack") || query.contains("service=git-receive-pack");
-    let level = match authorize(run, member, req.headers(), &path, &query) {
+    let level = match authorize(run, member, &path, &query) {
         Ok(level) => level,
         Err(refused) => return *refused,
     };
@@ -347,47 +186,6 @@ pub(crate) async fn git_request(
 /// The namespace that holds workers' service accounts.
 const WORKER_NS: &str = "zapper-workers";
 
-/// Network access to git or the cluster follows the grant: a rule in the
-/// worker's own layer allows the host while they hold one.
-pub fn network_follows_grant(
-    run: &FirmRun,
-    worker: &str,
-    resource: &str,
-    level: super::access::Level,
-) {
-    let Some(s) = run.rt(worker).and_then(|w| w.session()) else {
-        return;
-    };
-    // One rule per grant (`git:api` → `credentials-git-api`): a revoked
-    // repository leaves the others' rules, and so the host, in place.
-    let id = format!("credentials-{}", resource.replace(':', "-"));
-    if level == super::access::Level::None {
-        run.client.remove_session_rule(s.id(), &id);
-        return;
-    }
-    let (host, port) = if resource.starts_with("git:") {
-        (format!("git.{}", run.domain), 443)
-    } else {
-        (format!("{CLUSTER}.{}", run.domain), API_PORT as u16)
-    };
-    run.client.put_session_rule(
-        s.id(),
-        zapper_policy::AnyRule::Net(zapper_policy::NetRule {
-            id: Some(id),
-            action: zapper_policy::Action::Allow,
-            host,
-            ports: vec![port],
-            methods: vec![],
-            path: None,
-            protocol: Default::default(),
-            secrets: vec![],
-            set_headers: Default::default(),
-            final_: false,
-            comment: Some(format!("credentials: {resource} {}", level.name())),
-        }),
-    );
-}
-
 /// A worker's access to the cluster, as their grant says: their own
 /// service account with RoleBindings (read: `view` in dev; write: `edit` in
 /// dev; admin: also `admin` in prod), and a kubeconfig in their VM with its
@@ -417,6 +215,7 @@ pub async fn cluster_access(
             "k3s kubectl -n {WORKER_NS} delete serviceaccount {sa} --ignore-not-found >/dev/null"
         ));
         sh(run, c.id(), &script).await?;
+        run.facility.cluster_tokens.lock().unwrap().remove(worker);
         if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
             let home = format!("/home/{}", s.user());
             let _ = sh(run, s.id(), &format!("rm -f {home}/.kube/config")).await;
@@ -442,24 +241,22 @@ pub async fn cluster_access(
         bail!("RBAC for {worker}: {out}");
     }
     let token = out.lines().last().unwrap_or("").trim().to_string();
-    let ca = run
-        .facility
-        .kubeconfig
+    // The API at the office edge's `/cluster`, the token kept here and
+    // added on the way: the worker's kubeconfig names the server alone.
+    run.facility
+        .cluster_tokens
         .lock()
         .unwrap()
-        .as_deref()
-        .and_then(|k| {
-            k.lines().find_map(|l| {
-                l.trim()
-                    .strip_prefix("certificate-authority-data:")
-                    .map(|v| v.trim().to_string())
-            })
-        })
-        .ok_or_else(|| anyhow!("no cluster CA yet"))?;
+        .insert(worker.to_string(), token);
     let kube = format!(
-        "apiVersion: v1\nkind: Config\nclusters:\n- name: {CLUSTER}\n  cluster:\n    server: https://{CLUSTER}.{d}:{API_PORT}\n    certificate-authority-data: {ca}\nusers:\n- name: {worker}\n  user:\n    token: {token}\ncontexts:\n- name: {worker}\n  context:\n    cluster: {CLUSTER}\n    user: {worker}\n    namespace: dev\ncurrent-context: {worker}\n",
-        d = run.domain
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: {CLUSTER}\n  cluster:\n    server: {}/cluster\nusers:\n- name: {worker}\n  user: {{}}\ncontexts:\n- name: {worker}\n  context:\n    cluster: {CLUSTER}\n    user: {worker}\n    namespace: dev\ncurrent-context: {worker}\n",
+        edge(run)
     );
+    write_kubeconfig(run, worker, kube).await
+}
+
+/// Writes `kube` as `worker`'s `~/.kube/config`.
+async fn write_kubeconfig(run: &FirmRun, worker: &str, kube: String) -> Result<()> {
     if let Some(s) = run.rt(worker).and_then(|w| w.session()) {
         let home = format!("/home/{}", s.user());
         let (code, _out, err) = crate::client::run_command(
@@ -477,7 +274,6 @@ pub async fn cluster_access(
     Ok(())
 }
 
-/// Runs a shell command as root in a session's VM; its stdout.
 /// Runs a shell command in session `id` over the office's client; its exit
 /// code and output (stdout, then stderr if it failed).
 pub(super) async fn sh(run: &FirmRun, id: &str, script: &str) -> Result<(i32, String)> {
@@ -506,38 +302,12 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     if !repos.is_empty() {
         for name in repos.iter().filter(|_| run.config.git_remote().is_none()) {
             let repo = run.dir.join("git").join(format!("{name}.git"));
-            std::fs::create_dir_all(&repo)?;
-            let ok = tokio::process::Command::new("git")
-                .args(["init", "--quiet", "--bare", "-b", "main"])
-                .arg(&repo)
-                .status()
-                .await
-                .context("git init (is git installed?)")?;
-            if !ok.success() {
-                bail!("git init {name} failed");
-            }
-            let _ = tokio::process::Command::new("git")
-                .arg("--git-dir")
-                .arg(&repo)
-                .args(["config", "http.receivepack", "true"])
-                .status()
-                .await;
-            // Below admin, pushes may not touch `main` or tags. The hook is
-            // the daemon's: the repository lives on the host, out of
-            // workers' reach.
-            let hook = repo.join("hooks").join("pre-receive");
-            std::fs::create_dir_all(repo.join("hooks"))?;
-            std::fs::write(&hook, zapper_git::PRE_RECEIVE)?;
-            std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+            // Below admin, pushes may not touch `main` or tags.
+            zapper_git::init_bare(&repo, zapper_git::PRE_RECEIVE)
+                .with_context(|| format!("the firm's repository {name}"))?;
         }
         // An empty knowledge base gets its layout.
         super::kb::seed(run).await?;
-        // A password per worker is who they are, not what they may do: their
-        // grant decides that.
-        let mut pw = run.facility.git_passwords.lock().unwrap();
-        for w in run.rts() {
-            pw.insert(w.name.clone(), random_id(24));
-        }
         run.journal.append(
             "facility",
             json!({ "name": "git", "state": "ready", "repos": repos }),
@@ -548,30 +318,24 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
     };
     run.journal
         .append("facility", json!({ "name": name, "state": "booting" }));
-    let forwards = [API_PORT, HTTP_PORT, HTTPS_PORT, DASHBOARD_PORT]
-        .iter()
-        .map(|p| Forward {
-            vsock_port: *p,
-            tcp_port: *p as u16,
-            nic: true,
-        })
-        .collect();
+    // k3s runs rootless, as the sandbox's user (OpenShell runs nothing as
+    // root): its kubeconfig is in that user's home.
+    let user = config
+        .resolve(&f.profile)
+        .map(|p| p.agent.user.clone())
+        .unwrap_or_else(|_| "agent".into());
+    let kubeconfig = format!("/home/{user}/.kube/k3s.yaml");
     let new = NewSession {
         profile: f.profile.clone(),
         workdir: run.dir.join("empty"),
         policy: Policy::default(),
         labels: super::labels(&run.firm, &run.id, CLUSTER, "", false),
-        shared_layers: vec![],
         files: vec![],
         mounts: vec![],
-        // For the operator's `zapper exec --system`: kubectl as k3s's admin.
-        agent_overlay: Some(json!({ "env": { "KUBECONFIG": "/etc/rancher/k3s/k3s.yaml" } })),
-        forwards,
-        persistent: false,
-        accept_changed_image: false,
-        ssh: false,
+        // kubectl as k3s's admin, in the sandbox.
+        agent_overlay: Some(json!({ "env": { "KUBECONFIG": kubeconfig } })),
+        // The office reaches its ports over the gateway (`connect_port`).
     };
-    let _ = config;
     let s = run
         .client
         .create_session(new)
@@ -579,15 +343,12 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
         .context("booting the cluster")?;
     let cid = s.id().to_string();
     *run.facility.cluster.lock().unwrap() = Some(s);
-    register_cluster(run, &cid)?;
     run.journal.append(
         "facility",
         json!({ "name": name, "state": "starting", "session": cid.clone() }),
     );
     let san = format!("{CLUSTER}.{}", run.domain);
-    let script = format!(
-        "mkdir -p /var/log && nohup k3s server --node-name {CLUSTER} --tls-san {san} --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &"
-    );
+    let script = k3s_start(&san);
     let (code, out) = sh(run, &cid, &script).await?;
     if code != 0 {
         bail!("starting k3s: {out}");
@@ -602,14 +363,14 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
             break;
         }
         if tokio::time::Instant::now() > deadline {
-            let (_, log) = sh(run, &cid, "tail -30 /var/log/k3s.log")
+            let (_, log) = sh(run, &cid, "tail -30 ~/k3s.log")
                 .await
                 .unwrap_or_default();
             bail!("k3s did not become ready in 5 minutes; its log ends:\n{log}");
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let (code, kube) = sh(run, &cid, "cat /etc/rancher/k3s/k3s.yaml").await?;
+    let (code, kube) = sh(run, &cid, "cat \"$KUBECONFIG\"").await?;
     if code != 0 {
         bail!("reading the kubeconfig: {kube}");
     }
@@ -658,6 +419,22 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
         tokio::spawn(async move { deploy_dashboard(&run, &id).await });
     }
     Ok(())
+}
+
+/// What starts k3s in the cluster's sandbox: rootless (OpenShell runs
+/// nothing as root), with its air-gap images from the image, the API's
+/// certificate naming `san` too, and Traefik on ports a rootless k3s may
+/// bind (`HTTP_PORT`, `HTTPS_PORT`). Its log is `~/k3s.log`.
+pub fn k3s_start(san: &str) -> String {
+    let traefik = format!(
+        "apiVersion: helm.cattle.io/v1\nkind: HelmChartConfig\nmetadata:\n  name: traefik\n  namespace: kube-system\nspec:\n  valuesContent: |-\n    ports:\n      web:\n        exposedPort: {HTTP_PORT}\n      websecure:\n        exposedPort: {HTTPS_PORT}\n"
+    );
+    format!(
+        "set -e; d=~/.rancher/k3s; mkdir -p $d/agent $d/server/manifests ~/.kube; \
+         [ -e $d/agent/images ] || ln -s /var/lib/rancher/k3s/agent/images $d/agent/images; \
+         printf '%s' '{traefik}' > $d/server/manifests/traefik-ports.yaml; \
+         nohup k3s server --rootless --node-name {CLUSTER} --tls-san {san} --disable metrics-server --write-kubeconfig-mode 600 > ~/k3s.log 2>&1 &"
+    )
 }
 
 /// The product port: an HTTP proxy to the cluster's ingress, which asks for
@@ -734,7 +511,7 @@ fn dashboard_manifest() -> String {
                     "containers": [{ "name": "headlamp", "image": HEADLAMP_IMAGE, "imagePullPolicy": "IfNotPresent",
                         "args": ["-in-cluster"], "ports": [{ "containerPort": 4466 }] }] } } } },
             { "apiVersion": "v1", "kind": "Service", "metadata": { "name": "headlamp", "namespace": "dashboard" },
-              "spec": { "type": "NodePort", "selector": labels, "ports": [{ "port": 80, "targetPort": 4466, "nodePort": DASHBOARD_PORT }] } },
+              "spec": { "type": "LoadBalancer", "selector": labels, "ports": [{ "port": DASHBOARD_PORT, "targetPort": 4466 }] } },
         ]
     });
     serde_json::to_string(&list).unwrap()
@@ -877,13 +654,6 @@ pub async fn stop(run: &Arc<FirmRun>) {
     {
         t.abort();
     }
-    // The git server's guard removes its registration, stops serving and
-    // unlinks its socket.
-    run.facility.git.lock().unwrap().take();
-    let services: Vec<u64> = run.facility.services.lock().unwrap().drain(..).collect();
-    for id in services {
-        run.client.remove_service(id);
-    }
     let cluster = run.facility.cluster.lock().unwrap().take();
     if let Some(s) = cluster {
         let _ = run.client.stop_session(s.id(), "firm down").await;
@@ -946,7 +716,6 @@ pub async fn git_log(run_dir: &Path) -> Value {
 }
 
 pub fn services_for(run: &FirmRun, _role: &str) -> Services {
-    let d = &run.domain;
     // Shown to everyone: access to each comes with a grant.
     let kube = !run.config.facilities.is_empty();
     let cluster = run.facility.cluster.lock().unwrap().is_some();
@@ -955,7 +724,7 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .config
             .git_repos()
             .iter()
-            .map(|r| format!("https://git.{d}/{r}.git"))
+            .map(|r| git_url(run, r))
             .collect(),
         remote_main: run
             .config
@@ -969,37 +738,36 @@ pub fn services_for(run: &FirmRun, _role: &str) -> Services {
             .into_iter()
             .filter(|r| run.config.git_remote().is_some() && run.config.main_is_local(r))
             .collect(),
-        kube: kube.then(|| format!("https://{CLUSTER}.{d}:{API_PORT}")),
-        product: cluster.then(|| format!("http://apps.{d}")),
+        kube: kube.then(|| format!("{}/cluster", edge(run))),
+        product: cluster.then(|| format!("{}/apps/", edge(run))),
     }
 }
 
-/// Files that give a worker its credentials for the firm's services.
-pub fn credentials_for(
-    run: &FirmRun,
-    worker: &str,
-    _role: &str,
-    home: &str,
-) -> Result<Vec<GuestFile>> {
-    // The kubeconfig comes with a cluster grant (cluster_access); the git
-    // password is the worker's identity, and their grant decides the rest.
-    let mut files = Vec::new();
-    if let Some(pw) = run.facility.git_passwords.lock().unwrap().get(worker) {
-        let d = &run.domain;
-        files.push(GuestFile {
-            path: format!("{home}/.git-credentials"),
-            content: format!("https://{worker}:{pw}@git.{d}\n"),
-            mode: 0o600,
-            user_owned: true,
-        });
-        files.push(GuestFile {
-            path: format!("{home}/.gitconfig"),
-            content: format!("[user]\n\tname = {worker}\n\temail = {worker}@{d}\n[credential]\n\thelper = store\n[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n"),
-            mode: 0o644,
-            user_owned: true,
-        });
-    }
-    Ok(files)
+/// The office edge's URL, as the firm's workers reach it.
+fn edge(run: &FirmRun) -> String {
+    run.client.edge().trim_end_matches('/').to_string()
+}
+
+/// Where the firm's workers clone repository `repo`: through the office edge.
+pub fn git_url(run: &FirmRun, repo: &str) -> String {
+    format!("{}/git/{repo}.git", edge(run))
+}
+
+/// The `.gitconfig` the firm's workers get: who they are in commits. Their
+/// identity at the git server is the token the gateway adds outside the VM.
+fn gitconfig(worker: &str, domain: &str) -> String {
+    format!("[user]\n\tname = {worker}\n\temail = {worker}@{domain}\n[init]\n\tdefaultBranch = main\n[push]\n\tautoSetupRemote = true\n")
+}
+
+/// Files that set a worker up for the firm's services: its `.gitconfig`
+/// (the kubeconfig comes with a cluster grant, `cluster_access`).
+pub fn credentials_for(run: &FirmRun, worker: &str, home: &str) -> Vec<GuestFile> {
+    vec![GuestFile {
+        path: format!("{home}/.gitconfig"),
+        content: gitconfig(worker, &run.domain),
+        mode: 0o644,
+        user_owned: true,
+    }]
 }
 
 /// Whether namespace prod runs anything (the firm has shipped): what
@@ -1081,43 +849,6 @@ mod tests {
             v["items"][4]["metadata"]["annotations"]
                 ["traefik.ingress.kubernetes.io/router.priority"],
             "1"
-        );
-    }
-
-    const FIRM: &str = "
-profiles:
-  w:
-    agent: { kind: claude-code }
-firms:
-  acme:
-    roles:
-      ceo: { profile: w, agent: ceo }
-    workers:
-      - { name: ceo, role: ceo }
-    git: { repos: [api] }
-";
-
-    /// Starting the run wires the firm's zone and git service through the
-    /// office's client; the daemon's registry holds them.
-    #[tokio::test]
-    async fn register_wires_the_firms_zone_and_git_service() {
-        use zapper_core::ServiceApi;
-        let t = crate::test_core(FIRM);
-        let run = crate::test_run(&t.core, "acme");
-        let services = t.core.services();
-        assert!(
-            services.iter().any(|s| s.name == run.domain),
-            "zone {} not registered: {:?}",
-            run.domain,
-            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        );
-        let git = format!("git.{}", run.domain);
-        assert!(
-            services
-                .iter()
-                .any(|s| s.name == git && s.port == Some(443)),
-            "git service {git} missing: {:?}",
-            services.iter().map(|s| &s.name).collect::<Vec<_>>(),
         );
     }
 }

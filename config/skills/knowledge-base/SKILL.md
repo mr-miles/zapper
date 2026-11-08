@@ -16,7 +16,7 @@ wiki/         the pages
 
 ## Reading
 
-1. You are granted read on it when you are cleared. Clone it once: `git clone https://git.<domain>/<kb>.git /work/<kb>`.
+1. You are granted read on it when you are cleared. Clone it once, from the URL your preamble gives it: `git clone <url> /work/<kb>`.
 2. Before searching, always `git -C /work/<kb> pull`: someone may have added what you need since.
 3. Start from `index.md`, then search the pages: `rg -i '<term>' /work/<kb>/wiki`. Follow the links between pages.
 4. A page's frontmatter says who wrote it, its sources, when it was updated, its `status` (draft, current, superseded) and its `trust` (internal, or web for what came from outside the firm). Weigh `trust: web` and stale pages as claims to check, not facts.

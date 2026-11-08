@@ -10,12 +10,11 @@ use crate::firm::{Firm, BOARD};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use zapper_policy::parse_size;
-use zapper_policy::proto::{Frame, ShellRequest};
+use zapper_policy::proto::ShellRequest;
 
 use super::{now, FirmRun};
-use zapper_driver::read_frame;
 
 /// No `code`: code lives in the firm's git repository, shared as a branch.
 const KINDS: [&str; 5] = ["document", "report", "dataset", "deck", "board-pack"];
@@ -141,75 +140,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let stream = client.attach(id, ShellRequest::system(argv)).await?;
-    pump_command(stream, input, out, limit).await
-}
-
-/// Drives a command over `stream`, a terminal already opened for it: feeds
-/// `input`, writes stdout to `out` (at most `limit` bytes), returns the exit
-/// code and stderr. The stream is a VM terminal in-process (from
-/// `Session::open_shell`) or an attached one over the office's client — the
-/// cluster, a sandbox and not an agent, is driven over it as a terminal
-/// user would. Each call runs one command (a shell script may bundle many).
-pub(crate) async fn pump_command<S, R, W>(
-    stream: S,
-    input: Option<R>,
-    mut out: W,
-    limit: u64,
-) -> Result<(i32, String)>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    let (mut r, mut w) = tokio::io::split(stream);
-    let feeder = tokio::spawn(async move {
-        if let Some(mut input) = input {
-            let mut buf = vec![0u8; 60 * 1024];
-            loop {
-                let n = match input.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                if w.write_all(&Frame::Data(buf[..n].to_vec()).encode())
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        }
-        let _ = w.write_all(&Frame::Eof.encode()).await;
-        // Keep the write half open until the command exits.
-        std::future::pending::<()>().await;
-    });
-    let mut stderr = String::new();
-    let mut total = 0u64;
-    let mut code = 255;
-    while let Some(f) = read_frame(&mut r).await? {
-        match f {
-            Frame::Data(d) => {
-                total += d.len() as u64;
-                if total > limit {
-                    feeder.abort();
-                    bail!("more than {limit} bytes");
-                }
-                out.write_all(&d).await?;
-            }
-            Frame::Stderr(d) => {
-                if stderr.len() < 4096 {
-                    stderr.push_str(&String::from_utf8_lossy(&d));
-                }
-            }
-            Frame::Exit(c) => {
-                code = c;
-                break;
-            }
-            _ => {}
-        }
-    }
-    feeder.abort();
-    out.flush().await?;
-    Ok((code, stderr))
+    zapper_driver::process::pump_command(stream, input, out, limit).await
 }
 
 fn files_under(root: &Path) -> Result<Vec<(String, PathBuf)>> {

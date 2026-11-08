@@ -1,7 +1,7 @@
-//! The office's tools: an MCP server in the daemon's gateway, served to the
-//! run's workers over their VM's MCP port (`zapper-agent office mcp` bridges
-//! the harness's stdio to it). Each tool is an op; the daemon knows which
-//! worker calls from the VM the connection came from, and checks the role on
+//! The office's tools: an MCP server on the office edge (`/mcp`), served to
+//! the run's workers (Claude Code speaks Streamable HTTP to it; `office mcp`
+//! bridges other harnesses' stdio to it). Each tool is an op; the edge
+//! knows which sandbox the request came from, and the role is checked on
 //! every call.
 
 use std::sync::Arc;
@@ -10,137 +10,50 @@ use crate::firm::parse_duration;
 use anyhow::{anyhow, bail, Result};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
-use zapper_policy::NetRequest;
 
 use super::mail::{Draft, Expects, FollowUp, Kind, PostOffice};
 use super::{drive, now, security, FirmRun, WorkerRt};
 use crate::{access, contracts, workforce};
-use zapper_policy::facility::McpCall;
+use zapper_openshell::edge::Caller;
 
 /// Where the agent copies itself in every guest.
-pub const AGENT_PATH: &str = "/usr/local/bin/zapper-agent";
+pub use zapper_openshell::AGENT_PATH;
 
-/// The office's tools, an MCP server in the gateway for the run's workers.
-/// Who calls is the session's member label; the role is checked on every
-/// call.
-struct Tools {
-    /// The office registry, to resolve a caller's firm → its run without a
-    /// `Core` (the office owns its own `Office`).
-    office: Arc<crate::Office>,
+/// What the office's MCP server tells a worker's harness about itself.
+pub(crate) fn instructions() -> Option<String> {
+    Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
 }
 
-impl Tools {
-    fn instructions(&self) -> Option<String> {
-        Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
-    }
-
-    /// Answers one call on the tools socket, for the caller the daemon named
-    /// (the `McpCall`'s session id and labels, from the VM): the firm's run,
-    /// the member, and the tool.
-    async fn handle(&self, call: &McpCall, op: &str, args: Value) -> Result<Value> {
-        let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
-        // A worker of another (ended) run of the firm is told it isn't running.
-        let run = self
-            .office
-            .run(firm)
-            .ok()
-            .filter(|r| call.labels.get("run").map(String::as_str) == Some(r.id.as_str()))
-            .ok_or_else(|| anyhow!("the firm isn't running"))?;
-        let member = call.labels.get("member").map(String::as_str).unwrap_or("");
-        dispatch(&run, &call.session, member, op, &args)
-            .await
-            .inspect_err(|e| {
-                run.journal.append(
-                    "op_error",
-                    json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
-                );
-            })
-    }
+/// Answers one tool list (`op` "tools") or call for `caller`, as the office
+/// edge verified it (its session and labels as the office made them, never
+/// as the guest said): the firm's run, the member, and the tool. A worker of
+/// another (ended) run of the firm is told the firm isn't running.
+pub(crate) async fn answer(
+    office: &Arc<crate::Office>,
+    caller: &Caller,
+    op: &str,
+    args: Value,
+) -> Result<Value> {
+    let run = office
+        .run_of(&caller.labels)
+        .ok_or_else(|| anyhow!("the firm isn't running"))?;
+    let member = caller
+        .labels
+        .get("member")
+        .map(String::as_str)
+        .unwrap_or("");
+    dispatch(&run, &caller.session, member, op, &args)
+        .await
+        .inspect_err(|e| {
+            run.journal.append(
+                "op_error",
+                json!({ "worker": member, "op": op, "error": format!("{e:#}") }),
+            );
+        })
 }
 
 /// The MCP server's name, as the workers' harnesses know it.
-pub const SERVER: &str = "office";
-
-/// Serves the office's tools to the firm's workers, from a socket in the
-/// daemon's `state/services/` directory that the gateway asks for each
-/// tool list and call (naming the caller from the VM), as a facility in
-/// another process would. A worker of another run of the firm gets the
-/// tools too, and is told on each call that its firm isn't running.
-pub fn register(run: &FirmRun) -> Result<()> {
-    let sessions: std::collections::BTreeMap<String, String> =
-        [("firm", run.firm.as_str()), ("office", "worker")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-    let socket = format!("office-{}.sock", run.firm);
-    // The tools reach the daemon and the registry over the client and the
-    // office's own `Office`; their registration and socket go through the
-    // client. The listener is bound now and served once there is a runtime
-    // (always in the daemon; not in a test that starts a firm without one).
-    let tools = Arc::new(Tools {
-        office: run.office(),
-    });
-    let instructions = tools.instructions();
-    let served_tools = tools.clone();
-    let guard = crate::client::serve_facility(
-        &run.client,
-        &run.socket_dir,
-        &socket,
-        crate::client::Registered::Mcp,
-        move |listener| {
-            zapper_client::serve_socket(listener, move |line, stream| {
-                answer_mcp(served_tools.clone(), line, stream)
-            })
-        },
-        |socket| {
-            run.client
-                .add_mcp_socket(SERVER, sessions, socket, instructions, "office")
-        },
-    )?;
-    *run.tools.lock().unwrap() = Some(guard);
-    Ok(())
-}
-
-/// Stops serving them, when the firm stops (the guard's drop removes the
-/// registration, aborts the serve task and unlinks the socket).
-pub fn unregister(run: &FirmRun) {
-    run.tools.lock().unwrap().take();
-}
-
-/// Answers one request on the tools' socket: the caller is the `McpCall` as
-/// the daemon named it from the VM, never as the guest says.
-async fn answer_mcp(tools: Arc<Tools>, line: Vec<u8>, mut stream: tokio::net::UnixStream) {
-    use tokio::io::AsyncWriteExt;
-    use zapper_policy::facility::{McpMethod, McpReply};
-    let answer = async {
-        let call: McpCall = serde_json::from_slice(&line)?;
-        if call.server != SERVER {
-            bail!("this socket serves {SERVER}, not {}", call.server);
-        }
-        let (op, args) = match call.method {
-            McpMethod::ToolsList => ("tools".to_string(), json!({})),
-            McpMethod::ToolsCall => (
-                call.tool.clone().unwrap_or_default(),
-                call.arguments.clone().unwrap_or_else(|| json!({})),
-            ),
-        };
-        tools.handle(&call, &op, args).await
-    };
-    let reply = match answer.await {
-        Ok(v) => McpReply {
-            result: Some(v),
-            error: None,
-        },
-        Err(e) => McpReply {
-            result: None,
-            error: Some(format!("{e:#}")),
-        },
-    };
-    if let Ok(mut b) = serde_json::to_vec(&reply) {
-        b.push(b'\n');
-        let _ = stream.write_all(&b).await;
-    }
-}
+pub const SERVER: &str = zapper_openshell::OFFICE_MCP;
 
 fn names() -> Value {
     json!({ "type": "array", "items": { "type": "string" }, "description": "Addresses: a worker's name, board, team:NAME (NAME's direct reports), or all" })
@@ -246,44 +159,10 @@ impl<'a> Args<'a> {
 
 /// What a tool's handler gets: who calls, from which session, and with
 /// what.
-/// The rule that already allows a worker's request, if their session's
-/// rules allow it for every method asked for (or the connection, with
-/// none).
-fn allowed_by(
-    c: &Call,
-    host: &str,
-    port: u16,
-    methods: Option<&[String]>,
-    path: Option<&str>,
-) -> Result<Option<String>> {
-    let methods: Vec<Option<String>> = match methods {
-        Some(m) if !m.is_empty() => m.iter().cloned().map(Some).collect(),
-        _ => vec![None],
-    };
-    let mut rule = None;
-    for method in methods {
-        // As the proxy would judge it, over the client: the daemon applies the
-        // worker's `{session}`/`{label:…}` rewriting.
-        let req = NetRequest {
-            host: host.to_string(),
-            port,
-            method,
-            path: path.map(str::to_string),
-            session: None,
-            labels: Default::default(),
-        };
-        match c.run.client.allowed(c.sid, req) {
-            Some(r) => rule = Some(r),
-            None => return Ok(None),
-        }
-    }
-    Ok(Some(rule.unwrap_or_else(|| "default".into())))
-}
-
 struct Call<'a> {
     run: &'a Arc<FirmRun>,
-    /// The caller's session id, as the daemon named it from the VM (never from
-    /// the guest) — the office reaches the session over its client.
+    /// The caller's session id, as the edge named it from its sandbox (never
+    /// from what it sent): the office reaches the session over its client.
     sid: &'a str,
     w: &'a Arc<WorkerRt>,
     me: &'a str,
@@ -550,43 +429,6 @@ static TOOLS: &[Tool] = &[
                 }
             }
             Ok(v)
-        }),
-    },
-    Tool {
-        name: "request_access",
-        shown: |_| true,
-        description: "Ask the security officers for network access before you need it, with a reason. You'll get mail with the decision. If your machine's rules already allow it, the answer says so and nothing is asked.",
-        props: || json!({ "host": s("Host name"), "port": { "type": "integer" }, "methods": { "type": "array", "items": { "type": "string" } }, "path": s("URL path glob, e.g. /simple/*"), "reason": s("Why your work needs it") }),
-        required: &["host", "reason"],
-        run: Run::Sync(|c| {
-            let host = zapper_policy::names::hostname(&c.args.req("host")?)
-                .map_err(|e| anyhow!("host: {e}"))?;
-            let port = c.args.raw("port").as_u64().unwrap_or(443).min(65535) as u16;
-            let methods = c.args.list_if_array("methods").map(|m| {
-                m.into_iter()
-                    .map(|m| m.to_ascii_uppercase())
-                    .collect::<Vec<_>>()
-            });
-            let path = c.args.opt("path");
-            let reason = c.args.req("reason")?;
-            // What the worker's rules already allow (every method asked
-            // for, on the path if given) needs no one's decision.
-            if let Some(rule) = allowed_by(c, &host, port, methods.as_deref(), path.as_deref())? {
-                return Ok(json!({
-                    "allowed": true,
-                    "rule": rule,
-                    "note": "already allowed by your machine's rules: go ahead, no request needed. If it's still blocked, the error names the rule; ask again with that",
-                }));
-            }
-            let req = NetRequest {
-                host,
-                port,
-                method: methods.as_ref().and_then(|m| m.first().cloned()),
-                path: None, ..Default::default() };
-            let id = security::ask(c.run, c.me, &req, methods, path, &reason)?;
-            Ok(
-                json!({ "request": id, "note": "the security officers will decide; you'll get mail" }),
-            )
         }),
     },
     Tool {
@@ -1031,7 +873,7 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "traffic",
         shown: |p| p.officer,
-        description: "The firm's requests: method, URL, status, sizes, rule, allowed or denied.",
+        description: "The firm's requests: method, URL, status, sizes, rule, allowed or denied. Not yet on OpenShell: empty until the office reads the gateway's network log; a refused connection still comes to you as an access request.",
         props: || json!({ "worker": s("Worker"), "host": s("Host prefix"), "since": s("e.g. 1h"), "limit": { "type": "integer" } }),
         required: &[],
         run: Run::Sync(|c| {

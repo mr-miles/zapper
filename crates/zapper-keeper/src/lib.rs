@@ -2,10 +2,10 @@
 //! audit logs and terminal recordings.
 //!
 //! It runs as its own OS user and owns the record's files; the user who runs
-//! zapper can read them but not change them. The daemon sends it one kind of
+//! zapper can read them but not change them. The office sends it one kind of
 //! request over a unix socket, append a line to a stream, and gets back only
 //! an acknowledgement: nothing is read, rewritten or removed through it. So a
-//! compromised daemon can add to the record but can't change what is there.
+//! compromised office can add to the record but can't change what is there.
 //!
 //! Next to each file the keeper keeps a hash chain (`<file>.chain`): every
 //! line's hash covers the line and the hash before it, and every so often a
@@ -228,7 +228,7 @@ impl Stream {
         Ok(())
     }
 
-    /// Appends a line, durably: it is on disk before the daemon hears back.
+    /// Appends a line, durably: it is on disk before the office hears back.
     /// The chain needn't be: after a crash it is rebuilt from the data.
     fn append(&mut self, line: &[u8]) -> Result<u64> {
         let off = self.data.metadata()?.len();
@@ -372,7 +372,7 @@ pub fn peer_uid(s: &UnixStream) -> Result<u32> {
 
 /// Free space the keeper leaves on its filesystem: below it, appends are
 /// refused, so a flood of appends (from a compromised writer) can't fill
-/// the disk. The daemon then stops its firms rather than run unrecorded.
+/// the disk. The office then stops its firms rather than run unrecorded.
 pub const MIN_FREE: u64 = 1 << 30;
 
 /// Bytes free on the filesystem of `dir`, for unprivileged users.
@@ -512,7 +512,7 @@ impl Keeper {
     }
 }
 
-/// The daemon's side: one connection, reopened when it breaks.
+/// The office's side: one connection, reopened when it breaks.
 pub struct Client {
     path: PathBuf,
     conn: Mutex<Option<(UnixStream, BufReader<UnixStream>)>>,

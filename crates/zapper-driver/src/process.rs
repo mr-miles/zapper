@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use zapper_policy::proto::{Frame, MAX_LINE};
 
@@ -206,4 +206,69 @@ where
         steers,
         reader: reader_task,
     }
+}
+
+/// Drives one command over `stream`, a terminal already opened for it: feeds
+/// `input`, writes stdout to `out` (at most `limit` bytes), returns the exit
+/// code and stderr (at most 4 KiB). A shell script may bundle many steps.
+pub async fn pump_command<S, R, W>(
+    stream: S,
+    input: Option<R>,
+    mut out: W,
+    limit: u64,
+) -> Result<(i32, String)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let (mut r, mut w) = tokio::io::split(stream);
+    let feeder = tokio::spawn(async move {
+        if let Some(mut input) = input {
+            let mut buf = vec![0u8; 60 * 1024];
+            loop {
+                let n = match input.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if w.write_all(&Frame::Data(buf[..n].to_vec()).encode())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        let _ = w.write_all(&Frame::Eof.encode()).await;
+        // Keep the write half open until the command exits.
+        std::future::pending::<()>().await;
+    });
+    let mut stderr = String::new();
+    let mut total = 0u64;
+    let mut code = 255;
+    while let Some(f) = crate::read_frame(&mut r).await? {
+        match f {
+            Frame::Data(d) => {
+                total += d.len() as u64;
+                if total > limit {
+                    feeder.abort();
+                    bail!("more than {limit} bytes");
+                }
+                out.write_all(&d).await?;
+            }
+            Frame::Stderr(d) => {
+                if stderr.len() < 4096 {
+                    stderr.push_str(&String::from_utf8_lossy(&d));
+                }
+            }
+            Frame::Exit(c) => {
+                code = c;
+                break;
+            }
+            _ => {}
+        }
+    }
+    feeder.abort();
+    out.flush().await?;
+    Ok((code, stderr))
 }

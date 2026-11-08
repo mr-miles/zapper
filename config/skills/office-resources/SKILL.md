@@ -35,13 +35,18 @@ You start with no access to the firm's resources. Access is a **grant** per reso
 
 ## Outside sites
 
-Traffic to sites outside the firm is checked by the security officers. Ask ahead for what your work needs: `request_access(host, port?, methods?, path?, reason)`, as narrow as works ("GET registry.npmjs.org to install the dependencies for t-12"). If your machine's rules already allow it, the answer says `allowed` and nobody is asked: go ahead. A 403 that says the request went to security means it's waiting: don't retry in a loop, do other work or end your turn; the decision comes by mail. Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
+Traffic to sites outside the firm is checked by the security officers, and a request your machine's rules don't allow is refused at once. Don't retry it in a loop: ask, then do other work or end your turn; the decision comes by mail.
+
+- If the refusal answers `policy_denied`, ask by proposing the narrowest rule that would allow it through `http://policy.local`, as `/etc/openshell/skills/policy_advisor.md` explains (read it the first time), with an `intent_summary` that names the work ("GET registry.npmjs.org to install the dependencies for t-12"). The security officers decide it, not the sandbox: you can wait on `/v1/proposals/{chunk_id}/wait?timeout=300` while you have nothing else to do. A rejection carries the officer's reason: ask for less, or not at all. Never propose wildcard hosts or `tls: skip`.
+- If the refusal is a 403 that says the request went to security, it already waits for an officer: there is nothing more to ask.
+
+Never try to get around a denial or the proxy; if it blocks your work, tell whoever gave it to you, with alternatives.
 
 ## git
 
-Your preamble lists the firm's repositories, `https://git.<domain>/<name>.git`; your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
+Your preamble lists the firm's repositories and their URLs (`https://git.<domain>/<name>.git`, or the office's own address on some hosts); your git identity is set up for all of them. Each is its own grant: you can clone only those you hold one for.
 
-- `git clone https://git.<domain>/<name>.git /work/<name>`; `git pull` to stay current.
+- `git clone <url> /work/<name>`, with the URL from your preamble; `git pull` to stay current.
 - Ask for write, not merge or admin. Branches, review and who merges to `main`: the office-git skill.
 - Code lives in git, never on the drive.
 
@@ -49,12 +54,12 @@ If your preamble says a repository's `main` is merged by the board on the firm's
 
 ## The cluster
 
-k3s with Traefik as ingress, and two namespaces: `dev`, where everyone builds and tests, and `prod`, which the product's ingress serves. You get the API (`https://cluster.<domain>:6443`), not the node.
+k3s with Traefik as ingress, and two namespaces: `dev`, where everyone builds and tests, and `prod`, which the product's ingress serves. You get the API (your preamble says where: `https://cluster.<domain>:6443`, or the office's own address `…/cluster` on some hosts), not the node.
 
 - A cluster grant puts a configured `~/.kube/config` on your machine (namespace `dev`); it goes when the grant ends.
-- In `dev`, name everything with your name first (`ada-api`) and leave others' things alone. Reach a service with `kubectl -n dev port-forward svc/ada-api 18080:80`. No Ingress in `dev`.
+- In `dev`, name everything with your name first (`ada-api`) and leave others' things alone. Reach a service with `kubectl -n dev port-forward svc/ada-api 18080:80` where the API is the cluster's own; through the office's address, `port-forward`, `exec` and `attach` aren't served: test in `dev` with a Job or a pod's logs instead. No Ingress in `dev`.
 - `prod` changes only in a release.
-- Anything the work needs inside the cluster, such as an internal container registry, you deploy yourself with the credentials you hold; a grant is the permission. Nobody approves tools. Ask security (`request_access`, `credentials_request`) only for access you lack.
+- Anything the work needs inside the cluster, such as an internal container registry, you deploy yourself with the credentials you hold; a grant is the permission. Nobody approves tools. Ask security (a rule through `policy.local`, or `credentials_request`) only for access you lack.
 
 ## The shared drive
 
@@ -62,7 +67,7 @@ Published work lives in **spaces**, such as `general`, `product`, `engineering`,
 
 ## The product
 
-`http://apps.<domain>` is open to everyone. The `browse` command looks at it as a user would:
+`http://apps.<domain>` is open to everyone; where your preamble gives the product's address as the office's (`…/apps/`), use that wherever the skills say `http://apps.<domain>`. The `browse` command looks at it as a user would:
 
 - `browse shot URL /work/shot.png` screenshots (`--width 390` for a phone, `--full` for the whole page); read the PNG to see it.
 - `browse text URL` prints the visible text; `browse console URL` prints script errors and failed requests.

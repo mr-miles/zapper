@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use zapper_policy::{parse_size, valid_worker_name, Action, Config};
+use zapper_policy::{parse_size, valid_worker_name, Config};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -564,8 +564,8 @@ pub struct GitService {
     /// Access is granted per repository (`git:<name>`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
-    /// Where the daemon keeps the repositories in step: their remote. Only
-    /// the daemon talks to it; agents use the firm's server.
+    /// Where the office keeps the repositories in step: their remote. Only
+    /// the office talks to it; agents use the firm's server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<GitRemote>,
     /// With a remote: the folder that holds the repositories, a bare one per
@@ -598,11 +598,11 @@ pub struct GitService {
     pub web_url: String,
 }
 
-/// How the daemon reaches a firm's remote.
+/// How the office reaches a firm's remote.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitRemote {
-    /// GitHub, through the account's App (`zapper github setup`).
+    /// GitHub, through the account's App (`zapper-office github setup`).
     pub github: Option<GithubRemote>,
 }
 
@@ -613,8 +613,8 @@ pub struct GithubRemote {
     /// `~/.config/zapper/github-apps`. An App belongs to one account, which
     /// is where it is installed: the firm's repositories are that account's.
     pub config: String,
-    /// The command that mints the daemon's tokens, before `--app`, `--repo`
-    /// and `--perm` are added: `[zapper, mint, github-app]` if unset.
+    /// The command that mints the office's tokens, before `--app`, `--repo`
+    /// and `--perm` are added: `[zapper-office, mint, github-app]` if unset.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mint: Vec<String>,
 }
@@ -1006,21 +1006,8 @@ until someone funds them, every access request and background check goes to the 
                     "role {rname}: agent {agent:?}: lowercase letters, digits and dashes"
                 ));
             }
-            match config.resolve(&role.profile) {
-                Err(e) => err(format!("role {rname}: profile {}: {e:#}", role.profile)),
-                Ok(p) => {
-                    // Officers decide network access only; an exec can't wait
-                    // minutes for them.
-                    let mut layers: Vec<&zapper_policy::Policy> =
-                        p.layers.iter().map(|(_, l)| l).collect();
-                    layers.push(&config.policy);
-                    if layers.iter().any(|l| {
-                        l.exec.iter().any(|r| r.action == Action::Ask)
-                            || l.defaults.exec == Some(Action::Ask)
-                    }) {
-                        err(format!("role {rname}: profile {} has exec rules that ask; in a firm, exec rules are allow or deny", role.profile));
-                    }
-                }
+            if let Err(e) = config.resolve(&role.profile) {
+                err(format!("role {rname}: profile {}: {e:#}", role.profile));
             }
         }
         for (rname, role) in &self.roles {
@@ -1181,9 +1168,8 @@ pub fn title_case(s: &str) -> String {
         .join(" ")
 }
 
-/// The office's own config file (`office.yaml`): the firms it runs. Its own,
-/// because the daemon neither validates nor uses firms (proposal 13 decision
-/// 2); `profiles:` stays the daemon's and is read through the client.
+/// The office's own config file (`office.yaml`): the firms it runs. The
+/// profiles they name are `zapper.yaml`'s, read through the client.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct OfficeConfig {
@@ -1191,9 +1177,8 @@ struct OfficeConfig {
 }
 
 /// Reads the office's firms from `office.yaml`. A missing file means no firms.
-/// A firm that does not parse is an error (the office owns this file, unlike
-/// the lenient [`all`] over the daemon's config); cross-checks against the
-/// daemon's profiles are [`validate_firms`].
+/// A firm that does not parse is an error; cross-checks against the profiles
+/// are [`validate_firms`].
 pub fn load(path: &Path) -> Result<BTreeMap<String, Firm>> {
     if !path.exists() {
         return Ok(BTreeMap::new());
@@ -1215,9 +1200,9 @@ fn load_str(text: &str) -> Result<BTreeMap<String, Firm>> {
     Ok(firms)
 }
 
-/// Splits a combined test config into the daemon YAML and an `office.yaml`
-/// body, so a test can write firms where the office reads them (the daemon's
-/// `Config` no longer holds firms). Returns the firm-less daemon YAML and, if
+/// Splits a combined test config into a `zapper.yaml` and an `office.yaml`
+/// body, so a test can write firms where the office reads them. Returns the
+/// firm-less `zapper.yaml` and, if
 /// there were firms, the `office.yaml` text (a `firms:` document).
 #[cfg(test)]
 pub(crate) fn split_office_yaml(yaml: &str) -> (String, Option<String>) {
@@ -1249,25 +1234,20 @@ pub(crate) fn test_firm(yaml: &str, name: &str) -> Firm {
         .unwrap_or_else(|| panic!("no firm {name}"))
 }
 
-/// The daemon `Config` from a combined test config, with its `firms:` stripped
-/// (the daemon's `Config` no longer holds firms) — for the tests that need the
-/// profiles alongside a [`test_firm`].
+/// The zapper `Config` from a combined test config, with its `firms:`
+/// stripped: for the tests that need the profiles beside a [`test_firm`].
 #[cfg(test)]
 pub(crate) fn test_config(yaml: &str) -> Config {
     Config::from_yaml(&split_office_yaml(yaml).0).unwrap()
 }
 
 /// The office's check of its firms: each adds up with the profiles it names
-/// (read from the daemon's `config`), and the driver is on. The standalone
-/// office validates on load and reload; the co-host test office validates
-/// what `test_core` splits out of its YAML.
+/// (`zapper.yaml`'s). The office validates on load
+/// and reload; the tests validate what `test_core` splits out of their YAML.
 pub fn validate_firms(firms: &BTreeMap<String, Firm>, config: &Config) -> Result<()> {
     let mut errors = Vec::new();
     for (name, f) in firms {
         errors.extend(f.validate(name, config));
-    }
-    if !config.daemon.driver && !firms.is_empty() {
-        errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
     }
     if errors.is_empty() {
         Ok(())
@@ -1310,7 +1290,6 @@ profiles:
   w: { agent: { kind: claude-code } }
   p: { agent: { kind: pi, model: qwen } }
   plain: { agent: { kind: generic } }
-  asks: { policy: { exec: [{ action: ask, path: ssh }] } }
 firms:
   acme:
     roles:
@@ -1323,9 +1302,8 @@ firms:
     security: { officers: [] }
 ";
 
-    /// Parses a combined test config, validates its firms against the daemon
-    /// profiles, and returns the `acme` firm — firms are the office's own
-    /// config (`office.yaml`) now, split out of the daemon's `Config`.
+    /// Parses a combined test config, validates its firms against its
+    /// profiles, and returns the `acme` firm.
     fn firm(yaml: &str) -> Result<Firm> {
         let (daemon, office) = split_office_yaml(yaml);
         let c = Config::from_yaml(&daemon)?;
@@ -1571,15 +1549,6 @@ firms:
             .unwrap_err()
             .to_string()
             .contains("unknown role intern"));
-    }
-
-    #[test]
-    fn exec_ask_is_refused_in_firm_profiles() {
-        let c = BASE.replace("eng: { profile: w", "eng: { profile: asks");
-        assert!(firm(&c)
-            .unwrap_err()
-            .to_string()
-            .contains("exec rules that ask"));
     }
 
     #[test]

@@ -1,4 +1,8 @@
 #!/bin/sh
+# NOTE: this suite drove firms through the zapper daemon (`zapper exec`, its
+# sessions and journal), which is gone. It is kept as the checklist for its
+# port onto OpenShell (docs/openshell-migration.md, phase 5) and does not run
+# as it stands.
 # End-to-end tests of the office: a small firm of real VMs whose workers run
 # a fake Claude Code and pi (the office-fake image's `claude` and `pi`), which
 # play the script their profile names, so runs are deterministic and cost no
@@ -420,7 +424,6 @@ expect "grants beyond a resource's levels are refused before clearing" "$("$Z" e
 cwait_for "credentials p-1 ken asks drive:engineering read" 120 && pass "a hire asks for access, with a reason" || fail "a hire asks for access, with a reason" "$(cjournal | grep "credentials\|ken" | tail -5)"
 cwait_for "credentials p-1 granted drive:engineering by sec-1" 90 && pass "the security officer decides it" || fail "the security officer decides it" "$(cjournal | grep credentials | tail -5)"
 ckenl=$("$Z" --json firm status corp | python3 -c 'import sys,json; print([w["session"] for w in json.load(sys.stdin)["run"]["workers"] if w["name"]=="ken"][0])')
-expect "the firm's own services aren't network requests" "$("$Z" exec "$ckenl" -- cat /work/internal.txt 2>&1)" "credentials_request"
 cr=$("$Z" firm credentials corp)
 expect "the grant expires" "$(echo "$cr" | grep "ken ")" "drive:engineering"
 expect "the policy owners hold every space" "$(echo "$cr" | grep "sec-1 ")" "while they hold the role"

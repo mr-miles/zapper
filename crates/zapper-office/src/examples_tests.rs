@@ -8,7 +8,7 @@ use zapper_policy::Config;
 
 use crate::firm::Firm;
 
-/// An example's directory: the daemon config (`zapper.yaml`) this build loads,
+/// An example's directory: the zapper config (`zapper.yaml`) this build loads,
 /// and the office's firms (`office.yaml`) which validate against its profiles,
 /// all on the one image the firms need (`zapper check` asks for every profile's
 /// image), each firm's skills there, and a task with a subject.
@@ -17,8 +17,8 @@ fn example(name: &str) -> (Config, BTreeMap<String, Firm>) {
         .join("../../examples")
         .join(name);
     // The examples' `skills_dir`/`agents_dir` are relative (`../../config/…`);
-    // resolve them against the example's directory, as the daemon resolves
-    // config paths against the config file's directory. Every example sits at
+    // resolve them against the example's directory, as config paths resolve
+    // against the config file's directory. Every example sits at
     // the same depth, so `set_config_dir` (set-once) is right for all of them.
     zapper_policy::set_config_dir(&dir);
     let c = Config::from_yaml(&std::fs::read_to_string(dir.join("zapper.yaml")).unwrap()).unwrap();

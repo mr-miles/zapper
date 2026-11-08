@@ -9,7 +9,7 @@ The [shopping list](../shopping-list/README.md) company, working in a repository
 
 ## Before you start
 
-You need a zapper set up as in the [README](../../README.md): `make deps`, `make install`, and the Claude Code image, `make image IMAGE=office`. You also need your Claude token in `~/.config/zapper/claude-token`; [config/zapper.yaml](../../config/zapper.yaml) says how.
+You need The Office set up as in the [quickstart](../../docs/quickstart.md): an OpenShell gateway with the `anthropic` and `office-edge` providers, and the workers' image (`make image`).
 
 Then, on GitHub, in an account of yours (an organisation, or your own login):
 
@@ -35,7 +35,7 @@ Then, on GitHub, in an account of yours (an organisation, or your own login):
 Then the App, from the repository's root on the zapper host:
 
 ```
-zapper github setup --org <account>        # or --user <your login>
+zapper-office github setup --org <account>        # or --user <your login>
 ```
 
 It opens GitHub to create the App (or finds the one there is) and to install it: install it on the `shopping-list` and `kb` repositories only, since the firm's repositories are every one the App is installed on. It writes the App's credentials to `~/.config/zapper/github-apps/<account>.yaml`. Put that file's name in [zapper.yaml](zapper.yaml), in place of `acme.yaml`:
@@ -48,7 +48,7 @@ It opens GitHub to create the App (or finds the one there is) and to install it:
 Check it:
 
 ```
-zapper github status --org <account>       # its installation, permissions and repositories
+zapper-office github status --org <account>       # its installation, permissions and repositories
 zapper --config examples/github-firm/zapper.yaml check
 ```
 

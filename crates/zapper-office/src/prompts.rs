@@ -600,6 +600,35 @@ pub fn timeout_note(limit: &str, subjects: &[String]) -> String {
 }
 
 /// The officer's prompt for pending access requests.
+/// What an officer reads of a rule a worker's network drafted (OpenShell):
+/// where it came from, the programs it lets through, the rule the gateway
+/// would apply, and what the gateway's checks found.
+pub fn draft_text(d: &crate::client::DraftRule) -> String {
+    draft_lines(&serde_json::to_value(d).unwrap_or_default())
+}
+
+fn draft_lines(d: &Value) -> String {
+    let mut s = String::new();
+    let from = if d["proposed"].as_bool() == Some(true) {
+        "proposed by the worker (policy.local); their reason is the one above"
+    } else {
+        "drafted by the sandbox from a connection it refused"
+    };
+    let _ = writeln!(s, "The rule: {from}.");
+    let programs: Vec<&str> = d["binaries"]
+        .as_array()
+        .map(|b| b.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !programs.is_empty() {
+        let _ = writeln!(s, "Programs it lets through: {}", programs.join(", "));
+    }
+    let _ = writeln!(s, "As the gateway would apply it: {}", d["rule"]);
+    if let Some(f) = d["findings"].as_str().filter(|f| !f.trim().is_empty()) {
+        let _ = writeln!(s, "The gateway's checks found:\n{}", quote(f));
+    }
+    s
+}
+
 pub fn access_requests(reqs: &[Value]) -> String {
     let mut s = String::new();
     for r in reqs {
@@ -636,6 +665,9 @@ pub fn access_requests(reqs: &[Value]) -> String {
         }
         if let Some(t) = r["recent"].as_str() {
             let _ = writeln!(s, "Their recent traffic: {t}");
+        }
+        if r["draft"].is_object() {
+            s.push_str(&draft_lines(&r["draft"]));
         }
         s.push('\n');
     }

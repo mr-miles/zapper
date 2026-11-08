@@ -108,7 +108,7 @@ pub fn check_permissions(p: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
-/// A token and when it stops working (RFC 3339), as `zapper mint` prints it.
+/// A token and when it stops working (RFC 3339), as `zapper-office mint` prints it.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Token {
     pub value: String,

@@ -1,33 +1,16 @@
-//! zapper-agent: PID 1 of a zapper microVM.
+//! zapper-agent: the guest side of The Office, installed in its sandboxes'
+//! images as `office` (`zapper-office image`): the workers' command line to
+//! the office's tools, the MCP server Claude Code or pi runs, and Claude
+//! Code's Stop hook, all reaching the office edge over HTTP.
 //!
-//! It mounts the basics, fetches the session spec from the host over vsock,
-//! prepares the guest, then serves terminals whose every exec is checked by
-//! the host and whose process exits are reported to it.
-//!
-//! Nothing here is trusted by the host: the agent holds no secrets, and the
-//! host enforces network, secret and disk policy on its own side.
+//! It holds no credential: the sandbox's supervisor adds the worker's token
+//! on the way out, and the office checks every call.
 
-mod acct;
-mod control;
-mod forward;
-mod holder;
-mod init;
 mod office;
-mod shell;
-mod sys;
-mod usage;
 
 fn main() {
-    if std::process::id() == 1 {
-        // A panic in PID 1 would panic the kernel; power off instead.
-        std::panic::set_hook(Box::new(|info| {
-            eprintln!("zapper-agent: {info}");
-            sys::power_off();
-        }));
-        init::run();
-    }
     let args: Vec<String> = std::env::args().collect();
-    // Installed in guests as `office` too.
+    // Installed as `office`, or run as `zapper-agent office ...`.
     if args
         .first()
         .is_some_and(|a| a.rsplit('/').next() == Some("office"))
@@ -36,11 +19,9 @@ fn main() {
     }
     match args.get(1).map(String::as_str) {
         Some("--version") => println!("zapper-agent {}", env!("CARGO_PKG_VERSION")),
-        // A persistent terminal's holder, started by PID 1 (`holder`).
-        Some("hold") => std::process::exit(holder::run()),
         Some("office") => std::process::exit(office::cli(&args[2..])),
         _ => {
-            eprintln!("zapper-agent runs as PID 1 of a zapper microVM");
+            eprintln!("usage: office ... (zapper-agent office ...); office --help");
             std::process::exit(2);
         }
     }

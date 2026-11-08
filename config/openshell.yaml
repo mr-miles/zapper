@@ -1,24 +1,60 @@
-# The office on OpenShell (docs/openshell-migration.md): `zapper-office serve
-# --openshell config/openshell.yaml`, from a zapper-office built with
-# `--features openshell`. Profiles still come from zapper.yaml; this says
-# which gateway makes their sandboxes.
+# The OpenShell gateway the office runs its firms on (docs/openshell-migration.md):
+# `zapper-office serve` reads it beside zapper.yaml (or --openshell PATH).
+# Profiles come from zapper.yaml; this says which gateway makes their sandboxes.
 
 # The gateway's URL (`openshell gateway info` prints it).
 gateway: https://127.0.0.1:8080
+# The gateway workspace the sandboxes and templates are in (`openshell
+# workspace list`); by default `default`.
+# workspace: default
 # Its CA, and the office's client certificate for mutual TLS, as PEM files.
 # ca_cert: ~/.config/openshell/gateways/local/mtls/ca.crt
 # client_cert: ~/.config/openshell/gateways/local/mtls/tls.crt
 # client_key: ~/.config/openshell/gateways/local/mtls/tls.key
 
+# Where sandboxes' files are staged for the driver to copy in before their
+# workload starts (openshell-firecracker's driver_config `files`): the same
+# directory as the driver's OPENSHELL_VM_FILES_ROOT, writable by the office.
+# The gateway and the driver must allow driver_config (allow_driver_config =
+# true in gateway.toml's [openshell.drivers.firecracker], and
+# OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON={"allow_driver_config":true}). A
+# profile's engine.disk is its sandboxes' writable disk (overlay_disk_mib, up
+# to the driver's OPENSHELL_VM_MAX_OVERLAY_DISK_MIB).
+files_root: ~/.local/share/openshell/sandbox-files
+# The compute driver's name at the gateway, which driver_config is keyed by.
+# driver: firecracker
+
 # Providers attached to every sandbox: `anthropic` carries the Claude token,
-# injected outside the VM (`openshell provider create --type anthropic ...`).
-providers: [anthropic]
+# injected outside the VM (`openshell provider create --type anthropic ...`);
+# `office-edge` is the workers' identity at the office edge
+# (config/openshell-office-edge.yaml says how to create it).
+providers: [anthropic, office-edge]
+
+# The office edge, where the workers reach the office's tools (MCP over
+# Streamable HTTP, at /mcp) and git (/git/<repo>.git). The defaults suit the
+# Firecracker driver on this host with supervisor identity on; they must
+# match the office-edge provider profile.
+# edge:
+#   listen: 127.0.0.1:8970                       # loopback: the token endpoint must be, for plain HTTP
+#   url: http://host.openshell.internal:8970     # the edge as the workers reach it
+#   token_url: http://127.0.0.1:8970/oauth/token # the profile's token_endpoint: the SVIDs' audience
+#   jwks: http://127.0.0.1:8961/.well-known/jwks.json  # the driver's (OPENSHELL_VM_SUPERVISOR_IDENTITY_JWKS_BIND)
+#   issuer: http://127.0.0.1:8961
+#   trust_domain: openshell.local                # OPENSHELL_VM_SUPERVISOR_IDENTITY_TRUST_DOMAIN
 
 # The OCI image for each zapper image the profiles name. By default
-# localhost/zapper-openshell-<image>, which scripts/openshell-image.sh builds.
+# localhost/zapper-openshell-<image>, which `zapper-office image <image>` builds.
 # images:
 #   office: localhost/zapper-openshell-office
 
 # The most sandboxes at once (default: daemon.max_sessions of zapper.yaml).
 # max_sessions: 16
 # ready_timeout_secs: 300
+
+# The programs the office's network rules let through. zapper's rules name
+# none, so by default any: /**. List the image's programs to narrow them,
+# e.g. [/usr/local/bin/node, /usr/bin/curl, /usr/lib/git-core/git-remote-http].
+# The gateway must leave proposal_approval_mode and
+# agent_policy_proposals_enabled unset: the office turns the policy advisor on
+# per sandbox, and its security officers decide every proposal.
+# rule_binaries: ["/**"]

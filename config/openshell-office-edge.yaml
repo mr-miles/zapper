@@ -1,0 +1,48 @@
+# The `office-edge` provider profile (docs/openshell-migration.md, phase 2):
+# how a firm worker's sandbox reaches the office edge, as that worker.
+#
+#   openshell profile import -f config/openshell-office-edge.yaml
+#   openshell provider create --name office-edge --type office-edge --runtime-credentials
+#
+# then list `office-edge` under `providers:` in openshell.yaml. Needs the
+# Firecracker driver's supervisor identity on (OPENSHELL_VM_SUPERVISOR_IDENTITY=true):
+# each supervisor posts its sandbox's JWT-SVID to the edge's token endpoint
+# and adds the token it gets to the worker's requests to the edge, outside
+# the VM. The guest never holds it.
+#
+# The addresses match openshell.yaml's `edge:` defaults: the edge listens on
+# host loopback, which the supervisors reach as host.openshell.internal.
+id: office-edge
+display_name: Office edge
+description: The office's tools (MCP), git server and cluster, for the firm's workers
+category: other
+credentials:
+  - name: access_token
+    required: false
+    auth_style: bearer
+    header_name: Authorization
+    token_grant:
+      # Plain HTTP only on loopback, which the supervisor dials directly.
+      token_endpoint: http://127.0.0.1:8970/oauth/token
+      # The SVID's audience: the edge checks it is its token endpoint
+      # (openshell.yaml `edge.token_url`).
+      jwt_svid_audience: http://127.0.0.1:8970/oauth/token
+      scopes: [office]
+endpoints:
+  - host: host.openshell.internal
+    port: 8970
+    protocol: rest
+    access: full
+    enforcement: enforce
+# The programs that talk to the office: Claude Code (MCP over HTTP), pi
+# (through `office mcp`, as node runs it), the `office` command and stop
+# hook, git's HTTP transport, and, for the cluster (`/cluster` and
+# `/apps`), kubectl, curl and the headless browser.
+binaries:
+  - /usr/local/bin/claude
+  - /usr/local/bin/node
+  - /usr/local/bin/zapper-agent
+  - /usr/lib/git-core/git-remote-http
+  - /usr/local/bin/kubectl
+  - /usr/bin/curl
+  - /opt/ms-playwright/**

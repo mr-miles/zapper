@@ -1,25 +1,33 @@
-//! Applying the repository to zapper: a commit checked out, rendered as
-//! zapper's whole config (`render`), checked by zapper without being
-//! applied (`PUT /v1/config?dry_run=true`, which says what would change),
-//! then put in place and saved; and the images whose recipe or files
-//! changed since they were last built, built again, one at a time.
+//! Applying the repository to the gateway: a commit of `main` checked out
+//! and rendered as zapper's profiles and image recipes (`render`); each
+//! image whose recipe or files changed built again (`zapper-openshell`'s
+//! image builder); and each profile made a sandbox template, `wb-<profile>`:
+//! its image, CPU and memory, its environment (the profile's and its
+//! harness's, and `ZAPPER_WORKBENCH_PROFILE`), its disk size and files
+//! (the harness's files, the skills and directories it mounted: staged under
+//! the driver's files root for the driver to copy into each sandbox made
+//! from it, before its workload starts), and labels naming the profile and
+//! the commit it came from (`zapper-profile`, `zapper-commit`). Its setup
+//! commands run in the sandboxes `zapper-workbench new` makes
+//! (`provision`).
 //!
-//! Only `main` is applied, and only when asked: changes come on branches,
-//! which can be checked first. The live commit is kept beside the
-//! repository (`state.json`), with each image's hash as last built.
+//! Only what is asked for is applied (`zapper-workbench apply`, `main` by
+//! default); `check` renders a branch without building or applying. The
+//! live commit is kept beside the repository (`state.json`), with each
+//! image's hash as last built.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
-use axum::http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use zapper_openshell::{Labels, OpenShell, Setup, Template};
+use zapper_policy::{Config, ResolvedProfile};
 
-use crate::gateway::{Ctx, Live};
 use crate::render;
+use crate::repo::git;
 
 /// A commit applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,109 +38,128 @@ pub struct Applied {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct State {
     live: Option<Applied>,
-    /// Each image's hash when it was last built (or found built).
+    /// Each image's hash when it was last built.
     images: BTreeMap<String, String>,
 }
 
-/// How long a commit's id is, as sessions are labelled with it.
+/// How long a commit's id is in the labels.
 const SHORT: usize = 12;
+/// The prefix of the templates the workbench makes.
+pub const TEMPLATE_PREFIX: &str = "wb-";
+/// Where the workbench stages its templates' files, under the driver's files
+/// root.
+const STAGED: &str = "workbench";
+
+/// The template a profile becomes.
+pub fn template_name(profile: &str) -> String {
+    format!("{TEMPLATE_PREFIX}{profile}")
+}
+
+/// The labels of profile `profile`'s template, made from `commit`, and of
+/// the sandboxes the workbench makes from it: so the gateway's operator sees
+/// which definition a sandbox came from.
+pub fn labels(profile: &str, commit: &str) -> Labels {
+    Labels::from([
+        ("zapper-workbench".to_string(), "1".to_string()),
+        (
+            "zapper-profile".to_string(),
+            zapper_openshell::label_value(profile),
+        ),
+        (
+            "zapper-commit".to_string(),
+            commit[..SHORT.min(commit.len())].to_string(),
+        ),
+    ])
+}
+
+/// The OCI image the workbench builds recipe `name` as, unless
+/// `openshell.yaml`'s `images:` names one (then that, built by whoever set it):
+/// its own tag, apart from the office's.
+pub fn image_of(os: &OpenShell, name: &str) -> (String, bool) {
+    match os.image_override(name) {
+        Some(i) => (i, false),
+        None => (format!("localhost/zapper-workbench-{name}"), true),
+    }
+}
+
+/// The account the profiles on image `name` run as (its uid 1000).
+fn image_user(config: &Config, name: &str) -> String {
+    config
+        .profiles
+        .keys()
+        .filter_map(|p| config.resolve(p).ok())
+        .find(|p| p.engine.image == name)
+        .map(|p| p.agent.user.clone())
+        .unwrap_or_else(|| "agent".into())
+}
+
+/// What an image is built from: its recipe and files (`hash`) and its user.
+fn image_key(config: &Config, name: &str, hash: &str) -> String {
+    format!("{hash} {}", image_user(config, name))
+}
+
+/// The recipe arguments the workbench can't give (it gives none): those
+/// without a default.
+fn check_args(config: &Config, name: &str) -> Result<()> {
+    let Some(r) = config.images.get(name) else {
+        bail!("no recipe for image {name}");
+    };
+    let missing: Vec<&String> = r
+        .args
+        .iter()
+        .filter(|(_, a)| a.default.is_none())
+        .map(|(k, _)| k)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "image {name}: give its arguments defaults in the repository ({}): the workbench builds it with none",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Profile `p`'s setup, as its sandboxes get it: `ZAPPER_WORKBENCH_PROFILE`
+/// in its environment, so what runs in one knows which it is.
+pub fn setup(p: &ResolvedProfile) -> Result<Setup> {
+    let extra = BTreeMap::from([("ZAPPER_WORKBENCH_PROFILE".to_string(), p.name.clone())]);
+    Setup::of(p, extra)
+}
 
 pub struct Applier {
     repo: PathBuf,
-    live_dir: PathBuf,
-    secrets: PathBuf,
-    daemon: Option<Value>,
-    state_path: PathBuf,
-    state: Mutex<State>,
-    builds: Mutex<BTreeMap<String, Value>>,
-    applying: tokio::sync::Mutex<()>,
-    live: Live,
-}
-
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| anyhow!("git: {e} (is git installed?)"))?;
-    if !out.status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// A ref a user may name: a branch or a commit, nothing git would take as
-/// an option or a range.
-fn checked_ref(r: &str) -> Result<&str> {
-    let ok = !r.is_empty()
-        && r.len() <= 200
-        && !r.starts_with('-')
-        && !r.contains("..")
-        && r.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b));
-    if !ok {
-        bail!("{r:?} isn't a branch or a commit");
-    }
-    Ok(r)
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
+    data: PathBuf,
+    /// The live commit's config, once rendered.
+    live: Mutex<Option<(String, Config)>>,
 }
 
 impl Applier {
-    /// Applies `repo` (bare) with checkouts under `live`, the secrets
-    /// facility's files under `secrets`, zapper's daemon section `daemon`
-    /// (else the running one); its state in `state`, and the live commit
-    /// told to `live`.
-    pub fn new(
-        repo: PathBuf,
-        live_dir: PathBuf,
-        secrets: PathBuf,
-        daemon: Option<Value>,
-        state_path: PathBuf,
-        live: Live,
-    ) -> Result<Applier> {
-        let state: State = match std::fs::read(&state_path) {
-            Ok(b) => serde_json::from_slice(&b).context("state.json")?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(e) => return Err(e.into()),
-        };
-        live.set(
-            state
-                .live
-                .as_ref()
-                .map(|a| a.commit[..SHORT.min(a.commit.len())].to_string()),
-        );
-        Ok(Applier {
+    /// Applies the bare repository `repo`, with checkouts and state under
+    /// `data`.
+    pub fn new(repo: PathBuf, data: PathBuf) -> Applier {
+        Applier {
             repo,
-            live_dir,
-            secrets,
-            daemon,
-            state_path,
-            state: Mutex::new(state),
-            builds: Mutex::new(BTreeMap::new()),
-            applying: tokio::sync::Mutex::new(()),
-            live,
-        })
+            data,
+            live: Mutex::default(),
+        }
+    }
+    fn state_path(&self) -> PathBuf {
+        self.data.join("state.json")
     }
 
-    fn save_state(&self) -> Result<()> {
-        let s = serde_json::to_vec_pretty(&*self.state.lock().unwrap())?;
-        let tmp = self.state_path.with_extension("tmp");
-        std::fs::write(&tmp, s)?;
-        std::fs::rename(tmp, &self.state_path)?;
-        Ok(())
+    fn state(&self) -> Result<State> {
+        match std::fs::read(self.state_path()) {
+            Ok(b) => serde_json::from_slice(&b).context("state.json"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn save(&self, s: &State) -> Result<()> {
+        zapper_util::write_private(&self.state_path(), &serde_json::to_vec_pretty(s)?)
     }
 
     /// The commit `r` names, and its subject.
@@ -171,7 +198,7 @@ impl Applier {
         let ok = std::process::Command::new("tar")
             .args(["-x", "-C"])
             .arg(&partial)
-            .stdin(archive.stdout.unwrap())
+            .stdin(archive.stdout.context("git archive's output")?)
             .status()
             .context("tar")?;
         if !ok.success() {
@@ -181,245 +208,155 @@ impl Applier {
         Ok(repo)
     }
 
-    /// Renders `commit` checked out in `dir`, as zapper's whole config: its
-    /// daemon section the workbench's, else the running one as it is; and
-    /// the office's `firms`, which aren't the repository's, kept as they run.
-    async fn render(&self, ctx: &Ctx, commit: &str, dir: &Path) -> Result<render::Rendered> {
+    /// `commit` rendered under `dir`, as a zapper config.
+    fn render(&self, commit: &str, dir: &Path) -> Result<(Config, BTreeMap<String, String>)> {
         let repo = self.checkout(commit, dir)?;
-        let running = ctx
-            .zapper
-            .call(Method::GET, "/v1/config?format=json", None)
-            .await?
-            .ok()
-            .map_err(|(_, why)| anyhow!("zapper's config: {why}"))?;
-        let daemon = self
-            .daemon
-            .clone()
-            .unwrap_or_else(|| running["daemon"].clone());
-        let mut rendered = render::render(&repo, dir, &self.secrets, daemon)?;
-        if let Some(firms) = running
-            .get("firms")
-            .filter(|f| f.as_object().is_some_and(|m| !m.is_empty()))
-        {
-            rendered.config["firms"] = firms.clone();
-        }
-        Ok(rendered)
+        let r = render::render(&repo, dir)?;
+        let text = serde_yaml::to_string(&r.config)?;
+        let config = Config::from_yaml(&text).context("the rendered config")?;
+        Ok((config, r.images))
     }
 
-    /// What applying `r` (a branch or a commit) would change, checked by
-    /// zapper as a replacement and not applied: its diff, or why it can't be.
-    pub async fn check(&self, ctx: &Ctx, r: &str) -> Result<Value> {
+    /// What applying `r` would do: the images it would build and the
+    /// templates it would make, or why it can't be applied.
+    pub fn check(&self, r: &str) -> Result<Value> {
         let (commit, subject) = self.resolve(r)?;
-        let dir = self.live_dir.join(format!(".check-{commit}"));
-        let rendered = self.render(ctx, &commit, &dir).await;
+        let dir = self.data.join(format!(".check-{commit}"));
+        let rendered = self.render(&commit, &dir);
         let _ = std::fs::remove_dir_all(&dir);
-        let rendered = rendered?;
-        let diff = dry_run(ctx, &rendered.config).await?;
+        let (config, images) = rendered?;
+        let state = self.state()?;
+        let changed: Vec<&String> = images
+            .iter()
+            .filter(|(n, h)| state.images.get(*n) != Some(&image_key(&config, n, h)))
+            .map(|(n, _)| n)
+            .collect();
+        for n in &changed {
+            check_args(&config, n)?;
+        }
+        let profiles: Vec<String> = config.profiles.keys().map(|p| template_name(p)).collect();
+        let ignored = zapper_openshell::rules::ignored(&config);
         Ok(
-            json!({ "commit": commit, "subject": subject, "diff": diff, "images": self.changed(ctx, &rendered).await? }),
+            json!({ "commit": commit, "subject": subject, "images": changed, "templates": profiles, "ignored": ignored }),
         )
     }
 
-    /// Applies `main`: rendered, checked, put in place and saved; then the
-    /// images it changed built again, in the background.
-    pub async fn apply(self: &Arc<Self>, ctx: &Ctx) -> Result<Value> {
-        let _one = self.applying.lock().await;
-        let (commit, subject) = self.resolve("main")?;
-        let dir = self.live_dir.join(&commit);
-        let rendered = self.render(ctx, &commit, &dir).await?;
-        let diff = dry_run(ctx, &rendered.config).await?;
-        let put = ctx
-            .zapper
-            .call(Method::PUT, "/v1/config", Some(&rendered.config))
-            .await?;
-        put.ok()
-            .map_err(|(_, why)| anyhow!("zapper refused the config: {why}"))?;
-        ctx.zapper
-            .call(Method::POST, "/v1/config/save", None)
-            .await?
-            .ok()
-            .map_err(|(_, why)| anyhow!("applied, but not saved: {why}"))?;
-        let changed = self.changed(ctx, &rendered).await?;
-        {
-            let mut st = self.state.lock().unwrap();
-            st.live = Some(Applied {
-                commit: commit.clone(),
-                subject: subject.clone(),
-                applied_at: now(),
-            });
+    /// Applies `r` (`main` unless said): images built where they changed,
+    /// every profile's template made again.
+    pub async fn apply(&self, os: &OpenShell, r: &str, log: &dyn Fn(&str)) -> Result<Value> {
+        let (commit, subject) = self.resolve(r)?;
+        let dir = self.data.join("live").join(&commit);
+        let (config, images) = self.render(&commit, &dir)?;
+        let mut state = self.state()?;
+        for w in zapper_openshell::rules::ignored(&config) {
+            log(&format!("ignored: {w}"));
         }
-        self.save_state()?;
-        self.live.set(Some(commit[..SHORT].to_string()));
-        self.prune(&commit);
-        if !changed.is_empty() {
-            let (me, ctx, hashes) = (self.clone(), ctx.clone(), rendered.images.clone());
-            let names = changed.clone();
-            tokio::spawn(async move { me.build(&ctx, names, hashes).await });
-        }
-        Ok(json!({ "commit": commit, "subject": subject, "diff": diff, "building": changed }))
-    }
-
-    /// The images to build again: those whose hash isn't the one last
-    /// built. One never recorded is built only if zapper doesn't have it.
-    async fn changed(&self, ctx: &Ctx, rendered: &render::Rendered) -> Result<Vec<String>> {
-        let have = ctx.zapper.call(Method::GET, "/v1/images", None).await?.body;
-        let built: Vec<String> = have["images"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|i| i["name"].as_str().map(str::to_string))
-            .collect();
-        let mut st = self.state.lock().unwrap();
-        let mut out = vec![];
-        for (name, hash) in &rendered.images {
-            match st.images.get(name) {
-                Some(h) if h == hash => {}
-                Some(_) => out.push(name.clone()),
-                None if built.contains(name) => {
-                    st.images.insert(name.clone(), hash.clone());
-                }
-                None => out.push(name.clone()),
-            }
-        }
-        Ok(out)
-    }
-
-    /// Builds `names` one at a time through zapper, each recorded as built
-    /// at its hash once it is.
-    async fn build(&self, ctx: &Ctx, names: Vec<String>, hashes: BTreeMap<String, String>) {
-        for n in &names {
-            self.builds
-                .lock()
-                .unwrap()
-                .insert(n.clone(), json!({ "state": "queued" }));
-        }
-        for name in names {
-            let say = |v: Value| {
-                self.builds.lock().unwrap().insert(name.clone(), v);
-            };
-            // One build at a time in zapper: wait for another to end.
-            let id = loop {
-                match ctx
-                    .zapper
-                    .call(
-                        Method::POST,
-                        &format!("/v1/images/{name}/build"),
-                        Some(&json!({})),
-                    )
-                    .await
-                {
-                    Ok(a) if a.status.as_u16() == 409 => {
-                        tokio::time::sleep(Duration::from_secs(3)).await
-                    }
-                    Ok(a) if a.status.is_success() => break a.body["id"].clone(),
-                    Ok(a) => {
-                        say(json!({ "state": "failed", "detail": a.body["error"] }));
-                        break Value::Null;
-                    }
-                    Err(e) => {
-                        say(json!({ "state": "failed", "detail": format!("{e:#}") }));
-                        break Value::Null;
-                    }
-                }
-            };
-            if id.is_null() {
+        let mut built = Vec::new();
+        for (name, hash) in &images {
+            let key = image_key(&config, name, hash);
+            let (tag, ours) = image_of(os, name);
+            if !ours || state.images.get(name) == Some(&key) {
                 continue;
             }
-            say(json!({ "state": "building", "build": id }));
-            let outcome = loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let Ok(a) = ctx.zapper.call(Method::GET, "/v1/images", None).await else {
-                    continue;
-                };
-                let b = a.body["builds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|b| b["id"] == id)
-                    .cloned();
-                match b {
-                    Some(b) if !b["outcome"].is_null() => break b["outcome"].clone(),
-                    Some(_) => {}
-                    None => break json!({ "failed": "zapper no longer lists the build" }),
-                }
+            check_args(&config, name)?;
+            let b = zapper_openshell::image::Build {
+                name: name.clone(),
+                args: vec![],
+                user: image_user(&config, name),
+                // Its sandboxes don't reach the office.
+                agent: None,
+                tag: Some(tag),
             };
-            if outcome.get("failed").is_some() {
-                say(json!({ "state": "failed", "build": id, "detail": outcome["failed"] }));
-            } else {
-                say(json!({ "state": "built", "build": id }));
-                if let Some(h) = hashes.get(&name) {
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .images
-                        .insert(name.clone(), h.clone());
-                    let _ = self.save_state();
-                }
-            }
+            zapper_openshell::image::build(&config, &b, log)?;
+            state.images.insert(name.clone(), key);
+            built.push(name.clone());
         }
+        let mut made = Vec::new();
+        for name in config.profiles.keys() {
+            let p = config.resolve(name)?;
+            let s = setup(&p)?;
+            // Its files and directories, staged for the driver to copy into
+            // each sandbox made from it before the workload starts.
+            let driver = os.driver_config(&p, &s, &format!("{STAGED}/{name}"), None)?;
+            let t = Template {
+                name: template_name(name),
+                image: image_of(os, &p.engine.image).0,
+                vcpus: p.engine.vcpus,
+                memory_mib: p.engine.memory_mib,
+                labels: labels(name, &commit),
+                env: s.env,
+                driver_config: Some(driver),
+            };
+            os.put_template(&t).await?;
+            made.push(t.name);
+        }
+        state.live = Some(Applied {
+            commit: commit.clone(),
+            subject: subject.clone(),
+            applied_at: zapper_util::now() as u64,
+        });
+        self.save(&state)?;
+        *self.live.lock().unwrap() = Some((commit.clone(), config));
+        // The checkout before the live one is kept, older ones go.
+        prune(&self.data.join("live"), &commit);
+        Ok(json!({ "commit": commit, "subject": subject, "built": built, "templates": made }))
     }
 
-    /// Keeps the live commit's checkout and the one before it: sessions copy
-    /// what they mount when they boot, so no running one needs another.
-    fn prune(&self, live: &str) {
-        let Ok(entries) = std::fs::read_dir(&self.live_dir) else {
-            return;
-        };
-        let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
-            .flatten()
-            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-            .collect();
-        dirs.sort();
-        let keep = 2;
-        let n = dirs.len();
-        for (_, d) in dirs.into_iter().take(n.saturating_sub(keep)) {
-            if !d.ends_with(live) {
-                let _ = std::fs::remove_dir_all(d);
-            }
+    /// The live commit's profile `name`, resolved; an error if nothing was
+    /// applied or it has no such profile.
+    pub fn live_profile(&self, name: &str) -> Result<(String, ResolvedProfile)> {
+        let commit = self
+            .state()?
+            .live
+            .ok_or_else(|| anyhow!("nothing applied yet (zapper-workbench apply)"))?
+            .commit;
+        let mut live = self.live.lock().unwrap();
+        if live.as_ref().map(|(c, _)| c) != Some(&commit) {
+            let (config, _) = self.render(&commit, &self.data.join("live").join(&commit))?;
+            *live = Some((commit.clone(), config));
         }
+        let (_, config) = live.as_ref().expect("rendered above");
+        let p = config
+            .resolve(name)
+            .with_context(|| format!("profile {name} at {commit}"))?;
+        Ok((commit, p))
     }
 
-    /// What is applied, and the sessions an apply has left behind: made
-    /// from another commit (their `workbench-config` label), not restarted.
-    pub async fn status(&self, ctx: &Ctx) -> Value {
-        let live = self.state.lock().unwrap().live.clone();
-        let main = self.resolve("main").ok();
-        let short = live
-            .as_ref()
-            .map(|a| a.commit[..SHORT.min(a.commit.len())].to_string());
-        let mut behind = vec![];
-        if let (Some(short), Ok(a)) = (
-            &short,
-            ctx.zapper.call(Method::GET, "/v1/sessions", None).await,
-        ) {
-            for s in a.body.as_array().into_iter().flatten() {
-                if let Some(c) = s["labels"][crate::gateway::CONFIG_LABEL].as_str() {
-                    if c != short {
-                        behind.push(json!({ "id": s["id"], "profile": s["profile"], "commit": c }));
-                    }
-                }
-            }
-        }
-        json!({
-            "live": live,
-            "main": main.map(|(c, s)| json!({ "commit": c, "subject": s })),
-            "builds": *self.builds.lock().unwrap(),
-            "out_of_date": behind,
-        })
+    /// The live commit, if any was applied.
+    pub fn status(&self) -> Result<Value> {
+        let s = self.state()?;
+        Ok(json!({ "live": s.live, "images": s.images }))
     }
 }
+/// A ref the user may name: a branch or a commit, nothing git would read
+/// as an option or a range.
+fn checked_ref(r: &str) -> Result<&str> {
+    let ok = !r.is_empty()
+        && !r.starts_with('-')
+        && !r.contains("..")
+        && r.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b));
+    if !ok {
+        bail!("{r:?} isn't a branch or a commit");
+    }
+    Ok(r)
+}
 
-/// zapper's check of `config` as a replacement: what it would change.
-async fn dry_run(ctx: &Ctx, config: &Value) -> Result<String> {
-    let a = ctx
-        .zapper
-        .call(Method::PUT, "/v1/config?dry_run=true", Some(config))
-        .await?;
-    let v = a
-        .ok()
-        .map_err(|(_, why)| anyhow!("zapper refuses it: {why}"))?;
-    Ok(v["diff"].as_str().unwrap_or_default().to_string())
+/// Removes the checkouts under `live` but `keep` and the newest other.
+fn prune(live: &Path, keep: &str) {
+    let Ok(rd) = std::fs::read_dir(live) else {
+        return;
+    };
+    let mut others: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.file_name() != keep)
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    others.sort();
+    others.pop();
+    for (_, p) in others {
+        let _ = std::fs::remove_dir_all(p);
+    }
 }
 
 #[cfg(test)]
@@ -427,12 +364,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_ref_is_a_branch_or_a_commit_not_an_option() {
-        for ok in ["main", "proposal/one", "3f1a2b", "v1.2"] {
+    fn refs_are_branches_or_commits() {
+        for ok in ["main", "feat/x", "a1b2c3"] {
             assert!(checked_ref(ok).is_ok(), "{ok}");
         }
-        for bad in ["", "--upload-pack=x", "main..other", "a b", "x;y"] {
+        for bad in ["", "-x", "a..b", "a b", "a;b"] {
             assert!(checked_ref(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_profiles_template_names_it_and_its_sandboxes_get_the_rest() {
+        let c = Config::from_yaml(
+            "profiles:\n  dev:\n    agent:\n      kind: claude-code\n      instructions: be careful\n      env: { MODE: a, TOKEN: \"{{secret:x}}\" }\n    setup: [\"echo hi\"]\n",
+        )
+        .unwrap();
+        let p = c.resolve("dev").unwrap();
+        let l = labels("dev", "0123456789abcdef0123");
+        assert_eq!(l["zapper-workbench"], "1");
+        assert_eq!(l["zapper-profile"], "dev");
+        assert_eq!(l["zapper-commit"], "0123456789ab");
+        let s = setup(&p).unwrap();
+        assert_eq!(s.env["MODE"], "a");
+        assert_eq!(s.env["ZAPPER_WORKBENCH_PROFILE"], "dev");
+        assert!(!s.env.contains_key("TOKEN"), "secrets are the gateway's");
+        assert_eq!(s.left_out, ["agent.env.TOKEN"]);
+        assert_eq!(s.commands, ["echo hi"]);
+        let home = format!("/home/{}/", p.agent.user);
+        assert!(
+            s.files.iter().any(|f| f.path.starts_with(&home)),
+            "the harness's files under the home"
+        );
+        assert_eq!(template_name("dev"), "wb-dev");
     }
 }

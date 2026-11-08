@@ -233,9 +233,8 @@ function renderFooter() {
     FOOT.prev.set(it.key, sig);
     els.push(e);
   }
-  // zapper's own pages, under the office.
-  const a = el('a', { class: 'right', title: 'zapper, the sandbox the office runs on: every session, its network, terminals and approvals' }, 'zapper sessions ↗');
-  a.href = sessionsHref();
+  // The sandboxes the office runs.
+  const a = el('a', { class: 'right', href: '#', title: 'the sandboxes the office runs on the OpenShell gateway', onclick: (e) => { e.preventDefault(); showTab('vms'); } }, 'sandboxes');
   const sig = (S.firm || '') + '#' + items.map((it) => it.key + ':' + it.parts.map(([v]) => v).join('|') + (it.warn ? '!' : '')).join(',');
   if (foot.dataset.sig === sig) return;
   foot.dataset.sig = sig;

@@ -1,13 +1,15 @@
+use crate::FsRule;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use zapper_proto::FsRule;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The whole daemon configuration. This is what `GET /config` returns and what
-/// `POST /config/save` writes to the startup file.
+/// The zapper config (`zapper.yaml`): the profiles and image recipes the
+/// office runs its workers from, the global policy layer, and the `daemon:`
+/// settings it still reads (`state`, `max_sessions`, `memory_overcommit`,
+/// `keeper`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -22,8 +24,8 @@ pub struct Config {
     pub policy: Policy,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-    /// Image recipes, by the image's name: what `zapper image build NAME`
-    /// builds. (`daemon.images` is where the built images go.)
+    /// Image recipes, by the image's name: what `zapper-office image NAME`
+    /// builds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, ImageRecipe>,
 }
@@ -287,7 +289,7 @@ impl fmt::Display for NetProtocol {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum SecretSource {
-    /// Read from the daemon's environment.
+    /// Read from the office's environment.
     Env { env: String },
     /// Read from a file, optionally a string field of a JSON file selected by a
     /// JSON pointer (e.g. `/claudeAiOauth/accessToken`).
@@ -681,8 +683,8 @@ impl Default for Engine {
     }
 }
 
-/// Agent harnesses zapper knows (`agent.kind`); each is implemented in the
-/// daemon's `harness` module.
+/// Agent harnesses zapper knows (`agent.kind`); each is implemented in
+/// `zapper_driver::harness`.
 pub const AGENT_KINDS: &[&str] = &["claude-code", "pi", "generic"];
 
 /// The harnesses the driver can run headless (`agent.driven`).
@@ -699,8 +701,7 @@ pub struct AgentSpec {
     /// Default command of `zapper run`.
     pub command: Vec<String>,
     /// Run the agent headless, given tasks through the API, `zapper tell`
-    /// or the UI instead of a terminal (`DRIVABLE_KINDS` only; needs
-    /// `daemon.driver`).
+    /// or the UI instead of a terminal (`DRIVABLE_KINDS` only).
     pub driven: bool,
     /// User the command runs as, created with uid 1000 if missing.
     pub user: String,
@@ -713,7 +714,7 @@ pub struct AgentSpec {
     /// Environment; values may use `{{secret:NAME}}`.
     pub env: BTreeMap<String, String>,
     // The agent's configuration, in terms every harness understands; each
-    // writes it in its own place and format (daemon::harness).
+    // writes it in its own place and format (`zapper_driver::harness`).
     /// The model the agent uses.
     pub model: Option<String>,
     /// How the agent approves its own actions (Claude Code:
@@ -1216,19 +1217,6 @@ impl Config {
                     continue;
                 }
             };
-            for port in &p.engine.ports {
-                let reserved = [
-                    crate::proto::CONTROL_PORT,
-                    crate::proto::SHELL_PORT,
-                    crate::proto::PROXY_PORT,
-                    crate::proto::MCP_PORT,
-                ];
-                if *port == 0 || reserved.contains(&(*port as u32)) {
-                    errors.push(format!(
-                        "profile {name}: engine.ports: {port} is not a port the guest can offer"
-                    ));
-                }
-            }
             if !p.agent.driven {
                 continue;
             }
@@ -1238,15 +1226,10 @@ impl Config {
                     DRIVABLE_KINDS.join(", ")
                 ));
             }
-            if !self.daemon.driver {
-                errors.push(format!(
-                    "profile {name}: agent.driven, but the driver is off (daemon.driver: false)"
-                ));
-            }
         }
     }
 
-    /// The daemon's own settings.
+    /// The `daemon:` settings.
     fn check_daemon(&self, errors: &mut Vec<String>) {
         if let Some(r) = self.daemon.memory_overcommit {
             if !(r.is_finite() && r > 0.0) {
@@ -1392,7 +1375,7 @@ mod tests {
 
     #[test]
     fn driven_agents_and_the_driver_switch() {
-        use super::{Config, DaemonConfig};
+        use super::Config;
         let ok = |y: &str| {
             Config::from_yaml(y)
                 .map(|_| ())
@@ -1406,39 +1389,16 @@ mod tests {
         assert!(!c.resolve("a").unwrap().agent.user.is_empty());
         let e = ok("profiles:\n  g: { agent: { kind: generic, driven: true } }\n").unwrap_err();
         assert!(e.contains("needs a kind the driver runs"), "{e}");
-        let off = "daemon: { driver: false }\n";
-        ok(off).unwrap();
-        let e = ok(&format!("{off}{driven}")).unwrap_err();
-        assert!(
-            e.contains("profile a: agent.driven, but the driver is off"),
-            "{e}"
-        );
-        assert!(e.contains("profile b: agent.driven"), "{e}");
-        assert!(DaemonConfig::default().driver, "on unless turned off");
     }
 
     #[test]
-    fn a_profile_offers_guest_ports_for_services() {
+    fn a_profiles_ports_are_inherited() {
         use super::Config;
         let c = Config::from_yaml(
             "profiles:\n  k: { engine: { ports: [6443] } }\n  l: { extends: k }\n",
         )
         .unwrap();
         assert_eq!(c.resolve("l").unwrap().engine.ports, [6443], "inherited");
-        for port in [0, 1000, 1024, 1100, 3128] {
-            let e = Config::from_yaml(&format!(
-                "profiles:\n  k: {{ engine: {{ ports: [{port}] }} }}\n"
-            ))
-            .err()
-            .map(|e| format!("{e:#}"))
-            .unwrap_or_default();
-            assert!(
-                e.contains(&format!(
-                    "engine.ports: {port} is not a port the guest can offer"
-                )),
-                "{port}: {e}"
-            );
-        }
     }
 
     #[test]

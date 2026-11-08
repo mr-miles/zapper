@@ -1,12 +1,11 @@
 //! The board's mail through the office's routes, as the UI and the CLI
 //! use them: sending, its inbox and anyone's, a thread, marking mail read.
 
+use crate::fake::TestCore;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
-use zapper_core::prelude::*;
-use zapper_core::testing::TestCore;
 
 const FIRM: &str = "
 profiles:
@@ -27,10 +26,7 @@ async fn call(t: &TestCore, method: Method, uri: &str, body: Value) -> (StatusCo
         .uri(uri)
         .body(Body::from(body.to_string()))
         .unwrap();
-    let r = crate::routes(crate::OfficeOf::office(&t.core))
-        .oneshot(req)
-        .await
-        .unwrap();
+    let r = crate::routes(t.core.office()).oneshot(req).await.unwrap();
     let status = r.status();
     let bytes = http_body_util::BodyExt::collect(r.into_body())
         .await
@@ -130,76 +126,4 @@ async fn the_board_mails_reads_its_inbox_and_threads_and_marks_them_read() {
     // A firm that isn't running has no mail.
     let (status, _) = call(&t, Method::GET, "/firms/other/mail", Value::Null).await;
     assert_ne!(status, StatusCode::OK);
-}
-
-/// The board promotes a standing approval into the running config: the
-/// rule goes to the profile of the role it covers, under a fresh id, and is
-/// journaled; the startup file is untouched until `config save`; what isn't
-/// a standing approval isn't promoted.
-#[tokio::test]
-async fn the_board_promotes_a_decision_into_the_running_config() {
-    let t = crate::test_core(FIRM);
-    let run = crate::test_run(&t.core, "acme");
-    let req = zapper_policy::NetRequest {
-        host: "docs.example".into(),
-        port: 443,
-        method: None,
-        path: None,
-        ..Default::default()
-    };
-    let id = crate::security::ask(&run, "pat", &req, None, None, "the docs").unwrap();
-    let (status, v) = call(
-        &t,
-        Method::POST,
-        &format!("/firms/acme/security/requests/{id}"),
-        json!({ "allow": true, "scope": "role", "reason": "engineers read docs" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{v}");
-    let standing = crate::security::standing(&run);
-    let rule = standing[0]["id"].as_str().unwrap().to_string();
-    let startup = std::fs::read_to_string(t.core.startup_path()).unwrap();
-
-    let (status, v) = call(
-        &t,
-        Method::POST,
-        &format!("/firms/acme/security/rules/{rule}/promote"),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{v}");
-    assert_eq!(v["scope"], "profile:w", "{v}");
-    let added = v["rule"]["id"].as_str().unwrap().to_string();
-    let config = t.core.config();
-    let w = &config.profiles["w"].policy.net;
-    let r = w
-        .iter()
-        .find(|r| r.id.as_deref() == Some(added.as_str()))
-        .expect("in the running config");
-    assert_eq!(
-        (r.host.as_str(), r.action),
-        ("docs.example", zapper_policy::Action::Allow)
-    );
-    assert_eq!(
-        std::fs::read_to_string(t.core.startup_path()).unwrap(),
-        startup,
-        "not saved"
-    );
-    let promoted = std::fs::read_to_string(run.dir.join("journal.jsonl"))
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str::<Value>(l).unwrap())
-        .any(|e| {
-            e["type"] == "access" && e["event"] == "promoted" && e["config_rule"] == added.as_str()
-        });
-    assert!(promoted);
-
-    let (status, _) = call(
-        &t,
-        Method::POST,
-        "/firms/acme/security/rules/a-net-99/promote",
-        Value::Null,
-    )
-    .await;
-    assert!(status.is_client_error(), "{status}");
 }

@@ -2,160 +2,81 @@
 
 # Quickstart
 
-From a fresh clone to a running firm: the example firm `acme`, a CEO who hires the team, and a cluster to deploy to.
+From a fresh clone and an OpenShell gateway to a running firm: the example firm `acme`, a CEO who hires the team.
 
 ## 1. What you need
 
-- Linux on x86_64, with KVM (`ls /dev/kvm`)
+- Linux on x86_64 with KVM, and an [OpenShell](https://github.com/NVIDIA/OpenShell) gateway (v0.1.7) with the [openshell-firecracker](https://github.com/NVIDIA/openshell-firecracker) driver installed and running (its README's install, configure, check and start steps). `openshell gateway info` should show the `firecracker` driver.
 - Rust, with the static target: `rustup target add x86_64-unknown-linux-musl`
-- `podman` and `e2fsprogs`, to build images
-- `iproute2` and `nftables`
-- unprivileged user namespaces (on by default on most distributions)
+- `podman`, to build the workers' image
 - a Claude subscription, for the workers
-- about 40 GiB of free RAM for the example firm ([office: resources](office.md#resources))
+- room for the example firm: each worker is a microVM with its profile's memory ([office: resources](office.md#resources))
 
-`zapper check` in step 5 tells you if something is missing, with the command that fixes it.
-
-## 2. Build and install
+## 2. Build
 
 ```
 git clone <this repository> && cd zapper
-make deps         # downloads Firecracker and a guest kernel
-make install      # builds zapper, zapper-agent and zapper-inspect into ~/.local/bin
+make build
 ```
 
-zapper is the daemon and CLI the office runs on. Run it from the repository's root: it uses `config/zapper.yaml` there, and paths in it are relative to that file or under your home. Outside a checkout, `zapper init` copies it to `~/.config/zapper/zapper.yaml`, with the workers' skills in `~/.config/zapper/skills`. The config defines the firm `acme` and the profiles its workers run with; a profile is a recipe for a VM: which image, which command, which rules.
+That builds `zapper-office` (the office: its dashboard, the firm CLI, image builds), `zapper-inspect` (past runs) and `zapper-agent`, the static `office` command the workers' image carries. Run the office from the repository's root: it reads `config/` there (`zapper.yaml`: the profiles and image recipes; `office.yaml`: the firms; `openshell.yaml`: the gateway). Outside a checkout, `zapper-office init` writes all three to `~/.config/zapper`, with the workers' agents and skills beside them.
 
-## 3. Images and the cluster's kernel
-
-```
-make image                    # the base Ubuntu image
-make image IMAGE=office       # the workers: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
-make image IMAGE=k3s          # the firm's cluster
-make kernel KERNEL=k8s        # the cluster's kernel, built in a container
-```
-
-## 4. The Claude token
-
-Workers use your Claude subscription through a long-lived OAuth token. Create it on any machine with Claude Code and a browser (your laptop will do: the token belongs to your account, not the machine), then store it on the zapper host, pasting it at the prompt so it stays out of your shell history:
+## 3. The workers' image
 
 ```
-claude setup-token        # signs in and prints the token, sk-ant-oat…
-mkdir -p -m 700 ~/.config/zapper
-(umask 077; read -rsp 'Claude token: ' t; printf '%s' "$t" > ~/.config/zapper/claude-token); echo
+make image                    # localhost/zapper-openshell-office: Claude Code and pi (pinned), git, kubectl, podman, a headless browser
 ```
 
-The token stays on the host: zapper adds it to the workers' requests to `api.anthropic.com`, and Claude Code in the VMs only sees a placeholder.
+`zapper-office image NAME` builds any recipe of `zapper.yaml`'s `images:` the same way: the recipe, then the workers' account at uid 1000, `/work`, and the `office` command. The OpenShell client uses `localhost/zapper-openshell-<image>` for a profile's image unless `images:` in `openshell.yaml` says otherwise.
 
-Every worker runs on Claude, contractors included. The red-team scenario's contractor runs on pi with DeepSeek through OpenRouter (Claude declines its covert objective): to play it, create a key at [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) and store it the same way, `(umask 077; read -rsp 'OpenRouter key: ' t; printf '%s' "$t" > ~/.config/zapper/openrouter-token); echo`, or pick another profile for its slot in Kickoff. [Model credentials](configuration.md#model-credentials-claude-and-openrouter) has both in full.
+## 4. The gateway's side
 
-Usage counts against your subscription, not API billing. Claude Code's banner says "Claude API" anyway, because this kind of token can't read your plan; `/status` shows "Auth token: CLAUDE_CODE_OAUTH_TOKEN", and `/usage` shows your plan's limits. The comments on `secrets` in the config explain the difference, and how to switch to an API key.
-
-## 5. Check
+The driver must issue each sandbox's identity and copy each sandbox's files in. In its environment (`~/.config/openshell/firecracker-driver.env`) set:
 
 ```
-zapper check
+OPENSHELL_VM_SUPERVISOR_IDENTITY=true
+OPENSHELL_VM_FILES_ROOT=/home/<you>/.local/share/openshell/sandbox-files
+OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON={"allow_driver_config":true}
 ```
 
-Each line should say `ok`. Expected at this point:
+and `allow_driver_config = true` under `[openshell.drivers.firecracker]` in the gateway's `gateway.toml`, then restart the driver and the gateway. The office stages each worker's files (instructions, settings, skills, its work directory) under `OPENSHELL_VM_FILES_ROOT`, and the driver copies them in, with their owner and mode, before the worker's agent starts; a profile's `engine.disk` is the size of its sandboxes' writable disk (at most the driver's `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, 64 GiB by default). This needs openshell-firecracker with per-sandbox disk size and files.
 
-- `note   the daemon isn't running`: you start it next.
-- `note   the record is written by this user`: no [keeper](security.md#the-record), which is optional.
+The Claude token is the gateway's `anthropic` provider: create it as OpenShell's docs say (`openshell provider create --type anthropic ...`). Nothing in a VM sees it; the supervisor adds it to the workers' requests to the Claude API.
 
-## 6. Start the daemon
-
-In a terminal of its own:
+The workers' identity at the office is the `office-edge` provider:
 
 ```
-zapper serve
+openshell profile import -f config/openshell-office-edge.yaml
+openshell provider create --name office-edge --type office-edge --runtime-credentials
 ```
 
-```
-zapper: UI at http://127.0.0.1:7878/?token=3evtji2k5mntwur2ijmc5xm2
-zapper: API on /run/user/1000/zapper/api.sock
-```
+The office turns OpenShell's policy advisor on for each sandbox it makes and its security officers decide every proposal, so leave `proposal_approval_mode` and `agent_policy_proposals_enabled` unset at the gateway: the office refuses to start against a gateway that approves on its own.
 
-The daemon's UI (7878) is the sessions view (sessions, network, terminals, approvals). The Office runs as its own process; in another terminal start it (no arguments — it reads the same config), and open the office URL it prints for the firm view (org chart, messages, security, drive, VMs, replay):
+## 5. Point the office at the gateway
 
-```
-zapper-office serve
-```
+In `config/openshell.yaml`, set `gateway:` to the gateway's URL (`openshell gateway info` prints it) and its TLS files, and `files_root:` to the driver's `OPENSHELL_VM_FILES_ROOT`. `providers: [anthropic, office-edge]` attaches both to every sandbox. The `edge:` defaults suit the driver on this host.
 
-Leave both running.
-
-## 7. Check a session
-
-Each worker is a zapper session. Before booting a firm, check that a plain one works:
+## 6. Start the office
 
 ```
-zapper run -C $(mktemp -d)
+target/release/zapper-office serve
 ```
 
-You get a shell inside a VM, in `/work`, which holds a copy of the directory given with `-C` (by default, the current one). Try:
+It connects to the gateway, starts the office edge on `127.0.0.1:8970` (where the sandboxes' supervisors reach it, as `host.openshell.internal`), and prints the dashboard's URL with its one-time token. On a remote host, reach it through an SSH tunnel: `ssh -L 8099:127.0.0.1:8099 user@host`.
+
+## 7. Start a firm
+
+A firm spends your Claude usage. In the dashboard's Kickoff tab, start the company: its name, its CEO and charter, the terms you set, and your own articles. Or start the example firm with its CEO idle, and give the CEO its first task:
 
 ```
-curl https://pypi.org               # fails: the default profile allows no network
-exit
+target/release/zapper-office firm up acme
+target/release/zapper-office mail send acme --to barbara --kind assignment --subject 'Build the widget' --body '...'
 ```
 
-The session and its VM are removed when you exit. `zapper events --history` shows what it did, one line per DNS query, connection or exec, with the rule that decided it.
+The CEO scopes the work and asks you for a budget, which only you approve (Kickoff, or `zapper-office firm budget acme approve b-1`). With it they hire; nobody starts before their background check clears.
 
-Claude Code works in a sandbox on its own too, without a firm: `zapper run -p claude --keep`, in a project's directory, starts it on a copy of the project. The Claude API is allowed with the token the host adds, `.env` files are hidden, and every other host waits for your answer (`zapper approvals`, `zapper approve ID`, or the UI's sessions view). `zapper cp ID:/work ./out` copies its work out.
+## 8. Watch it
 
-## 8. Start the firm
+The dashboard's tabs follow the firm: the org chart, mail, the drive, git, security (access requests, standing approvals, background checks), VMs and statistics. A worker's network access is the security officers' call: what no rule allows is refused at once, the worker proposes a narrow rule through OpenShell's `policy.local`, and an officer approves, narrows or rejects it.
 
-```
-zapper-office firm up acme                     # boots the cluster, then the CEO, idle
-zapper-office firm status acme                 # workers' states, mail, turns and tokens today
-```
-
-Or start it in the UI's Kickoff tab: the company's name, its CEO (who holds security until they hire an officer), and the [charter](office.md#the-charter), the company's law, with the terms you set (the seed, security's share, the pace) and your own articles. `zapper-office firm up acme --articles law.md` does the same from the command line.
-
-`firm up` checks the firm's memory against the host's before booting anything. In the UI, the org chart fills in as workers boot, and the product port, `http://127.0.0.1:8080`, shows the firm's landing page.
-
-## 9. Give the CEO a task
-
-Write the CEO the firm's first task in the Kickoff tab, or:
-
-```
-zapper-office mail send acme --to barbara --kind assignment --subject "First product" --body "…"
-```
-
-Nothing in the config says what the firm builds; the kickoff does. [Office prompts](office-prompts.md#example-kickoff) has an example.
-
-The CEO scopes the task on the seed and asks you for a budget. Approve or decline it in Kickoff, or:
-
-```
-zapper-office firm budget acme                 # the request: total, plan, reason
-zapper-office firm budget acme approve b-1     # or: decline b-1 --note "…"
-```
-
-Then the CEO hires the team; each hire waits for a background check (by an officer, or by you in the Security tab or with `zapper-office firm screen acme c-1 --approve`).
-
-## 10. Watch it work
-
-```
-zapper-office firm journal acme -f             # mail, states, turns, access requests, publishes
-zapper-office firm transcript acme ada         # what a worker's agent did
-zapper-office firm security acme               # access requests and standing approvals
-zapper-office drive ls acme                    # what workers published
-```
-
-In the UI: envelopes move along the org chart as workers mail each other, the Messages tab holds every thread, Security shows the officers' decisions and anything escalated to you, and the Shared drive tab opens what was published. The product the engineers deploy replaces the landing page at `http://127.0.0.1:8080`, and the cluster's Kubernetes dashboard is at `http://127.0.0.1:8081` (the UI has its sign-in token).
-
-The budget you approved caps the run, and `budget` in the config limits the turns per day; `zapper-office firm budget acme` and `zapper-office firm status acme` show what's used.
-
-## 11. End the run
-
-```
-zapper-office firm down acme
-```
-
-The run stays on disk: `zapper-office firm runs acme` lists runs, and the UI's Runs tab replays one. The next `zapper-office firm up acme` starts a fresh run.
-
-## Next
-
-- [Office](office.md): firms, mail, the shared drive, security officers, the UI.
-- [Policy](policy.md): writing rules, secrets, approvals.
-- [Configuration](configuration.md): profiles, firms and the config file.
-- [Commands](commands.md): every command.
+`zapper-office firm down acme` ends the run; it can be replayed in the Runs tab, or read with `zapper-inspect`.

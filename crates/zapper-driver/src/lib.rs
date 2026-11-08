@@ -1,21 +1,10 @@
 //! Driving an agent: the harnesses' conversation code (Claude Code, pi) and
-//! the process driver that runs one on a terminal. A crate of its own so
-//! both the daemon (for driven sessions) and the office (over a worker's
-//! terminal) use it without the office linking the core.
+//! the process driver that runs one over a command stream: the office's
+//! foreman drives its workers with it, and the OpenShell client pumps
+//! commands with it.
 
 pub mod harness;
 pub mod process;
-
-/// A short random id in the same alphabet the daemon uses, for a worker whose
-/// name a harness must invent.
-pub(crate) fn random_id(len: usize) -> String {
-    use rand::Rng;
-    const ID_CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| ID_CHARS[rng.gen_range(0..ID_CHARS.len())] as char)
-        .collect()
-}
 
 /// Reads one length-prefixed protocol frame from `r`, or `None` at a clean
 /// end of stream.

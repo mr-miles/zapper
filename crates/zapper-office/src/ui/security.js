@@ -79,8 +79,7 @@ function updateSecurity() {
         el('td', { class: 'small' }, fmtDate(s.created)),
         el('td', {}, fromApi ? String(s.uses ?? 0) : String(s.uses || 0)),
         el('td', {}, live() ? el('span', { style: 'display:flex;gap:6px' },
-          el('button', { class: 'btn small danger', type: 'button', disabled: !canWrite(), onclick: () => revoke(s.id) }, 'Revoke'),
-          el('button', { class: 'btn small', type: 'button', disabled: !canWrite(), title: 'Copy into the running config at the role\'s profile', onclick: () => promote(s.id) }, 'Promote to config')) : ''));
+          el('button', { class: 'btn small danger', type: 'button', disabled: !canWrite(), onclick: () => revoke(s.id) }, 'Revoke')) : ''));
     });
     $('sec-standing').replaceChildren(
       rows.length ? el('table', { class: 't' }, el('thead', {}, el('tr', {}, ['rule', 'what', 'scope', 'expires', 'officer', 'reason', 'added', 'uses', ''].map((h) => el('th', {}, h)))), el('tbody', {}, rows))
@@ -117,7 +116,7 @@ function renderTraffic(M) {
     el('td', { class: 'small' }, r.inspected ? 'inspected' : '')));
   box.replaceChildren(digests, rows.length
     ? el('table', { class: 't' }, el('thead', {}, el('tr', {}, ['time', 'worker', 'method', 'url', 'status', 'action', 'rule', 'size', 'time', ''].map((h) => el('th', {}, h)))), el('tbody', {}, rows))
-    : el('div', { class: 'empty card' }, SEC.trafficAt ? 'No requests yet.' : 'Loading…'),
+    : el('div', { class: 'empty card' }, SEC.trafficAt ? 'No traffic shown: the office doesn\'t read the gateway\'s network log yet (`openshell logs <sandbox>` shows it). Refused connections still come here as access requests.' : 'Loading…'),
     shown < SEC.traffic.length ? el('div', { class: 'more-row' }, el('span', { class: 'muted small' }, 'Latest ' + shown + ' of ' + SEC.traffic.length),
       el('button', { class: 'btn small', type: 'button', onclick: () => { SEC.trafficShown += TRAFFIC_PAGE; renderTraffic(S.M); } }, 'Load more')) : '');
 }
@@ -242,10 +241,6 @@ async function decide(id, allow, scope, reason) {
 async function revoke(id) {
   if (!confirm('Revoke standing approval ' + id + '?')) return;
   try { await write('DELETE', F() + '/security/rules/' + enc(id)); toast('Revoked ' + id); pollSecurity(); } catch (e) { toast(e.message, true); }
-}
-async function promote(id) {
-  if (!confirm('Copy ' + id + ' into the running config? `zapper config save` keeps it.')) return;
-  try { const r = await write('POST', F() + '/security/rules/' + enc(id) + '/promote'); toast('Promoted ' + id + ' to ' + str(r && r.scope)); pollSecurity(); } catch (e) { toast(e.message, true); }
 }
 
 // A link to an address from the config: loopback as it is, an address

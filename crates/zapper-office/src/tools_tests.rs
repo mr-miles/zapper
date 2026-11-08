@@ -4,13 +4,13 @@
 //! money: the board's budget, a hire, funding, and a contract paid for.
 
 use std::sync::Arc;
-use zapper_core::prelude::*;
 
+use crate::fake::Session;
+use crate::fake::TestCore;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use zapper_core::testing::TestCore;
-use zapper_core::{NewSession, Session};
+use zapper_openshell::session::NewSession;
 use zapper_policy::{NetRequest, Policy};
 
 use crate::{labels, security, test_run, FirmRun};
@@ -59,7 +59,7 @@ async fn call(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value) -
     let s = session_of(run, who);
     let (host, mut guest) = UnixStream::pair().unwrap();
     let (d, vm) = (t.core.clone(), s.clone());
-    tokio::spawn(async move { zapper_core::testing::mcp(&d, &vm, host).await });
+    tokio::spawn(async move { crate::fake::mcp(&d, &vm, host).await });
     let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
     guest
         .write_all(format!("office\n{line}\n").as_bytes())
@@ -91,6 +91,21 @@ async fn refused(t: &TestCore, run: &FirmRun, who: &str, name: &str, args: Value
         .as_str()
         .unwrap_or_else(|| panic!("{who} {name} went through: {v}"))
         .to_string()
+}
+
+/// `who` proposes a rule for `host` (`methods`, if inspected) through
+/// `policy.local`, filed for the officers as the office files a draft: the
+/// request's id.
+fn ask(
+    t: &TestCore,
+    run: &FirmRun,
+    who: &str,
+    host: &str,
+    port: u16,
+    methods: &[&str],
+    reason: &str,
+) -> String {
+    t.core.propose(run, who, host, port, methods, reason)
 }
 
 /// A worker who joined during the run gets a VM: a session of theirs.
@@ -290,24 +305,15 @@ async fn a_role_slot_binds_and_reuses_the_same_worker() {
 #[tokio::test]
 async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     let (t, run) = run();
-    let asked = ok(
+    let id = ask(
         &t,
         &run,
         "pat",
-        "request_access",
-        json!({ "host": "API.Example", "methods": "get, post", "reason": "the docs" }),
-    )
-    .await;
-    let id = asked["request"].as_str().unwrap().to_string();
-    assert!(refused(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "a b", "reason": "x" })
-    )
-    .await
-    .starts_with("host:"));
+        "API.Example",
+        443,
+        &["get", "post"],
+        "the docs",
+    );
 
     let pending = ok(&t, &run, "sec", "access_requests", json!({})).await;
     let r = pending
@@ -371,20 +377,13 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     );
 
     // One more, handed to the board.
-    let again = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "secrets.example", "reason": "keys" }),
-    )
-    .await;
+    let again = ask(&t, &run, "pat", "secrets.example", 443, &[], "keys");
     ok(
         &t,
         &run,
         "sec",
         "escalate",
-        json!({ "request": again["request"], "recommendation": "the board's call" }),
+        json!({ "request": again, "recommendation": "the board's call" }),
     )
     .await;
     let escalated = journal(&run)
@@ -393,192 +392,13 @@ async fn access_is_asked_for_and_an_officer_decides_and_revokes_it() {
     assert!(escalated, "{:?}", journal(&run));
 }
 
-/// Asking again for what a waiting request covers joins it. Asking for
-/// more replaces it with one request for both, closing the old one as
-/// merged: one request waits at a time, and a request never grows after a
-/// decider may have seen it.
-#[tokio::test]
-async fn asking_again_joins_or_replaces_the_request_waiting() {
-    let (t, run) = run();
-    let ask = |methods: Value| {
-        let (t, run) = (&t, &run);
-        async move {
-            let r = ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
-            )
-            .await;
-            let pending = ok(t, run, "sec", "access_requests", json!({})).await;
-            assert_eq!(pending.as_array().unwrap().len(), 1, "one waits: {pending}");
-            (
-                r["request"].as_str().unwrap().to_string(),
-                pending[0].clone(),
-            )
-        }
-    };
-    let (first, _) = ask(json!(["GET"])).await;
-    let (again, _) = ask(json!(["get"])).await;
-    assert_eq!(again, first, "the same again joins it");
-    let (both, waiting) = ask(json!(["POST", "GET"])).await;
-    assert_ne!(both, first, "more replaces it");
-    assert_eq!(waiting["methods"], json!(["GET", "POST"]), "{waiting}");
-    assert_eq!(waiting["attempts"], 3, "{waiting}");
-    let (whole, waiting) = ask(json!(null)).await;
-    assert_ne!(whole, both, "the whole connection is more again");
-    assert!(waiting.get("methods").is_none(), "{waiting}");
-    assert_eq!(
-        ask(json!(["DELETE"])).await.0,
-        whole,
-        "the whole connection covers it"
-    );
-    let count = |event: &str| {
-        journal(&run)
-            .into_iter()
-            .filter(|e| e["type"] == "access" && e["event"] == event)
-            .count()
-    };
-    assert_eq!((count("requested"), count("merged")), (3, 2));
-    // Another port is another request.
-    let other = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "api.example", "port": 8443, "reason": "the admin API" }),
-    )
-    .await;
-    assert_ne!(other["request"], json!(whole));
-}
-
-/// A decider who saw the GET decides it just as the worker asks for POST
-/// too: nothing is decided, and they are told what waits now.
-#[tokio::test]
-async fn deciding_a_request_that_was_replaced_decides_nothing() {
-    let (t, run) = run();
-    let asked = |methods: Value| {
-        let (t, run) = (&t, &run);
-        async move {
-            ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "api.example", "methods": methods, "reason": "the docs" }),
-            )
-            .await["request"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        }
-    };
-    let seen = asked(json!(["GET"])).await;
-    let now = asked(json!(["POST"])).await;
-    let e = refused(
-        &t,
-        &run,
-        "sec",
-        "access_decide",
-        json!({ "request": seen, "allow": true, "scope": "worker", "reason": "the docs" }),
-    )
-    .await;
-    assert!(
-        e.contains(&format!("now {now}: GET, POST api.example:443")),
-        "{e}"
-    );
-    assert!(security::standing(&run).is_empty(), "nothing allowed");
-    let pending = ok(&t, &run, "sec", "access_requests", json!({})).await;
-    assert_eq!(pending[0]["id"], json!(now), "{pending}");
-}
-
-/// What the worker's rules already allow isn't asked about: the answer
-/// says so, and nobody gets a request to decide.
-#[tokio::test]
-async fn access_already_allowed_is_not_asked_for() {
-    let (t, run) = run();
-    let r = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "registry.npmjs.org", "methods": ["get"], "reason": "npm install" }),
-    )
-    .await;
-    assert_eq!(r["allowed"], true, "{r}");
-    assert!(r["request"].is_null(), "{r}");
-    assert!(
-        r["note"].as_str().unwrap().contains("already allowed"),
-        "{r}"
-    );
-    assert_eq!(
-        ok(&t, &run, "sec", "access_requests", json!({})).await,
-        json!([])
-    );
-    let asked = journal(&run)
-        .into_iter()
-        .any(|e| e["type"] == "access" && e["event"] == "requested");
-    assert!(!asked, "{:?}", journal(&run));
-    // Another port isn't allowed, so it is asked about.
-    let r = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "registry.npmjs.org", "port": 80, "reason": "npm over http" }),
-    )
-    .await;
-    assert!(r["request"].is_string(), "{r}");
-}
-
-/// "Already allowed" is judged as the proxy would judge the worker's
-/// request: a rule for the worker's own folder (`{session}`) allows it
-/// there, and not in another's.
-#[tokio::test]
-async fn already_allowed_is_judged_as_the_workers_request() {
-    let (t, run) = run();
-    let pat = session_of(&run, "pat");
-    pat.put_rule(
-        serde_yaml::from_str(
-            "{ kind: net, id: own-folder, action: allow, host: drive.example, methods: [GET], path: \"/outbox/{session}/**\" }",
-        )
-        .unwrap(),
-    );
-    let ask = |path: String| {
-        let (t, run) = (&t, &run);
-        async move {
-            ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": "drive.example", "methods": ["get"], "path": path, "reason": "my files" }),
-            )
-            .await
-        }
-    };
-    let own = ask(format!("/outbox/{}/x", pat.id)).await;
-    assert_eq!(own["allowed"], true, "{own}");
-    let other = ask("/outbox/zz9yy8/x".to_string()).await;
-    assert!(other["request"].is_string(), "{other}");
-}
-
 /// Nobody decides their own access request: an officer's own network or
 /// credential request goes to someone else, and deciding it themselves is
 /// refused.
 #[tokio::test]
 async fn nobody_decides_their_own_access_request() {
     let (t, run) = run();
-    let asked = ok(
-        &t,
-        &run,
-        "sec",
-        "request_access",
-        json!({ "host": "notes.example", "reason": "research" }),
-    )
-    .await;
-    let id = asked["request"].as_str().unwrap().to_string();
+    let id = ask(&t, &run, "sec", "notes.example", 443, &[], "research");
     let r = crate::security::requests(&run, true)
         .into_iter()
         .find(|r| r["id"] == id.as_str())
@@ -634,20 +454,13 @@ async fn an_approval_never_gets_past_a_final_rule() {
     let decide = |host: &'static str| {
         let (t, run) = (&t, &run);
         async move {
-            let asked = ok(
-                t,
-                run,
-                "pat",
-                "request_access",
-                json!({ "host": host, "reason": "x" }),
-            )
-            .await;
+            let asked = ask(t, run, "pat", host, 443, &[], "x");
             ok(
                 t,
                 run,
                 "sec",
                 "access_decide",
-                json!({ "request": asked["request"], "allow": true, "scope": "worker", "reason": "fine" }),
+                json!({ "request": asked, "allow": true, "scope": "worker", "reason": "fine" }),
             )
             .await;
         }
@@ -689,15 +502,7 @@ async fn a_hired_officer_decides_nothing_before_clearance() {
     .await;
     assert_eq!(hired["worker"], "kim", "{hired}");
     give_vm(&t, &run, "kim");
-    let asked = ok(
-        &t,
-        &run,
-        "pat",
-        "request_access",
-        json!({ "host": "docs.example", "reason": "the docs" }),
-    )
-    .await;
-    let request = asked["request"].as_str().unwrap().to_string();
+    let request = ask(&t, &run, "pat", "docs.example", 443, &[], "the docs");
     for (tool, args) in [
         ("access_requests", json!({})),
         ("background_checks", json!({})),
@@ -985,7 +790,7 @@ async fn a_budgeted_firm_hires_funds_and_pays_for_a_contract() {
     let access = checks[1].to_string();
     assert!(access.contains("Machine: profile w"), "{access}");
     assert!(
-        access.contains("Network: *.example: needs approval"),
+        access.contains("Network: allowed to registry.npmjs.org port 443"),
         "{access}"
     );
     assert!(
@@ -1272,7 +1077,7 @@ fn tar_of(files: &[(&str, &str)]) -> Vec<u8> {
 #[tokio::test]
 async fn work_is_published_from_one_vm_and_fetched_into_another() {
     let (t, run) = run();
-    let mut vm = zapper_core::testing::shell_vm(&session_of(&run, "pat"));
+    let mut vm = crate::fake::shell_vm(&session_of(&run, "pat"));
     // Publishing needs write on the space.
     let refused_first = refused(
         &t,
@@ -1374,7 +1179,7 @@ async fn work_is_published_from_one_vm_and_fetched_into_another() {
 async fn publish(
     t: &TestCore,
     run: &FirmRun,
-    vm: &mut tokio::sync::mpsc::UnboundedReceiver<zapper_core::testing::Shell>,
+    vm: &mut tokio::sync::mpsc::UnboundedReceiver<crate::fake::Shell>,
     who: &str,
     thread: &str,
     title: &str,
@@ -1399,7 +1204,7 @@ async fn publish(
 #[tokio::test]
 async fn a_tasks_work_is_found_by_its_thread_delegated_work_included() {
     let (t, run) = run();
-    let mut vm = zapper_core::testing::shell_vm(&session_of(&run, "ceo"));
+    let mut vm = crate::fake::shell_vm(&session_of(&run, "ceo"));
     // Task A: the CEO assigns pat, who delegates part of it to sec while
     // working on it (the new thread's context is task A's).
     let a = ok(

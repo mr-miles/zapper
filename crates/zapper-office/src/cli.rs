@@ -2,13 +2,8 @@
 //! in `firm_cli.rs`): a small client of the running office's unix-socket API
 //! and the output helpers the commands share. The office serves its firm
 //! routes to the browser (behind the UI gateway, at `/api`) and, for this CLI,
-//! on a local unix socket of its own (`standalone::office_socket_path`), the
-//! way the daemon serves the `zapper` CLI — so these commands reach the office
-//! the way `zapper`'s reached the daemon.
-//!
-//! The socket plumbing is the shared [`zapper_client::Zapper`]; [`Client`] is
-//! a thin board-facing adapter over it, keeping raw response bytes (a drive
-//! download is binary) and the board's error wrapping.
+//! on a local unix socket of its own (`standalone::office_socket_path`),
+//! which these commands reach.
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -16,20 +11,48 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
-use zapper_client::Zapper;
-
-pub use zapper_client::url_encode;
 
 use zapper_office::standalone::office_socket_path;
 
-/// A client of the running office's unix-socket API, as the board: the shared
-/// [`Zapper`] (the socket plumbing) plus the board's JSON/text/bytes helpers
-/// and error wrapping.
-pub struct Client(Zapper);
+/// A client of the running office's unix-socket API, as the board: raw
+/// response bytes (a drive download is binary), and the board's JSON and text
+/// helpers and error wrapping.
+pub struct Client(std::path::PathBuf);
 
 impl Client {
     pub fn new() -> Self {
-        Self(Zapper::new(office_socket_path()))
+        Self(office_socket_path())
+    }
+
+    /// `method path` with `headers` and `body`, on a connection of its own.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Result<hyper::Response<Incoming>> {
+        let stream = tokio::net::UnixStream::connect(&self.0)
+            .await
+            .with_context(|| {
+                format!(
+                    "the office at {} (is `zapper-office serve` running?)",
+                    self.0.display()
+                )
+            })?;
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await?;
+        tokio::spawn(conn);
+        let mut b = hyper::Request::builder()
+            .method(method)
+            .uri(format!("http://office{path}"))
+            .header("host", "office");
+        for (k, v) in headers {
+            b = b.header(k, v);
+        }
+        Ok(sender
+            .send_request(b.body(http_body_util::Full::new(body))?)
+            .await?)
     }
 
     pub async fn call(
@@ -44,7 +67,13 @@ impl Client {
             Some(b) => (Some("application/json"), Bytes::from(b)),
             None => (None, Bytes::new()),
         };
-        self.0.call_raw(method, path, ct, bytes).await
+        let mut headers = HeaderMap::new();
+        if let Some(ct) = ct {
+            headers.insert("content-type", ct.parse()?);
+        }
+        let resp = self.send(method, path, &headers, bytes).await?;
+        let status = resp.status();
+        Ok((status, resp.into_body().collect().await?.to_bytes()))
     }
 
     fn check(status: StatusCode, bytes: &Bytes) -> Result<()> {
@@ -72,7 +101,9 @@ impl Client {
 
     /// A streaming GET, e.g. server-sent events.
     pub async fn stream(&self, path: &str) -> Result<Incoming> {
-        let resp = self.0.stream(path, &HeaderMap::new()).await?;
+        let resp = self
+            .send(Method::GET, path, &HeaderMap::new(), Bytes::new())
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp.into_body().collect().await?.to_bytes();
@@ -83,16 +114,11 @@ impl Client {
     }
 }
 
-/// The config file zapper and the office read: `$ZAPPER_CONFIG`, else the
-/// checkout's `config/zapper.yaml`, else `~/.config/zapper/zapper.yaml` — the
-/// same file the daemon reads. Sets CONFIG_DIR to its directory so relative
-/// paths (a firm's `agents_dir`/`skills_dir`, the daemon's `state`) resolve
-/// against it, as they do for the daemon.
-///
-/// This mirrors `zapper`'s own `config_path`. The two are deliberately not
-/// shared: the logic needs `zapper-policy` and encodes zapper's layout, so it
-/// belongs in neither `zapper-util` (no zapper-crate deps, nothing
-/// zapper-specific) nor `zapper-policy` (no I/O) — each binary keeps its own.
+/// The config file the office reads (the profiles and image recipes):
+/// `$ZAPPER_CONFIG`, else the checkout's `config/zapper.yaml`, else
+/// `~/.config/zapper/zapper.yaml`. Sets CONFIG_DIR to its directory so
+/// relative paths (a firm's `agents_dir`/`skills_dir`, `daemon.state`)
+/// resolve against it.
 pub fn config_path() -> std::path::PathBuf {
     use zapper_policy::expand_home;
     let path = match std::env::var("ZAPPER_CONFIG") {
@@ -114,7 +140,7 @@ pub fn config_path() -> std::path::PathBuf {
 }
 
 /// The directory the config file lives in: where the office's workers' agents
-/// and skills are installed, beside the config (as `zapper init` wrote them).
+/// and skills are installed, beside the config (as `zapper-office init` writes them).
 pub fn config_dir() -> std::path::PathBuf {
     config_path()
         .parent()
@@ -122,9 +148,8 @@ pub fn config_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// The office's own config file (`office.yaml`): the firms it runs, beside the
-/// daemon's `zapper.yaml` (`$ZAPPER_OFFICE_CONFIG` overrides). Firms are the
-/// office's config, not the daemon's (proposal 13 decision 2).
+/// The office's own config file (`office.yaml`): the firms it runs, beside
+/// `zapper.yaml` (`$ZAPPER_OFFICE_CONFIG` overrides).
 pub fn office_config_path() -> std::path::PathBuf {
     use zapper_policy::expand_home;
     match std::env::var("ZAPPER_OFFICE_CONFIG") {
@@ -136,9 +161,9 @@ pub fn office_config_path() -> std::path::PathBuf {
     }
 }
 
-/// The daemon's `state` directory, from its config file. Used by `firm replay`
-/// to find the daemon's `ui-url`.
-pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
+/// The office's `state` directory, from `zapper.yaml` (`daemon.state`): where
+/// firms' runs are kept, and the dashboard's URL for `firm replay`.
+pub fn state_dir() -> Result<std::path::PathBuf> {
     use zapper_policy::{expand_home, Config};
     let path = config_path();
     let config = if path.exists() {
@@ -148,4 +173,16 @@ pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
         Config::default()
     };
     Ok(std::path::PathBuf::from(expand_home(&config.daemon.state)))
+}
+
+/// `s` as a URL's query value (percent-encoded).
+pub fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
 }

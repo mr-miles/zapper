@@ -4,15 +4,13 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-#[cfg(test)]
-use zapper_core::prelude::*;
 
+#[cfg(test)]
+use crate::fake::Core;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{Notify, Semaphore};
-use zapper_api_types::NewSession;
-#[cfg(test)]
-use zapper_core::Core;
+use zapper_openshell::session::NewSession;
 use zapper_policy::proto::GuestFile;
 use zapper_policy::{Config, Policy};
 use zapper_util::now;
@@ -21,8 +19,6 @@ use crate::firm::{Firm, BOARD};
 use crate::history::RUN_CONFIG;
 use crate::journal::Journal;
 use crate::mail::{self, PostOffice};
-#[cfg(test)]
-use crate::OfficeOf;
 use crate::{
     access, contracts, drive, facility, foreman, labels, ops, prompts, run_id, scenario, security,
     skills, utc_day, workforce, FirmRun, Office, RunState, Usage, WorkerRt, WorkerState,
@@ -103,36 +99,16 @@ pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<Stri
     })
 }
 
-/// Memory still available on the host, in MiB.
-pub(crate) fn mem_available_mib() -> Option<u64> {
-    zapper_util::host_memory_mib("MemAvailable")
-}
-
-/// Checks that the firm fits before booting anything.
-fn check_resources(office: &Office, config: &Config, firm: &Firm) -> Result<()> {
-    let mut mib = 0u64;
-    let mut count = 0usize;
-    for w in &firm.workers {
-        let role = &firm.roles[&w.role];
-        mib += config.resolve(&role.profile)?.engine.memory_mib as u64;
-        count += 1;
-    }
-    for f in firm.facilities.values() {
-        mib += config.resolve(&f.profile)?.engine.memory_mib as u64;
-        count += 1;
-    }
-    let running = office.client().session_count();
-    if running + count > config.daemon.max_sessions {
-        bail!(
-            "the firm needs {count} sessions and {running} are running; daemon.max_sessions is {}",
-            config.daemon.max_sessions
-        );
-    }
-    if let Some(avail) = mem_available_mib() {
-        if mib > avail {
-            bail!("the firm needs {mib} MiB of memory for its VMs and the host has {avail} MiB available");
-        }
-    }
+/// Checks that the firm fits before booting anything: its workers' and
+/// facilities' sandboxes, at once.
+fn check_resources(office: &Office, firm: &Firm) -> Result<()> {
+    let profiles: Vec<String> = firm
+        .workers
+        .iter()
+        .map(|w| firm.roles[&w.role].profile.clone())
+        .chain(firm.facilities.values().map(|f| f.profile.clone()))
+        .collect();
+    office.client().admit(&profiles)?;
     Ok(())
 }
 
@@ -450,7 +426,7 @@ fn create_run(
     }
     let journal = Journal::create(&dir.join("journal.jsonl"))?;
     let domain = firm.domain(name);
-    // Each role's shared layer lives in the daemon, named `<firm>/<role>`;
+    // Each role's shared layer is the client's, named `<firm>/<role>`;
     // workers attach it by their `firm-role` label, and the office changes it
     // through the client. Reset to empty for this run (the registry outlives a
     // run, which starts with no approvals).
@@ -473,7 +449,6 @@ fn create_run(
         firm: name.to_string(),
         id: id.clone(),
         dir: dir.clone(),
-        socket_dir: office.socket_dir().to_path_buf(),
         post: mail::Post::new(PostOffice::new(&firm, live.clone())),
         chart: live,
         ledger: workforce::Books::new(&firm),
@@ -503,7 +478,6 @@ fn create_run(
         state: Mutex::new(RunState::Starting),
         journal,
         workers: RwLock::new(workers),
-        tools: Mutex::new(None),
         plans: Mutex::new(crate::plan::Plans::default()),
         stopping: Notify::new(),
     });
@@ -532,9 +506,6 @@ fn create_run(
             &format!("[Automatic notice] firm {name}: {w}.\n"),
         );
     }
-    facility::register(&run)?;
-    security::register(&run)?;
-    ops::register(&run)?;
     office
         .runs
         .write()
@@ -628,7 +599,7 @@ pub async fn up_with(
         articles,
         scenario,
     } = with_options(name, firm, &config, opts)?;
-    check_resources(office, &config, &firm)?;
+    check_resources(office, &firm)?;
     let firm = super::remote::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;
@@ -806,7 +777,7 @@ pub(crate) async fn boot_worker(
         } else {
             ""
         };
-    let mut files = facility::credentials_for(run, &w.name, &w.role, &home)?;
+    let mut files = facility::credentials_for(run, &w.name, &home);
     // A headless browser command, for the image's Playwright.
     files.push(GuestFile {
         path: "/usr/local/bin/browse".into(),
@@ -821,14 +792,9 @@ pub(crate) async fn boot_worker(
         policy: Policy::default(),
         // The role's shared layer is attached by the `firm-role` label.
         labels: labels(&run.firm, &run.id, &w.name, &w.role, true),
-        shared_layers: vec![],
         files,
         mounts: vec![],
         agent_overlay: Some(overlay),
-        forwards: vec![],
-        persistent: false,
-        accept_changed_image: false,
-        ssh: false,
     };
     let info = run.client.create_session(new).await?;
     run.journal.append(
@@ -929,8 +895,6 @@ pub async fn down(run: &Arc<FirmRun>, reason: &str) {
     }
     super::remote::finish(run).await;
     facility::stop(run).await;
-    security::unregister(run);
-    ops::unregister(run);
     *run.state.lock().unwrap() = RunState::Ended;
     run.journal
         .append("run", json!({ "state": "ended", "reason": reason }));

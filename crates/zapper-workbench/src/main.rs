@@ -1,244 +1,164 @@
-//! `zapper-workbench`: serve the workbench, and keep its tokens.
+//! `zapper-workbench`: serve the drive and repository to OpenShell
+//! sandboxes, apply the repository to the gateway as templates, and make
+//! sandboxes from them, set up as their profiles.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use zapper_workbench::facility::{self, Facilities};
-use zapper_workbench::gateway::{self, Ctx};
-use zapper_workbench::tokens::{Right, Tokens};
-use zapper_workbench::zapper::{socket_path, Zapper};
+use zapper_openshell::edge::Edge;
+use zapper_openshell::OpenShell;
+use zapper_workbench::apply::Applier;
+use zapper_workbench::backend::Workbench;
+use zapper_workbench::drive::Drive;
+use zapper_workbench::provision::Provisioner;
+use zapper_workbench::repo::Repo;
+use zapper_workbench::settings::Settings;
 
 #[derive(Parser)]
 #[command(
     name = "zapper-workbench",
-    about = "A layer for single users on zapper"
+    about = "One person's drive, repository and sandbox templates on OpenShell"
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
 
-fn default_listen() -> SocketAddr {
-    "127.0.0.1:7880".parse().unwrap()
-}
-
 #[derive(Subcommand)]
 enum Cmd {
-    /// Serve the workbench's API and UI, over the zapper daemon's socket.
-    Serve {
-        /// Where to listen. Beyond loopback it is plain HTTP: for a trusted
-        /// network, or behind a TLS proxy.
-        /// Default: workbench.yaml's `listen`, else 127.0.0.1:7880.
+    /// Serve the drive and the repository to the gateway's sandboxes, on the
+    /// workbench's edge.
+    Serve,
+    /// Apply a commit of the repository (`main` by default) to the gateway:
+    /// its images built where they changed, each profile a template.
+    Apply {
+        #[arg(default_value = "main")]
+        r#ref: String,
+    },
+    /// What applying a branch or commit would build and make, without doing it.
+    Check { r#ref: String },
+    /// Make a sandbox from a profile's template, labelled with the profile
+    /// and commit, and set it up.
+    New {
+        profile: String,
+        /// Its name (by default `<profile>-<random>`).
         #[arg(long)]
-        listen: Option<SocketAddr>,
+        name: Option<String>,
     },
-    /// Print the UI's address (sign in there with a token).
-    Url {
-        /// Default: workbench.yaml's `listen`, else 127.0.0.1:7880.
-        #[arg(long)]
-        listen: Option<SocketAddr>,
-    },
-    /// The workbench's tokens.
-    Token {
-        #[command(subcommand)]
-        cmd: TokenCmd,
-    },
-    /// What the host's sshd runs for a key the workbench added: SSH on
-    /// stdin and stdout, for the sandbox named (else by
-    /// `$SSH_ORIGINAL_COMMAND`), if the key reaches it.
-    SshProxy {
-        target: Option<String>,
-        #[arg(long)]
-        key: String,
-    },
+    /// The commit applied last, the sandboxes set up, and where the drive
+    /// and repository are.
+    Status,
 }
 
-#[derive(Subcommand)]
-enum TokenCmd {
-    /// Make a token, printed once: for sessions with the labels given (all
-    /// sessions without), with the rights given.
-    Add {
-        name: String,
-        /// `key=value`: the token reaches sessions with every one, and the
-        /// sessions it creates get them (repeatable).
-        #[arg(short, long = "label")]
-        labels: Vec<String>,
-        /// Comma-separated: read, create, control, terminal, answer, rules.
-        #[arg(long, value_delimiter = ',', default_value = "read")]
-        rights: Vec<String>,
-    },
-    /// Print the owner's token, alone on stdout (to sign in to the UI).
-    Show,
-    /// List the tokens (never their values).
-    Ls,
-    /// Remove a token: refused from then on.
-    Rm { name: String },
+struct Ctx {
+    settings: Settings,
+    drive: Drive,
+    repo: Repo,
+    applier: Arc<Applier>,
+    provisioned: PathBuf,
 }
 
-/// The UI's address: never with a token in it, which would be kept in
-/// histories and logs.
-fn url(listen: SocketAddr) -> String {
-    let host = if listen.ip().is_unspecified() {
-        format!("127.0.0.1:{}", listen.port())
-    } else {
-        listen.to_string()
-    };
-    format!("http://{host}/")
+fn ctx() -> Result<Ctx> {
+    let settings = Settings::load(&zapper_workbench::config_dir().join("workbench.yaml"))?;
+    let data = zapper_workbench::data_dir();
+    let drive = Drive::new(data.join("drive"))?;
+    let repo = Repo::new(data.clone())?;
+    let applier = Arc::new(Applier::new(repo.path(), data.join("applied")));
+    std::fs::create_dir_all(data.join("applied"))?;
+    Ok(Ctx {
+        settings,
+        drive,
+        repo,
+        applier,
+        provisioned: data.join("applied").join("provisioned.json"),
+    })
+}
+
+async fn connect(settings: &Settings) -> Result<OpenShell> {
+    let path = settings.openshell.clone().unwrap_or_else(|| {
+        PathBuf::from(zapper_policy::expand_home(
+            "~/.config/zapper/openshell.yaml",
+        ))
+    });
+    let mut s = zapper_openshell::Settings::load(&path)?;
+    s.edge = settings.edge(s.edge);
+    if let Some(w) = &settings.workspace {
+        s.workspace = w.clone();
+    }
+    s.providers = settings
+        .providers
+        .clone()
+        .unwrap_or_else(|| vec!["anthropic".into(), "workbench-edge".into()]);
+    // The workbench's profiles are its repository's: no zapper config.
+    OpenShell::connect(s, None).await
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zapper_workbench=info".into()),
-        )
-        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
-    let tokens = Tokens::open(zapper_workbench::config_dir())?;
-    let settings = zapper_workbench::settings::Settings::load(
-        &zapper_workbench::config_dir().join("workbench.yaml"),
-    )?;
+    let c = ctx()?;
     match cli.cmd {
-        Cmd::Serve { listen } => {
-            let listen = listen.or(settings.listen).unwrap_or(default_listen());
-            let live = zapper_workbench::gateway::Live::default();
-            let work = zapper_workbench::data_dir().join("work");
-            std::fs::create_dir_all(&work)?;
-            let ctx = Ctx {
-                zapper: Zapper::new(socket_path()),
-                tokens: tokens.clone(),
-                facilities: Arc::new(Facilities::new(vec![
-                    Arc::new(zapper_workbench::secrets::Secrets::new(
-                        zapper_workbench::config_dir().join("secrets"),
-                    )?),
-                    Arc::new(zapper_workbench::drive::Drive::new(
-                        zapper_workbench::data_dir().join("drive"),
-                    )?),
-                    Arc::new(zapper_workbench::git::Git::new(
-                        zapper_workbench::data_dir().join("git"),
-                        zapper_workbench::git::ApplySettings {
-                            secrets: zapper_workbench::config_dir().join("secrets"),
-                            daemon: settings.daemon.clone(),
-                            live: live.clone(),
-                        },
-                    )?),
-                    Arc::new(zapper_workbench::ssh::Ssh::new(
-                        zapper_workbench::ssh_keys(&std::env::current_exe()?)?,
-                        zapper_ssh::known_hosts_line(&zapper_ssh::host_key(
-                            &zapper_workbench::ssh_host_key(),
-                        )?)?,
-                    )),
-                ])?),
-                work,
-                port: listen.port(),
-                remote: !listen.ip().is_loopback(),
-                live,
-            };
-            for f in ctx.facilities.iter() {
-                f.start(&ctx);
-            }
-            tokio::spawn(facility::keep_registered(ctx.clone()));
-            if ctx.facilities.iter().any(|f| f.wants_events()) {
-                tokio::spawn(facility::follow(ctx.clone()));
-            }
+        Cmd::Serve => {
+            let os = Arc::new(connect(&c.settings).await?);
+            let settings = os.edge_settings().clone();
+            let listen = settings.listen;
             let listener = tokio::net::TcpListener::bind(listen)
                 .await
-                .with_context(|| format!("listening on {listen}"))?;
-            if ctx.remote {
-                eprintln!("zapper-workbench: listening on {listen}, beyond loopback, in plain HTTP: for a trusted network or behind a TLS proxy");
+                .with_context(|| format!("binding the workbench's edge on {listen}"))?;
+            let backend = Arc::new(Workbench::new(os.clone(), c.drive, c.repo.clone()));
+            let edge = Arc::new(Edge::new(settings.clone(), backend));
+            eprintln!(
+                "zapper-workbench: the edge on http://{listen} (sandboxes: {}/drive/ and {}/git/{}), workspace {}",
+                settings.url,
+                settings.url,
+                zapper_workbench::repo::REPO,
+                os.workspace()
+            );
+            eprintln!(
+                "zapper-workbench: the repository is {}; clone it, and push main",
+                c.repo.path().display()
+            );
+            tokio::select! {
+                _ = edge.serve(listener) => {}
+                _ = tokio::signal::ctrl_c() => {}
             }
-            eprintln!("zapper-workbench: the UI is at {}", url(listen));
-            // The owner's token, the first time only: a service's output is
-            // logged, and this would be at each start.
-            if tokens.owner_is_new() {
-                eprintln!("zapper-workbench: sign in with the owner's token, made now (again: `zapper-workbench token show`):");
-                eprintln!("{}", tokens.owner()?);
-            } else {
-                eprintln!(
-                    "zapper-workbench: sign in with the token `zapper-workbench token show` prints"
-                );
-            }
-            axum::serve(listener, gateway::app(ctx)).await?;
+            Ok(())
         }
-        Cmd::Url { listen } => {
+        Cmd::Apply { r#ref } => {
+            let os = connect(&c.settings).await?;
+            let v = c.applier.apply(&os, &r#ref, &|l| eprintln!("{l}")).await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
+        Cmd::Check { r#ref } => {
             println!(
                 "{}",
-                url(listen.or(settings.listen).unwrap_or(default_listen()))
-            )
+                serde_json::to_string_pretty(&c.applier.check(&r#ref)?)?
+            );
+            Ok(())
         }
-        Cmd::SshProxy { target, key } => {
-            let keys = zapper_workbench::ssh_keys(&std::env::current_exe()?)?;
-            zapper_workbench::ssh::proxy(
-                Zapper::new(socket_path()),
-                &keys,
-                &key,
-                target,
-                &zapper_workbench::ssh_host_key(),
-            )
-            .await?
+        Cmd::New { profile, name } => {
+            let os = Arc::new(connect(&c.settings).await?);
+            let name = name.unwrap_or_else(|| format!("{profile}-{}", zapper_util::random_id(8)));
+            let p = Provisioner::new(os, c.applier.clone(), c.provisioned.clone());
+            let r = p.new_sandbox(&profile, &name).await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
         }
-        Cmd::Token { cmd } => match cmd {
-            TokenCmd::Add {
-                name,
-                labels,
-                rights,
-            } => {
-                let labels: BTreeMap<String, String> = labels
-                    .iter()
-                    .map(|l| {
-                        l.split_once('=')
-                            .map(|(k, v)| (k.to_string(), v.to_string()))
-                            .with_context(|| format!("label {l:?}: key=value"))
-                    })
-                    .collect::<Result<_>>()?;
-                let rights: BTreeSet<Right> = rights
-                    .iter()
-                    .map(|r| Right::parse(r.trim()))
-                    .collect::<Result<_>>()?;
-                let token = tokens.add(&name, labels, rights)?;
-                eprintln!("zapper-workbench: token {name}, shown this once:");
-                println!("{token}");
-            }
-            TokenCmd::Show => println!("{}", tokens.owner()?),
-            TokenCmd::Ls => {
-                println!("{:<16} {:<24} RIGHTS", "NAME", "SESSIONS");
-                println!("{:<16} {:<24} all", "owner", "all");
-                for k in tokens.list()? {
-                    let labels = if k.labels.is_empty() {
-                        "all".to_string()
-                    } else {
-                        k.labels
-                            .iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    };
-                    let rights: Vec<String> = k
-                        .rights
-                        .iter()
-                        .map(|r| {
-                            serde_json::to_value(r)
-                                .unwrap()
-                                .as_str()
-                                .unwrap()
-                                .to_string()
-                        })
-                        .collect();
-                    println!("{:<16} {:<24} {}", k.name, labels, rights.join(","));
-                }
-            }
-            TokenCmd::Rm { name } => {
-                if !tokens.remove(&name)? {
-                    bail!("no token {name}");
-                }
-                eprintln!("zapper-workbench: token {name} removed");
-            }
-        },
+        Cmd::Status => {
+            let mut v = c.applier.status()?;
+            v["sandboxes"] =
+                serde_json::to_value(zapper_workbench::provision::records(&c.provisioned)?)?;
+            v["repository"] = serde_json::json!(c.repo.path());
+            v["drive"] = serde_json::json!(zapper_workbench::data_dir().join("drive"));
+            v["edge"] = serde_json::json!(c.settings.listen().to_string());
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
     }
-    Ok(())
 }

@@ -1,96 +1,30 @@
-# zapper startup config. In a checkout, `zapper` uses this file when run from
-# the repository's root; elsewhere `zapper init` copies it to
-# ~/.config/zapper/zapper.yaml once and never overwrites it. Relative paths
-# here resolve against this file's directory; `~/` is your home. Downloads,
-# images, kernels, state and the Claude token stay under your home, outside
-# the repository.
+# The profiles and image recipes The Office runs its workers from. In a
+# checkout, `zapper-office` uses this file when run from the repository's
+# root; elsewhere `zapper-office init` copies it to ~/.config/zapper/zapper.yaml
+# once and never overwrites it. Relative paths here resolve against this
+# file's directory; `~/` is your home. The office reads it again when it
+# changes.
 #
-# This is the fork's minimal config: plain shells, Claude Code and a test
-# Kubernetes cluster, no firms (The Office). Upstream's example, with the acme firm and its profiles, is
-# `git show main:config/zapper.yaml`.
-#
-# The daemon loads this file at start as the running config. API changes
-# (`zapper rule add`, `zapper config edit`, approvals remembered in a profile)
-# change the running config only: `zapper config diff` shows them,
-# `zapper config save` writes them here, `zapper config reload` drops them.
-#
-# Policy is layered: session → profile → the profiles it extends → global.
-# Within a layer the first matching rule wins; `final: true` rules are checked
-# first, from global down, and cannot be overridden. Unmatched requests get the
-# most specific `defaults`, else deny.
+# Each worker is a sandbox of an OpenShell gateway (openshell.yaml), made from
+# its profile: its image, CPU, memory and disk, its agent's settings and
+# files, and its network rules. Rules are layered: a worker's own → its role's
+# → its profile → the profiles it extends → global; the allows among them
+# become the sandbox's policy, and what no rule allows OpenShell refuses and
+# drafts a rule for, which the firm's security officers decide. What OpenShell
+# can't do (exec and fs rules, the daemon's settings, rules that name
+# secrets) is ignored, and `zapper-office serve` lists it when it starts.
 
 daemon:
-  firecracker: ~/.local/share/zapper/bin/firecracker
-  images: ~/.local/share/zapper/images
-  kernels: ~/.local/share/zapper/kernels
+  # Where firms' runs are kept (their mail, transcripts, journals).
   state: ~/.local/state/zapper
-  # The web UI. Loopback by default. On a remote host, prefer an SSH tunnel
-  # from your machine, which needs no change here:
-  #   ssh -L 7878:127.0.0.1:7878 you@zapper-host
-  # To reach it over the network instead, listen on every interface:
-  #   ui: 0.0.0.0:7878
-  # !!! WARNING: whoever has the token (in the URL `zapper serve` prints)
-  # !!! controls zapper: sessions, rules and approvals. It's plain HTTP:
-  # !!! only on a network you trust, or behind a TLS proxy. zapper isn't
-  # !!! built for production. The VMs can't reach it either way: the
-  # !!! host's own addresses are closed to them.
-  ui: 127.0.0.1:7878
-  ask_timeout_secs: 60
+  # The most sandboxes at once (openshell.yaml's max_sessions overrides it).
   max_sessions: 16
-  # Private networks sessions may reach, when a rule allows the host.
-  # Loopback, link-local and this host's addresses stay unreachable.
-  private_networks: ["192.168.0.0/24"]
 
-# Secrets. With `mode: proxy` (the default) the session sees the placeholder
-# `zapper-secret-<name>`, and the proxy puts the value into requests that a
-# rule allows to the secret's `hosts`. With `mode: guest` the value is written
-# where a profile uses {{secret:<name>}}, for credentials the client holds
-# itself, such as S3 keys and client certificates; issue those scoped and
-# short-lived.
-secrets:
-  # Claude subscription or Claude API: which one pays for Claude Code.
-  #
-  # `claude` is a token from `claude setup-token`, kept in a 0600 file. It uses
-  # your Pro/Max/Team/Enterprise subscription: usage counts against the plan's
-  # limits and isn't billed as API usage. Claude Code shows "Claude API" in its
-  # banner with this token because the token can only make model requests and
-  # can't read your plan; `/status` shows "Auth token: CLAUDE_CODE_OAUTH_TOKEN".
-  # The token is for your own use. Other people need their own credentials or
-  # an API key.
-  # https://code.claude.com/docs/en/authentication#generate-a-long-lived-token
-  # https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use
-  #
-  # `anthropic` (commented out) is a Claude Console API key, billed per token
-  # to the Console organization. Claude Code prefers ANTHROPIC_API_KEY over the
-  # subscription token, so a profile that sets ANTHROPIC_API_KEY bills the API
-  # even when CLAUDE_CODE_OAUTH_TOKEN is set too. Use one or the other.
-  # https://code.claude.com/docs/en/authentication#authentication-precedence
-  #
-  # To check: `/usage` in Claude Code, or claude.ai Settings → Usage for the
-  # subscription; platform.claude.com for API usage and spend limits. With
-  # extra usage turned off on the plan, requests past the limits are refused
-  # rather than charged.
-  # anthropic:
-  #   env: ANTHROPIC_API_KEY
-  #   hosts: [api.anthropic.com]
-  # Your Claude subscription, for every Claude Code session.
-  #   1. On any machine with Claude Code and a browser (your laptop will do:
-  #      the token belongs to your account, not the machine):
-  #        claude setup-token
-  #      It opens the sign-in page and prints a long-lived token (sk-ant-oat…).
-  #   2. On the zapper host, store it in a 0600 file without it touching
-  #      your shell history (paste it at the prompt):
-  #        mkdir -p -m 700 ~/.config/zapper
-  #        (umask 077; read -rsp 'Claude token: ' t; printf '%s' "$t" > ~/.config/zapper/claude-token); echo
-  #   3. zapper check. No restart: the host reads the file on each request.
-  # The VMs never see it: they get the placeholder zapper-secret-claude, and
-  # the host swaps the token in on requests to api.anthropic.com.
-  claude:
-    file: ~/.config/zapper/claude-token
-    hosts: [api.anthropic.com]
-  # s3:
-  #   file: ~/.config/zapper/s3-session.env
-  #   mode: guest
+# Credentials are the OpenShell gateway's providers, never this file's: the
+# Claude token is the `anthropic` provider (`openshell provider create --type
+# anthropic ...`, docs/quickstart.md), which opens api.anthropic.com for its
+# sandboxes and adds the token outside the VM. A rule here that names a secret
+# is left out, and the office says so when it starts.
 
 policy:
   defaults: { net: deny, exec: allow }
@@ -126,10 +60,6 @@ profiles:
     description: Shell on a copy of the current directory
     mounts:
       - { host: "{workdir}", guest: /work, mode: rw }
-    policy:
-      fs:
-        - { path: "/work/**/.env", access: hidden }
-        - { path: "/work/.git/config", access: ro }
 
   # `zapper run -p claude`: Claude Code on a copy of the current directory.
   # The Claude API is allowed with the token the host adds; every other
@@ -147,34 +77,29 @@ profiles:
         CLAUDE_CODE_OAUTH_TOKEN: "{{secret:claude}}"
     policy:
       net:
-        - { action: allow, host: api.anthropic.com, ports: [443], secrets: [claude] }
+        - { action: allow, host: api.anthropic.com, ports: [443] }
       defaults: { net: ask }
 
-  # `zapper run -p k3s`: a single-node Kubernetes cluster (k3s) to test
-  # against, with a copy of the current directory at /work. The shell is
-  # root's, with kubectl set up; k3s starts at boot and takes a minute
-  # (`kubectl get nodes` until Ready; its log is /var/log/k3s.log). Image
-  # pulls are allowed, other hosts asked. Image: make image IMAGE=k3s;
-  # kernel: make kernel KERNEL=k8s.
+  # A firm's cluster (`facilities: { cluster: { kind: k3s, profile: k3s } }`):
+  # a sandbox of its own in which the office runs a single-node k3s, rootless
+  # as the sandbox's user (OpenShell runs nothing as root), and reaches its
+  # API and ingress over the gateway. Workers reach it through the office
+  # edge (`/cluster`, `/apps`). Its log is ~/k3s.log. Image pulls are
+  # allowed. Image: make image IMAGE=k3s.
   k3s:
     extends: default
     description: A test Kubernetes cluster (k3s) on a copy of the current directory
     engine:
       {
         image: k3s,
-        kernel: vmlinux-6.1-k8s,
         vcpus: 4,
         memory_mib: 8192,
         disk: 30GiB,
-        ports: [6443],
       }
     agent:
       kind: generic
       command: [bash, -l]
-      root: true
-      env: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
-    setup:
-      - mkdir -p /var/log && nohup k3s server --disable metrics-server --flannel-backend host-gw --write-kubeconfig-mode 600 > /var/log/k3s.log 2>&1 &
+      env: { KUBECONFIG: /home/agent/.kube/k3s.yaml }
     policy:
       net:
         - { action: allow, host: registry-1.docker.io, ports: [443], comment: image pulls }
@@ -261,12 +186,13 @@ images:
   # The cluster facility: k3s at a pinned release, with its air-gap images so
   # it starts without the internet, and the board's dashboard (Headlamp),
   # whose image goes into the air-gap directory so k3s imports it at start.
-  # Needs the k8s kernel: make kernel KERNEL=k8s.
+  # uidmap, slirp4netns and fuse-overlayfs are for k3s rootless: the sandbox's
+  # kernel must allow user namespaces, and cgroup v2 with its controllers.
   k3s:
     description: A single-node k3s cluster (pinned), with its air-gap images and Headlamp
     from: docker.io/library/ubuntu:26.04
     run:
-      - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl iptables conntrack ipset zstd procps && rm -rf /var/lib/apt/lists/*"
+      - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl iptables conntrack ipset zstd procps uidmap slirp4netns fuse-overlayfs && rm -rf /var/lib/apt/lists/*"
       - "curl -fsSL -o /usr/local/bin/k3s https://github.com/k3s-io/k3s/releases/download/v1.36.5%2Bk3s1/k3s && echo 'd73847bcd3c5fccef0115b372e2f9a91f3032dc84bbf71518a4617565294d313  /usr/local/bin/k3s' | sha256sum -c && chmod 755 /usr/local/bin/k3s && ln -sf k3s /usr/local/bin/kubectl"
       - "mkdir -p /var/lib/rancher/k3s/agent/images && curl -fsSL -o /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst https://github.com/k3s-io/k3s/releases/download/v1.36.5%2Bk3s1/k3s-airgap-images-amd64.tar.zst && echo '7d939471907df2d4e537a9c308bf94173e453fff4a2e9e77e9ae92a64be3007f  /var/lib/rancher/k3s/agent/images/k3s-airgap-images-amd64.tar.zst' | sha256sum -c"
       - "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends skopeo && skopeo copy --override-os linux --override-arch amd64 docker://ghcr.io/headlamp-k8s/headlamp@sha256:8a0ef97527544baa2b35825940ddf4db6e2d09c30cd5aa31fd269ff604cc8b75 docker-archive:/var/lib/rancher/k3s/agent/images/headlamp.tar:ghcr.io/headlamp-k8s/headlamp:v0.46.0 && apt-get purge -y skopeo && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*"
