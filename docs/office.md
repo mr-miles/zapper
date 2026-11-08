@@ -400,7 +400,7 @@ The board sees every pending request in the Security tab, not only the ones esca
 - Secrets, private networks and new profiles stay with the board: an officer can recommend them, and the request is escalated with that recommendation.
 - A worker's reason text is untrusted input to the officer; the officer's skill says so and shows it quoted.
 - If no officer answers within `security.answer_within` (default 15 minutes), the request goes to the board as well, and stays pending until one of them answers or the firm stops. Nothing is held meanwhile, so there is no deny-on-timeout.
-- Officers decide network access only. Exec rules in firm profiles are `allow` or `deny`, never `ask`. So the officer's decision on a download is in effect the decision on running it: if an officer allows a worker to fetch a tool, the worker can run it unless a profile `deny` rule says otherwise. Every exec is still checked against those rules and recorded, and officers see the download in the traffic log.
+- Officers decide network access only. OpenShell has no exec rules: a tool an officer lets a worker download, the worker can run.
 - Officers can't approve their own requests, and two officers (if configured) can see and revoke each other's approvals.
 
 ## Facilities: the cluster, git and the product
@@ -568,7 +568,7 @@ A firm reads its agents from its `agents_dir` and its skills from its `skills_di
 
 ## Web UI
 
-The UI has a tab bar for the office. zapper's own views of sessions (network, terminals, approvals) are a separate page, `/sessions`, linked from the footer and from each worker's panel; its footer leads back to the firm.
+The UI has a tab bar for the office. A sandbox's terminals, logs and policy are OpenShell's (its CLI and UI); the footer and each worker's panel link to the VMs tab.
 
 | Tab | For |
 |---|---|
@@ -580,7 +580,7 @@ The UI has a tab bar for the office. zapper's own views of sessions (network, te
 | Security | What officers approved, what they decided, and why |
 | Shared drive | Published work, including board packs |
 | Git | The firm's repository: branches, files and commits |
-| VMs | Every running VM of the daemon, now: the host, each firm's workers and cluster, other sessions; size, usage and counters; terminals to watch read-only, and each worker's transcript (Claude Code's or pi's) |
+| VMs | Every sandbox the office runs, now: each firm's workers and cluster; their size, image and uptime, and each worker's transcript (Claude Code's or pi's) |
 | Statistics | Activity, throughput and budgets |
 | Runs | The firm's runs, each with what it was asked to build; opens one in replay, or deletes it |
 
@@ -639,7 +639,7 @@ A mail client over the whole firm, read-only except for the board's own mail.
 
 ### Security
 
-- **Standing approvals**: every rule an officer added at a worker or role layer: host, ports, methods, paths, scope, expiry, officer, reason, when, and how many requests it has allowed since. The board can revoke one or promote it into the startup config.
+- **Standing approvals**: every rule an officer added at a worker or role layer: host, ports, methods, paths, scope, expiry, officer, reason, when, and how many requests it has allowed since. The board can revoke one.
 - **Escalations**: requests waiting for the board (secrets, private networks, global rules), with the officer's recommendation; answering here is the board's decision.
 - **Background checks on new hires**: each check with the hire, the hirer, the budget, what the role can reach, the reason and the brief; pending ones first, with **Approve** and **Object** for the board.
 - **Traffic**: the firm's requests across all workers as one live list (allowed, denied, waiting), the latest 25 first with **Load more** for older ones, the officers' digests, and anything an officer flagged.
@@ -714,7 +714,7 @@ state/firms/<firm>/runs/<run-id>/
   git/<name>.git       the firm's repositories (product.git by default)
 ```
 
-- Each worker's session keeps its own audit log and terminal recordings in `state/sessions/<id>/`, as any zapper session does; `run.json` links them.
+- A worker's network events are the gateway's (`openshell logs <sandbox>`); the office doesn't read them yet.
 - Workers' disks are deleted when their VMs stop, as for any zapper session, so their Claude conversations and working files end with the run. What was published stays in the run's `drive/`.
 - `zapper-office firm down` or a daemon restart ends the run. The next `firm up` starts a new one; it doesn't continue the old one.
 - Runs stay on disk as records until removed: `zapper-office firm runs` lists them (and `zapper-inspect` reads them without the daemon: people, a scenario's operatives, transcripts as Markdown), `zapper-office firm note FIRM RUN TEXT` (or Note in the Runs tab) marks one for later analysis with free text kept in the run's directory, outside the record, and `zapper-office firm prune FIRM RUN` deletes one. Like session directories, they hold sensitive material.
@@ -779,7 +779,7 @@ A run with real Claude Code is a manual check: a two-worker firm on a small mode
 ## Limitations
 
 - **A run can't be resumed.** A daemon restart or `firm down` ends it; workers' disks and conversations go with it. The run stays on disk for replay. Resuming needs persistent worker disks and `--resume` of each conversation.
-- **Officers decide network access only.** Exec rules in firm profiles are allow or deny, so a tool an officer lets a worker download can run unless a profile denies it.
+- **Officers decide network access only.** OpenShell has no exec rules, so a tool an officer lets a worker download can run.
 - **The cluster is one node and starts fresh.** It holds nothing between runs; the git repository is the record of the product's code.
 - **Inspection rules don't apply to the firm's own services.** Rules for `git.`, `cluster.` and `apps.` names match host and port; methods, paths and secrets on them are refused.
 - **Workers share one subscription.** `max_concurrent` keeps turns within its rate limits; a refused turn is retried after a minute.
