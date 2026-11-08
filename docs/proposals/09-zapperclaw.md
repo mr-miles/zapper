@@ -109,7 +109,7 @@ It can't loosen a policy, attach a credential, choose an image or command, reach
 
 **New in zapperclaw:**
 1. **A slimmer trait** in place of `OfficeClient`: `Workers { ensure, delete, list, agent }`, with a `Warden` implementation over HTTP and the in-memory fake for tests.
-2. **Restart without losing the run.** Rebuild the post office's index from the journal at start (`history.rs` already reads it for replay). Re-list workers from the warden. Reattach each foreman with the conversation id it last recorded. Workers' sandboxes outlive the office process, so their `~/.claude` is still there. This removes today's "a run can't be resumed" limitation, as long as sandboxes persist (open question 1).
+2. **Restart without losing the run.** Rebuild the post office's index from the journal at start (`history.rs` already reads it for replay). Re-list workers from the warden. Reattach each foreman with the conversation id it last recorded. Workers' sandboxes outlive the office process, so their `~/.claude` is still there. This removes today's "a run can't be resumed" limitation, since sandboxes and their disks persist across restarts (open question 1, confirmed).
 3. **Per-worker instructions from the edge.** The template's harness settings load a `SessionStart` hook (`office instructions`) that fetches the worker's own instructions and directory over the edge, replacing per-worker staged files.
 
 Roster example:
@@ -152,11 +152,11 @@ Two kinds:
 
 Size: S is under 2 days, M is 3 to 5 days, L is 1 to 2 weeks. Steps 0 to 4 are about 4 to 5 weeks for one engineer. Relays follow.
 
-**Status.** Step 0 is confirmed on a gateway. Step 1 is written: `crates/zapper-warden` ([the warden](../warden.md)), with unit tests on an in-memory gateway and its gate as [tests/e2e-warden.sh](../../tests/e2e-warden.sh); the office sandbox is a probe image until step 2.
+**Status.** Step 0 is confirmed on a gateway, and so is open question 1 (sandboxes and their disks survive restarts). Step 1 is written: `crates/zapper-warden` ([the warden](../warden.md)), with unit tests on an in-memory gateway and its gate as [tests/e2e-warden.sh](../../tests/e2e-warden.sh); the office sandbox is a probe image until step 2.
 
 ## Open questions
 
-1. **Do sandboxes and their disks survive a gateway or host restart** with openshell-firecracker v0.1.7? Restart without losing the run (step 4) depends on it for both the office sandbox and the workers. If they don't, the warden needs a way to back up and restore the office's journal (an `ExecSandbox tar`, limited to the office sandbox's state directory).
+1. **Do sandboxes and their disks survive a gateway or host restart** with openshell-firecracker v0.1.7? Yes: confirmed on a gateway. Restart without losing the run (step 4) can rely on it for both the office sandbox and the workers, and the warden needs no backup of the office's journal.
 2. **Is a long-lived `ForwardTcp` into a sandbox fit to carry all workers' edge traffic?** If not, the warden can open one forward per connection, which it would do anyway, since it pipes each accepted connection.
 3. **Can the token grant go through the forward?** The `office-edge` provider's `token_endpoint` would be `host.openshell.internal:8970/oauth/token`, answered inside the office sandbox. The office must also be able to tell the supervisors' grant requests from guest traffic, which today's edge already does with the SVID.
 4. **The TLS question** from the migration carries over: the edge is plain HTTP on loopback today.
