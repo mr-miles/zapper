@@ -5,7 +5,7 @@
 #   openshell provider create --name workbench-edge --type workbench-edge --runtime-credentials
 #
 # then attach `workbench-edge` to the sandboxes that should reach them
-# (`openshell sandbox create --from-template wb-<profile> --provider
+# (`openshell sandbox create --template wb-<profile> --provider
 # workbench-edge ...`). Needs the Firecracker driver's supervisor identity on
 # (OPENSHELL_VM_SUPERVISOR_IDENTITY=true): each supervisor posts its
 # sandbox's JWT-SVID to the workbench's token endpoint and adds the token it
