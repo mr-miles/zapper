@@ -26,11 +26,11 @@ Then: `scope: "once"` for a one-off, `"worker"` for repeated use, `"role"` only 
 ## TLS: passed through or inspected
 
 - A host and port without `methods` or `path` passes TLS through untouched: the client sees the real certificate; you see the connection, not the requests.
-- `methods` or `path` make the proxy inspect: it re-signs with the session's CA, which only worker VMs trust.
-- The cluster's pods never trust the session CA: for requests from `cluster`, approve host and port with `methods: []`.
+- `methods` or `path` make the gateway inspect: it terminates TLS with a CA only the sandbox trusts.
+- The cluster's pods never trust that CA: for requests from `cluster`, approve host and port with `methods: []`.
 - `CONNECT host:443` is a tunnel: approve host and port with `methods: []`, never `methods: ["CONNECT"]`.
 - A worker reporting a certificate error on a host you approved: revoke and re-approve with `methods: []`.
-- The session CA never leaves the host: don't ask for it, pass on certificates, or suggest disabling verification.
+- That CA never leaves the gateway: don't ask for it, pass on certificates, or suggest disabling verification.
 
 ## Credential requests
 
