@@ -12,6 +12,18 @@ gateway: https://127.0.0.1:8080
 # client_cert: ~/.config/openshell/gateways/local/mtls/tls.crt
 # client_key: ~/.config/openshell/gateways/local/mtls/tls.key
 
+# Where sandboxes' files are staged for the driver to copy in before their
+# workload starts (openshell-firecracker's driver_config `files`): the same
+# directory as the driver's OPENSHELL_VM_FILES_ROOT, writable by the office.
+# The gateway and the driver must allow driver_config (allow_driver_config =
+# true in gateway.toml's [openshell.drivers.firecracker], and
+# OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON={"allow_driver_config":true}). A
+# profile's engine.disk is its sandboxes' writable disk (overlay_disk_mib, up
+# to the driver's OPENSHELL_VM_MAX_OVERLAY_DISK_MIB).
+files_root: ~/.local/share/openshell/sandbox-files
+# The compute driver's name at the gateway, which driver_config is keyed by.
+# driver: firecracker
+
 # Providers attached to every sandbox: `anthropic` carries the Claude token,
 # injected outside the VM (`openshell provider create --type anthropic ...`);
 # `office-edge` is the workers' identity at the office edge
@@ -31,7 +43,7 @@ providers: [anthropic, office-edge]
 #   trust_domain: openshell.local                # OPENSHELL_VM_SUPERVISOR_IDENTITY_TRUST_DOMAIN
 
 # The OCI image for each zapper image the profiles name. By default
-# localhost/zapper-openshell-<image>, which scripts/openshell-image.sh builds.
+# localhost/zapper-openshell-<image>, which `zapper-office image <image>` builds.
 # images:
 #   office: localhost/zapper-openshell-office
 

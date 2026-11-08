@@ -31,7 +31,15 @@ make image                    # localhost/zapper-openshell-office: Claude Code a
 
 ## 4. The gateway's side
 
-The driver must issue each sandbox's identity: set `OPENSHELL_VM_SUPERVISOR_IDENTITY=true` in its environment (`~/.config/openshell/firecracker-driver.env`) and restart it.
+The driver must issue each sandbox's identity and copy each sandbox's files in. In its environment (`~/.config/openshell/firecracker-driver.env`) set:
+
+```
+OPENSHELL_VM_SUPERVISOR_IDENTITY=true
+OPENSHELL_VM_FILES_ROOT=/home/<you>/.local/share/openshell/sandbox-files
+OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON={"allow_driver_config":true}
+```
+
+and `allow_driver_config = true` under `[openshell.drivers.firecracker]` in the gateway's `gateway.toml`, then restart the driver and the gateway. The office stages each worker's files (instructions, settings, skills, its work directory) under `OPENSHELL_VM_FILES_ROOT`, and the driver copies them in, with their owner and mode, before the worker's agent starts; a profile's `engine.disk` is the size of its sandboxes' writable disk (at most the driver's `OPENSHELL_VM_MAX_OVERLAY_DISK_MIB`, 64 GiB by default). This needs openshell-firecracker with per-sandbox disk size and files.
 
 The Claude token is the gateway's `anthropic` provider: create it as OpenShell's docs say (`openshell provider create --type anthropic ...`). Nothing in a VM sees it; the supervisor adds it to the workers' requests to the Claude API.
 
@@ -46,7 +54,7 @@ The office turns OpenShell's policy advisor on for each sandbox it makes and its
 
 ## 5. Point the office at the gateway
 
-In `config/openshell.yaml`, set `gateway:` to the gateway's URL (`openshell gateway info` prints it) and its TLS files. `providers: [anthropic, office-edge]` attaches both to every sandbox. The `edge:` defaults suit the driver on this host.
+In `config/openshell.yaml`, set `gateway:` to the gateway's URL (`openshell gateway info` prints it) and its TLS files, and `files_root:` to the driver's `OPENSHELL_VM_FILES_ROOT`. `providers: [anthropic, office-edge]` attaches both to every sandbox. The `edge:` defaults suit the driver on this host.
 
 ## 6. Start the office
 

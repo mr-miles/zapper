@@ -4372,6 +4372,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "openshell-sdk",
+ "prost-types",
  "rand 0.8.8",
  "ring",
  "serde",

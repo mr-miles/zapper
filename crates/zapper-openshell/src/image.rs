@@ -6,18 +6,16 @@
 //! On top of the recipe it adds what OpenShell's microVM driver needs and
 //! zapper's guest agent used to set up at boot: the profile's user as uid
 //! 1000 (every command runs as it, never root) with its home, `/work` theirs
-//! and the working directory, the `browse` command the office would write
-//! outside the user's reach, and the static `zapper-agent` as `office` (the
+//! and the working directory, and the static `zapper-agent` as `office` (the
 //! workers' CLI, Stop hook and MCP bridge, which reach the office edge).
+//! Files the office gives a worker (`browse`, Claude Code's managed
+//! settings) are the driver's to copy in, as root where they must be.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
-
-/// The `browse` command, installed in every image.
-const BROWSE: &str = include_str!("../../zapper-office/src/browse.js");
 
 /// What to build.
 pub struct Build {
@@ -120,7 +118,6 @@ pub fn build(config: &zapper_policy::Config, b: &Build, log: &dyn Fn(&str)) -> R
     for step in &r.after {
         file.push_str(&format!("RUN {step}\n"));
     }
-    std::fs::write(work.0.join("browse"), BROWSE)?;
     std::fs::copy(&b.agent, work.0.join("zapper-agent"))
         .with_context(|| format!("reading {}", b.agent.display()))?;
     file.push_str(&openshell_layer(&b.user));
@@ -147,7 +144,6 @@ fn openshell_layer(user: &str) -> String {
          RUN old=$(getent passwd 1000 | cut -d: -f1); if [ -n \"$old\" ] && [ \"$old\" != \"{user}\" ]; then userdel -r \"$old\"; fi; \\\n    \
          id -u {user} >/dev/null 2>&1 || useradd -m -u 1000 -U -s /bin/bash {user}; \\\n    \
          mkdir -p /work && chown {user}:{user} /work\n\
-         COPY --chmod=755 browse /usr/local/bin/browse\n\
          COPY --chmod=755 zapper-agent /usr/local/bin/zapper-agent\n\
          RUN ln -sf zapper-agent /usr/local/bin/office\n\
          ENV HOME=/home/{user}\n\

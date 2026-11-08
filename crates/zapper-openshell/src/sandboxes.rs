@@ -2,15 +2,17 @@
 //! and its compute driver (openshell-firecracker): the [`OfficeClient`] the
 //! firm logic runs on, and what the workbench uses of it.
 //!
-//! - **Sessions.** A zapper profile becomes a sandbox template (image, CPU,
-//!   memory), made once per office process; a session is a sandbox created
-//!   from it, with the gateway's providers attached (the Claude token is the
-//!   `anthropic` provider's, injected outside the VM), labelled with its
-//!   firm, run, member, role and profile. Once the gateway's status stream
-//!   says it is ready, the office sets it up as the profile ([`Setup`]):
-//!   the harness's files (instructions, settings, MCP servers, turn-end
-//!   hook), the profile's and the session's files, copies of the directories
-//!   it mounted (skills, the work directory), then the profile's `setup`.
+//! - **Sessions.** A session is a sandbox of its profile: its image, CPU,
+//!   memory and disk (`engine.disk`), its environment, and the gateway's
+//!   providers (the Claude token is the `anthropic` provider's, injected
+//!   outside the VM), labelled with its firm, run, member, role and profile.
+//!   Its files ([`Setup`]: the harness's instructions, settings, MCP
+//!   servers and turn-end hook, the profile's and the session's files, the
+//!   directories it mounted, the work directory among them) are staged
+//!   under the driver's files root, and openshell-firecracker copies them in
+//!   with their owner and mode before the workload starts (`crate::files`).
+//!   Once the gateway's status stream says it is ready, the profile's
+//!   `setup` commands run.
 //! - **Driving.** `attach` is `ExecSandboxInteractive`, translated to and
 //!   from the frames the foreman and the drive's tar copies speak;
 //!   `connect_port` is `ForwardTcp`.
@@ -36,9 +38,9 @@
 //! digests.
 //!
 //! What a firm can tell: commands run as the sandbox user, never root
-//! (`ShellRequest::system` is ignored), so files the office writes outside
-//! the user's reach must already be in the image with the same content (the
-//! image builder puts them there); secrets are the gateway's providers, so
+//! (`ShellRequest::system` only moves the work directory), though the
+//! driver copies files in as root where they must be; secrets are the
+//! gateway's providers, so
 //! `{{secret:…}}` values in a profile's env and files are left out; and
 //! there is no per-exec approval or terminal recording.
 
@@ -68,7 +70,8 @@ use zapper_policy::{
 };
 
 use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
-use crate::rules;
+use crate::files::Staging;
+use crate::{files, rules};
 
 /// The most stdout or stderr one frame carries (under `MAX_FRAME`).
 const CHUNK: usize = 60 * 1024;
@@ -82,23 +85,12 @@ const SETUP_OUTPUT: u64 = 1 << 20;
 const DRAFT_POLL: Duration = Duration::from_secs(5);
 /// The prefix of the ids of the rules approved drafts became.
 const DRAFT_RULE: &str = "draft-";
+/// Where the office stages its sandboxes' files, under the files root.
+const STAGED: &str = "office";
 /// The gateway settings the office relies on: the policy advisor on, and
 /// approvals left to the officers.
 const PROPOSALS: &str = "agent_policy_proposals_enabled";
 const APPROVAL_MODE: &str = "proposal_approval_mode";
-
-/// Writes stdin to `$1` with mode `$2`, as the sandbox user. A path the user
-/// can't write (outside its home, the work directory and `/tmp`) is accepted
-/// only if the image already has it with this content.
-const WRITE_FILE: &str = r#"p=$1; m=$2; d=${p%/*}; mkdir -p "$d" 2>/dev/null
-if { [ -e "$p" ] && [ -w "$p" ]; } || { [ ! -e "$p" ] && [ -w "$d" ]; }; then
-  cat > "$p" && chmod "$m" "$p"
-else
-  cmp -s - "$p" || { echo "$p: $(id -un) can't write it, and the image doesn't have it with this content" >&2; exit 1; }
-fi"#;
-
-/// Unpacks a tar on stdin into the directory `$1`.
-const UNPACK: &str = r#"mkdir -p "$1" && tar -C "$1" -xf -"#;
 
 /// The office's OpenShell settings (`openshell.yaml`, beside `office.yaml`):
 /// which gateway, how to reach it, and what to give its sandboxes.
@@ -115,7 +107,7 @@ pub struct Settings {
     /// Skip verifying the gateway's certificate (development only).
     pub insecure_skip_verify: bool,
     /// The OCI image for each zapper image a profile names; by default
-    /// `localhost/zapper-openshell-<image>` (`scripts/openshell-image.sh`).
+    /// `localhost/zapper-openshell-<image>` (`zapper-office image`).
     pub images: BTreeMap<String, String>,
     /// Gateway providers attached to every sandbox (e.g. `anthropic`).
     pub providers: Vec<String>,
@@ -133,6 +125,12 @@ pub struct Settings {
     /// The gateway workspace the sandboxes and templates are in; by default
     /// `default`.
     pub workspace: String,
+    /// The driver's `OPENSHELL_VM_FILES_ROOT`: where a sandbox's files are
+    /// staged for the driver to copy in (`crate::files`).
+    pub files_root: Option<String>,
+    /// The compute driver's name at the gateway, which a `driver_config`
+    /// is keyed by; by default `firecracker`.
+    pub driver: Option<String>,
 }
 
 /// The office edge's settings (`edge:` in `openshell.yaml`). The defaults
@@ -198,6 +196,11 @@ impl Settings {
             .unwrap_or_else(|| format!("localhost/zapper-openshell-{name}"))
     }
 
+    /// The compute driver's name: `driver`, or `firecracker`.
+    pub fn driver(&self) -> &str {
+        self.driver.as_deref().unwrap_or("firecracker")
+    }
+
     /// The gateway workspace: `workspace`, or `default`.
     pub fn workspace(&self) -> &str {
         match self.workspace.trim() {
@@ -229,6 +232,8 @@ pub struct Template {
     pub labels: Labels,
     /// The environment its sandboxes' processes get.
     pub env: BTreeMap<String, String>,
+    /// What the driver puts in its sandboxes ([`OpenShell::driver_config`]).
+    pub driver_config: Option<Value>,
 }
 
 /// A sandbox of the gateway's workspace, of any maker.
@@ -363,8 +368,6 @@ pub struct OpenShell {
     /// The zapper config the profiles come from, and when it was read.
     config_path: PathBuf,
     config: Mutex<(Option<SystemTime>, Config)>,
-    /// Templates made by this process: name → what they were made from.
-    templates: tokio::sync::Mutex<BTreeMap<String, String>>,
     sandboxes: Mutex<BTreeMap<String, Sandbox>>,
     /// Firm roles' shared layers, by name (`firm/role`).
     layers: Mutex<BTreeMap<String, Policy>>,
@@ -414,7 +417,6 @@ impl OpenShell {
             settings,
             config: Mutex::new((modified(&config_path), config)),
             config_path,
-            templates: Default::default(),
             sandboxes: Default::default(),
             layers: Default::default(),
             next_id: AtomicU64::new(1),
@@ -797,35 +799,6 @@ impl OpenShell {
         officers_decide(&global)
     }
 
-    /// The template for `profile`, made (again) if this process hasn't made
-    /// it from the profile as it is now.
-    async fn template(&self, profile: &ResolvedProfile) -> Result<String> {
-        let name = template_name(&profile.name);
-        let image = self.settings.image(&profile.engine.image);
-        let from = format!(
-            "{image} {} {}",
-            profile.engine.vcpus, profile.engine.memory_mib
-        );
-        let mut made = self.templates.lock().await;
-        if made.get(&name) == Some(&from) {
-            return Ok(name);
-        }
-        let t = Template {
-            name: name.clone(),
-            image,
-            vcpus: profile.engine.vcpus,
-            memory_mib: profile.engine.memory_mib,
-            labels: Labels::from([
-                ("zapper-office".to_string(), "1".to_string()),
-                ("zapper-profile".to_string(), label_value(&profile.name)),
-            ]),
-            env: BTreeMap::new(),
-        };
-        self.put_template(&t).await?;
-        made.insert(name.clone(), from);
-        Ok(name)
-    }
-
     /// Makes template `t` on the gateway (again, if there is one).
     pub async fn put_template(&self, t: &Template) -> Result<()> {
         let name = t.name.as_str();
@@ -845,6 +818,7 @@ impl OpenShell {
                         ..Default::default()
                     }),
                 }),
+                driver_config: t.driver_config.as_ref().map(files::to_struct),
                 ..Default::default()
             }),
         };
@@ -997,62 +971,59 @@ impl OpenShell {
         Ok(())
     }
 
-    /// Waits for sandbox `name` and sets it up as zapper's guest agent would
-    /// have: the environment, files, directories and setup commands of
-    /// `profile`. The environment and work directory its commands get.
-    async fn boot(
+    /// Creates sandbox `name` of `profile`, set up as `setup` with
+    /// `driver_config` `driver`, labelled `labels`, with the providers every
+    /// sandbox gets: its image and resources, and its environment for every
+    /// process in it. The gateway's id for it.
+    async fn create(
         &self,
         name: &str,
         profile: &ResolvedProfile,
-        new: &NewSession,
-    ) -> Result<(HashMap<String, String>, String)> {
-        self.wait_ready(name).await?;
-        // `office` (the CLI, the stop hook, the stdio bridge for harnesses
-        // without HTTP MCP) reaches the edge at ZAPPER_OFFICE_URL.
-        let extra = BTreeMap::from([
-            ("ZAPPER_SESSION".to_string(), name.to_string()),
-            ("ZAPPER_OFFICE_URL".to_string(), self.mcp_url()),
-        ]);
-        let mut setup = Setup::of(profile, extra)?;
-        setup.files.extend(new.files.iter().cloned());
-        setup.mounts.extend(new.mounts.iter().cloned());
-        let workdir = new.workdir.to_string_lossy().into_owned();
-        self.provision(name, &setup, Some(&workdir)).await?;
-        Ok((
-            setup.env.into_iter().collect(),
-            profile.agent.workdir.clone(),
-        ))
+        setup: &Setup,
+        driver: &Value,
+        labels: HashMap<String, String>,
+    ) -> Result<String> {
+        let req = proto::CreateSandboxRequest {
+            workspace_scope: Some(proto::workspace_selector(self.workspace())),
+            name: name.to_string(),
+            labels,
+            spec: Some(proto::SandboxSpec {
+                environment: setup.env.clone().into_iter().collect(),
+                template: Some(proto::SandboxTemplate {
+                    image: self.settings.image(&profile.engine.image),
+                    resources: Some(files::to_struct(&json!({ "limits": {
+                        "cpu": profile.engine.vcpus.to_string(),
+                        "memory": format!("{}Mi", profile.engine.memory_mib),
+                    }}))),
+                    driver_config: Some(files::to_struct(driver)),
+                    ..Default::default()
+                }),
+                providers: self.settings.providers.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let created = self
+            .sdk
+            .raw_grpc_fresh()
+            .await?
+            .create_sandbox(req)
+            .await
+            .with_context(|| format!("creating sandbox {name} (profile {})", profile.name))?
+            .into_inner();
+        created
+            .sandbox
+            .and_then(|s| s.metadata)
+            .map(|m| m.id)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow!("the gateway made sandbox {name} but gave no id"))
     }
 
-    /// Sets sandbox `name` up as `setup` says: its files written, its
-    /// directories copied (`{workdir}` in a mount's host path is `workdir`;
-    /// with none, those mounts are left out), then its commands run in
-    /// order, in its work directory with its environment. The first that
-    /// fails stops it.
-    pub async fn provision(&self, name: &str, setup: &Setup, workdir: Option<&str>) -> Result<()> {
-        if !setup.left_out.is_empty() {
-            tracing::warn!(
-                sandbox = name,
-                "left out, as they name secrets (the gateway's providers hold credentials): {}",
-                setup.left_out.join(", ")
-            );
-        }
-        for f in &setup.files {
-            self.write_file(name, f)
-                .await
-                .with_context(|| format!("writing {}", f.path))?;
-        }
-        for m in &setup.mounts {
-            let host = match workdir {
-                Some(w) => m.host.replace("{workdir}", w),
-                None if m.host.contains("{workdir}") => continue,
-                None => m.host.clone(),
-            };
-            let host = expand_home(&host);
-            self.copy_dir(name, Path::new(&host), &m.guest)
-                .await
-                .with_context(|| format!("copying {host} to {}", m.guest))?;
-        }
+    /// Runs `setup`'s commands in sandbox `name`, in order, in its work
+    /// directory with its environment; the first that fails stops it. Its
+    /// files and directories are the driver's to copy in, before the
+    /// workload starts ([`OpenShell::driver_config`]).
+    pub async fn run_setup(&self, name: &str, setup: &Setup) -> Result<()> {
         let env: HashMap<String, String> = setup.env.clone().into_iter().collect();
         for cmd in &setup.commands {
             let argv = vec!["bash".to_string(), "-c".to_string(), cmd.clone()];
@@ -1073,50 +1044,41 @@ impl OpenShell {
         Ok(())
     }
 
-    async fn write_file(&self, name: &str, f: &GuestFile) -> Result<()> {
-        let mode = format!("{:o}", f.mode);
-        let argv = ["sh", "-c", WRITE_FILE, "sh", f.path.as_str(), mode.as_str()]
-            .map(String::from)
-            .to_vec();
-        let input = f.content.clone().into_bytes();
-        let (code, _, err) = self
-            .exec(name, argv, HashMap::new(), String::new(), input, 0)
-            .await?;
-        if code != 0 {
-            bail!("exit {code}: {}", err.trim());
+    /// The driver's files root, where sandboxes' files are staged.
+    pub fn staging(&self) -> Result<Staging> {
+        match &self.settings.files_root {
+            Some(root) => Ok(Staging::new(PathBuf::from(expand_home(root)))),
+            None => bail!(
+                "files_root isn't set in openshell.yaml: set it to the driver's \
+                 OPENSHELL_VM_FILES_ROOT (sandboxes' files are copied in from there)"
+            ),
         }
-        Ok(())
     }
 
-    async fn copy_dir(&self, name: &str, host: &Path, guest: &str) -> Result<()> {
-        if !host.is_dir() {
-            bail!("not a directory");
+    /// The `driver_config` of a sandbox (or template) of `profile` set up as
+    /// `setup`, with its files staged in `dir` of the files root (`{workdir}`
+    /// mounts from `workdir`; with none, left out): the overlay disk's size
+    /// (`engine.disk`) and the files.
+    pub fn driver_config(
+        &self,
+        profile: &ResolvedProfile,
+        setup: &Setup,
+        dir: &str,
+        workdir: Option<&str>,
+    ) -> Result<Value> {
+        if !setup.left_out.is_empty() {
+            tracing::warn!(
+                profile = %profile.name,
+                "left out, as they name secrets (the gateway's providers hold credentials): {}",
+                setup.left_out.join(", ")
+            );
         }
-        let tar = tokio::process::Command::new("tar")
-            .arg("-C")
-            .arg(host)
-            .args(["-cf", "-", "."])
-            .output()
-            .await
-            .context("running tar")?;
-        if !tar.status.success() {
-            bail!("tar: {}", String::from_utf8_lossy(&tar.stderr).trim());
-        }
-        let argv = ["sh", "-c", UNPACK, "sh", guest].map(String::from).to_vec();
-        let (code, _, err) = self
-            .exec(
-                name,
-                argv,
-                HashMap::new(),
-                String::new(),
-                tar.stdout,
-                SETUP_OUTPUT,
-            )
-            .await?;
-        if code != 0 {
-            bail!("exit {code}: {}", err.trim());
-        }
-        Ok(())
+        let files = self.staging()?.stage(dir, setup, workdir)?;
+        Ok(files::driver_config(
+            self.settings.driver(),
+            files::disk_mib(&profile.engine.disk)?,
+            files,
+        ))
     }
 
     /// Runs `argv` in sandbox `name` with `stdin`: its exit code, stdout (at
@@ -1287,37 +1249,59 @@ impl OfficeClient for OpenShell {
                 profile.agent = serde_json::from_value(agent).context("agent overlay")?;
             }
             self.office_over_http(&mut profile);
-            let template = self.template(&profile).await?;
             let name = format!("zo-{:012x}", rand::random::<u64>() >> 16);
-            let spec = SandboxTemplateCreateSpec {
-                name: Some(name.clone()),
-                template_name: template.clone(),
-                labels: gateway_labels(&new.labels, &profile.name),
-                providers: self.settings.providers.clone(),
-                ..Default::default()
-            };
+            // `office` (the CLI, the stop hook, the stdio bridge for harnesses
+            // without HTTP MCP) reaches the edge at ZAPPER_OFFICE_URL.
+            let extra = BTreeMap::from([
+                ("ZAPPER_SESSION".to_string(), name.clone()),
+                ("ZAPPER_OFFICE_URL".to_string(), self.mcp_url()),
+            ]);
+            let mut setup = Setup::of(&profile, extra)?;
+            setup.files.extend(new.files.iter().cloned());
+            setup.mounts.extend(new.mounts.iter().cloned());
+            let workdir = new.workdir.to_string_lossy().into_owned();
+            let staged = format!("{STAGED}/{name}");
+            let driver = self.driver_config(&profile, &setup, &staged, Some(&workdir))?;
             let created = self
-                .scoped()
-                .create_sandbox_from_template(spec)
-                .await
-                .with_context(|| format!("creating a sandbox from template {template}"))?;
+                .create(
+                    &name,
+                    &profile,
+                    &setup,
+                    &driver,
+                    gateway_labels(&new.labels, &profile.name),
+                )
+                .await;
+            let uuid = match created {
+                Ok(uuid) => uuid,
+                Err(e) => {
+                    self.staging()?.remove(&staged);
+                    return Err(e);
+                }
+            };
             // Before its agent starts, so it finds the advisor's guide: its
             // workers ask for access through `policy.local`.
             if let Err(e) = self.advisor_on(&name).await {
                 tracing::warn!(sandbox = %name, "{e:#}; its workers can't propose rules");
             }
-            let (env, workdir) = match self.boot(&name, &profile, &new).await {
-                Ok(booted) => booted,
-                Err(e) => {
-                    let gone = DeleteOptions {
-                        allow_missing: true,
-                    };
-                    if let Err(d) = self.scoped().delete_sandbox(&name, gone).await {
-                        tracing::warn!(sandbox = %name, "deleting it after a failed boot: {d}");
-                    }
-                    return Err(e.context(format!("sandbox {name}")));
+            let booted = async {
+                self.wait_ready(&name).await?;
+                self.run_setup(&name, &setup).await
+            }
+            .await;
+            if let Err(e) = booted {
+                let gone = DeleteOptions {
+                    allow_missing: true,
+                };
+                if let Err(d) = self.scoped().delete_sandbox(&name, gone).await {
+                    tracing::warn!(sandbox = %name, "deleting it after a failed boot: {d}");
                 }
-            };
+                self.staging()?.remove(&staged);
+                return Err(e.context(format!("sandbox {name}")));
+            }
+            let (env, workdir): (HashMap<String, String>, String) = (
+                setup.env.into_iter().collect(),
+                profile.agent.workdir.clone(),
+            );
             let info = SessionInfo {
                 id: name.clone(),
                 profile: new.profile.clone(),
@@ -1347,7 +1331,7 @@ impl OfficeClient for OpenShell {
                 name,
                 Sandbox {
                     info: info.clone(),
-                    uuid: created.id,
+                    uuid,
                     env,
                     workdir,
                     command: profile.agent.command.clone(),
@@ -1384,6 +1368,9 @@ impl OfficeClient for OpenShell {
                 )
                 .await
                 .with_context(|| format!("deleting sandbox {id}"))?;
+            if let Ok(s) = self.staging() {
+                s.remove(&format!("{STAGED}/{id}"));
+            }
             Ok(())
         })
     }
@@ -1666,25 +1653,6 @@ fn office_over_http(profile: &mut ResolvedProfile, mcp_url: &str) {
             );
         }
     }
-}
-
-fn template_name(profile: &str) -> String {
-    let s: String = profile
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let s = format!("zapper-{}", s.trim_matches('-'));
-    s.chars()
-        .take(63)
-        .collect::<String>()
-        .trim_end_matches('-')
-        .to_string()
 }
 
 /// The labels the gateway gets: which firm, run and worker (the office keeps
@@ -1975,9 +1943,6 @@ mod tests {
 
     #[test]
     fn templates_and_labels_are_names_the_gateway_takes() {
-        assert_eq!(template_name("fake-corp-dev"), "zapper-fake-corp-dev");
-        assert_eq!(template_name("Office_Fake"), "zapper-office-fake");
-        assert!(template_name(&"p".repeat(100)).len() <= 63);
         assert_eq!(label_value("acme/eng"), "acme-eng");
         assert_eq!(label_value("-x-"), "x");
         let l = gateway_labels(

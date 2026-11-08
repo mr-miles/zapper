@@ -26,7 +26,7 @@ The user creates the credentials themselves; never ask for a token, read it or p
 
 1. The Claude token as the gateway's `anthropic` provider (`claude setup-token` on any machine with a browser prints a long-lived OAuth token; OpenShell's docs say how to create the provider from it).
 2. The workers' identity at the office: `openshell profile import -f config/openshell-office-edge.yaml` and `openshell provider create --name office-edge --type office-edge --runtime-credentials`.
-3. The driver's supervisor identity on: `OPENSHELL_VM_SUPERVISOR_IDENTITY=true` in its environment, then restart it.
+3. In the driver's environment: supervisor identity on (`OPENSHELL_VM_SUPERVISOR_IDENTITY=true`), and sandboxes' files copied in from `OPENSHELL_VM_FILES_ROOT` (the same directory as `files_root:` in `config/openshell.yaml`), with `driver_config` allowed (`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON={"allow_driver_config":true}`, and `allow_driver_config = true` in the gateway's `[openshell.drivers.firecracker]`); then restart the driver and the gateway.
 4. `proposal_approval_mode` and `agent_policy_proposals_enabled` left unset at the gateway: the office decides proposals through its officers and refuses to start otherwise.
 
 ### 4. Hand over a running office

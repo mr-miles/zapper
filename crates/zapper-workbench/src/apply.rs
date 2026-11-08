@@ -3,11 +3,13 @@
 //! image whose recipe or files changed built again (`zapper-openshell`'s
 //! image builder); and each profile made a sandbox template, `wb-<profile>`:
 //! its image, CPU and memory, its environment (the profile's and its
-//! harness's, and `ZAPPER_WORKBENCH_PROFILE`), and labels naming the
-//! profile and the commit it came from (`zapper-profile`,
-//! `zapper-config`). The rest of the profile (its harness's files, the
-//! skills and directories it mounted, its setup commands) is put in each
-//! sandbox once it is made (`provision`).
+//! harness's, and `ZAPPER_WORKBENCH_PROFILE`), its disk size and files
+//! (the harness's files, the skills and directories it mounted: staged under
+//! the driver's files root for the driver to copy into each sandbox made
+//! from it, before its workload starts), and labels naming the profile and
+//! the commit it came from (`zapper-profile`, `zapper-config`). Its setup
+//! commands run in the sandboxes `zapper-workbench new` makes
+//! (`provision`).
 //!
 //! Only what is asked for is applied (`zapper-workbench apply`, `main` by
 //! default); `check` renders a branch without building or applying. The
@@ -47,6 +49,9 @@ struct State {
 const SHORT: usize = 12;
 /// The prefix of the templates the workbench makes.
 pub const TEMPLATE_PREFIX: &str = "wb-";
+/// Where the workbench stages its templates' files, under the driver's files
+/// root.
+const STAGED: &str = "workbench";
 
 /// The template a profile becomes.
 pub fn template_name(profile: &str) -> String {
@@ -221,13 +226,18 @@ impl Applier {
         let mut made = Vec::new();
         for name in config.profiles.keys() {
             let p = config.resolve(name)?;
+            let s = setup(&p)?;
+            // Its files and directories, staged for the driver to copy into
+            // each sandbox made from it before the workload starts.
+            let driver = os.driver_config(&p, &s, &format!("{STAGED}/{name}"), None)?;
             let t = Template {
                 name: template_name(name),
                 image: os.image_of(&p),
                 vcpus: p.engine.vcpus,
                 memory_mib: p.engine.memory_mib,
                 labels: labels(name, &commit),
-                env: setup(&p)?.env,
+                env: s.env,
+                driver_config: Some(driver),
             };
             os.put_template(&t).await?;
             made.push(t.name);

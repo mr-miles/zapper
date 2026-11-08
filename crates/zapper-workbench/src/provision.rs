@@ -1,8 +1,8 @@
 //! Making a sandbox from a profile's template and setting it up as the
 //! profile (`zapper-workbench new`). The template carries the profile's
-//! image, resources, environment and labels; the rest (its harness's files,
-//! the skills and directories it mounted, its setup commands) is put in the
-//! sandbox once the gateway's stream of its status says it is ready. What
+//! image, resources, environment, labels, disk and files (which the driver
+//! copies in before the workload starts); its setup commands run once the
+//! gateway's stream of its status says it is ready. What
 //! was done is kept in `provisioned.json`, by sandbox name, for `status`.
 
 use std::collections::BTreeMap;
@@ -68,7 +68,7 @@ impl Provisioner {
             .await?;
         let done = async {
             let setup = apply::setup(&p)?;
-            self.os.provision(name, &setup, None).await
+            self.os.run_setup(name, &setup).await
         }
         .await;
         let r = Record {
