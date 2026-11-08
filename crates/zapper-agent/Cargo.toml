@@ -5,11 +5,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["office"]
-# Firm workers' `office` command and MCP server.
-office = []
-
 [dependencies]
 zapper-proto = { path = "../zapper-proto" }
 anyhow.workspace = true

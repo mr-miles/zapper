@@ -1,6 +1,6 @@
 # Lint, unit tests and the release build, as `make lint`, `make test` and
-# `make build` run them, with the office and without (OFFICE=0); the
-# release's package, installed under a fresh home; and the pages' scripts.
+# `make build` run them (the office with its OpenShell client); the release's
+# package, installed under a fresh home; and the pages' scripts.
 # The end-to-end tests need KVM, images and network, and stay local
 # (`make test-e2e`).
 name: ci
@@ -9,7 +9,7 @@ on:
   pull_request:
   push:
     # overlay is this fork's main line; main mirrors upstream.
-    branches: [main, overlay]
+    branches: [main, overlay, feat/office-openshell]
   workflow_dispatch:
 
 permissions:
@@ -29,12 +29,6 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        office: [1, 0]
-    env:
-      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v7
       - name: Rust
@@ -42,18 +36,10 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt,clippy
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: office-${{ matrix.office }}
       - run: make lint
 
   test:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        office: [1, 0]
-    env:
-      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v7
       - name: Rust
@@ -61,18 +47,10 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: office-${{ matrix.office }}
       - run: make test
 
   build:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        office: [1, 0]
-    env:
-      OFFICE: ${{ matrix.office }}
     steps:
       - uses: actions/checkout@v7
       - name: Rust
@@ -80,8 +58,6 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal -t x86_64-unknown-linux-musl
           rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: office-${{ matrix.office }}
       - run: make build
       # It runs as PID 1 in any image, so it must not need a dynamic loader.
       - name: The guest agent is static
@@ -103,14 +79,9 @@ jobs:
           test "$(stat -c %a "$conf/zapper.yaml")" = 600
           test -x "$HOME/.local/share/zapper/bin/firecracker"
           test -s "$HOME/.local/share/zapper/kernels/vmlinux-6.1"
-          if [ "$OFFICE" = 0 ]; then
-            test ! -e "$bin/zapper-inspect"
-            test ! -e "$conf/skills"
-            if grep -q '^firms:' "$conf/zapper.yaml"; then exit 1; fi
-          else
-            test -x "$bin/zapper-inspect"
-            ls "$conf"/skills/*/SKILL.md
-          fi
+          test -x "$bin/zapper-inspect"
+          test -x "$bin/zapper-office"
+          ls "$conf"/skills/*/SKILL.md
           # No KVM or images here: check fails, but finds what was installed.
           # Out of the checkout, whose config it would take.
           (cd "$HOME" && "$bin/zapper" check) > "$RUNNER_TEMP/check.txt" || true
@@ -125,12 +96,13 @@ jobs:
           tail -n1 "$conf/zapper.yaml" | grep -qx "# mine"
       - uses: actions/upload-artifact@v7
         with:
-          name: zapper-${{ matrix.office == 1 && 'office' || 'no-office' }}-${{ github.sha }}
+          name: zapper-${{ github.sha }}
           path: |
             target/release/zapper
             target/release/zapper-agent
             target/release/zapper-inspect
             target/release/zapper-keeper
+            target/release/zapper-office
           if-no-files-found: error
           retention-days: 7
 

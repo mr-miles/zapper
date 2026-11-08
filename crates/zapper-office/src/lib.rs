@@ -17,6 +17,8 @@ pub(crate) mod http;
 pub(crate) mod journal;
 mod kb;
 pub(crate) mod mail;
+#[cfg(feature = "openshell")]
+pub mod openshell;
 pub(crate) mod ops;
 pub(crate) mod plan;
 pub(crate) mod product;

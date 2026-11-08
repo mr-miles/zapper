@@ -57,6 +57,11 @@ enum Cmd {
         /// facilities' sockets. Default: `<state_dir>/services`.
         #[arg(long)]
         socket_dir: Option<PathBuf>,
+        /// Drive firms on an OpenShell gateway instead of the zapper daemon,
+        /// with the settings in this file (`openshell.yaml`: the gateway,
+        /// its TLS, images and providers). Needs the `openshell` feature.
+        #[arg(long)]
+        openshell: Option<PathBuf>,
     },
     /// Print the dashboard's address.
     Url {
@@ -134,6 +139,7 @@ async fn main() -> Result<()> {
             listen,
             state_dir,
             socket_dir,
+            openshell,
         } => {
             // Default to the daemon's config: its `state` dir, and `services`
             // under it — so `zapper-office serve` needs no args beside the same
@@ -143,7 +149,11 @@ async fn main() -> Result<()> {
                 None => cli::daemon_state_dir()?,
             };
             let socket_dir = socket_dir.unwrap_or_else(|| state_dir.join("services"));
-            serve(listen.unwrap_or_else(default_listen), state_dir, socket_dir).await
+            let listen = listen.unwrap_or_else(default_listen);
+            match openshell {
+                Some(settings) => serve_openshell(listen, &settings, state_dir, socket_dir).await,
+                None => serve(listen, state_dir, socket_dir).await,
+            }
         }
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
@@ -152,6 +162,46 @@ async fn main() -> Result<()> {
             std::process::exit(firm_cli::config(&Client::new(), cmd, json).await?)
         }
     }
+}
+
+/// The office on an OpenShell gateway: profiles from the zapper config (as
+/// the daemon would read it), sandboxes from the gateway in `settings`.
+#[cfg(feature = "openshell")]
+async fn serve_openshell(
+    listen: SocketAddr,
+    settings: &std::path::Path,
+    state_dir: PathBuf,
+    socket_dir: PathBuf,
+) -> Result<()> {
+    use zapper_office::openshell::{OpenShell, Settings};
+    let settings = Settings::load(settings)?;
+    let gateway = settings.gateway.clone();
+    let os = OpenShell::connect(settings, cli::config_path()).await?;
+    eprintln!("zapper-office: connected to the OpenShell gateway at {gateway}");
+    let tcp = tokio::net::TcpListener::bind(listen)
+        .await
+        .with_context(|| format!("binding {listen}"))?;
+    let remote = !listen.ip().is_loopback();
+    let office_config = cli::office_config_path();
+    zapper_office::standalone::serve_openshell(
+        tcp,
+        std::sync::Arc::new(os),
+        state_dir,
+        socket_dir,
+        office_config,
+        remote,
+    )
+    .await
+}
+
+#[cfg(not(feature = "openshell"))]
+async fn serve_openshell(
+    _listen: SocketAddr,
+    _settings: &std::path::Path,
+    _state_dir: PathBuf,
+    _socket_dir: PathBuf,
+) -> Result<()> {
+    bail!("this zapper-office was built without OpenShell: build it with `--features openshell`")
 }
 
 async fn serve(listen: SocketAddr, state_dir: PathBuf, socket_dir: PathBuf) -> Result<()> {

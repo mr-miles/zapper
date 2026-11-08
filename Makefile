@@ -13,7 +13,6 @@
 #   make lint              rustfmt and clippy (warnings are errors), as the pre-commit hook runs them
 #   make fmt               format the code with rustfmt
 #   make hooks             use the repository's git hooks (.githooks: pre-commit runs make lint)
-#   OFFICE=0               with any of the above: zapper without The Office (no firms)
 #   make test-e2e          boots real VMs: policy, secrets, exec, attacks (needs KVM, network)
 #   make clean
 #
@@ -27,25 +26,14 @@ PREFIX  ?= $(HOME)/.local
 IMAGE   ?= ubuntu-26.04
 ZAPPER  := $(TARGET)/zapper
 KERNEL  ?= k8s
-# OFFICE=0 builds zapper without The Office (cargo --no-default-features),
-# and without zapper-inspect, which reads firms' runs; lint and tests leave
-# out the office's crates too.
-OFFICE  ?= 1
-ifeq ($(OFFICE),0)
-FEATURES := --no-default-features
-HOST     := -p zapper -p zapper-keeper -p zapper-workbench
-BINS     := zapper zapper-agent zapper-workbench
-EXCLUDE  := --exclude zapper-office --exclude zapper-inspect --exclude zapper-runs --exclude zapper-fake
-FAKE     :=
-else
-FEATURES :=
+# The office is built with its OpenShell client (feature `openshell`;
+# docs/openshell-migration.md), so lint, tests and the build all cover it.
+FEATURES := --features zapper-office/openshell
 HOST     := -p zapper -p zapper-keeper -p zapper-inspect -p zapper-workbench -p zapper-office
 BINS     := zapper zapper-agent zapper-inspect zapper-workbench zapper-office
-EXCLUDE  :=
 # The fake Claude Code and pi of the office's e2e tests, static like the
 # agent: the office-fake image installs it.
 FAKE     := -p zapper-fake
-endif
 
 # Image recipes are in the config (config/zapper.yaml, `images:`).
 
@@ -55,7 +43,7 @@ deps:
 	scripts/fetch-deps.sh
 
 build:
-	cargo build --release $(FEATURES) -p zapper-agent $(FAKE) --target $(MUSL)
+	cargo build --release -p zapper-agent $(FAKE) --target $(MUSL)
 	cargo build --release $(FEATURES) $(HOST)
 	cp $(AGENT) $(TARGET)/zapper-agent
 
@@ -73,11 +61,11 @@ check: build
 	$(ZAPPER) check
 
 test:
-	cargo test --workspace $(EXCLUDE) $(FEATURES)
+	cargo test --workspace $(FEATURES)
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace $(EXCLUDE) --all-targets --release $(FEATURES) -- -D warnings
+	cargo clippy --workspace --all-targets --release $(FEATURES) -- -D warnings
 	# The fuzz targets' entry points (feature `fuzz`), which no other build has.
 	cargo clippy -p zapper-core --features fuzz --all-targets --release -- -D warnings
 

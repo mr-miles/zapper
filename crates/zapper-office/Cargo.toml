@@ -40,6 +40,13 @@ ring = "0.17"
 time = "0.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+# The office on an OpenShell gateway instead of the zapper daemon (feature
+# `openshell`; docs/openshell-migration.md). Its proto build uses a vendored
+# protoc, so no system one is needed.
+openshell-sdk = { git = "https://github.com/NVIDIA/OpenShell", tag = "v0.1.7", optional = true }
+
+[features]
+openshell = ["dep:openshell-sdk"]
 
 [[bin]]
 name = "zapper-office"

@@ -12,7 +12,6 @@ mod control;
 mod forward;
 mod holder;
 mod init;
-#[cfg(feature = "office")]
 mod office;
 mod shell;
 mod sys;
@@ -29,7 +28,6 @@ fn main() {
     }
     let args: Vec<String> = std::env::args().collect();
     // Installed in guests as `office` too.
-    #[cfg(feature = "office")]
     if args
         .first()
         .is_some_and(|a| a.rsplit('/').next() == Some("office"))
@@ -40,7 +38,6 @@ fn main() {
         Some("--version") => println!("zapper-agent {}", env!("CARGO_PKG_VERSION")),
         // A persistent terminal's holder, started by PID 1 (`holder`).
         Some("hold") => std::process::exit(holder::run()),
-        #[cfg(feature = "office")]
         Some("office") => std::process::exit(office::cli(&args[2..])),
         _ => {
             eprintln!("zapper-agent runs as PID 1 of a zapper microVM");

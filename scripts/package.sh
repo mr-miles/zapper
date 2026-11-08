@@ -4,7 +4,6 @@
 # `zapper init` writes the example config and the workers' skills.
 #
 #   make build && scripts/package.sh v0.1.0    # dist/zapper-v0.1.0-x86_64-linux.tar.gz
-#   OFFICE=0 make build && OFFICE=0 scripts/package.sh v0.1.0    # without the office
 set -eu
 
 VERSION=${1:?usage: $0 VERSION}
@@ -17,8 +16,7 @@ ROOT=$OUT/$NAME
 # As the Makefile builds them: zapper-inspect reads firms' runs, and
 # zapper-office is The Office's binary (serve, the firm CLI, and `init`,
 # which installs the workers' agents and skills).
-BINS="zapper zapper-agent"
-[ "${OFFICE:-1}" = 0 ] || BINS="$BINS zapper-inspect zapper-office"
+BINS="zapper zapper-agent zapper-inspect zapper-office"
 for b in $BINS; do
     [ -x "$HERE/target/release/$b" ] || { echo "no target/release/$b: run make build first" >&2; exit 1; }
 done

@@ -1,0 +1,230 @@
+# Moving zapper-office onto OpenShell + Firecracker
+
+2026-11-07 · Miles
+
+## Summary
+
+Recommendation: keep zapper-office's firm logic as it is, and replace only the layer under it. zapper-office already reaches the zapper daemon through one Rust trait, `OfficeClient` (`crates/zapper-office/src/client.rs`, about 20 methods). The smallest migration adds a third implementation of that trait, `OpenShell`, which talks gRPC to an OpenShell v0.1.7 gateway running the openshell-firecracker driver. It also adds one host-side **office edge** service that replaces the guest-to-daemon vsock port.
+
+The smallest implementation has five parts:
+
+1. **`OpenShell` client** implementing `OfficeClient` over the gateway API: `CreateSandbox`, `DeleteSandbox`, `ExecSandboxInteractive`, `ForwardTcp`, `UpdateConfig`, the draft-policy RPCs and `GetSandboxLogs`.
+2. **Office edge**, one HTTP service on a private host address. It serves the office MCP tools (Streamable HTTP), the git server, the Stop-hook endpoint and an OAuth2 token endpoint that turns a sandbox's SPIFFE JWT-SVID into a worker identity.
+3. **An `office` provider profile** with a `client_credentials` token grant. The supervisor injects the worker's short-lived token into every request to the firm's services, so no credential enters the VM. The Claude token uses the stock `anthropic` provider the same way.
+4. **Officer queue on draft policy**: denials become drafts (`GetDraftPolicy`), and officer decisions become `ApproveDraftChunk` / `RejectDraftChunk` or a policy update.
+5. **The k3s cluster moves out of the VM fleet** and runs as a host container that workers reach through an `allowed_ips` rule. OpenShell's single guest kernel and NIC-less guests don't suit k3s.
+
+Rough size: about 10 engineer-weeks to cutover over 6 phases, then about 1 week for durable traffic history (Phase 6). The firm logic (mail, workforce, budgets, drive, contracts, scenarios, UI, journal, replay) stays unchanged. The main risk is that the vendored Firecracker driver hasn't booted a real sandbox yet, so Phase 0 is a de-risking spike with pass/fail gates.
+
+## Current state: what zapper-office takes from zapper
+
+zapper-office is already its own process. In production it reaches the zapper daemon only through `zapper-client` over the daemon's Unix socket (the `Remote` impl of `OfficeClient`), plus a vsock port inside each guest. Everything it needs from zapper falls into seven groups:
+
+| Group | `OfficeClient` methods / mechanism | What zapper does for it |
+| --- | --- | --- |
+| Sessions | `create_session`, `stop_session`, `session`, `admit`, `session_count`, `config` | Boots a Firecracker VM from a zapper profile (image, size, network, secrets); checks host memory and `max_sessions` |
+| Driving the agent | `attach` (terminal stream), `connect_port` | Terminal channel into the guest; the foreman runs `claude -p --input-format stream-json` over it. Also copies files in and out for `drive_publish` / `drive_fetch` |
+| Guest → office calls | vsock port `office`, `zapper-agent office` (MCP stdio server + CLI + `stop-hook`) | One JSON request per connection. The daemon knows the caller from the vsock socket, so no token is needed |
+| Network rules | `add_layer_rule`, `remove_layer_rule`, `reset_layer` (role layers); `put_session_rule`, `remove_session_rule` (worker layer); `allowed`; `promote_rule` | Layered allow/deny/ask rules (global → profile → role → session), applied live to running VMs |
+| Access decisions | `add_decider_socket`, `remove_decider` | Sends each `ask` to the office's decider socket, which refuses at once and queues it for an officer |
+| Traffic | `requests` | The proxy's request log per session: method, URL, status, sizes, deciding rule |
+| Firm services | `add_service`, `add_zone`, `remove_service`, `add_mcp_socket`, `remove_mcp_server` | Names under `<firm>.internal` that resolve only inside the firm. The daemon splices connections to the office's git server, the cluster VM's API and ingress, and the office MCP gateway |
+
+Three more things come from zapper underneath and are easy to miss:
+
+- **Secrets as placeholders.** The Claude token is substituted by the host proxy, never placed in the VM.
+- **Exec gating.** A guest seccomp filter makes every exec wait for the host's allow/deny decision, and logs it. The office forbids `ask` on exec, so only allow/deny lists are in use.
+- **The record.** zapper keeps audit logs, terminal recordings and an optional append-only keeper per session. `run.json` links them from the firm's run.
+
+## Target state
+
+In the target state, zapper-office drives OpenShell's gateway instead of the zapper daemon. Every byte a worker sends leaves its VM over vsock to its host supervisor, which enforces the sandbox's policy and attaches the worker's identity before the request reaches the office.
+
+```mermaid
+flowchart LR
+    subgraph Control[Control plane]
+        office["zapper-office<br/>firm logic unchanged<br/>new: OpenShell client"]
+        gw["openshell-gateway v0.1.7<br/>sandboxes, policy, drafts<br/>OCSF log stream"]
+        drv["Firecracker driver<br/>boots one VM per worker<br/>issues SPIFFE JWT-SVIDs"]
+    end
+    vm["Worker microVM<br/>claude -p, office CLI<br/>no NIC: vsock only"]
+    sup["Host supervisor<br/>enforces policy per binary<br/>injects provider tokens"]
+    edge["Office edge (new)<br/>MCP, git, Stop hook<br/>/oauth/token checks SVID"]
+    k3s["k3s container (host)<br/>cluster API and ingress<br/>reached via allowed_ips"]
+    net["Anthropic API, internet<br/>Claude token injected<br/>other hosts by approval"]
+
+    office -->|gRPC: create, exec, policy| gw
+    gw -->|compute driver socket| drv
+    drv --> vm
+    vm -->|vsock| sup
+    sup --> gw
+    sup -->|HTTPS + worker token| edge
+    sup --> k3s
+    sup --> net
+    edge -->|office tools| office
+```
+
+OpenShell supplies isolation, policy, credentials and identity. zapper-office keeps everything that makes it a company: mail, budgets, hiring, the drive, security officers and the record.
+
+## Required changes, capability by capability
+
+Most capabilities map directly onto an OpenShell v0.1.7 RPC. Three need new office code before cutover: the guest-to-office channel, role-wide rules and the cluster. Durable traffic history comes later, in Phase 6. Two are accepted losses: per-exec host approval and `once`-scoped approvals.
+
+| zapper capability | OpenShell + openshell-firecracker equivalent | Change in zapper-office | Size |
+| --- | --- | --- | --- |
+| `create_session` from a profile | `CreateSandbox` with a sandbox template per role (image, CPU/memory, base policy, attached providers). Image `ENV`/`WORKDIR` are honoured by the vendored driver | Translate zapper profiles to templates; write the preamble, skills and `mcpServers` config into the sandbox after create | M |
+| `stop_session`, `session`, `session_count` | `DeleteSandbox`, `GetSandbox`, `ListSandboxes`, `WatchSandbox` | Thin mapping | S |
+| `admit` (host room) | Gateway `resource_admission`; no free-memory check | Keep the office's own `/proc/meminfo` check before create | S |
+| `attach` (foreman drives `claude -p`) | `ExecSandboxInteractive` (bidirectional stdin/stdout stream) | Wrap the stream as a `DriveStream`; restart with `--resume` when the stream drops, as today | M |
+| `drive_publish` / `drive_fetch` file copy | `ExecSandbox` running `tar` (or `openshell sandbox upload/download` over SSH) | Replace the terminal-channel copy with exec + tar, capped at `artifact_size` | S |
+| `connect_port` (product, dashboard) | `ForwardTcp` | Only needed if the cluster stays a sandbox; with k3s on the host, the product port connects directly | S |
+| vsock `office` port + `zapper-agent office` | No vsock to anything but the supervisor. The guest reaches host services through the supervisor proxy only | **New office edge**: MCP over Streamable HTTP at `office.<domain>`, plus `/stop-hook`. The guest CLI becomes a ~100-line HTTP client | L |
+| Caller identity (vsock socket = VM) | Driver-issued SPIFFE JWT-SVID per supervisor (`spiffe://<td>/openshell/sandbox/<id>`), used as an OAuth2 client assertion by a provider token grant | **New token endpoint** in the edge: verifies the SVID against the driver's JWKS and issues a token naming the worker. Every edge route checks it | M |
+| Claude token placeholder | `anthropic` provider; static credential bound to the vendor endpoint | Config only | S |
+| Git server (per-worker password + source VM check) | Same token grant, injected on requests to `git.<domain>` | Drop per-worker passwords; `git http-backend` behind the edge checks the bearer token, then the grant | S |
+| Role-layer rules | None: policy is per sandbox (base + provider rules) or global | Fan out: the office keeps role rules and writes them into every sandbox of the role with `UpdateConfig` | M |
+| Session-layer rules, revocation | `openshell policy update` semantics via `UpdateConfig`; changes load live and close connections opened under old rules | Thin mapping. Rules need a `binaries` list: use the agent image's known binaries, or a glob if v0.1.7 accepts one (to check) | M |
+| `ask` + decider socket | No hold. Denied connections are drafted automatically into per-binary proposals (`GetDraftPolicy`); the policy advisor (`policy.local`) lets agents propose rules with a reason | Officer queue reads drafts; `access_decide` → `ApproveDraftChunk` / `RejectDraftChunk`; `request_access` stays an office MCP tool. zapper also refused at once, so agent behaviour is unchanged | M |
+| `allowed` (would this be allowed?) | Policy prover / effective policy (`GetSandboxConfig`) | Evaluate the host and port against the effective policy in the office | S |
+| `requests` (traffic log) | OCSF `NET:OPEN` / `HTTP:*` events in `WatchSandbox` / `GetSandboxLogs`; the gateway keeps only 2,000 lines per sandbox in memory | **Interim:** `requests()` reads recent events on demand with `GetSandboxLogs`, with no ingest. **Phase 6:** query history from telemetry and the audit extension | S |
+| Services and zones (`*.<firm>.internal`) | No zones. The supervisor resolves names on the host; private addresses are allowed for exact hostnames, and loopback never | Bind the edge on a private host address (a dummy interface); resolve `office.`, `git.` and `cluster.` names on the host (`/etc/hosts` or dnsmasq) | S |
+| k3s cluster facility (own kernel, NIC, vsock forwards) | Not a good fit: the driver boots one kernel per driver, and guests have no NIC | Run k3s as a host podman container per run; workers reach `cluster.<domain>:6443` with `allowed_ips`; kubeconfig copied in by exec | M |
+| Per-exec host approval + exec log (seccomp) | No equivalent; Landlock, seccomp and binary-scoped network rules instead | **Accepted loss.** Office profiles already allow or deny exec without `ask` | — |
+| Audit log, terminal recordings, keeper | Gateway OCSF JSONL (`ocsf_log`) for gateway events; supervisor logs are not durable | The office keeps transcripts as today; traffic history comes from telemetry and the audit extension in Phase 6. No terminal recordings | S |
+| `promote_rule` (save to config) | Global policy, or a role template | Write the rule into the role's template or the office config | S |
+
+Size: S is under 2 days, M is 3 to 5 days, L is 1 to 2 weeks.
+
+## The smallest implementation
+
+The smallest change that keeps every office feature is one new trait impl, one new HTTP service, two provider profiles and a template per role. Nothing above `OfficeClient` changes, so mail, workforce, budgets, contracts, scenarios, the drive, the UI, the journal and replay come across as they are.
+
+### What gets built
+
+1. **`zapper-office/src/openshell.rs`: `struct OpenShell` implementing `OfficeClient`**, using the OpenShell Rust SDK (gRPC, mTLS to the gateway). It keeps a map from worker to sandbox id and the office's own role-rule table, which it fans out with `UpdateConfig`. Methods with no OpenShell meaning (`add_zone`, `add_service`, `add_decider_socket`, `add_mcp_socket`) become no-ops that return an id. Their job moves into the edge and the provider config.
+2. **`office-edge`**, an axum service bound to a private host address, for example `10.231.0.1:443` on a dummy interface with a certificate from the office's CA (but see the TLS open question). Routes:
+    - `POST /oauth/token`: verifies the JWT-SVID with the driver's JWKS (`127.0.0.1:8961`), maps sandbox id to worker, and returns a 5-minute token.
+    - `/mcp`: the office tools over MCP Streamable HTTP, dispatching to the same `ops.rs` handlers the vsock port uses today. Role scoping and authority checks are unchanged.
+    - `/stop-hook`: the Stop hook's "any new mail?" call.
+    - `git.<domain>/*`: the existing `git http-backend` handler, with the bearer token replacing the per-worker password.
+3. **Provider profiles.** `office` uses `token_grant: client_credentials`, `token_endpoint: https://office.<domain>/oauth/token`, with endpoints `office.<domain>:443` and `git.<domain>:443`. The stock `anthropic` profile carries the Claude subscription token. Both are attached to every worker sandbox.
+4. **Sandbox templates per role**, generated at `firm up` from today's zapper profiles: image (`office`, plus a small `office` HTTP CLI replacing `zapper-agent office`), CPU and memory, and a base policy. The base policy contains the Anthropic API, the office services pinned with `allowed_ips: [10.231.0.0/24]`, and the profile's allowed hosts. `cluster.<domain>` is added only when granted.
+5. **Traffic, interim**: `requests()` reads each worker's recent OCSF network events from `GetSandboxLogs` when an officer tool, the digest or the rule-use count asks for them. That covers what officers use today, within the gateway's 2,000-line buffer per sandbox. There's no ingest task; durable history is Phase 6.
+6. **Cluster on the host**: `podman run rancher/k3s` per run, its API and ingress on the same private address. The office already creates service accounts and kubeconfigs; it now does this with `kubectl` on the host, then copies the kubeconfig in with `ExecSandbox`.
+
+### What it deletes
+
+The office stops depending on the zapper daemon: `zapper-client`, `zapper-driver`'s terminal transport, `zapper-record` and the daemon's rule layers. `zapper-github` and `zapper-mint` stay as libraries for the GitHub App tokens, and `zapper-policy`'s config types stay until firm profiles move into `office.yaml`. The guest-side `zapper-agent office` and the vsock port go. So do the cluster's custom `vmlinux-6.1-k8s` kernel and its vsock forwards.
+
+### Behaviour that changes
+
+- **`ask` becomes deny + draft.** The agent sees a 403 with OpenShell's text instead of zapper's request id. The office's own `request_access` tool still queues a request with a reason, and the officer decision still mails the worker.
+- **`once` approvals** are approved as worker rules with a 10-minute expiry, which the office removes. Exact once-only semantics need an `HTTP:*` log match, so they're out of scope.
+- **Network rules are binary-scoped.** That's stricter than zapper's host rules, and drafts arrive per binary.
+- **No per-exec record and no terminal recordings.** Transcripts and traffic remain.
+
+## Workplan
+
+The work runs in six phases over about 10 weeks for one engineer to cutover, then a later Phase 6 for traffic history. Phase 0 settles the open technical questions before any office code changes. Each phase ends at a gate tested with the existing fake-Claude e2e scripts (`tests/fake`).
+
+```mermaid
+gantt
+    title About 10 weeks to cutover; traffic history follows in its own phase
+    dateFormat X
+    axisFormat W%s
+    section Phases
+    0 Spike and de-risk (go/no-go)   :p0, 0, 2
+    1 OpenShell client               :p1, 2, 3
+    2 Office edge and identity       :p2, 3, 5
+    3 Policy, officers, traffic      :p3, 5, 7
+    4 Cluster and facilities         :p4, 7, 8
+    5 Cutover and e2e suite          :p5, 8, 10
+    6 Traffic history (later)        :p6, 10, 11
+```
+
+Estimated weeks for one engineer. Phases 2 and 3 can run in parallel with a second engineer, saving about 2 weeks.
+
+### Phase 0: Spike and de-risk (weeks 1 to 2)
+
+- [x] Boot the vendored v0.1.7 driver with sub-uids on; run 10 concurrent sandboxes on the `office` image for 4 hours.
+- [x] Run `claude -p --input-format stream-json` through `ExecSandboxInteractive`, with the `anthropic` provider supplying the token.
+- [x] Turn on supervisor identity; complete a `client_credentials` token grant against a stub `/oauth/token`; confirm injection on a private-address host.
+- [x] Settle TLS from the supervisor to a host service (see risks).
+- [x] Confirm a denied request produces a draft in `GetDraftPolicy`, and that `binaries` accepts a glob.
+
+Gate: all five pass. Otherwise stop, or fix in openshell-firecracker first. (Verified.)
+
+### Phase 1: OpenShell client (week 3)
+
+- [x] `OpenShell` impl of `OfficeClient`: sessions, `attach`, `admit`, `config`; profiles become sandbox templates (`crates/zapper-office/src/openshell.rs`, feature `openshell`).
+- [x] File copy for `drive_publish` / `drive_fetch`: the drive's existing `tar` over `attach`, which is `ExecSandboxInteractive` here, so no separate `ExecSandbox` path is needed.
+- [ ] Run the gate on a gateway (below).
+
+How to run it: build the office with `cargo build --release -p zapper-office --features openshell`; `make image IMAGE=office-fake`, then `scripts/openshell-image.sh office-fake`; create the gateway's `anthropic` provider; edit `config/openshell.yaml`; `zapper-office serve --openshell config/openshell.yaml`; then start a firm whose roles use `office-fake` profiles (as `tests/e2e-office.sh` writes them) with `zapper-office firm up`.
+
+What phase 1 leaves to later phases: rules are kept and `allowed` judges by them, but nothing enforces them at the network (phase 3); `requests()` is empty (phase 3); the office MCP server, git server and decider are served but no sandbox reaches them, so their registrations are no-ops (phase 2), and a fake worker's office tool calls fail until then; `promote_rule` and port forwards (the cluster) refuse (phases 3 and 4). Commands run as the sandbox user, never root, and `{{secret:…}}` values in profiles are left out, since the gateway's providers hold credentials.
+
+Gate: a fake-Claude firm boots and the foreman takes turns.
+
+### Phase 2: Office edge and identity (weeks 4 to 5)
+
+- [ ] `office-edge`: `/oauth/token`, MCP Streamable HTTP over `ops.rs`, `/stop-hook`, git behind bearer tokens.
+- [ ] `office` provider profile; host DNS for `<firm>.internal`; image update (HTTP `office` CLI, `mcpServers` type `http`).
+
+Gate: e2e for delegation, authority, identity (the sender is the sandbox), mail privacy and git grants passes.
+
+### Phase 3: Policy, officers, traffic (weeks 6 to 7)
+
+- [ ] Role-rule fan-out and worker rules through `UpdateConfig`; expiry timers; revocation.
+- [ ] Officer queue from drafts; `access_decide` to approve or reject; `request_access` kept.
+- [ ] Interim traffic: `requests()` over `GetSandboxLogs` (recent events only, matched rule parsed from `[policy:<rule>]`); digest wakes.
+
+Gate: e2e for a request refused, decided by an officer and retried, plus revocation, passes.
+
+### Phase 4: Cluster and facilities (week 8)
+
+- [ ] k3s host container per run; service accounts and kubeconfig by exec; product and dashboard ports.
+- [ ] GitHub remote and knowledge base unchanged; re-test `publish_branch`.
+
+Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) passes.
+
+### Phase 5: Cutover (weeks 9 to 10)
+
+- [ ] Port `make test-e2e-office`; one real-Claude two-worker run; one red-team scenario run.
+- [ ] Remove the daemon dependencies, update `docs/office.md` and the quickstart.
+
+Gate: the full office e2e suite is green on OpenShell.
+
+### Phase 6: Traffic history (later, about 1 week)
+
+- [ ] Confirm the audit extension and telemetry keep network events with the sandbox ID and the matched rule, and how quickly events land there.
+- [ ] Replace the interim `requests()` with a read adapter over that store; keep `GetSandboxLogs` for the digest count if the store lags by minutes.
+- [ ] Link each run's traffic history from `run.json`, as zapper's session audit logs are today.
+
+Gate: officers' `traffic()` and `access_rules()` counts cover a whole run, including after a gateway restart.
+
+## Risks, open questions and decisions
+
+The biggest risk is maturity rather than design. openshell-firecracker's own verification table says the vendored v0.1.7 driver has not run a sandbox, and sub-uids, concurrency and long-running guests are unchecked. A firm runs 5 to 15 concurrent, hours-long VMs.
+
+| Risk or question | Impact | Mitigation or how to settle it |
+| --- | --- | --- |
+| Vendored driver not yet booted; concurrency and long runs untested | Blocks everything | Phase 0 gate: 10 concurrent sandboxes for 4 hours, with `rootfs-console.log` captured |
+| TLS from the supervisor to the office edge: the supervisor must trust the edge's certificate, and `additional_ca_bundle` is rejected for external drivers | Office MCP and git unreachable over HTTPS | Phase 0 spike. Options: host trust store if the supervisor reads it; plain HTTP to a private address if token injection still works on `http`; or a publicly-trusted certificate for a real subdomain |
+| Does a token grant inject on a non-default port or a private address? | Identity design | Phase 0 spike with a stub token endpoint |
+| Binary-scoped rules: does v0.1.7 accept a glob in `binaries`? | Officer approvals per binary are noisier | Check the policy schema. Fallback: a fixed binary list per role image |
+| Until Phase 6, officers see only the gateway's last 2,000 log lines per sandbox, held in memory | Older traffic in a busy run can't be queried; counts are lost if the gateway restarts | Accepted for the interim, since officers work on recent traffic. Phase 6 moves queries to telemetry and the audit extension |
+| OpenShell API churn (middleware API marked evolving; driver pinned to v0.1.7) | Rework at upgrades | Use only gateway RPCs and provider profiles, not middleware. Pin gateway and driver together |
+| Loss of per-exec gating and terminal recordings | Weaker record than zapper's | Decide whether that's acceptable for The Office (see decisions) |
+
+**Decisions needed:**
+
+- [ ] Accept losing per-exec host approval and exec audit, or require it (that would mean a supervisor change upstream).
+- [ ] Cluster: k3s as a host container (recommended, smallest) or a k3s-capable sandbox (needs a second guest kernel and a NIC-less k3s setup).
+- [ ] Keep `zapper` as an alternative backend behind `OfficeClient` during the transition, or cut over in one go.
+
+## Sources
+
+- [mr-miles/zapper](https://github.com/mr-miles/zapper): `docs/office.md`, `docs/crate-dependencies.md`, `crates/zapper-office/src/client.rs` (`OfficeClient`)
+- [mr-miles/openshell-firecracker](https://github.com/mr-miles/openshell-firecracker): README (supervisor identity, verification status, limits)
+- [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell) at `v0.1.7`: `proto/openshell.proto`, `proto/supervisor_middleware.proto`, docs on policies, the policy advisor, provider profiles (token grants) and logs
