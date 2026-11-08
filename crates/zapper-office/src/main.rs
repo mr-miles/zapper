@@ -203,6 +203,9 @@ async fn serve(listen: SocketAddr, settings: &std::path::Path, state_dir: PathBu
     let gateway = settings.gateway.clone();
     let os = OpenShell::connect(settings, cli::config_path()).await?;
     os.require_officers().await?;
+    for w in os.ignored() {
+        eprintln!("zapper-office: zapper.yaml: {w}");
+    }
     eprintln!("zapper-office: connected to the OpenShell gateway at {gateway}");
     let tcp = tokio::net::TcpListener::bind(listen)
         .await

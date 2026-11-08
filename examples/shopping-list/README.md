@@ -11,7 +11,7 @@ There is no cluster: the engineers run and test the app in their own VMs, and yo
 
 ## Before you start
 
-You need a zapper set up as in the [README](../../README.md): `make deps`, `make install`, and the Claude Code image, `make image IMAGE=office`. You also need your Claude token in `~/.config/zapper/claude-token`; [config/zapper.yaml](../../config/zapper.yaml) says how. Then, from the repository's root:
+You need The Office set up as in the [quickstart](../../docs/quickstart.md): an OpenShell gateway with the `anthropic` and `office-edge` providers, and the workers' image (`make image`). Then, from the repository's root:
 
 ```
 zapper --config examples/shopping-list/zapper.yaml check

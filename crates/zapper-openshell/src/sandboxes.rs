@@ -775,6 +775,12 @@ impl OpenShell {
         Ok(config)
     }
 
+    /// What the zapper config sets that OpenShell doesn't do
+    /// ([`rules::ignored`]).
+    pub fn ignored(&self) -> Vec<String> {
+        rules::ignored(&self.config())
+    }
+
     /// The OCI image profile `p`'s sandboxes run.
     pub fn image_of(&self, p: &ResolvedProfile) -> String {
         self.settings.image(&p.engine.image)
@@ -1205,7 +1211,12 @@ impl OfficeClient for OpenShell {
         let mut c = self.config.lock().unwrap();
         if now != c.0 {
             match load_config(&self.config_path) {
-                Ok(config) => *c = (now, config),
+                Ok(config) => {
+                    for w in rules::ignored(&config) {
+                        tracing::warn!("zapper.yaml: {w}");
+                    }
+                    *c = (now, config)
+                }
                 Err(e) => tracing::warn!("{e:#}; keeping the config as it was"),
             }
         }

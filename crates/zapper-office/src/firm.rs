@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use zapper_policy::{parse_size, valid_worker_name, Action, Config};
+use zapper_policy::{parse_size, valid_worker_name, Config};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1006,21 +1006,8 @@ until someone funds them, every access request and background check goes to the 
                     "role {rname}: agent {agent:?}: lowercase letters, digits and dashes"
                 ));
             }
-            match config.resolve(&role.profile) {
-                Err(e) => err(format!("role {rname}: profile {}: {e:#}", role.profile)),
-                Ok(p) => {
-                    // Officers decide network access only; an exec can't wait
-                    // minutes for them.
-                    let mut layers: Vec<&zapper_policy::Policy> =
-                        p.layers.iter().map(|(_, l)| l).collect();
-                    layers.push(&config.policy);
-                    if layers.iter().any(|l| {
-                        l.exec.iter().any(|r| r.action == Action::Ask)
-                            || l.defaults.exec == Some(Action::Ask)
-                    }) {
-                        err(format!("role {rname}: profile {} has exec rules that ask; in a firm, exec rules are allow or deny", role.profile));
-                    }
-                }
+            if let Err(e) = config.resolve(&role.profile) {
+                err(format!("role {rname}: profile {}: {e:#}", role.profile));
             }
         }
         for (rname, role) in &self.roles {
@@ -1255,15 +1242,12 @@ pub(crate) fn test_config(yaml: &str) -> Config {
 }
 
 /// The office's check of its firms: each adds up with the profiles it names
-/// (`zapper.yaml`'s), and the driver is on. The office validates on load
+/// (`zapper.yaml`'s). The office validates on load
 /// and reload; the tests validate what `test_core` splits out of their YAML.
 pub fn validate_firms(firms: &BTreeMap<String, Firm>, config: &Config) -> Result<()> {
     let mut errors = Vec::new();
     for (name, f) in firms {
         errors.extend(f.validate(name, config));
-    }
-    if !config.daemon.driver && !firms.is_empty() {
-        errors.push("firms: firms need the driver, which is off (daemon.driver: false)".into());
     }
     if errors.is_empty() {
         Ok(())
@@ -1306,7 +1290,6 @@ profiles:
   w: { agent: { kind: claude-code } }
   p: { agent: { kind: pi, model: qwen } }
   plain: { agent: { kind: generic } }
-  asks: { policy: { exec: [{ action: ask, path: ssh }] } }
 firms:
   acme:
     roles:
@@ -1566,15 +1549,6 @@ firms:
             .unwrap_err()
             .to_string()
             .contains("unknown role intern"));
-    }
-
-    #[test]
-    fn exec_ask_is_refused_in_firm_profiles() {
-        let c = BASE.replace("eng: { profile: w", "eng: { profile: asks");
-        assert!(firm(&c)
-            .unwrap_err()
-            .to_string()
-            .contains("exec rules that ask"));
     }
 
     #[test]

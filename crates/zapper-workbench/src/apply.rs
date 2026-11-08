@@ -188,8 +188,9 @@ impl Applier {
             .map(|(n, _)| n)
             .collect();
         let profiles: Vec<String> = config.profiles.keys().map(|p| template_name(p)).collect();
+        let ignored = zapper_openshell::rules::ignored(&config);
         Ok(
-            json!({ "commit": commit, "subject": subject, "images": changed, "templates": profiles }),
+            json!({ "commit": commit, "subject": subject, "images": changed, "templates": profiles, "ignored": ignored }),
         )
     }
 
@@ -200,6 +201,9 @@ impl Applier {
         let dir = self.data.join("live").join(&commit);
         let (config, images) = self.render(&commit, &dir)?;
         let mut state = self.state()?;
+        for w in zapper_openshell::rules::ignored(&config) {
+            log(&format!("ignored: {w}"));
+        }
         let mut built = Vec::new();
         for (name, hash) in &images {
             if state.images.get(name) == Some(hash) {

@@ -506,17 +506,6 @@ fn a_firm_on_an_unknown_profile_is_refused() {
 }
 
 #[test]
-fn firms_need_the_driver() {
-    let c = zapper_policy::Config::from_yaml("daemon: { driver: false }\nprofiles: { w: {} }\n")
-        .unwrap();
-    let firms = crate::firm::test_firms(
-        "profiles: { w: {} }\nfirms:\n  acme:\n    roles: { ceo: { profile: w, agent: ceo } }\n    workers: [{ name: ceo, role: ceo }]\n",
-    );
-    let e = crate::firm::validate_firms(&firms, &c).unwrap_err();
-    assert!(format!("{e:#}").contains("firms need the driver"), "{e:#}");
-}
-
-#[test]
 fn reload_applies_a_valid_office_yaml_and_rejects_a_bad_one() {
     let t = crate::test_core(FIRM);
     let office = t.core.office();

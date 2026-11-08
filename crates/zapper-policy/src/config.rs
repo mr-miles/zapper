@@ -701,8 +701,7 @@ pub struct AgentSpec {
     /// Default command of `zapper run`.
     pub command: Vec<String>,
     /// Run the agent headless, given tasks through the API, `zapper tell`
-    /// or the UI instead of a terminal (`DRIVABLE_KINDS` only; needs
-    /// `daemon.driver`).
+    /// or the UI instead of a terminal (`DRIVABLE_KINDS` only).
     pub driven: bool,
     /// User the command runs as, created with uid 1000 if missing.
     pub user: String,
@@ -1227,11 +1226,6 @@ impl Config {
                     DRIVABLE_KINDS.join(", ")
                 ));
             }
-            if !self.daemon.driver {
-                errors.push(format!(
-                    "profile {name}: agent.driven, but the driver is off (daemon.driver: false)"
-                ));
-            }
         }
     }
 
@@ -1381,7 +1375,7 @@ mod tests {
 
     #[test]
     fn driven_agents_and_the_driver_switch() {
-        use super::{Config, DaemonConfig};
+        use super::Config;
         let ok = |y: &str| {
             Config::from_yaml(y)
                 .map(|_| ())
@@ -1395,15 +1389,6 @@ mod tests {
         assert!(!c.resolve("a").unwrap().agent.user.is_empty());
         let e = ok("profiles:\n  g: { agent: { kind: generic, driven: true } }\n").unwrap_err();
         assert!(e.contains("needs a kind the driver runs"), "{e}");
-        let off = "daemon: { driver: false }\n";
-        ok(off).unwrap();
-        let e = ok(&format!("{off}{driven}")).unwrap_err();
-        assert!(
-            e.contains("profile a: agent.driven, but the driver is off"),
-            "{e}"
-        );
-        assert!(e.contains("profile b: agent.driven"), "{e}");
-        assert!(DaemonConfig::default().driver, "on unless turned off");
     }
 
     #[test]
