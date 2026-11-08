@@ -243,7 +243,9 @@ async fn token(run: &FirmRun, repo: &str) -> Result<Token> {
         .remote_repo(repo)
         .ok_or_else(|| anyhow!("{repo} has no remote"))?;
     let mut argv: Vec<String> = if gh.mint.is_empty() {
-        ["zapper-office", "mint", "github-app"].map(String::from).to_vec()
+        ["zapper-office", "mint", "github-app"]
+            .map(String::from)
+            .to_vec()
     } else {
         gh.mint.clone()
     };

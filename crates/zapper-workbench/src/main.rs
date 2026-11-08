@@ -65,11 +65,7 @@ fn ctx() -> Result<Ctx> {
     let data = zapper_workbench::data_dir();
     let drive = Drive::new(data.join("drive"))?;
     let repo = Repo::new(data.clone())?;
-    let agent = settings
-        .agent
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(zapper_policy::expand_home("~/.local/bin/zapper-agent")));
-    let applier = Arc::new(Applier::new(repo.path(), data.join("applied"), agent));
+    let applier = Arc::new(Applier::new(repo.path(), data.join("applied")));
     std::fs::create_dir_all(data.join("applied"))?;
     Ok(Ctx {
         settings,
@@ -87,7 +83,7 @@ async fn connect(settings: &Settings) -> Result<OpenShell> {
         ))
     });
     let mut s = zapper_openshell::Settings::load(&path)?;
-    s.edge = settings.edge.clone();
+    s.edge = settings.edge(s.edge);
     if let Some(w) = &settings.workspace {
         s.workspace = w.clone();
     }
@@ -96,7 +92,7 @@ async fn connect(settings: &Settings) -> Result<OpenShell> {
         .clone()
         .unwrap_or_else(|| vec!["anthropic".into(), "workbench-edge".into()]);
     // The workbench's profiles are its repository's: no zapper config.
-    OpenShell::connect(s, PathBuf::from("/nonexistent/zapper.yaml")).await
+    OpenShell::connect(s, None).await
 }
 
 #[tokio::main]
@@ -109,16 +105,17 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Serve => {
             let os = Arc::new(connect(&c.settings).await?);
-            let listen = c.settings.edge.listen;
+            let settings = os.edge_settings().clone();
+            let listen = settings.listen;
             let listener = tokio::net::TcpListener::bind(listen)
                 .await
                 .with_context(|| format!("binding the workbench's edge on {listen}"))?;
             let backend = Arc::new(Workbench::new(os.clone(), c.drive, c.repo.clone()));
-            let edge = Arc::new(Edge::new(c.settings.edge.clone(), backend));
+            let edge = Arc::new(Edge::new(settings.clone(), backend));
             eprintln!(
                 "zapper-workbench: the edge on http://{listen} (sandboxes: {}/drive/ and {}/git/{}), workspace {}",
-                c.settings.edge.url,
-                c.settings.edge.url,
+                settings.url,
+                settings.url,
                 zapper_workbench::repo::REPO,
                 os.workspace()
             );
@@ -159,7 +156,7 @@ async fn main() -> Result<()> {
                 serde_json::to_value(zapper_workbench::provision::records(&c.provisioned)?)?;
             v["repository"] = serde_json::json!(c.repo.path());
             v["drive"] = serde_json::json!(zapper_workbench::data_dir().join("drive"));
-            v["edge"] = serde_json::json!(c.settings.edge.listen.to_string());
+            v["edge"] = serde_json::json!(c.settings.listen().to_string());
             println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }

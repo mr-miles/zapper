@@ -144,7 +144,8 @@ async fn main() -> Result<()> {
                 name,
                 args,
                 user,
-                agent,
+                agent: Some(agent),
+                tag: None,
             };
             let tag = zapper_office::image::build(&config, &b, &|l| eprintln!("{l}"))?;
             println!("{tag}");
@@ -216,7 +217,7 @@ async fn serve(listen: SocketAddr, settings: &std::path::Path, state_dir: PathBu
     use zapper_office::openshell::{OpenShell, Settings};
     let settings = Settings::load(settings)?;
     let gateway = settings.gateway.clone();
-    let os = OpenShell::connect(settings, cli::config_path()).await?;
+    let os = OpenShell::connect(settings, Some(cli::config_path())).await?;
     os.require_officers().await?;
     for w in os.ignored() {
         eprintln!("zapper-office: zapper.yaml: {w}");

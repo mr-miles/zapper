@@ -2,7 +2,6 @@
 //! files in zapper's own format, each under its section.
 //!
 //! ```text
-//! policy.yaml                  policy
 //! images/NAME.yaml             images.NAME
 //! profiles/NAME.yaml           profiles.NAME
 //! agents/NAME/AGENT.md         a profile's CLAUDE.md, for one that says `agent.definition: NAME`
@@ -132,9 +131,8 @@ fn hash(bytes: &[u8], paths: &[PathBuf]) -> Result<String> {
 pub fn render(repo: &Path, out: &Path) -> Result<Rendered> {
     let mut config = Map::new();
 
-    let policy = repo.join("policy.yaml");
-    if policy.exists() {
-        config.insert("policy".into(), load(&policy)?);
+    if repo.join("policy.yaml").exists() {
+        bail!("policy.yaml: a sandbox's network policy is OpenShell's (`openshell policy set`, or its UI), not the repository's");
     }
 
     let mut images = Map::new();
@@ -168,6 +166,14 @@ pub fn render(repo: &Path, out: &Path) -> Result<Rendered> {
         let obj = p
             .as_object_mut()
             .ok_or_else(|| anyhow!("{what} isn't a map"))?;
+        // Its name is its template's, its label's and its image's.
+        zapper_openshell::image::check_name(&name).with_context(|| what.clone())?;
+        if name.len() > 60 {
+            bail!("{what}: a name of at most 60 characters");
+        }
+        if obj.contains_key("policy") {
+            bail!("{what}: policy: a sandbox's network policy is OpenShell's (`openshell policy set`, or its UI), not the repository's");
+        }
         for m in obj
             .get_mut("mounts")
             .and_then(|m| m.as_array_mut())
@@ -240,7 +246,6 @@ mod tests {
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
             std::fs::write(f, s).unwrap();
         };
-        w("policy.yaml", "defaults: { net: deny, exec: allow }\n");
         w("images/office.yaml", "from: docker.io/library/ubuntu:26.04\nargs:\n  tools: { default: files/tools }\ncopy: [{ from: tools, to: /opt/tools }]\n");
         w("files/tools/x.sh", "echo 1\n");
         w("profiles/claude.yaml", "engine: { image: office }\nagent: { kind: claude-code }\nmounts:\n  - { host: \"{workdir}\", guest: /work, mode: rw }\n  - { host: files, guest: /files }\n");
@@ -275,7 +280,6 @@ mod tests {
     fn each_file_goes_under_its_section_and_the_result_is_zappers_config() {
         let (x, r, _) = rendered("sections");
         let c = &x.config;
-        assert_eq!(c["policy"]["defaults"]["net"], "deny");
         assert_eq!(
             c["images"]["office"]["args"]["tools"]["default"],
             r.join("files/tools").display().to_string()
@@ -334,6 +338,13 @@ mod tests {
     #[test]
     fn what_doesnt_belong_is_refused_with_why() {
         let cases = [
+            ("policy.yaml", "net: []\n", "network policy is OpenShell's"),
+            (
+                "profiles/bad.yaml",
+                "policy: { net: [] }\n",
+                "network policy is OpenShell's",
+            ),
+            ("profiles/Bad Name.yaml", "{}\n", "use letters, digits"),
             (
                 "profiles/bad.yaml",
                 "agent: { skills: elsewhere }\n",

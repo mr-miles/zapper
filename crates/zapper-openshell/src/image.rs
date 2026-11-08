@@ -25,8 +25,12 @@ pub struct Build {
     pub args: Vec<String>,
     /// The account commands run as (the profiles' `agent.user`).
     pub user: String,
-    /// The static guest binary installed as `office`.
-    pub agent: PathBuf,
+    /// The static guest binary installed as `office`, for the office's
+    /// workers; none for an image whose sandboxes don't reach the office
+    /// (the workbench's).
+    pub agent: Option<PathBuf>,
+    /// The tag to build; by default [`tag`]`(name)`.
+    pub tag: Option<String>,
 }
 
 /// The container engine: `$ZAPPER_OCI`, else podman.
@@ -56,10 +60,10 @@ pub fn build(config: &zapper_policy::Config, b: &Build, log: &dyn Fn(&str)) -> R
             }
         )
     })?;
-    if !b.agent.is_file() {
+    if let Some(agent) = b.agent.as_ref().filter(|a| !a.is_file()) {
         bail!(
             "no {}: build the static guest binary first (make build)",
-            b.agent.display()
+            agent.display()
         );
     }
     let mut given = std::collections::BTreeMap::new();
@@ -118,11 +122,13 @@ pub fn build(config: &zapper_policy::Config, b: &Build, log: &dyn Fn(&str)) -> R
     for step in &r.after {
         file.push_str(&format!("RUN {step}\n"));
     }
-    std::fs::copy(&b.agent, work.0.join("zapper-agent"))
-        .with_context(|| format!("reading {}", b.agent.display()))?;
-    file.push_str(&openshell_layer(&b.user));
+    if let Some(agent) = &b.agent {
+        std::fs::copy(agent, work.0.join("zapper-agent"))
+            .with_context(|| format!("reading {}", agent.display()))?;
+    }
+    file.push_str(&openshell_layer(&b.user, b.agent.is_some()));
 
-    let tag = tag(&b.name);
+    let tag = b.tag.clone().unwrap_or_else(|| tag(&b.name));
     std::fs::write(work.0.join("Containerfile"), &file)?;
     log(&format!("building {tag} from {}", r.from));
     let oci = engine();
@@ -137,23 +143,27 @@ pub fn build(config: &zapper_policy::Config, b: &Build, log: &dyn Fn(&str)) -> R
     Ok(tag)
 }
 
-/// What every image gets on top of its recipe, for `user`.
-fn openshell_layer(user: &str) -> String {
+/// What every image gets on top of its recipe, for `user`; with `office`,
+/// the office's guest command.
+fn openshell_layer(user: &str, office: bool) -> String {
+    let office = if office {
+        "COPY --chmod=755 zapper-agent /usr/local/bin/zapper-agent\nRUN ln -sf zapper-agent /usr/local/bin/office\n"
+    } else {
+        ""
+    };
     format!(
         "# Ubuntu's images have an `ubuntu` account at uid 1000: the user takes its place.\n\
          RUN old=$(getent passwd 1000 | cut -d: -f1); if [ -n \"$old\" ] && [ \"$old\" != \"{user}\" ]; then userdel -r \"$old\"; fi; \\\n    \
          id -u {user} >/dev/null 2>&1 || useradd -m -u 1000 -U -s /bin/bash {user}; \\\n    \
          mkdir -p /work && chown {user}:{user} /work\n\
-         COPY --chmod=755 zapper-agent /usr/local/bin/zapper-agent\n\
-         RUN ln -sf zapper-agent /usr/local/bin/office\n\
-         ENV HOME=/home/{user}\n\
+         {office}ENV HOME=/home/{user}\n\
          WORKDIR /work\n"
     )
 }
 
 /// A name that is safe in a tag and a shell: letters, digits, `-`, `_` and
 /// `.`, starting with a letter or digit.
-fn check_name(name: &str) -> Result<()> {
+pub fn check_name(name: &str) -> Result<()> {
     let starts_well = name.starts_with(|c: char| c.is_ascii_alphanumeric());
     if !starts_well
         || !name
@@ -253,7 +263,7 @@ mod tests {
 
     #[test]
     fn every_image_gets_the_user_the_office_command_and_its_workdir() {
-        let l = openshell_layer("agent");
+        let l = openshell_layer("agent", true);
         assert!(
             l.contains("useradd -m -u 1000 -U -s /bin/bash agent"),
             "{l}"
@@ -263,6 +273,8 @@ mod tests {
             "{l}"
         );
         assert!(l.trim_end().ends_with("WORKDIR /work"), "{l}");
+        let plain = openshell_layer("agent", false);
+        assert!(!plain.contains("office"), "no office command: {plain}");
     }
 
     #[test]
@@ -284,7 +296,8 @@ mod tests {
             name: "nope".into(),
             args: vec![],
             user: "agent".into(),
-            agent: "/nonexistent".into(),
+            agent: None,
+            tag: None,
         };
         let e = build(&c, &b, &|_| {}).unwrap_err().to_string();
         assert!(e.contains("images: office"), "{e}");

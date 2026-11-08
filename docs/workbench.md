@@ -6,7 +6,7 @@
 
 - **A drive**: files in `~/.local/share/zapper-workbench/drive`. You put files in `inbox/` on the host; each sandbox reads them at `/drive/inbox/` and writes its own `/drive/outbox/<sandbox>/`, which you read on the host. The drive decides that itself: a sandbox can't write the inbox or read another's outbox, and every path stays in the directory (no `..`, hidden names or symbolic links on the way).
 - **A repository**: `~/.local/share/zapper-workbench/config.git`, bare. You clone it on the host and push to it, `main` included. Sandboxes reach it at `/git/config.git` and may push branches only, never `main`, `main/…` or tags, each push as the sandbox: an agent proposes a change on a branch, and you merge it.
-- **Templates from the repository**: `zapper-workbench apply` turns a commit of `main` into the gateway's sandbox templates, one per profile, `wb-<profile>`. Each image's recipe is built (`zapper-openshell`'s image builder) where it changed. A profile's template is its image, CPU and memory; its writable disk (`engine.disk`); its environment (the profile's, its harness's, and `ZAPPER_WORKBENCH_PROFILE`); its files (the harness's instructions, settings, MCP servers and turn-end hook, the skills and directories it mounts), staged under the driver's files root (`files_root:` in `openshell.yaml`), which openshell-firecracker copies into each sandbox made from the template before its workload starts; and labels saying which definition it is: `zapper-workbench: 1`, `zapper-profile: <profile>` and `zapper-config: <commit>`. Its setup commands run in each sandbox `new` makes, once it is ready.
+- **Templates from the repository**: `zapper-workbench apply` turns a commit of `main` into the gateway's sandbox templates, one per profile, `wb-<profile>`. Each image's recipe is built where it or its user changed, as `localhost/zapper-workbench-<image>` (unless `openshell.yaml`'s `images:` names the image, which is then used as it is); its sandboxes get no `office` command, as they don't reach the office. A profile's template is its image, CPU and memory; its writable disk (`engine.disk`); its environment (the profile's, its harness's, and `ZAPPER_WORKBENCH_PROFILE`); its files (the harness's instructions, settings, MCP servers and turn-end hook, the skills and directories it mounts), staged under the driver's files root (`files_root:` in `openshell.yaml`), which openshell-firecracker copies into each sandbox made from the template before its workload starts; and labels saying which definition it is: `zapper-workbench: 1`, `zapper-profile: <profile>` and `zapper-commit: <commit>`. Its setup commands run in each sandbox `new` makes, once it is ready.
 
 ## Sandboxes from the templates
 
@@ -17,7 +17,6 @@
 ```text
 images/NAME.yaml             an image recipe (as config/zapper.yaml's images:)
 profiles/NAME.yaml           a profile (as zapper.yaml's profiles:)
-policy.yaml                  the global layer's rules
 agents/NAME/AGENT.md         a profile's instructions, for one that says `agent.definition: NAME`
 agents/NAME/skills/SKILL/    that agent's own skills
 skills/SKILL/                skills every profile gets
@@ -56,5 +55,6 @@ Its config is `~/.config/zapper-workbench/workbench.yaml` (all optional):
 - `openshell:` the gateway's settings (default `~/.config/zapper/openshell.yaml`, the office's).
 - `workspace:` the gateway workspace its templates and sandboxes are in; by default `openshell.yaml`'s `workspace:`, else `default`. It sees only that workspace's sandboxes, and the providers it attaches must be that workspace's, so give the OpenShell CLI the same one (`--workspace NAME` or `OPENSHELL_WORKSPACE`) when you create the providers and your sandboxes.
 - `providers:` what `new` attaches (default `[anthropic, workbench-edge]`).
-- `agent:` the static `office` command the images carry (default `~/.local/bin/zapper-agent`).
-- `edge:` the edge's addresses (give them all if you change one).
+- `edge:` the edge's `listen`, `url` and `token_url`, each optional (port 8971 by default); its driver identity settings are `openshell.yaml`'s.
+
+The repository holds no network policy: `policy.yaml`, or `policy:` in a profile, is refused, as a sandbox's policy is OpenShell's (`openshell policy set`, or its UI). Profile names are their templates' and labels': letters, digits, `-`, `_` and `.`, at most 60 of them. `check` and `apply` list what a profile sets that OpenShell ignores.

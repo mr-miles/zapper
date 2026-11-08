@@ -362,8 +362,9 @@ type Drafts = Vec<(DraftRule, proto::PolicyChunk)>;
 pub struct OpenShell {
     sdk: OpenShellClient,
     settings: Settings,
-    /// The zapper config the profiles come from, and when it was read.
-    config_path: PathBuf,
+    /// The zapper config the profiles come from (none: the workbench's, whose
+    /// profiles are its repository's), and when it was read.
+    config_path: Option<PathBuf>,
     config: Mutex<(Option<SystemTime>, Config)>,
     sandboxes: Mutex<BTreeMap<String, Sandbox>>,
     /// Firm roles' shared layers, by name (`firm/role`).
@@ -382,7 +383,7 @@ pub struct OpenShell {
 impl OpenShell {
     /// Connects to the gateway `settings` names, with profiles from the zapper
     /// config at `config_path`.
-    pub async fn connect(settings: Settings, config_path: PathBuf) -> Result<OpenShell> {
+    pub async fn connect(settings: Settings, config_path: Option<PathBuf>) -> Result<OpenShell> {
         let read = |p: &str| {
             let p = expand_home(p);
             std::fs::read(&p).with_context(|| format!("reading {p}"))
@@ -406,11 +407,14 @@ impl OpenShell {
             .await
             .with_context(|| format!("the OpenShell gateway at {}", settings.gateway))?;
         tracing::info!(gateway = %settings.gateway, version = %health.version, "connected to OpenShell");
-        let config = load_config(&config_path)?;
+        let config = match &config_path {
+            Some(p) => load_config(p)?,
+            None => Config::default(),
+        };
         Ok(OpenShell {
             sdk,
             settings,
-            config: Mutex::new((modified(&config_path), config)),
+            config: Mutex::new((config_path.as_deref().and_then(modified), config)),
             config_path,
             sandboxes: Default::default(),
             layers: Default::default(),
@@ -770,6 +774,12 @@ impl OpenShell {
     /// ([`rules::ignored`]).
     pub fn ignored(&self) -> Vec<String> {
         rules::ignored(&self.config())
+    }
+
+    /// The OCI image `openshell.yaml`'s `images:` names for zapper image
+    /// `name`, if it names one.
+    pub fn image_override(&self, name: &str) -> Option<String> {
+        self.settings.images.get(name).cloned()
     }
 
     /// The OCI image profile `p`'s sandboxes run.
@@ -1198,10 +1208,13 @@ impl OfficeClient for OpenShell {
     }
 
     fn config(&self) -> Config {
-        let now = modified(&self.config_path);
         let mut c = self.config.lock().unwrap();
+        let Some(path) = &self.config_path else {
+            return c.1.clone();
+        };
+        let now = modified(path);
         if now != c.0 {
-            match load_config(&self.config_path) {
+            match load_config(path) {
                 Ok(config) => {
                     for w in rules::ignored(&config) {
                         tracing::warn!("zapper.yaml: {w}");
@@ -1592,7 +1605,7 @@ fn gateway_labels(labels: &BTreeMap<String, String>, profile: &str) -> HashMap<S
 
 /// `v` as a label value: at most 63 of `[A-Za-z0-9._-]`, alphanumeric at
 /// both ends.
-fn label_value(v: &str) -> String {
+pub fn label_value(v: &str) -> String {
     let s: String = v
         .chars()
         .map(|c| {

@@ -7,7 +7,7 @@
 //! (the harness's files, the skills and directories it mounted: staged under
 //! the driver's files root for the driver to copy into each sandbox made
 //! from it, before its workload starts), and labels naming the profile and
-//! the commit it came from (`zapper-profile`, `zapper-config`). Its setup
+//! the commit it came from (`zapper-profile`, `zapper-commit`). Its setup
 //! commands run in the sandboxes `zapper-workbench new` makes
 //! (`provision`).
 //!
@@ -64,12 +64,62 @@ pub fn template_name(profile: &str) -> String {
 pub fn labels(profile: &str, commit: &str) -> Labels {
     Labels::from([
         ("zapper-workbench".to_string(), "1".to_string()),
-        ("zapper-profile".to_string(), profile.to_string()),
         (
-            "zapper-config".to_string(),
+            "zapper-profile".to_string(),
+            zapper_openshell::label_value(profile),
+        ),
+        (
+            "zapper-commit".to_string(),
             commit[..SHORT.min(commit.len())].to_string(),
         ),
     ])
+}
+
+/// The OCI image the workbench builds recipe `name` as, unless
+/// `openshell.yaml`'s `images:` names one (then that, built by whoever set it):
+/// its own tag, apart from the office's.
+pub fn image_of(os: &OpenShell, name: &str) -> (String, bool) {
+    match os.image_override(name) {
+        Some(i) => (i, false),
+        None => (format!("localhost/zapper-workbench-{name}"), true),
+    }
+}
+
+/// The account the profiles on image `name` run as (its uid 1000).
+fn image_user(config: &Config, name: &str) -> String {
+    config
+        .profiles
+        .keys()
+        .filter_map(|p| config.resolve(p).ok())
+        .find(|p| p.engine.image == name)
+        .map(|p| p.agent.user.clone())
+        .unwrap_or_else(|| "agent".into())
+}
+
+/// What an image is built from: its recipe and files (`hash`) and its user.
+fn image_key(config: &Config, name: &str, hash: &str) -> String {
+    format!("{hash} {}", image_user(config, name))
+}
+
+/// The recipe arguments the workbench can't give (it gives none): those
+/// without a default.
+fn check_args(config: &Config, name: &str) -> Result<()> {
+    let Some(r) = config.images.get(name) else {
+        bail!("no recipe for image {name}");
+    };
+    let missing: Vec<&String> = r
+        .args
+        .iter()
+        .filter(|(_, a)| a.default.is_none())
+        .map(|(k, _)| k)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "image {name}: give its arguments defaults in the repository ({}): the workbench builds it with none",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Profile `p`'s setup, as its sandboxes get it: `ZAPPER_WORKBENCH_PROFILE`
@@ -82,8 +132,6 @@ pub fn setup(p: &ResolvedProfile) -> Result<Setup> {
 pub struct Applier {
     repo: PathBuf,
     data: PathBuf,
-    /// The static guest binary the base images install as `office`.
-    agent: PathBuf,
     /// The live commit's config, once rendered.
     live: Mutex<Option<(String, Config)>>,
 }
@@ -91,11 +139,10 @@ pub struct Applier {
 impl Applier {
     /// Applies the bare repository `repo`, with checkouts and state under
     /// `data`.
-    pub fn new(repo: PathBuf, data: PathBuf, agent: PathBuf) -> Applier {
+    pub fn new(repo: PathBuf, data: PathBuf) -> Applier {
         Applier {
             repo,
             data,
-            agent,
             live: Mutex::default(),
         }
     }
@@ -184,9 +231,12 @@ impl Applier {
         let state = self.state()?;
         let changed: Vec<&String> = images
             .iter()
-            .filter(|(n, h)| state.images.get(*n) != Some(h))
+            .filter(|(n, h)| state.images.get(*n) != Some(&image_key(&config, n, h)))
             .map(|(n, _)| n)
             .collect();
+        for n in &changed {
+            check_args(&config, n)?;
+        }
         let profiles: Vec<String> = config.profiles.keys().map(|p| template_name(p)).collect();
         let ignored = zapper_openshell::rules::ignored(&config);
         Ok(
@@ -206,25 +256,22 @@ impl Applier {
         }
         let mut built = Vec::new();
         for (name, hash) in &images {
-            if state.images.get(name) == Some(hash) {
+            let key = image_key(&config, name, hash);
+            let (tag, ours) = image_of(os, name);
+            if !ours || state.images.get(name) == Some(&key) {
                 continue;
             }
-            // The account commands run as: the profiles' on this image.
-            let user = config
-                .profiles
-                .keys()
-                .filter_map(|p| config.resolve(p).ok())
-                .find(|p| &p.engine.image == name)
-                .map(|p| p.agent.user.clone())
-                .unwrap_or_else(|| "agent".into());
+            check_args(&config, name)?;
             let b = zapper_openshell::image::Build {
                 name: name.clone(),
                 args: vec![],
-                user,
-                agent: self.agent.clone(),
+                user: image_user(&config, name),
+                // Its sandboxes don't reach the office.
+                agent: None,
+                tag: Some(tag),
             };
             zapper_openshell::image::build(&config, &b, log)?;
-            state.images.insert(name.clone(), hash.clone());
+            state.images.insert(name.clone(), key);
             built.push(name.clone());
         }
         let mut made = Vec::new();
@@ -236,7 +283,7 @@ impl Applier {
             let driver = os.driver_config(&p, &s, &format!("{STAGED}/{name}"), None)?;
             let t = Template {
                 name: template_name(name),
-                image: os.image_of(&p),
+                image: image_of(os, &p.engine.image).0,
                 vcpus: p.engine.vcpus,
                 memory_mib: p.engine.memory_mib,
                 labels: labels(name, &commit),
@@ -339,7 +386,7 @@ mod tests {
         let l = labels("dev", "0123456789abcdef0123");
         assert_eq!(l["zapper-workbench"], "1");
         assert_eq!(l["zapper-profile"], "dev");
-        assert_eq!(l["zapper-config"], "0123456789ab");
+        assert_eq!(l["zapper-commit"], "0123456789ab");
         let s = setup(&p).unwrap();
         assert_eq!(s.env["MODE"], "a");
         assert_eq!(s.env["ZAPPER_WORKBENCH_PROFILE"], "dev");
