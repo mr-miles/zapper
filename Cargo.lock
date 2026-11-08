@@ -4399,6 +4399,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zapper-warden"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "hyper",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zapper-driver",
+ "zapper-openshell",
+ "zapper-policy",
+ "zapper-util",
+]
+
+[[package]]
 name = "zapper-workbench"
 version = "0.1.0"
 dependencies = [
