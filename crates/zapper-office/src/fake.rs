@@ -388,13 +388,18 @@ impl OfficeClient for Fake {
         self.0.config()
     }
 
-    fn session_count(&self) -> usize {
-        self.0 .0.sessions.lock().unwrap().len()
-    }
-
-    fn admit(&self, profile: &str) -> Result<Config> {
+    fn admit(&self, profiles: &[String]) -> Result<Config> {
         let config = self.0.config();
-        config.resolve(profile)?;
+        for p in profiles {
+            config.resolve(p)?;
+        }
+        let (running, max) = (self.0.sessions().len(), config.daemon.max_sessions);
+        if running + profiles.len() > max {
+            bail!(
+                "{} more sandboxes wanted and {running} running; max_sessions is {max}",
+                profiles.len()
+            );
+        }
         Ok(config)
     }
 

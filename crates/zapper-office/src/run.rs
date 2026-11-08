@@ -99,36 +99,16 @@ pub fn effective_model(role: &crate::firm::Role, config: &Config) -> Option<Stri
     })
 }
 
-/// Memory still available on the host, in MiB.
-pub(crate) fn mem_available_mib() -> Option<u64> {
-    zapper_util::host_memory_mib("MemAvailable")
-}
-
-/// Checks that the firm fits before booting anything.
-fn check_resources(office: &Office, config: &Config, firm: &Firm) -> Result<()> {
-    let mut mib = 0u64;
-    let mut count = 0usize;
-    for w in &firm.workers {
-        let role = &firm.roles[&w.role];
-        mib += config.resolve(&role.profile)?.engine.memory_mib as u64;
-        count += 1;
-    }
-    for f in firm.facilities.values() {
-        mib += config.resolve(&f.profile)?.engine.memory_mib as u64;
-        count += 1;
-    }
-    let running = office.client().session_count();
-    if running + count > config.daemon.max_sessions {
-        bail!(
-            "the firm needs {count} sessions and {running} are running; daemon.max_sessions is {}",
-            config.daemon.max_sessions
-        );
-    }
-    if let Some(avail) = mem_available_mib() {
-        if mib > avail {
-            bail!("the firm needs {mib} MiB of memory for its VMs and the host has {avail} MiB available");
-        }
-    }
+/// Checks that the firm fits before booting anything: its workers' and
+/// facilities' sandboxes, at once.
+fn check_resources(office: &Office, firm: &Firm) -> Result<()> {
+    let profiles: Vec<String> = firm
+        .workers
+        .iter()
+        .map(|w| firm.roles[&w.role].profile.clone())
+        .chain(firm.facilities.values().map(|f| f.profile.clone()))
+        .collect();
+    office.client().admit(&profiles)?;
     Ok(())
 }
 
@@ -619,7 +599,7 @@ pub async fn up_with(
         articles,
         scenario,
     } = with_options(name, firm, &config, opts)?;
-    check_resources(office, &config, &firm)?;
+    check_resources(office, &firm)?;
     let firm = super::remote::with_repositories(firm).await?;
     for r in firm.roles.values() {
         harness_driver(&config.resolve(&r.profile)?)?;

@@ -1232,7 +1232,7 @@ pub async fn hire(run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     if a.brief.len() > super::mail::MAX_BODY || a.reason.len() > MAX_PLAN {
         bail!("the brief or the reason is too long");
     }
-    let config = room(&run.office(), &a.role, &role)?;
+    let config = room(&run.office(), &role)?;
     let (name, firm, rt) = join(
         run,
         by,
@@ -1305,15 +1305,9 @@ pub async fn hire(run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
     }))
 }
 
-/// Room on the host for one more VM of `role`: the config, or why not. The
-/// host-room decision (session limit and memory) is one call to the client.
-pub(super) fn room(
-    office: &Office,
-    _role_name: &str,
-    role: &crate::firm::Role,
-) -> Result<zapper_policy::Config> {
-    let config = office.client().admit(&role.profile)?;
-    Ok(config)
+/// Room for one more sandbox of `role`: the config, or why not.
+pub(super) fn room(office: &Office, role: &crate::firm::Role) -> Result<zapper_policy::Config> {
+    office.client().admit(std::slice::from_ref(&role.profile))
 }
 
 /// Someone joins the firm under `by`: into the chart, funded from `by`'s

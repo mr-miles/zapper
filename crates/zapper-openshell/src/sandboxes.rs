@@ -725,54 +725,51 @@ impl OpenShell {
             .collect()
     }
 
-    async fn running(&self) -> usize {
-        match self
-            .scoped()
-            .list_all_sandboxes(ListOptions::default())
-            .await
-        {
-            Ok(all) => all.len(),
-            Err(e) => {
-                tracing::debug!("listing sandboxes: {e}");
-                self.sandboxes.lock().unwrap().len()
-            }
-        }
-    }
-
-    /// The session limit and the host's memory.
-    async fn has_room(&self, profile: &str) -> Result<Config> {
+    /// Whether new sandboxes of `profiles` fit beside the office's live ones:
+    /// at most `max_sessions` (openshell.yaml's, else `daemon.max_sessions`)
+    /// and, with `daemon.memory_overcommit`, at most that share of the
+    /// host's memory given to them (the driver runs on the office's host).
+    /// Other makers' sandboxes (the workbench's) aren't counted.
+    fn has_room(&self, profiles: &[String]) -> Result<Config> {
         let config = self.config();
-        let resolved = config.resolve(profile)?;
-        let max = self
-            .settings
-            .max_sessions
-            .unwrap_or(config.daemon.max_sessions);
-        let running = self.running().await;
-        if running >= max {
-            bail!("{running} sandboxes running; max_sessions is {max}");
+        let mut wanted = 0u64;
+        for p in profiles {
+            wanted += config.resolve(p)?.engine.memory_mib as u64;
         }
-        let given: u64 = self
-            .sandboxes
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|s| s.info.status.is_live())
-            .map(|s| s.info.memory_mib as u64)
-            .sum::<u64>()
-            + resolved.engine.memory_mib as u64;
-        if let (Some(ratio), Some(total)) =
-            (config.daemon.memory_overcommit, host_memory_mib("MemTotal"))
-        {
+        let (running, given) = {
+            let all = self.sandboxes.lock().unwrap();
+            let live: Vec<_> = all.values().filter(|s| s.info.status.is_live()).collect();
+            let mib: u64 = live.iter().map(|s| s.info.memory_mib as u64).sum();
+            (live.len(), mib)
+        };
+        let max = self.max_sessions(&config);
+        if running + profiles.len() > max {
+            bail!(
+                "{} more sandboxes wanted and {running} running; max_sessions is {max}",
+                profiles.len()
+            );
+        }
+        if let (Some(ratio), Some(total)) = (
+            config.daemon.memory_overcommit,
+            zapper_util::host_memory_mib("MemTotal"),
+        ) {
             let limit = (total as f64 * ratio) as u64;
-            if given > limit {
+            if given + wanted > limit {
                 bail!(
-                    "the sandboxes would be given {given} MiB of memory ({} MiB for this one), \
+                    "the sandboxes would be given {} MiB of memory ({wanted} MiB more), \
                      past daemon.memory_overcommit: {ratio} of the host's {total} MiB ({limit} MiB)",
-                    resolved.engine.memory_mib
+                    given + wanted
                 );
             }
         }
         Ok(config)
+    }
+
+    /// The most sandboxes the office runs at once.
+    fn max_sessions(&self, config: &Config) -> usize {
+        self.settings
+            .max_sessions
+            .unwrap_or(config.daemon.max_sessions)
     }
 
     /// What the zapper config sets that OpenShell doesn't do
@@ -1223,12 +1220,8 @@ impl OfficeClient for OpenShell {
         c.1.clone()
     }
 
-    fn session_count(&self) -> usize {
-        block(self.running())
-    }
-
-    fn admit(&self, profile: &str) -> Result<Config> {
-        block(self.has_room(profile))
+    fn admit(&self, profiles: &[String]) -> Result<Config> {
+        self.has_room(profiles)
     }
 
     fn promote_rule(&self, _what: &str, _scope: &Scope, _rule: NetRule) -> Result<AnyRule> {
@@ -1238,7 +1231,8 @@ impl OfficeClient for OpenShell {
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         Box::pin(async move {
             // The office reaches a sandbox's ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
-            let config = self.has_room(&new.profile).await?;
+            // Its room was checked when it was asked for (`admit`).
+            let config = self.config();
             let mut profile = config.resolve(&new.profile)?;
             if let Some(overlay) = &new.agent_overlay {
                 let mut agent = serde_json::to_value(&profile.agent)?;
@@ -1551,15 +1545,6 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// A `/proc/meminfo` value in MiB.
-fn host_memory_mib(key: &str) -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    text.lines().find_map(|l| {
-        let rest = l.strip_prefix(key)?.strip_prefix(':')?;
-        let kib: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
-        Some(kib / 1024)
-    })
-}
 
 /// A session's state from its sandbox's phase.
 fn status_of(phase: SandboxPhase) -> Status {

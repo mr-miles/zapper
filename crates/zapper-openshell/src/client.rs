@@ -30,12 +30,9 @@ pub trait OfficeClient: Send + Sync {
     /// The running zapper config (`zapper.yaml`): the profiles the office
     /// validates a start against, and the UI reads.
     fn config(&self) -> zapper_policy::Config;
-    /// How many sessions are running now (the firm-level pre-flight: enough
-    /// room under `max_sessions` for the firm's workers).
-    fn session_count(&self) -> usize;
-    /// Whether the host has room for a session of `profile`, and the running
-    /// config if so (the host-room decision in one call: limit + memory).
-    fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
+    /// Whether there is room for new sessions of `profiles` at once (the
+    /// session limit and the host's memory), and the running config if so.
+    fn admit(&self, profiles: &[String]) -> anyhow::Result<zapper_policy::Config>;
     /// Promotes a standing approval's `rule` into the running config at
     /// `scope`, under change note `what`, giving it a fresh `net-N` id; the
     /// rule as added.

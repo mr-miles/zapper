@@ -233,7 +233,7 @@ pub async fn offer(run: &Arc<FirmRun>, by: &str, a: OfferArgs) -> Result<Value> 
             fmt_tokens(balance)
         );
     }
-    let config = room(&run.office(), &a.role, &role)?;
+    let config = room(&run.office(), &role)?;
     let id = {
         let mut cs = run.contracts.lock().unwrap();
         cs.counter += 1;
