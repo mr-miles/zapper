@@ -288,7 +288,7 @@ impl MintCache {
 }
 
 /// Environment a minting command keeps: where to find programs and its own
-/// configuration (`zapper mint` reads the App's credentials file under it).
+/// configuration (`zapper-office mint` reads the App's credentials file under it).
 fn kept_env(name: &str) -> bool {
     matches!(name, "PATH" | "HOME" | "XDG_CONFIG_HOME") || name.starts_with("ZAPPER_")
 }

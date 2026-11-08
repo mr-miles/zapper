@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 
 mod cli;
 mod firm_cli;
+mod github_cli;
 
 use cli::Client;
 
@@ -86,6 +87,18 @@ enum Cmd {
     /// `openshell.yaml`) and the workers' default agents and skills into the
     /// config directory, keeping any file already there.
     Init,
+    /// GitHub Apps: set one up for an account (a firm's GitHub remote), and
+    /// look at it.
+    Github {
+        #[command(subcommand)]
+        cmd: github_cli::GithubCmd,
+    },
+    /// Print a short-lived credential: what the office runs for a firm's
+    /// GitHub remote's tokens.
+    Mint {
+        #[command(subcommand)]
+        cmd: github_cli::MintCmd,
+    },
     /// Firms of workers: start, stop, watch, replay.
     Firm {
         #[command(subcommand)]
@@ -186,6 +199,8 @@ async fn main() -> Result<()> {
             let settings = openshell.unwrap_or_else(|| cli::config_dir().join("openshell.yaml"));
             serve(listen, &settings, state_dir).await
         }
+        Cmd::Github { cmd } => std::process::exit(github_cli::github(cmd).await?),
+        Cmd::Mint { cmd } => std::process::exit(github_cli::mint(cmd).await?),
         Cmd::Firm { cmd } => std::process::exit(firm_cli::firm(&Client::new(), cmd, json).await?),
         Cmd::Mail { cmd } => std::process::exit(firm_cli::mail(&Client::new(), cmd, json).await?),
         Cmd::Drive { cmd } => std::process::exit(firm_cli::drive(&Client::new(), cmd, json).await?),

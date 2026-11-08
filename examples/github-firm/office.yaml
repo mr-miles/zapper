@@ -12,7 +12,7 @@ firms:
     budget: { seed: 1000000, max_concurrent: 3 }
     # The firm's repositories are on GitHub: `remote.github.config` names the
     # App's credentials file in ~/.config/zapper/github-apps, which
-    # `zapper github setup` wrote (named after the account: change acme.yaml
+    # `zapper-office github setup` wrote (named after the account: change acme.yaml
     # to yours). The repositories are every one the App is installed on,
     # kept in `dir` across runs. Their main is merged by you on GitHub,
     # unless listed in `local` (merged on the firm's server, pushed out).

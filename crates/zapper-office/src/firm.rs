@@ -602,7 +602,7 @@ pub struct GitService {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitRemote {
-    /// GitHub, through the account's App (`zapper github setup`).
+    /// GitHub, through the account's App (`zapper-office github setup`).
     pub github: Option<GithubRemote>,
 }
 
@@ -614,7 +614,7 @@ pub struct GithubRemote {
     /// is where it is installed: the firm's repositories are that account's.
     pub config: String,
     /// The command that mints the office's tokens, before `--app`, `--repo`
-    /// and `--perm` are added: `[zapper, mint, github-app]` if unset.
+    /// and `--perm` are added: `[zapper-office, mint, github-app]` if unset.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mint: Vec<String>,
 }

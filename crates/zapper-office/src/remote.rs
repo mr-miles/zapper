@@ -18,7 +18,7 @@
 //!   fast-forward only. If the remote's `main` moved by another route, the
 //!   office stops pushing and tells the board.
 //!
-//! The office's tokens come from `zapper mint github-app`, so the App's key
+//! The office's tokens come from `zapper-office mint github-app`, so the App's key
 //! is read by a short-lived process and never by the office; they are
 //! revoked when the run stops.
 
@@ -144,7 +144,7 @@ pub async fn resolve(
 ) -> Result<(zapper_github::App, String, Vec<String>)> {
     if !file.exists() {
         bail!(
-            "no GitHub App at {}; create it with `zapper github setup --org <account>` (or --user <login>)",
+            "no GitHub App at {}; create it with `zapper-office github setup --org <account>` (or --user <login>)",
             file.display()
         );
     }
@@ -243,7 +243,7 @@ async fn token(run: &FirmRun, repo: &str) -> Result<Token> {
         .remote_repo(repo)
         .ok_or_else(|| anyhow!("{repo} has no remote"))?;
     let mut argv: Vec<String> = if gh.mint.is_empty() {
-        ["zapper", "mint", "github-app"].map(String::from).to_vec()
+        ["zapper-office", "mint", "github-app"].map(String::from).to_vec()
     } else {
         gh.mint.clone()
     };
