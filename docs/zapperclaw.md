@@ -68,7 +68,7 @@ Then open `http://127.0.0.1:8974/?token=$(cat ~/.local/state/zapperclaw/board-to
 
 - **Restarting without losing the run** (step 4): a restarted office numbers on from its journal and resumes no conversation; it doesn't yet rebuild its mail from the journal.
 - **Instructions from the edge** (step 3): a worker's instructions come in its first wake, not from a `SessionStart` hook, and the `office` command has no drive upload of its own (curl does it).
-- To check on a gateway: the office's process is started by the warden's exec, and its requests to the warden must go through the sandbox's proxy as curl's do (zapperclaw honours `http_proxy` and `no_proxy`); and the host's build of zapperclaw must run on the image's glibc (Ubuntu 26.04).
+- To check on a gateway: that the supervisor adds the office's token to zapperclaw's own requests to the warden (as it does curl's: `/usr/local/bin/zapperclaw` is in the `warden` provider's binaries) when the warden's exec starts it; and that the host's build of zapperclaw runs on the image's glibc (Ubuntu 26.04).
 - Known edges, from review:
   - Anyone in a thread may add recipients when replying, and they can then read the whole thread, the board's messages included.
   - The board's cookie, like any cookie, goes to every port on 127.0.0.1. Writes still need `X-Zapper-UI`, which another origin can't send without the board's leave.

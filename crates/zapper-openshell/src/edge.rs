@@ -574,34 +574,32 @@ pub async fn http_get(url: &str) -> Result<Vec<u8>> {
 }
 
 /// Sends `method` to a plain `http://host:port/path` URL, with `body` as
-/// JSON if given: the answer's status and body (up to 1 MiB). Through the
-/// proxy `http_proxy` names (as a sandbox's supervisor sets it) unless the
-/// host is loopback or in `no_proxy`.
+/// JSON if given: the answer's status and body (up to 1 MiB). It connects
+/// directly: in a sandbox, the supervisor intercepts the connection, holds
+/// it to the sandbox's policy and adds the provider's token.
 pub async fn http_request(
     method: Method,
     url: &str,
     body: Option<Vec<u8>>,
 ) -> Result<(u16, Vec<u8>)> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
-        anyhow!("{url}: only http:// URLs (loopback, or through the sandbox's proxy)")
+        anyhow!("{url}: only http:// URLs (loopback, or a sandbox's intercepted egress)")
     })?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let proxy = proxy_for(authority, &|k| std::env::var(k).ok());
-    let (dial, target) = match &proxy {
-        Some(p) => (p.as_str(), url.to_string()),
-        None => (authority, path.to_string()),
-    };
-    let stream = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(dial))
-        .await
-        .map_err(|_| anyhow!("connecting to {dial}: timed out"))??;
+    let stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(authority),
+    )
+    .await
+    .map_err(|_| anyhow!("connecting to {authority}: timed out"))??;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(conn);
     let mut req = Request::builder()
         .method(method)
-        .uri(target)
+        .uri(path)
         .header(hyper::header::HOST, authority);
     if body.is_some() {
         req = req.header(hyper::header::CONTENT_TYPE, "application/json");
@@ -616,49 +614,6 @@ pub async fn http_request(
         .await
         .map_err(|e| anyhow!("{url}: {e}"))?;
     Ok((status, body.to_bytes().to_vec()))
-}
-
-/// The proxy (`host:port`) a request to `authority` goes through, if any:
-/// `http_proxy` (or `HTTP_PROXY`), unless `authority`'s host is loopback or
-/// matches `no_proxy` (or `NO_PROXY`): `*`, a host, or a `.domain` suffix.
-pub fn proxy_for(authority: &str, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let get = |a: &str, b: &str| var(a).or_else(|| var(b)).filter(|v| !v.trim().is_empty());
-    let proxy = get("http_proxy", "HTTP_PROXY")?;
-    let host = match authority.rsplit_once(':') {
-        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
-        _ => authority,
-    };
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    let host = host.as_str();
-    if host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-    {
-        return None;
-    }
-    let excluded = get("no_proxy", "NO_PROXY").is_some_and(|list| {
-        list.split(',')
-            .map(|n| n.trim().to_ascii_lowercase())
-            .any(|n| {
-                let n = n
-                    .strip_prefix('*')
-                    .filter(|s| s.starts_with('.'))
-                    .unwrap_or(&n);
-                n == "*"
-                    || n == host
-                    || (n.starts_with('.') && host.ends_with(n))
-                    || (!n.is_empty() && host.ends_with(&format!(".{n}")))
-            })
-    });
-    if excluded {
-        return None;
-    }
-    let p = proxy.trim().trim_start_matches("http://");
-    Some(p.trim_end_matches('/').to_string())
 }
 
 /// A new token: 32 random bytes, hex (token68, as the supervisor wants).
@@ -711,48 +666,3 @@ pub fn not_allowed(allow: &str) -> Response<Body> {
 #[cfg(test)]
 #[path = "edge_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-mod proxy_tests {
-    use super::proxy_for;
-
-    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |k| {
-            vars.iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.to_string())
-        }
-    }
-
-    #[test]
-    fn a_proxy_is_used_but_for_loopback_and_no_proxy() {
-        let vars = [
-            ("http_proxy", "http://10.200.0.1:3128/"),
-            ("NO_PROXY", "internal.example,.lan"),
-        ];
-        let e = env(&vars);
-        let proxied = proxy_for("host.openshell.internal:8972", &e);
-        assert_eq!(proxied.as_deref(), Some("10.200.0.1:3128"));
-        assert_eq!(proxy_for("127.0.0.1:8961", &e), None);
-        assert_eq!(proxy_for("localhost:80", &e), None);
-        assert_eq!(proxy_for("[::1]:80", &e), None);
-        assert_eq!(proxy_for("a.internal.example:80", &e), None);
-        assert_eq!(proxy_for("box.lan", &e), None);
-        assert_eq!(
-            proxy_for("A.Internal.Example:80", &e),
-            None,
-            "names in any case"
-        );
-        let star = [("http_proxy", "p:1"), ("no_proxy", "*.corp")];
-        assert_eq!(proxy_for("git.corp:443", &env(&star)), None);
-        assert_eq!(
-            proxy_for("corp.example:443", &env(&star)).as_deref(),
-            Some("p:1")
-        );
-        assert_eq!(proxy_for("x:1", &env(&[])), None, "no proxy set");
-        assert_eq!(
-            proxy_for("x:1", &env(&[("HTTP_PROXY", "p:1"), ("no_proxy", "*")])),
-            None
-        );
-    }
-}
