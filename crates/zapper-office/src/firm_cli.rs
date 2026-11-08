@@ -1190,9 +1190,9 @@ pub async fn firm(c: &Client, cmd: FirmCmd, json_out: bool) -> Result<i32> {
         FirmCmd::Replay { firm, run } => {
             c.json(Method::GET, &format!("/firms/{firm}/runs"), None)
                 .await?;
-            let state = crate::cli::daemon_state_dir()?;
-            let url = std::fs::read_to_string(state.join("ui-url"))
-                .context("the daemon's UI address (is the UI enabled?)")?;
+            let state = crate::cli::state_dir()?;
+            let url = std::fs::read_to_string(state.join(zapper_office::standalone::URL_FILE))
+                .context("the dashboard's address (is `zapper-office serve` running?)")?;
             println!("{}#firm={firm}&replay={run}", url.trim());
         }
         FirmCmd::Security { firm } => {

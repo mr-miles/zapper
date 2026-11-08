@@ -465,7 +465,7 @@ function updatePanel() {
   const sl = statusLine(M, w, now);
   PANEL.state.replaceChildren(el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px' },
     pill(w.state === 'error' ? 'error' : w.state === 'working' || w.state === 'reviewing' ? 'accent' : '', w.state), el('span', {}, sl.text),
-    sess ? el('span', { class: 'muted small', style: 'margin-left:auto' }, sessionsLink('Session'), ' ', el('span', { class: 'mono' }, sess)) : ''),
+    sess ? el('span', { class: 'muted small', style: 'margin-left:auto' }, vmsLink('Sandbox'), ' ', el('span', { class: 'mono' }, sess)) : ''),
   el('div', { class: 'muted small', style: 'margin-top:4px' }, `${w.turns} turns · ${fmtNum(w.tokens)} tokens` + (w.rateLimited ? ` · ${w.rateLimited} rate-limited` : '')),
   fundsOn(M) ? el('div', { class: 'small', style: 'margin-top:4px' }, 'Budget: ', ...((p) => [el('b', {}, p[0]), p[1]])(balanceParts(balanceOf(M, name), M.fundsIn.get(name) || 0)), ((M.fundsOut.get(name) || 0) ? ', ' + fmtTok(M.fundsOut.get(name)) + ' passed on to their team' : '') + (w.exhausted && balanceOf(M, name) <= 0 ? ' · out of budget' : '')) : '',
   contractLine(M, w),
@@ -523,9 +523,8 @@ function updatePanel() {
   PANEL.pubN.textContent = arts.length;
   if (S.mode === 'replay') renderFeed();
 }
-// The sessions UI, with the firm to come back to.
-function sessionsHref() { return daemonUrl('/sessions', S.firm ? { firm: S.firm } : {}); }
-function sessionsLink(text) { const a = el('a', {}, text); a.href = sessionsHref(); return a; }
+// The VMs tab, where the worker's sandbox is.
+function vmsLink(text) { return el('a', { href: '#', onclick: (e) => { e.preventDefault(); showTab('vms'); } }, text); }
 // readAt: when the worker read it, for the panel's Read mail.
 function mailItem(m, unread, readAt) {
   const t = S.M.threads.get(m.thread);

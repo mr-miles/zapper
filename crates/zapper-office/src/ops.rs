@@ -873,7 +873,7 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "traffic",
         shown: |p| p.officer,
-        description: "The firm's requests: method, URL, status, sizes, rule, allowed or denied.",
+        description: "The firm's requests: method, URL, status, sizes, rule, allowed or denied. Not yet on OpenShell: empty until the office reads the gateway's network log; a refused connection still comes to you as an access request.",
         props: || json!({ "worker": s("Worker"), "host": s("Host prefix"), "since": s("e.g. 1h"), "limit": { "type": "integer" } }),
         required: &[],
         run: Run::Sync(|c| {

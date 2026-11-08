@@ -35,7 +35,6 @@ mod history;
 mod run;
 pub mod standalone;
 
-#[cfg(test)]
 pub(crate) use history::close_orphans;
 pub(crate) use history::{list_runs, prune, run_config, run_dir, set_note};
 #[cfg(test)]

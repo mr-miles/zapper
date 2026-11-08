@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         } => {
             let state_dir = match state_dir {
                 Some(d) => d,
-                None => cli::daemon_state_dir()?,
+                None => cli::state_dir()?,
             };
             let listen = listen.unwrap_or_else(default_listen);
             let settings = openshell.unwrap_or_else(|| cli::config_dir().join("openshell.yaml"));

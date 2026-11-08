@@ -13,7 +13,7 @@ use crate::firm::{parse_duration, BOARD};
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use zapper_policy::{Action, AnyRule, NetRule, Scope};
+use zapper_policy::{Action, AnyRule, NetRule};
 
 use super::mail::{Draft, Kind};
 use super::{now, prompts, FirmRun, WorkerRt};
@@ -1445,26 +1445,4 @@ pub fn tick(run: &FirmRun, last_digest: &mut f64) {
             }
         }
     }
-}
-
-/// Promotes a standing approval into the running config: the rule goes to
-/// the role's profile.
-pub fn promote_target(run: &FirmRun, rule: &str) -> Result<(Scope, NetRule)> {
-    let sec = run.security.lock().unwrap();
-    let st = sec
-        .standing
-        .get(rule)
-        .ok_or_else(|| anyhow!("no standing approval {rule}"))?;
-    let role = match st.scope.split_once(':') {
-        Some(("role", r)) => r.to_string(),
-        Some((_, w)) => run
-            .rt(w)
-            .map(|x| x.role.clone())
-            .ok_or_else(|| anyhow!("{w} isn't a worker"))?,
-        None => bail!("bad scope"),
-    };
-    let profile = run.config.roles[&role].profile.clone();
-    let mut r = st.rule.clone();
-    r.id = None;
-    Ok((Scope::Profile(profile), r))
 }

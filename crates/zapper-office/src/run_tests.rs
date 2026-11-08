@@ -335,7 +335,7 @@ fn the_tool_lists_are_as_they_were() {
         .collect();
     assert_eq!(
         digest,
-        "818311746f3d2ae6534d5339fc4c03cc7debca7f48e446b7da66fef0a795e720"
+        "369ddf8aa5cac2a19fd7c66fa91ac010a20f147947f5176d7f1db9eb1dadf87c"
     );
 }
 
@@ -424,7 +424,7 @@ fn a_restart_ends_the_runs_the_daemon_left_running() {
     let last = journal(&run).last().unwrap().clone();
     assert_eq!(last["type"], "run", "{last}");
     assert_eq!(last["state"], "ended", "{last}");
-    assert_eq!(last["reason"], "the daemon stopped", "{last}");
+    assert_eq!(last["reason"], "the office stopped", "{last}");
 }
 
 #[tokio::test]

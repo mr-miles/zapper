@@ -161,9 +161,9 @@ pub fn office_config_path() -> std::path::PathBuf {
     }
 }
 
-/// The daemon's `state` directory, from its config file. Used by `firm replay`
-/// to find the daemon's `ui-url`.
-pub fn daemon_state_dir() -> Result<std::path::PathBuf> {
+/// The office's `state` directory, from `zapper.yaml` (`daemon.state`): where
+/// firms' runs are kept, and the dashboard's URL for `firm replay`.
+pub fn state_dir() -> Result<std::path::PathBuf> {
     use zapper_policy::{expand_home, Config};
     let path = config_path();
     let config = if path.exists() {

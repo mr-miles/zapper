@@ -24,6 +24,9 @@ use crate::{Office, ASSETS, PAGE};
 /// never granted.
 const UI_MARKER: &str = "x-zapper-ui";
 
+/// The dashboard's URL as `serve` printed it, under the state directory.
+pub const URL_FILE: &str = "office-url";
+
 /// The office's logo, the page's favicon.
 const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g fill="none" stroke="#D97757" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><circle cx="32" cy="32" r="28.5"/><path d="M42.16 36.21L36.21 42.16L27.79 42.16L21.84 36.21L21.84 27.79L27.79 21.84L36.21 21.84L42.16 27.79Z"/><path d="M42.16 36.21L42.16 60.23M36.21 42.16L19.23 59.15M27.79 42.16L3.77 42.16M21.84 36.21L4.85 19.23M21.84 27.79L21.84 3.77M27.79 21.84L44.77 4.85M36.21 21.84L60.23 21.84M42.16 27.79L59.15 44.77"/></g></svg>"##;
 
@@ -141,6 +144,8 @@ pub async fn serve(
     let office = Arc::new(Office::default());
     let _ = office.client.set(os.clone());
     let _ = office.state_dir.set(state_dir);
+    // Runs a previous office left running end, as it can't resume them.
+    crate::close_orphans(office.state_dir());
 
     // The office edge: where the sandboxes' supervisors reach the office's
     // tools and git, for the workers, with their tokens.
@@ -208,7 +213,12 @@ async fn serve_office(
     };
 
     let token = random_id(32);
-    eprintln!("zapper-office: dashboard on http://{local}/?token={token}");
+    let url = format!("http://{local}/?token={token}");
+    eprintln!("zapper-office: dashboard on {url}");
+    // For `zapper-office firm replay`; private, as the token is in it.
+    if let Err(e) = zapper_util::write_private(&office.state_dir().join(URL_FILE), url.as_bytes()) {
+        tracing::warn!("writing the dashboard's URL for `firm replay`: {e:#}");
+    }
     let app = app(office.clone(), extra, token, local.port(), remote);
     let shutdown = {
         let office = office.clone();

@@ -1049,24 +1049,22 @@ pub fn fund(run: &FirmRun, by: &str, worker: &str, tokens: i64, reason: &str) ->
 }
 
 /// What a role may reach, for the officers' background check, in words:
-/// its machine and its profile's network and program rules. Anything more
-/// is an access request, decided then.
+/// its machine and the network rules of its profile that its sandbox gets
+/// (the allows the gateway holds; what no rule allows is refused and
+/// becomes an access request). Anything more is an access request, decided
+/// then.
 pub(super) fn access_summary(run: &FirmRun, config: &zapper_policy::Config, role: &str) -> String {
     use zapper_policy::Action;
     let Some(r) = run.config.roles.get(role) else {
         return String::new();
     };
-    let said = |a: Action| match a {
-        Action::Allow => "allowed",
-        Action::Deny => "blocked",
-        Action::Ask => "needs approval",
-    };
     let mut lines = vec![format!("Machine: profile {}", r.profile)];
     if let Ok(p) = config.resolve(&r.profile) {
         let mut net = Vec::new();
-        let mut exec = Vec::new();
         for (_, layer) in &p.layers {
-            for n in &layer.net {
+            for n in layer.net.iter().filter(|n| {
+                n.action == Action::Allow && zapper_openshell::rules::why_not(n).is_none()
+            }) {
                 let ports = match n.ports.as_slice() {
                     [] => String::new(),
                     [one] => format!(" port {one}"),
@@ -1078,26 +1076,11 @@ pub(super) fn access_summary(run: &FirmRun, config: &zapper_policy::Config, role
                             .join(", ")
                     ),
                 };
-                let secrets = if n.secrets.is_empty() {
-                    String::new()
-                } else {
-                    format!(", the host adding the {} secret", n.secrets.join(", "))
-                };
-                net.push(format!("{}{ports}: {}{secrets}", n.host, said(n.action)));
+                net.push(format!("{}{ports}", n.host));
             }
-            for e in &layer.exec {
-                exec.push(format!("{}: {}", e.path, said(e.action)));
-            }
-        }
-        // The nearest layer's default is the one that applies.
-        if let Some(dn) = p.layers.iter().find_map(|(_, l)| l.defaults.net) {
-            net.push(format!("anything else: {}", said(dn)));
         }
         if !net.is_empty() {
-            lines.push(format!("Network: {}", net.join("; ")));
-        }
-        if !exec.is_empty() {
-            lines.push(format!("Programs: {}", exec.join("; ")));
+            lines.push(format!("Network: allowed to {}", net.join("; ")));
         }
     }
     lines.push("Additional access requests will require approval".into());

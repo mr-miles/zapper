@@ -15,7 +15,6 @@ const S = {
   security: null,        // GET /security (live)
   rp: null,              // replay: {events, idx, t0, t1, pos, playing, speed, timer, skip}
   gen: 0,                // bumps when the source changes; stale async results are dropped
-  daemonUi: null,        // the daemon UI's base URL (with token), for deep links to its pages
 };
 // "Now": wall clock live, the timeline position in replay.
 const T = () => (S.mode === 'replay' && S.rp ? S.rp.pos : nowSec());

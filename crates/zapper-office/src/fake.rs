@@ -222,11 +222,6 @@ impl Core {
         }))
     }
 
-    /// Replaces the config (as an edit to `zapper.yaml` would).
-    pub fn set_config(&self, config: Config) {
-        *self.0.config.lock().unwrap() = config;
-    }
-
     pub fn startup_path(&self) -> PathBuf {
         self.0.config_path.clone()
     }
@@ -401,25 +396,6 @@ impl OfficeClient for Fake {
             );
         }
         Ok(config)
-    }
-
-    fn promote_rule(&self, _what: &str, scope: &Scope, mut rule: NetRule) -> Result<AnyRule> {
-        let mut config = self.0.config();
-        let n = config.policy.net.len() + 1;
-        rule.id = Some(format!("net-{n}"));
-        match scope {
-            Scope::Global => config.policy.net.insert(0, rule.clone()),
-            Scope::Profile(p) => config
-                .profiles
-                .get_mut(p)
-                .ok_or_else(|| anyhow!("no profile {p}"))?
-                .policy
-                .net
-                .insert(0, rule.clone()),
-            other => bail!("promoting to {other:?} isn't supported"),
-        }
-        self.0.set_config(config);
-        Ok(AnyRule::Net(rule))
     }
 
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {

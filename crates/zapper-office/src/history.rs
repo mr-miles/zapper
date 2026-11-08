@@ -6,15 +6,12 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
-#[cfg(test)]
 use crate::journal::Journal;
 use crate::{is_run_id, Office};
 
 /// Ends the journals of runs a previous office left running: they can't be
-/// resumed, and a replay should say how they ended. Only the tests call it
-/// so far: `zapper-office serve` doesn't yet, so a run a restart cut off
-/// reads as still running.
-#[cfg(test)]
+/// resumed, and a replay should say how they ended. `zapper-office serve`
+/// calls it before it starts any firm.
 pub fn close_orphans(state: &std::path::Path) {
     let Ok(firms) = std::fs::read_dir(state.join("firms")) else {
         return;
@@ -39,7 +36,7 @@ pub fn close_orphans(state: &std::path::Path) {
                 if let Ok(j) = Journal::create(&path) {
                     j.append(
                         "run",
-                        json!({ "state": "ended", "reason": "the daemon stopped" }),
+                        json!({ "state": "ended", "reason": "the office stopped" }),
                     );
                 }
             }

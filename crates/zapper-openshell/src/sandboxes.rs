@@ -64,9 +64,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::{Frame, GuestFile, ShellRequest};
-use zapper_policy::{
-    expand_home, secret_refs, AnyRule, Config, Mount, NetRule, Policy, ResolvedProfile, Scope,
-};
+use zapper_policy::{expand_home, secret_refs, AnyRule, Config, Mount, Policy, ResolvedProfile};
 
 use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
 use crate::files::Staging;
@@ -717,11 +715,7 @@ impl OpenShell {
             .lock()
             .unwrap()
             .values()
-            .map(|s| {
-                let mut v = serde_json::to_value(&s.info).unwrap_or_default();
-                v["terminals"] = json!([]);
-                v
-            })
+            .map(|s| serde_json::to_value(&s.info).unwrap_or_default())
             .collect()
     }
 
@@ -1224,10 +1218,6 @@ impl OfficeClient for OpenShell {
         self.has_room(profiles)
     }
 
-    fn promote_rule(&self, _what: &str, _scope: &Scope, _rule: NetRule) -> Result<AnyRule> {
-        bail!("promoting a rule into the config isn't supported on OpenShell yet (phase 3)")
-    }
-
     fn create_session<'a>(&'a self, new: NewSession) -> BoxFuture<'a, Result<SessionInfo>> {
         Box::pin(async move {
             // The office reaches a sandbox's ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
@@ -1544,7 +1534,6 @@ fn load_config(path: &Path) -> Result<Config> {
 fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
-
 
 /// A session's state from its sandbox's phase.
 fn status_of(phase: SandboxPhase) -> Status {

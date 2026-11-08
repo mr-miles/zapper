@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 use zapper_driver::process::DriveStream;
 use zapper_policy::proto::ShellRequest;
-use zapper_policy::{AnyRule, NetRule, Scope};
+use zapper_policy::AnyRule;
 
 /// What the office's firm logic needs from where its workers run. The
 /// firm-logic calls (`security::decide`, revocation) are synchronous; the
@@ -33,10 +33,6 @@ pub trait OfficeClient: Send + Sync {
     /// Whether there is room for new sessions of `profiles` at once (the
     /// session limit and the host's memory), and the running config if so.
     fn admit(&self, profiles: &[String]) -> anyhow::Result<zapper_policy::Config>;
-    /// Promotes a standing approval's `rule` into the running config at
-    /// `scope`, under change note `what`, giving it a fresh `net-N` id; the
-    /// rule as added.
-    fn promote_rule(&self, what: &str, scope: &Scope, rule: NetRule) -> Result<AnyRule>;
 
     // --- sessions ----------------------------------------------------------
     // The office creates, drives, stops and forgets a worker's (or the

@@ -33,7 +33,7 @@ function render() {
   renderHeader();
   renderFooter();
   if (S.tab === 'overview') syncOverviewOff();
-  // The VMs are the daemon's, not the firm's: shown with or without a run.
+  // The VMs are the office's sandboxes, not one firm's: shown with or without a run.
   if (S.tab === 'vms') { try { updateVms(); } catch (e) { console.error(e); } }
   if (!S.M) return;
   try {
@@ -295,7 +295,6 @@ document.addEventListener('keydown', (ev) => {
 async function start() {
   buildHeader();
   mountAll();
-  await loadDaemonUi();
   await loadFirms();
   const h = readHash();
   S.tab = TABS.some(([t]) => t === h.tab) ? h.tab : 'kickoff';

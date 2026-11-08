@@ -790,7 +790,7 @@ async fn a_budgeted_firm_hires_funds_and_pays_for_a_contract() {
     let access = checks[1].to_string();
     assert!(access.contains("Machine: profile w"), "{access}");
     assert!(
-        access.contains("Network: *.example: needs approval"),
+        access.contains("Network: allowed to registry.npmjs.org port 443"),
         "{access}"
     );
     assert!(
