@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>zapperclaw</title>
+<style>
+body { font: 14px system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 18em 1fr; height: 100vh; }
+nav { border-right: 1px solid #ccc; overflow: auto; padding: .5em; }
+main { overflow: auto; padding: .5em 1em; }
+h2 { font-size: 1em; margin: .8em 0 .3em; }
+.item { cursor: pointer; padding: .2em .3em; border-radius: 3px; }
+.item:hover { background: #eee; }
+.state { color: #666; font-size: .9em; }
+pre { white-space: pre-wrap; background: #f6f6f6; padding: .5em; }
+textarea, input { width: 100%; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<nav>
+  <h2>Workers</h2><div id="workers"></div>
+  <h2>Threads</h2><div id="threads"></div>
+</nav>
+<main>
+  <h2>New message</h2>
+  <form id="send">
+    <input id="to" placeholder="to (names, comma-separated)">
+    <input id="subject" placeholder="subject">
+    <textarea id="body" rows="4" placeholder="message"></textarea>
+    <input id="reply" type="hidden">
+    <button>Send</button> <span id="sent"></span>
+  </form>
+  <div id="view"></div>
+</main>
+<script>
+// Everything shown here came from sandboxes: it is set as text, never as HTML.
+const el = (tag, text, cls) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; };
+const get = async (p) => (await fetch(p, { credentials: "same-origin" })).json();
+async function workers() {
+  const box = document.getElementById("workers"); box.replaceChildren();
+  for (const w of await get("/api/workers")) {
+    const d = el("div", undefined, "item");
+    d.append(el("span", w.name + " "), el("span", w.state + (w.detail ? ": " + w.detail : ""), "state"));
+    d.onclick = () => transcript(w.name);
+    box.append(d);
+  }
+}
+async function threads() {
+  const box = document.getElementById("threads"); box.replaceChildren();
+  for (const t of await get("/api/threads")) {
+    const d = el("div", t.subject + " (" + t.messages + ")", "item");
+    d.onclick = () => thread(t.id);
+    box.append(d);
+  }
+}
+async function thread(id) {
+  const t = await get("/api/thread/" + encodeURIComponent(id));
+  const v = document.getElementById("view"); v.replaceChildren(el("h2", t.subject));
+  for (const m of t.messages || []) {
+    v.append(el("div", m.id + " from " + m.from + " to " + m.to.join(", "), "state"), el("pre", m.body));
+  }
+  const last = (t.messages || []).at(-1);
+  if (last) { document.getElementById("reply").value = last.id; document.getElementById("to").value = last.from === "board" ? last.to.join(", ") : last.from; document.getElementById("subject").value = ""; }
+}
+async function transcript(name) {
+  const t = await get("/api/transcript/" + encodeURIComponent(name) + "?lines=200");
+  const v = document.getElementById("view"); v.replaceChildren(el("h2", name + "'s transcript"));
+  v.append(el("pre", (t.lines || []).map(l => JSON.stringify(l)).join("\n")));
+}
+document.getElementById("send").onsubmit = async (e) => {
+  e.preventDefault();
+  const v = (id) => document.getElementById(id).value;
+  const body = { to: v("to").split(",").map(s => s.trim()).filter(Boolean), subject: v("subject"), body: v("body") };
+  if (v("reply")) body.in_reply_to = v("reply");
+  const r = await fetch("/api/mail", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Zapper-UI": "1" }, body: JSON.stringify(body) });
+  const a = await r.json();
+  document.getElementById("sent").textContent = a.error ? a.error : "sent " + a.sent;
+  if (!a.error) { document.getElementById("body").value = ""; document.getElementById("reply").value = ""; threads(); }
+};
+const refresh = () => { workers(); threads(); };
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

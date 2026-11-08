@@ -28,6 +28,7 @@ pub mod config;
 pub mod forward;
 pub mod gateway;
 pub mod names;
+pub mod office;
 pub mod profiles;
 pub mod warden;
 

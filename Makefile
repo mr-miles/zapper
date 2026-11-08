@@ -1,6 +1,6 @@
 # The Office: firms of AI workers in sandboxes of an OpenShell gateway.
 #
-#   make build             zapper-office, zapper-workbench, zapper-warden, zapper-inspect and the static guest `office` command (release)
+#   make build             zapper-office, zapper-workbench, zapper-warden, zapperclaw (for the office sandbox's image), zapper-inspect and the static guest `office` command (release)
 #   make install           zapper-office, zapper-workbench, zapper-warden and zapper-inspect into ~/.local/bin
 #   make image             a sandbox image from a recipe in config/zapper.yaml (IMAGE=office by default)
 #   make image IMAGE=office-fake  a fake Claude Code and pi, for the office's e2e tests
@@ -18,7 +18,7 @@ TARGET  := target/release
 AGENT   := target/$(MUSL)/release/zapper-agent
 PREFIX  ?= $(HOME)/.local
 IMAGE   ?= office
-HOST    := -p zapper-office -p zapper-inspect -p zapper-keeper -p zapper-workbench -p zapper-warden
+HOST    := -p zapper-office -p zapper-inspect -p zapper-keeper -p zapper-workbench -p zapper-warden -p zapperclaw
 BINS    := zapper-office zapper-inspect zapper-workbench zapper-warden
 # The fake Claude Code and pi of the office's e2e tests, static like the
 # guest command: the office-fake image installs it.

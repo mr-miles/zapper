@@ -65,13 +65,28 @@ impl Profiles {
     }
 }
 
-/// The office's sandbox: its profile as it is, with where it reaches the
-/// warden and where the warden's forwards reach it.
+/// Where zapperclaw's config is in the office's sandbox: its user's
+/// `~/.config/zapperclaw`.
+pub fn office_config(user: &str) -> String {
+    format!("/home/{user}/.config/zapperclaw")
+}
+
+/// The office's sandbox: its profile, with zapperclaw's config, where it
+/// reaches the warden and where the warden's forwards reach it.
 fn prepare_office(config: &Config, zapper: &zapper_policy::Config) -> Result<Prepared> {
     let name = &config.office.profile;
-    let profile = zapper
+    let mut profile = zapper
         .resolve(name)
         .with_context(|| format!("office.profile {name}"))?;
+    // zapperclaw's config, as the template copies it in.
+    if let Some(dir) = &config.office.config {
+        profile.mounts.push(zapper_policy::Mount {
+            host: config.path(dir).to_string_lossy().into_owned(),
+            guest: office_config(&profile.agent.user),
+            mode: zapper_policy::MountMode::Ro,
+            extra: None,
+        });
+    }
     let ports = config.office.ports;
     let extra = BTreeMap::from([
         ("ZAPPERCLAW_WARDEN_URL".to_string(), config.url.clone()),

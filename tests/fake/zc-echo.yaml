@@ -1,0 +1,6 @@
+# zapperclaw's end-to-end test (tests/e2e-zapperclaw.sh): a worker that
+# answers the board's mail in its thread.
+rules:
+  - when: { from: board }
+    do:
+      - mail_reply: { message: $message, body: "echo: $subject" }

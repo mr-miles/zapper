@@ -73,11 +73,13 @@ pub struct Worker {
     /// The gateway's id for it (its supervisor's SPIFFE ID names it).
     pub id: String,
     pub ready: bool,
+    /// Its profile's harness (`claude-code`, `pi`): what the office drives.
+    pub kind: String,
 }
 
 /// The worker sandbox `s` is, if the warden made it: named and labelled as
 /// it names and labels them, from its profile's template.
-fn worker_of(s: &GatewaySandbox) -> Option<Worker> {
+fn worker_of(s: &GatewaySandbox, profiles: &Profiles) -> Option<Worker> {
     let name = s.labels.get(LABEL_WORKER)?;
     let profile = s.labels.get(LABEL_PROFILE)?;
     let ours = s.name == names::worker_sandbox(name)
@@ -88,7 +90,17 @@ fn worker_of(s: &GatewaySandbox) -> Option<Worker> {
         sandbox: s.name.clone(),
         id: s.id.clone(),
         ready: s.ready,
+        kind: kind_of(profiles, profile),
     })
+}
+
+/// The harness of worker profile `profile`.
+fn kind_of(profiles: &Profiles, profile: &str) -> String {
+    profiles
+        .workers
+        .get(profile)
+        .map(|p| p.profile.agent.kind.clone())
+        .unwrap_or_default()
 }
 
 pub struct Warden {
@@ -97,7 +109,7 @@ pub struct Warden {
     profiles: Profiles,
     /// The office sandbox's id: the one caller.
     office: String,
-    audit: Audit,
+    audit: Arc<Audit>,
     /// One make or delete at a time, so the caps and names hold.
     control: tokio::sync::Mutex<()>,
     /// The workers whose agent's stream is open: one at a time each.
@@ -181,14 +193,14 @@ impl Warden {
         config: Config,
         profiles: Profiles,
         office: String,
-        audit: Audit,
+        audit: impl Into<Arc<Audit>>,
     ) -> Warden {
         Warden {
             gw,
             config,
             profiles,
             office,
-            audit,
+            audit: audit.into(),
             control: tokio::sync::Mutex::new(()),
             streams: Arc::default(),
         }
@@ -206,7 +218,7 @@ impl Warden {
             .sandboxes()
             .await?
             .iter()
-            .filter_map(worker_of)
+            .filter_map(|s| worker_of(s, &self.profiles))
             .collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(all)
@@ -305,6 +317,7 @@ impl Warden {
             sandbox,
             id,
             ready: true,
+            kind: kind_of(&self.profiles, profile),
         };
         Ok((w, true))
     }

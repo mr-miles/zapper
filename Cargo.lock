@@ -4406,6 +4406,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hyper",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4442,6 +4443,32 @@ dependencies = [
  "zapper-openshell",
  "zapper-policy",
  "zapper-util",
+]
+
+[[package]]
+name = "zapperclaw"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zapper-driver",
+ "zapper-openshell",
+ "zapper-policy",
+ "zapper-record",
+ "zapper-util",
+ "zapper-workbench",
 ]
 
 [[package]]
