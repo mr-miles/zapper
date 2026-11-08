@@ -118,8 +118,8 @@ pub mod cli {
     }
 }
 
-/// What `zapper serve` prints when an operator's port is reachable from
-/// the network: the UI (`daemon.ui`) or a firm's Kubernetes dashboard.
+/// What the office prints when an operator's port is reachable from the
+/// network: a firm's Kubernetes dashboard.
 pub fn exposed_warning(what: &str) -> String {
     format!(
         "\n\

@@ -1,6 +1,6 @@
 //! A firm whose repositories have a remote (proposal 09). The remote's git
 //! is bare repositories on disk (`file://`), its API a local fake that
-//! keeps pull requests, checks and reviews, and the daemon's tokens come
+//! keeps pull requests, checks and reviews, and the office's tokens come
 //! from a script. Agents' pushes go through the firm's server's hooks as
 //! git runs them.
 
@@ -206,7 +206,7 @@ fn remote_repo(base: &Path, name: &str) {
 /// A commit on the remote's `main`, as the board's merge would make one.
 fn commit_on_remote(base: &Path, name: &str, file: &str) -> String {
     let work = base.join("seed").join(name);
-    // From the remote's main as it is now, which the daemon may have moved.
+    // From the remote's main as it is now, which the office may have moved.
     sh(
         &work,
         &[
@@ -435,7 +435,7 @@ async fn main_comes_from_the_remote_and_nobody_pushes_it() {
         "{e}"
     );
     assert!(push_branch(&run, &code, "pat-work", "x.txt", "write").is_ok());
-    // The board merges on the remote; the daemon fetches main back.
+    // The board merges on the remote; the office fetches main back.
     let merged = commit_on_remote(&w.base, &code, "merged.txt");
     remote::poll(&run).await;
     assert_eq!(

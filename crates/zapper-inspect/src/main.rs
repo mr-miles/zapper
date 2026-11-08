@@ -1,8 +1,8 @@
-//! `zapper-inspect`: The Office's past runs, read from the daemon's state
+//! `zapper-inspect`: The Office's past runs, read from the office's state
 //! directory (and the keeper's, when it keeps the record). Lists the runs
 //! and the people in each, names a scenario's operatives (the red team's
 //! contractor, say), and exports a worker's transcript. Read-only; the
-//! daemon needn't run.
+//! office needn't run.
 
 mod export;
 mod runs;
@@ -26,7 +26,7 @@ struct Cli {
     /// Default: config/zapper.yaml in a checkout, else ~/.config/zapper/zapper.yaml.
     #[arg(long, env = "ZAPPER_CONFIG", global = true)]
     config: Option<String>,
-    /// The daemon's state directory, instead of the config's.
+    /// The office's state directory, instead of the config's.
     #[arg(long, global = true)]
     state: Option<PathBuf>,
     #[command(subcommand)]

@@ -45,8 +45,7 @@ const TOKEN_TTL: Duration = Duration::from_secs(300);
 const MAX_FORM: usize = 64 << 10;
 /// The most an MCP message may be.
 const MAX_MCP: usize = 1 << 20;
-/// How long a tool list and a tool call may take, as the daemon's gateway
-/// allowed them.
+/// How long a tool list and a tool call may take.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The JWKS is fetched again for an unknown key at most this often.
@@ -435,7 +434,7 @@ impl Edge {
         }
     }
 
-    /// The answer to MCP message `msg`, as the daemon's gateway gave it; none
+    /// The answer to MCP message `msg`; none
     /// for a notification or a response.
     async fn answer(&self, caller: &Caller, msg: &Value) -> Option<Value> {
         let id = msg.get("id")?.clone();

@@ -1,7 +1,7 @@
-//! The office's tools: an MCP server in the daemon's gateway, served to the
-//! run's workers over their VM's MCP port (`zapper-agent office mcp` bridges
-//! the harness's stdio to it). Each tool is an op; the daemon knows which
-//! worker calls from the VM the connection came from, and checks the role on
+//! The office's tools: an MCP server on the office edge (`/mcp`), served to
+//! the run's workers (Claude Code speaks Streamable HTTP to it; `office mcp`
+//! bridges other harnesses' stdio to it). Each tool is an op; the edge
+//! knows which sandbox the request came from, and the role is checked on
 //! every call.
 
 use std::sync::Arc;
@@ -37,9 +37,9 @@ impl Tools {
         Some("The office: mail with colleagues, your desk, the org chart, the shared drive. See the office-mail and office-publish skills.".into())
     }
 
-    /// Answers one call on the tools socket, for the caller the daemon named
-    /// (the `McpCall`'s session id and labels, from the VM): the firm's run,
-    /// the member, and the tool.
+    /// Answers one call, for the caller the edge named (the `McpCall`'s
+    /// session id and labels, from its sandbox): the firm's run, the member,
+    /// and the tool.
     async fn handle(&self, call: &McpCall, op: &str, args: Value) -> Result<Value> {
         let firm = call.labels.get("firm").map(String::as_str).unwrap_or("");
         // A worker of another (ended) run of the firm is told it isn't running.
@@ -272,8 +272,8 @@ impl<'a> Args<'a> {
 /// what.
 struct Call<'a> {
     run: &'a Arc<FirmRun>,
-    /// The caller's session id, as the daemon named it from the VM (never from
-    /// the guest) — the office reaches the session over its client.
+    /// The caller's session id, as the edge named it from its sandbox (never
+    /// from what it sent): the office reaches the session over its client.
     sid: &'a str,
     w: &'a Arc<WorkerRt>,
     me: &'a str,

@@ -1,7 +1,7 @@
-//! A firm's services: its git repository, served by the daemon, and its
-//! cluster, a k3s VM booted before the workers. Workers reach both by name
-//! under the firm's domain through the proxy; the daemon routes those names
-//! itself, so no VM reaches another VM or a host address.
+//! A firm's services: its git repository and its cluster, k3s in a sandbox
+//! of its own booted before the workers. Workers reach both through the
+//! office edge (`/git/`, `/cluster`, `/apps/`), never another sandbox or a
+//! host address directly.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -50,7 +50,7 @@ pub struct Facilities {
     pub cluster_tokens: Mutex<HashMap<String, String>>,
     /// Per worker, for the git server.
     pub git_passwords: Mutex<HashMap<String, String>>,
-    /// What the daemon knows of the firm's git remote.
+    /// What the office knows of the firm's git remote.
     pub remote: super::remote::State,
     product: Mutex<Option<JoinHandle<()>>>,
     dashboard: Mutex<Option<JoinHandle<()>>>,
@@ -582,7 +582,7 @@ pub async fn start(run: &Arc<FirmRun>, config: &Config) -> Result<()> {
                 .status()
                 .await;
             // Below admin, pushes may not touch `main` or tags. The hook is
-            // the daemon's: the repository lives on the host, out of
+            // the office's: the repository lives on the host, out of
             // workers' reach.
             let hook = repo.join("hooks").join("pre-receive");
             std::fs::create_dir_all(repo.join("hooks"))?;

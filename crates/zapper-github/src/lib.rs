@@ -3,7 +3,7 @@
 //! permissions.
 //!
 //! The private key is read only here. A token is minted by `zapper mint`
-//! (or [`GitHub::mint`]) and held by the daemon in memory; it never reaches a
+//! (or [`GitHub::mint`]) and held by the office in memory; it never reaches a
 //! guest.
 
 mod app;

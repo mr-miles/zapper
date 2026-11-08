@@ -1,6 +1,6 @@
 //! Configuration model and rule evaluation for zapper.
 //!
-//! A [`Config`] is the whole serialisable state of the daemon (the "running
+//! A [`Config`] is `zapper.yaml`, as the office runs it (the "running
 //! config"). Policy is layered: rules in a session override its profile, a
 //! profile overrides the profile it `extends`, and every profile overrides the
 //! global policy. Within a layer rules are an ordered list and the first match

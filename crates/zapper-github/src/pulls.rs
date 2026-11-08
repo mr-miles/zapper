@@ -1,4 +1,4 @@
-//! Pull requests and what happens to them, for the daemon that publishes
+//! Pull requests and what happens to them, for the office that publishes
 //! agents' branches: opening one, its state, its checks and their logs, and
 //! its reviews and comments. Every call takes an installation token for the
 //! repository.

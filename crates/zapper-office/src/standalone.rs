@@ -24,14 +24,13 @@ use crate::{Office, ASSETS, PAGE};
 /// never granted.
 const UI_MARKER: &str = "x-zapper-ui";
 
-/// The firm's logo, as in the daemon UI's header (kept in step with
-/// `zapper-api`'s `ui::favicon`).
+/// The office's logo, the page's favicon.
 const FAVICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g fill="none" stroke="#D97757" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"><circle cx="32" cy="32" r="28.5"/><path d="M42.16 36.21L36.21 42.16L27.79 42.16L21.84 36.21L21.84 27.79L27.79 21.84L36.21 21.84L42.16 27.79Z"/><path d="M42.16 36.21L42.16 60.23M36.21 42.16L19.23 59.15M27.79 42.16L3.77 42.16M21.84 36.21L4.85 19.23M21.84 27.79L21.84 3.77M27.79 21.84L44.77 4.85M36.21 21.84L60.23 21.84M42.16 27.79L59.15 44.77"/></g></svg>"##;
 
 /// Where the office listens for its own CLI (`zapper-office firm/mail/drive`):
-/// `$ZAPPER_OFFICE_SOCKET`, else `office.sock` beside the daemon's `api.sock`
-/// under `$XDG_RUNTIME_DIR`. A unix socket, gated by filesystem permissions to
-/// the local user, the way the daemon serves the `zapper` CLI — the browser
+/// `$ZAPPER_OFFICE_SOCKET`, else `office.sock` under `$XDG_RUNTIME_DIR`
+/// (`/tmp/zapper-<uid>` without it). A unix socket, gated by filesystem permissions to the
+/// local user; the browser
 /// gateway (token, `Host`/`Origin`, the UI marker) is for the page alone.
 pub fn office_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("ZAPPER_OFFICE_SOCKET") {
@@ -90,8 +89,7 @@ pub fn app(office: Arc<Office>, extra: Router, token: String, port: u16, remote:
         ))
 }
 
-/// The office page's gateway, the daemon UI's `ui_guard` for the office's own
-/// token: every request needs the token (in the query once, then a strict
+/// The office page's gateway, for the office's own token: every request needs the token (in the query once, then a strict
 /// cookie) and an acceptable `Host`; a write also needs the `X-Zapper-UI`
 /// marker and an `Origin` naming the office itself.
 async fn ui_guard(
@@ -184,8 +182,8 @@ async fn serve_office(
         .local_addr()
         .context("the office listener's address")?;
 
-    // The office's own firm config (`office.yaml`), validated against the
-    // daemon's profiles; a bad firm config stops the office starting.
+    // The office's own firm config (`office.yaml`), validated against
+    // `zapper.yaml`'s profiles; a bad firm config stops the office starting.
     // `zapper-office config reload` re-reads it from the same path.
     let _ = office.config_path.set(office_config.clone());
     let n = office.reload_firms()?;
@@ -194,8 +192,8 @@ async fn serve_office(
         office_config.display()
     );
 
-    // The office's own CLI socket (no gateway: a local unix socket, as the
-    // daemon serves the `zapper` CLI). It serves the bare firm routes that the
+    // The office's own CLI socket (no gateway: a local unix socket, gated
+    // by filesystem permissions). It serves the bare firm routes that the
     // page reaches at `/api`; `zapper-office firm/mail/drive` call them here.
     let sock = office_socket_path();
     if let Some(parent) = sock.parent() {
@@ -308,8 +306,7 @@ firms:
             .unwrap()
             .contains("zapper_office_token=test-token"));
 
-        // A firm read over the socket: the configured firm is listed (the
-        // config comes from the daemon through the `Remote` client).
+        // A firm read over the socket: the configured firm is listed.
         let r = app()
             .oneshot(
                 Request::get("/api/firms")
@@ -370,7 +367,7 @@ firms:
     // The office's own CLI surface: the bare firm routes (what the CLI socket
     // serves `zapper-office firm/mail/drive`) answer with no token, marker or
     // Origin — a read and a write alike. The socket is gated by filesystem
-    // permissions, as the daemon serves the `zapper` CLI, so the browser
+    // permissions, so the browser
     // gateway (token, `Host`/`Origin`, the UI marker) does not apply here.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cli_routes_need_no_gateway() {

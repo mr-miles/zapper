@@ -1306,7 +1306,7 @@ pub async fn hire(run: &Arc<FirmRun>, by: &str, a: HireArgs) -> Result<Value> {
 }
 
 /// Room on the host for one more VM of `role`: the config, or why not. The
-/// host-room decision (session limit + memory) is one call to the daemon.
+/// host-room decision (session limit and memory) is one call to the client.
 pub(super) fn room(
     office: &Office,
     _role_name: &str,

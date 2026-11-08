@@ -1,5 +1,5 @@
 //! A firm's git remote (proposal 09): agents work only with the firm's own
-//! git server, and the daemon is the remote's only client.
+//! git server, and the office is the remote's only client.
 //!
 //! The repositories are the ones the firm's GitHub App is installed on, kept
 //! in `git.dir` across runs: each cloned (if absent) or fetched when a run
@@ -8,18 +8,18 @@
 //! way:
 //!
 //! - **the remote's** (the default, for code): the board merges in GitHub's
-//!   UI, and the daemon fetches `main` back. On the firm's server nobody
+//!   UI, and the office fetches `main` back. On the firm's server nobody
 //!   pushes `main`. Agents send a branch for review with `publish_branch`;
-//!   the daemon pushes it as `<worker>/<branch>`, opens its pull request, and
+//!   the office pushes it as `<worker>/<branch>`, opens its pull request, and
 //!   mails the author when its checks finish, when it is reviewed or
 //!   commented on, and when it is merged or closed.
 //! - **the firm's** (`git.local`, the knowledge base): merged on the firm's
 //!   server by whoever holds `admin`, and pushed out after each update,
 //!   fast-forward only. If the remote's `main` moved by another route, the
-//!   daemon stops pushing and tells the board.
+//!   office stops pushing and tells the board.
 //!
-//! The daemon's tokens come from `zapper mint github-app`, so the App's key
-//! is read by a short-lived process and never by the daemon; they are
+//! The office's tokens come from `zapper mint github-app`, so the App's key
+//! is read by a short-lived process and never by the office; they are
 //! revoked when the run stops.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -34,9 +34,9 @@ use zapper_mint as mint;
 use super::FirmRun;
 use crate::firm::Firm;
 
-/// How often the daemon looks at the remote.
+/// How often the office looks at the remote.
 const POLL_SECS: u64 = 60;
-/// What the daemon's tokens may do: push branches and `main` (of a
+/// What the office's tokens may do: push branches and `main` (of a
 /// local-main repository), open pull requests, read their checks.
 const PERMISSIONS: [&str; 5] = [
     "contents=write",
@@ -91,7 +91,7 @@ pub struct Published {
     seen: BTreeSet<(String, u64)>,
 }
 
-/// What the daemon knows of the remote while a run goes on.
+/// What the office knows of the remote while a run goes on.
 #[derive(Default)]
 pub struct State {
     /// The token commands used, to revoke what they minted.
@@ -316,7 +316,7 @@ async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
 }
 
 /// The hook of a repository whose `main` is the remote's: nobody pushes
-/// `main`, `main/*` or tags; the daemon moves `main` from the remote.
+/// `main`, `main/*` or tags; the office moves `main` from the remote.
 const PRE_RECEIVE_REMOTE: &str = r#"#!/bin/sh
 # Installed by zapper: main comes from the remote, where the board merges.
 if [ "$ZAPPER_GIT_LEVEL" = merge ]; then
@@ -959,7 +959,7 @@ fn short(sha: &str) -> &str {
 }
 
 /// The run is stopping: a local-main repository's `main` goes out a last
-/// time, the end is recorded, and every token the daemon minted is revoked.
+/// time, the end is recorded, and every token the office minted is revoked.
 pub async fn finish(run: &Arc<FirmRun>) {
     if run.config.git_remote().is_some() {
         for name in touched(run) {

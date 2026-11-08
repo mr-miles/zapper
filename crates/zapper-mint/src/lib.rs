@@ -1,6 +1,6 @@
 //! Secrets minted by a host command (`command:` in a secret).
 //!
-//! The daemon runs the command, which prints the credential, usually a
+//! The office runs the command, which prints the credential, usually a
 //! short-lived one: `{"value": "...", "expires_at": "<RFC 3339>"}`, or a bare
 //! value cached for `ttl_secs` (the format is `zapper_policy::mint`'s). The
 //! result is kept per command line and refreshed ahead of its expiry, so a
@@ -18,7 +18,7 @@
 //! seconds to whoever asks next, so a down service is asked once, not once
 //! per request. Everything here is async: waiting for a mint holds no thread.
 //!
-//! The command runs as the daemon's user with a cleared environment, no
+//! The command runs as the office's user with a cleared environment, no
 //! stdin, and a timeout. Its output is the secret: it is parsed and never put
 //! in an error or a log.
 

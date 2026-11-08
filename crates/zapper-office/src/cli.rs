@@ -2,9 +2,8 @@
 //! in `firm_cli.rs`): a small client of the running office's unix-socket API
 //! and the output helpers the commands share. The office serves its firm
 //! routes to the browser (behind the UI gateway, at `/api`) and, for this CLI,
-//! on a local unix socket of its own (`standalone::office_socket_path`), the
-//! way the daemon serves the `zapper` CLI — so these commands reach the office
-//! the way `zapper`'s reached the daemon.
+//! on a local unix socket of its own (`standalone::office_socket_path`),
+//! which these commands reach.
 //!
 //! The socket plumbing is the shared [`zapper_client::Zapper`]; [`Client`] is
 //! a thin board-facing adapter over it, keeping raw response bytes (a drive
@@ -117,9 +116,8 @@ pub fn config_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// The office's own config file (`office.yaml`): the firms it runs, beside the
-/// daemon's `zapper.yaml` (`$ZAPPER_OFFICE_CONFIG` overrides). Firms are the
-/// office's config, not the daemon's (proposal 13 decision 2).
+/// The office's own config file (`office.yaml`): the firms it runs, beside
+/// `zapper.yaml` (`$ZAPPER_OFFICE_CONFIG` overrides).
 pub fn office_config_path() -> std::path::PathBuf {
     use zapper_policy::expand_home;
     match std::env::var("ZAPPER_OFFICE_CONFIG") {

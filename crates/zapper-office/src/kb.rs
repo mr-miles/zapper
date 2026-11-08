@@ -1,6 +1,6 @@
 //! The firm's central knowledge base (proposal 09): a markdown wiki in one
 //! of its repositories, laid out as an LLM wiki and curated by a librarian
-//! who alone merges its `main`. The daemon gives an empty one its layout;
+//! who alone merges its `main`. The office gives an empty one its layout;
 //! the rest is the agents' work, by the `knowledge-base` skill and the
 //! librarian's.
 

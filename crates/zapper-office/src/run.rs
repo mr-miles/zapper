@@ -446,7 +446,7 @@ fn create_run(
     }
     let journal = Journal::create(&dir.join("journal.jsonl"))?;
     let domain = firm.domain(name);
-    // Each role's shared layer lives in the daemon, named `<firm>/<role>`;
+    // Each role's shared layer is the client's, named `<firm>/<role>`;
     // workers attach it by their `firm-role` label, and the office changes it
     // through the client. Reset to empty for this run (the registry outlives a
     // run, which starts with no approvals).

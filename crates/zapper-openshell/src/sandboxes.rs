@@ -1,50 +1,46 @@
-//! The office on OpenShell (phase 1 of `docs/openshell-migration.md`): an
-//! [`OfficeClient`] over an OpenShell gateway (v0.1.7) and its compute
-//! driver (openshell-firecracker), in place of the zapper daemon. The firm
-//! logic above the trait is unchanged.
-//!
-//! What this phase covers:
+//! The office's (and the workbench's) client of an OpenShell gateway (v0.1.7)
+//! and its compute driver (openshell-firecracker): the [`OfficeClient`] the
+//! firm logic runs on, and what the workbench uses of it.
 //!
 //! - **Sessions.** A zapper profile becomes a sandbox template (image, CPU,
 //!   memory), made once per office process; a session is a sandbox created
 //!   from it, with the gateway's providers attached (the Claude token is the
-//!   `anthropic` provider's, injected outside the VM). Once it is ready the
-//!   office writes what zapper's guest agent wrote at boot: the harness's
-//!   files (instructions, settings, MCP servers, turn-end hook), the
-//!   profile's and the session's files, and copies of the directories it
-//!   mounted (skills, the work directory), then runs the profile's `setup`.
+//!   `anthropic` provider's, injected outside the VM), labelled with its
+//!   firm, run, member, role and profile. Once the gateway's status stream
+//!   says it is ready, the office sets it up as the profile ([`Setup`]):
+//!   the harness's files (instructions, settings, MCP servers, turn-end
+//!   hook), the profile's and the session's files, copies of the directories
+//!   it mounted (skills, the work directory), then the profile's `setup`.
 //! - **Driving.** `attach` is `ExecSandboxInteractive`, translated to and
-//!   from the frames the foreman and the drive's tar copies speak, so both
-//!   work over it unchanged; `connect_port` is `ForwardTcp`.
+//!   from the frames the foreman and the drive's tar copies speak;
+//!   `connect_port` is `ForwardTcp`.
 //! - **Host room.** `admit` keeps the session limit and the memory check.
-//! - **The office's tools and git** (phase 2) are the office edge's
-//!   (the office's `edge`), which knows each sandbox by the UUID recorded here:
-//!   the facilities the daemon would have connected register as ids only,
-//!   Claude Code's `office` MCP server is the edge's Streamable HTTP, and
-//!   every command gets `ZAPPER_OFFICE_URL` for the `office` command.
-//! - **Network rules and the officers** (phase 3,
-//!   `crate::rules`): the allows among a sandbox's layers (its
-//!   own, its role's, its profile's, the global one) are rules of its
-//!   policy, kept in step through `UpdateConfig`, a role's for every
-//!   sandbox of the role. What no rule allows OpenShell refuses, and drafts
-//!   a rule for; a worker proposes one through `policy.local` (the policy
-//!   advisor, on for every sandbox the office makes). The office reads each
-//!   sandbox's pending drafts, files them as the officers' access requests,
-//!   and applies their decisions: approved (narrowed if they say so),
-//!   rejected with their reason, undone when the approval expires or is
+//! - **The office's tools and git** are the office edge's (`edge`), which
+//!   knows each sandbox by the UUID recorded here, so the facilities the
+//!   office registers are ids only. Claude Code's `office` MCP server is the
+//!   edge's Streamable HTTP, and every command gets `ZAPPER_OFFICE_URL` for
+//!   the `office` command.
+//! - **Network rules and the officers** (`crate::rules`): the allows among a
+//!   sandbox's layers (its own, its role's, its profile's, the global one)
+//!   are rules of its policy, kept in step through `UpdateConfig`, a role's
+//!   for every sandbox of the role. What no rule allows OpenShell refuses,
+//!   and drafts a rule for; a worker proposes one through `policy.local`
+//!   (the policy advisor, on for every sandbox the office makes). The office
+//!   reads each sandbox's pending drafts, files them as the officers' access
+//!   requests, and applies their decisions: approved (narrowed if they say
+//!   so), rejected with their reason, undone when the approval expires or is
 //!   revoked. The gateway must leave `proposal_approval_mode` unset, so
 //!   nothing is approved without an officer.
 //!
-//! What it does not do yet: the traffic log is empty (phase 3 remainder:
-//! `GetSandboxLogs`), so officers get no digests.
+//! Not yet: the traffic log is empty (`GetSandboxLogs`), so officers get no
+//! digests.
 //!
-//! Differences from zapper a firm can see: commands run as the sandbox user,
-//! never root (`ShellRequest::system` is ignored), so files the office writes
-//! outside the user's reach must already be in the image with the same
-//! content (`scripts/openshell-image.sh` puts them there); secrets are the
-//! gateway's providers, so `{{secret:…}}` values in a profile's env and
-//! files are left out; and there is no per-exec approval or terminal
-//! recording.
+//! What a firm can tell: commands run as the sandbox user, never root
+//! (`ShellRequest::system` is ignored), so files the office writes outside
+//! the user's reach must already be in the image with the same content (the
+//! image builder puts them there); secrets are the gateway's providers, so
+//! `{{secret:…}}` values in a profile's env and files are left out; and
+//! there is no per-exec approval or terminal recording.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -123,8 +119,8 @@ pub struct Settings {
     pub images: BTreeMap<String, String>,
     /// Gateway providers attached to every sandbox (e.g. `anthropic`).
     pub providers: Vec<String>,
-    /// The most sandboxes at once; by default `daemon.max_sessions` of the
-    /// zapper config.
+    /// The most sandboxes at once; by default `max_sessions` of the zapper
+    /// config's `daemon:` section.
     pub max_sessions: Option<usize>,
     /// How long a sandbox may take to become ready; by default 300.
     pub ready_timeout_secs: Option<u64>,
@@ -745,7 +741,7 @@ impl OpenShell {
         }
     }
 
-    /// The session limit and the host's memory, as the daemon checks them.
+    /// The session limit and the host's memory.
     async fn has_room(&self, profile: &str) -> Result<Config> {
         let config = self.config();
         let resolved = config.resolve(profile)?;
@@ -1167,9 +1163,8 @@ impl OpenShell {
         Ok(Box::new(ours))
     }
 
-    /// A facility the daemon would have connected the sandboxes to: on
-    /// OpenShell the office edge serves it (the tools, git), so registering
-    /// it is only an id.
+    /// A facility the office registers: the office edge serves it (the
+    /// tools, git), so registering it is only an id.
     fn registered(&self, what: &str) -> u64 {
         tracing::debug!("{what}: served through the office edge");
         self.next_id.fetch_add(1, Ordering::Relaxed)
@@ -1250,8 +1245,7 @@ impl OfficeClient for OpenShell {
     }
 
     fn record_writable(&self) -> bool {
-        // The record is the office's own (its journals and transcripts);
-        // there is no daemon record to wait for.
+        // The record is the office's own (its journals and transcripts).
         true
     }
 
@@ -1284,8 +1278,7 @@ impl OfficeClient for OpenShell {
             if new.persistent {
                 bail!("persistent sessions aren't supported on OpenShell");
             }
-            // A forward is the daemon's: here the office reaches a sandbox's
-            // ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
+            // The office reaches a sandbox's ports on demand (`connect_port`, OpenShell's `ForwardTcp`).
             let config = self.has_room(&new.profile).await?;
             let mut profile = config.resolve(&new.profile)?;
             if let Some(overlay) = &new.agent_overlay {
@@ -1584,8 +1577,7 @@ impl OfficeClient for OpenShell {
     }
 }
 
-/// The office's own routes on OpenShell that the daemon served before: the
-/// VMs view's session list.
+/// The office's routes for its sandboxes: the VMs view's session list.
 pub fn routes(os: Arc<OpenShell>) -> axum::Router {
     axum::Router::new().route(
         "/sessions",

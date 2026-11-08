@@ -29,27 +29,23 @@ pub trait OfficeClient: Send + Sync {
     /// Whether the record can be written now (the office takes no firm turn
     /// while it can't).
     fn record_writable(&self) -> bool;
-    /// The daemon's running config — the firms' definitions and profiles the
-    /// office validates a start against, and the UI reads.
+    /// The running zapper config (`zapper.yaml`): the profiles the office
+    /// validates a start against, and the UI reads.
     fn config(&self) -> zapper_policy::Config;
     /// How many sessions are running now (the firm-level pre-flight: enough
-    /// room under `daemon.max_sessions` for the firm's workers).
+    /// room under `max_sessions` for the firm's workers).
     fn session_count(&self) -> usize;
     /// Whether the host has room for a session of `profile`, and the running
     /// config if so (the host-room decision in one call: limit + memory).
     fn admit(&self, profile: &str) -> anyhow::Result<zapper_policy::Config>;
     /// Promotes a standing approval's `rule` into the running config at
     /// `scope`, under change note `what`, giving it a fresh `net-N` id; the
-    /// rule as added. Config mutation stays the operator's: `Local` changes
-    /// the daemon's config in process; `Remote` reaches the daemon's config
-    /// API (filled in with the standalone bin, P4-d).
+    /// rule as added.
     fn promote_rule(&self, what: &str, scope: &Scope, rule: NetRule) -> Result<AnyRule>;
 
-    // --- session surface (P1-b) --------------------------------------------
-    // The office creates, drives, stops and forgets a worker's (or facility's)
-    // session through these, storing the id it gets back rather than an
-    // `Arc<Session>` (P1-c). `Local` calls `Core` directly; `Remote` is
-    // filled in over the API socket in P3-a.
+    // --- sessions ----------------------------------------------------------
+    // The office creates, drives, stops and forgets a worker's (or the
+    // cluster's) sandbox through these, keeping only the id it gets back.
 
     /// Starts a session; its info once the guest is ready (the office keeps
     /// the `id`).
@@ -61,28 +57,26 @@ pub trait OfficeClient: Send + Sync {
     /// Session `id`'s info; errors if there is no such session.
     fn session(&self, id: &str) -> Result<SessionInfo>;
     /// Opens a terminal in session `id` and returns the stream to drive an
-    /// agent over it ([`zapper_driver::process::start`]). Local in-process; the
-    /// `Remote` impl upgrades the API connection to a raw stream (P3-a).
+    /// agent over it ([`zapper_driver::process::start`]).
     fn attach<'a>(
         &'a self,
         id: &'a str,
         req: ShellRequest,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
-    /// Opens a raw byte stream to port `port` of session `id`'s guest (over
-    /// vsock), for the office to proxy — the board's dashboard/product port.
-    /// `Remote` upgrades the API connection and the daemon splices it.
+    /// Opens a raw byte stream to port `port` of session `id`'s sandbox (on
+    /// OpenShell, `ForwardTcp`), for the office to proxy: the board's
+    /// dashboard and product ports, the cluster's API.
     fn connect_port<'a>(
         &'a self,
         id: &'a str,
         port: u32,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>>;
 
-    // --- facility registration (P2-a) --------------------------------------
+    // --- facilities --------------------------------------------------------
     // The office serves a facility (its tools, the officers' decider) on a
-    // socket in the daemon's `state/services/` directory (`run.socket_dir`,
-    // P1-a) and registers it here, so the gateway/core routes the run's
-    // sessions to it. `serve_facility` folds the bind + serve-loop + register
-    // + cleanup around these. Local calls `Core`; Remote is P3-a.
+    // socket in `state/services/` (`run.socket_dir`) and registers it here.
+    // On OpenShell the office edge serves the tools and git instead, so the
+    // registrations are ids only.
 
     /// Serves the MCP server a facility serves on `socket` as `name` to the
     /// sessions `sessions` picks; its id.
@@ -117,7 +111,7 @@ pub trait OfficeClient: Send + Sync {
     /// what it was).
     fn remove_service(&self, id: u64);
 
-    // --- a session's own rule layer and traffic (P4) -----------------------
+    // --- a session's own rule layer and traffic ---------------------------
     // The officers decide access by putting rules on a worker's (or the
     // cluster's) own session layer, and read its traffic; by session id, so
     // the office needs no `Session`.
@@ -130,8 +124,8 @@ pub trait OfficeClient: Send + Sync {
     fn remove_session_rule(&self, id: &str, rule_id: &str) -> bool;
     /// Where the firm's workers reach the office over HTTP, as a URL they
     /// can use (the office edge on OpenShell: its MCP tools at `/mcp`, git
-    /// at `/git/`), with their identity added outside the VM; `None` where
-    /// the daemon carries them (its MCP gateway, `git.<firm domain>`).
+    /// at `/git/`), with their identity added outside the VM; `None` for a
+    /// client with no edge (the tests' fake, unless set).
     fn edge(&self) -> Option<String> {
         None
     }
@@ -139,7 +133,7 @@ pub trait OfficeClient: Send + Sync {
     // --- drafted rules (OpenShell's policy advisor) -------------------------
     // Where the sandboxes' network drafts rules for review (a worker's
     // proposal through `policy.local`, or a connection it refused), the
-    // officers review them in place of the daemon's `ask` referrals.
+    // officers review them.
 
     /// Whether access requests come as drafted rules.
     fn drafts(&self) -> bool {

@@ -16,7 +16,7 @@ use zapper_util::cli::{print_json, s, table};
 
 #[derive(Subcommand)]
 pub enum ConfigCmd {
-    /// Re-read office.yaml and apply its firms (validated against the daemon's
+    /// Re-read office.yaml and apply its firms (validated against `zapper.yaml`'s
     /// profiles) to the running office, atomically.
     Reload,
 }

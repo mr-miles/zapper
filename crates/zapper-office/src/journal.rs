@@ -1,5 +1,5 @@
 //! Append-only JSON-lines files of a run: the firm's journal and the workers'
-//! transcripts. The daemon keeps offsets into them, not their contents. They
+//! transcripts. They
 //! are part of the record: written through `record`, and so through the
 //! keeper when there is one.
 

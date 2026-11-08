@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Where the files are: the daemon's state directory, and the keeper's
+/// Where the files are: the office's state directory, and the keeper's
 /// directory when the keeper holds the record (journals and transcripts).
 pub struct Store {
     pub state: PathBuf,
@@ -16,7 +16,7 @@ pub struct Store {
 
 impl Store {
     /// Where a file of the record is read: in the keeper's directory when
-    /// it keeps the record, else where the daemon wrote it.
+    /// it keeps the record, else where the office wrote it.
     fn view(&self, path: &Path) -> PathBuf {
         match (&self.keeper, path.strip_prefix(&self.state)) {
             (Some(k), Ok(rel)) => k.join(rel),

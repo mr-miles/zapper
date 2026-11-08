@@ -3,7 +3,7 @@
 //! officers decide. `docs/office.md` is the design.
 //!
 //! A run starts fresh with every `firm up` and is written to
-//! `state/firms/<firm>/runs/<id>/` as it happens; the daemon keeps indexes.
+//! `state/firms/<firm>/runs/<id>/` as it happens.
 
 pub(crate) mod access;
 pub(crate) mod client;
@@ -66,27 +66,24 @@ use mail::{Draft, Kind};
 use zapper_api_types::SessionInfo;
 
 /// Every firm's current or last run. `pub` as the office's own HTTP state
-/// (the axum `State` the firm routes extract), replacing `Core`; its fields
+/// (the axum `State` the firm routes extract); its fields
 /// stay crate-private.
 #[derive(Default)]
 pub struct Office {
     pub(crate) runs: RwLock<BTreeMap<String, Arc<FirmRun>>>,
-    /// The daemon through the office's client interface, set once in `start`.
-    /// In-process it wraps `Core`; once the office is a process of its own it
-    /// is the socket client. How the office reaches the daemon from places
-    /// that have no `run` in hand (run creation, the read endpoints), so they
-    /// need no `&Core`.
+    /// The office's client of the gateway (`zapper-openshell`; in tests the
+    /// fake), set once in `start`: how places with no `run` in hand (run
+    /// creation, the read endpoints) reach the sandboxes.
     client: std::sync::OnceLock<Arc<dyn client::OfficeClient>>,
-    /// The daemon's `state` directory, where firms' runs are kept on disk
+    /// The office's `state` directory, where firms' runs are kept on disk
     /// (`state/firms/<firm>/runs/…`). Set in `start`; the read endpoints and
-    /// history read run files by it, needing no `&Core`.
+    /// history read run files by it.
     state_dir: std::sync::OnceLock<PathBuf>,
-    /// The daemon's `state/services/` directory, where the office binds its
+    /// The office's `state/services/` directory, where the office binds its
     /// facilities' sockets (`FirmRun.socket_dir`). Set in `start`.
     socket_dir: std::sync::OnceLock<PathBuf>,
     /// The firms the office runs, its own config (`office.yaml`), parsed and
-    /// validated. Loaded at boot and swapped on reload; the daemon no longer
-    /// carries firm data (proposal 13 decision 2). Read through `firm`/`firms`.
+    /// validated. Loaded at boot and swapped on reload. Read through `firm`/`firms`.
     firms: RwLock<BTreeMap<String, Firm>>,
     /// Where `firms` is read from (`office.yaml`); set at boot, re-read by
     /// `reload_firms` (`zapper-office config reload`).
@@ -94,14 +91,14 @@ pub struct Office {
 }
 
 impl Office {
-    /// The office's client of the daemon (set in `start`).
+    /// The office's client of the gateway (set in `start`).
     pub fn client(&self) -> &Arc<dyn client::OfficeClient> {
         self.client
             .get()
             .expect("the office's client is set in start()")
     }
 
-    /// The daemon's `state` directory (set in `start`); firms' runs live
+    /// The office's `state` directory (set in `start`); firms' runs live
     /// under `state/firms/`.
     pub fn state_dir(&self) -> &std::path::Path {
         self.state_dir
@@ -114,7 +111,7 @@ impl Office {
         self.state_dir().join("firms").join(firm)
     }
 
-    /// The daemon's `state/services/` directory (set in `start`), where the
+    /// The office's `state/services/` directory (set in `start`), where the
     /// office binds its facilities' sockets.
     pub fn socket_dir(&self) -> &std::path::Path {
         self.socket_dir
@@ -141,17 +138,15 @@ impl Office {
 
     // --- firm definitions (office.yaml holder) -----------------------------
     // The one place the office reads firm definitions: its own config, loaded
-    // from `office.yaml` at boot and swapped on reload. The daemon no longer
-    // carries firm data.
+    // from `office.yaml` at boot and swapped on reload.
 
     /// Replaces the office's firms (boot or reload); validate first.
     pub(crate) fn load_firms(&self, firms: BTreeMap<String, Firm>) {
         *self.firms.write().unwrap() = firms;
     }
 
-    /// Re-reads `office.yaml`, validates it against the daemon's profiles, and
-    /// swaps the firms in atomically — or fails and changes nothing (the
-    /// office equivalent of `zapper config reload`). Returns the firm count.
+    /// Re-reads `office.yaml`, validates it against `zapper.yaml`'s profiles, and
+    /// swaps the firms in atomically — or fails and changes nothing. Returns the firm count.
     pub(crate) fn reload_firms(&self) -> Result<usize> {
         let path = self
             .config_path
@@ -214,7 +209,7 @@ pub(crate) struct WorkerRt {
     officer: AtomicBool,
     /// The worker's session once its VM is up: its info (id, user, labels),
     /// as the office's client gave it. The office holds no `Session` — it
-    /// reaches the guest/daemon over `run.client` by this id.
+    /// reaches the sandbox over `run.client` by this id.
     pub session: Mutex<Option<SessionInfo>>,
     /// The real `Session`, kept only in tests so the helpers can drive the
     /// fake VM (`shell_vm`, tools) by it; production holds just the info.
@@ -328,11 +323,8 @@ pub(crate) struct FirmRun {
     pub firm: String,
     pub id: String,
     pub dir: PathBuf,
-    /// The daemon's `state/services/` directory, where the office binds the
-    /// sockets of the facilities it serves (its tools, the officers' decider).
-    /// Plain office config (P1-a): the office and daemon are configured to the
-    /// same path, assumed aligned — no coordination over the client. In-process
-    /// it is `d.socket_dir()`; a co-host office reads it from `office.yaml`.
+    /// The office's `state/services/` directory, where it binds the sockets
+    /// of the facilities it serves (its tools, the officers' decider).
     pub socket_dir: PathBuf,
     /// The firm's config as the run started: roles, budgets, limits,
     /// services. The chart is in `chart`.
@@ -375,14 +367,11 @@ pub(crate) struct FirmRun {
     pub contracts: Mutex<contracts::Contracts>,
     /// Credential grants and requests.
     pub access: Mutex<access::Access>,
-    /// The daemon, through the office's client interface: how the office's
-    /// firm logic changes role layers (and, in time, everything else) so it
-    /// does not reach into `Core` directly. In-process now (`client::Local`);
-    /// over the API socket once the office is a process of its own.
+    /// The office's client of the gateway: how the run's firm logic makes
+    /// and drives sandboxes and changes their rule layers.
     pub client: Arc<dyn crate::client::OfficeClient>,
     /// Back to the office that holds this run, so firm logic reaches the
-    /// registry (the other runs) without a `Core` — the office owns its own
-    /// `Office`, not `d.office()`.
+    /// registry (the other runs).
     pub office: std::sync::Weak<Office>,
     pub turns: Arc<Semaphore>,
     pub usage: Mutex<Usage>,
@@ -414,7 +403,7 @@ pub(crate) fn labels(
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
     // A worker of a role attaches that role's shared layer by this label; its
-    // value is the layer's name (`Core::named_layer`).
+    // value is the layer's name (`OfficeClient::add_layer_rule`).
     if !role.is_empty() {
         m.insert("firm-role".to_string(), format!("{firm}/{role}"));
     }
@@ -474,7 +463,7 @@ fn utc_day(ts: f64) -> i64 {
 
 impl FirmRun {
     /// The office that holds this run — for firm logic that needs the
-    /// registry (the other runs) without a `Core`.
+    /// registry (the other runs).
     pub fn office(&self) -> Arc<Office> {
         self.office
             .upgrade()

@@ -2,7 +2,7 @@
 //! terminal recordings. Every write to it goes through here.
 //!
 //! With `daemon.keeper` configured, the record is appended through
-//! `zapper-keeper`, a separate user who owns its files: the daemon can add
+//! `zapper-keeper`, a separate user who owns its files: the office can add
 //! lines and never change or remove them, and reads them from the keeper's
 //! directory. Without it, the record is written under `state` as before.
 //! Paths stay the state paths everywhere else; `view` maps a path to where
@@ -34,8 +34,8 @@ static RECORDS: OnceLock<Records> = OnceLock::new();
 /// False after a write to the record failed, until one succeeds again.
 static HEALTHY: AtomicBool = AtomicBool::new(true);
 
-/// Sets up the record at the daemon's start. With a keeper configured, it
-/// must answer: the daemon doesn't run without its record.
+/// Sets up the record at the office's start. With a keeper configured, it
+/// must answer: the office doesn't run without its record.
 pub fn init(state: &Path, keeper: Option<&zapper_policy::KeeperConfig>) -> Result<()> {
     let keeper = match keeper {
         None => None,
@@ -165,7 +165,7 @@ pub fn status() -> Value {
     }
 }
 
-/// Verifies the files under `dir`, a directory of the daemon's state (a
+/// Verifies the files under `dir`, a directory of the office's state (a
 /// session's, a run's), against the keeper's chains: an error if it isn't in
 /// the record, or there is no keeper.
 pub fn verify_state_dir(dir: &Path) -> Result<Value> {
@@ -254,7 +254,7 @@ mod tests {
         );
 
         // A failed append (a read-only sink) flips health false; a later
-        // success flips it back — the gate the daemon uses to stop firm turns.
+        // success flips it back — the gate the office uses to stop firm turns.
         let ro = dir.join("ro");
         std::fs::write(&ro, b"").unwrap();
         let mut bad = Writer(Sink::Local(std::fs::File::open(&ro).unwrap()));

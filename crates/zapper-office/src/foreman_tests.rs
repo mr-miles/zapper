@@ -305,7 +305,7 @@ async fn a_rate_limited_turn_keeps_its_mail_for_later() {
 
 /// No turns while the record can't be written: with mail waiting, a
 /// worker shows the error and waits; once the record is back, nothing
-/// holds them. (The record's health is the daemon's, shared by every test
+/// holds them. (The record's health is process-wide, shared by every test
 /// in this process, so the gate is given it rather than it being broken.)
 #[tokio::test]
 async fn no_turns_while_the_record_cant_be_written() {

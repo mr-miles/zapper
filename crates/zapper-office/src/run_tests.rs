@@ -450,8 +450,8 @@ async fn the_office_server_introduces_itself() {
     );
 }
 
-// Where the office meets the core: a restart, the operator's rule changes,
-// and the daemon stopping.
+// Where the office meets its client: a restart, the operator's rule
+// changes, and the client going away.
 
 /// An office started again on `t`'s config and state, as after a restart.
 fn restart(t: &TestCore) -> crate::fake::Core {
@@ -538,8 +538,8 @@ async fn the_office_stopping_ends_its_firms() {
     assert!(ended, "{:?}", journal(&run));
 }
 
-// The firms' config (`office.yaml`), validated by the office against the
-// daemon's profiles — the daemon no longer carries or checks firms. Reload
+// The firms' config (`office.yaml`), validated by the office against
+// `zapper.yaml`'s profiles. Reload
 // atomicity (swap-or-nothing) is `zapper-office config reload`, tested with E3.
 
 #[test]

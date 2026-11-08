@@ -6,8 +6,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The whole daemon configuration. This is what `GET /config` returns and what
-/// `POST /config/save` writes to the startup file.
+/// The zapper config (`zapper.yaml`): the profiles and image recipes the
+/// office runs its workers from, the global policy layer, and the `daemon:`
+/// settings it still reads (`state`, `max_sessions`, `memory_overcommit`,
+/// `keeper`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -22,8 +24,8 @@ pub struct Config {
     pub policy: Policy,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-    /// Image recipes, by the image's name: what `zapper image build NAME`
-    /// builds. (`daemon.images` is where the built images go.)
+    /// Image recipes, by the image's name: what `zapper-office image NAME`
+    /// builds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, ImageRecipe>,
 }
@@ -287,7 +289,7 @@ impl fmt::Display for NetProtocol {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum SecretSource {
-    /// Read from the daemon's environment.
+    /// Read from the office's environment.
     Env { env: String },
     /// Read from a file, optionally a string field of a JSON file selected by a
     /// JSON pointer (e.g. `/claudeAiOauth/accessToken`).
@@ -681,8 +683,8 @@ impl Default for Engine {
     }
 }
 
-/// Agent harnesses zapper knows (`agent.kind`); each is implemented in the
-/// daemon's `harness` module.
+/// Agent harnesses zapper knows (`agent.kind`); each is implemented in
+/// `zapper_driver::harness`.
 pub const AGENT_KINDS: &[&str] = &["claude-code", "pi", "generic"];
 
 /// The harnesses the driver can run headless (`agent.driven`).
@@ -713,7 +715,7 @@ pub struct AgentSpec {
     /// Environment; values may use `{{secret:NAME}}`.
     pub env: BTreeMap<String, String>,
     // The agent's configuration, in terms every harness understands; each
-    // writes it in its own place and format (daemon::harness).
+    // writes it in its own place and format (`zapper_driver::harness`).
     /// The model the agent uses.
     pub model: Option<String>,
     /// How the agent approves its own actions (Claude Code:
@@ -1246,7 +1248,7 @@ impl Config {
         }
     }
 
-    /// The daemon's own settings.
+    /// The `daemon:` settings.
     fn check_daemon(&self, errors: &mut Vec<String>) {
         if let Some(r) = self.daemon.memory_overcommit {
             if !(r.is_finite() && r > 0.0) {
