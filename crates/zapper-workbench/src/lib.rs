@@ -9,6 +9,7 @@
 pub mod apply;
 pub mod backend;
 pub mod drive;
+pub mod provision;
 pub mod render;
 pub mod repo;
 pub mod settings;

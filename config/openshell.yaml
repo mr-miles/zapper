@@ -4,6 +4,9 @@
 
 # The gateway's URL (`openshell gateway info` prints it).
 gateway: https://127.0.0.1:8080
+# The gateway workspace the sandboxes and templates are in (`openshell
+# workspace list`); by default `default`.
+# workspace: default
 # Its CA, and the office's client certificate for mutual TLS, as PEM files.
 # ca_cert: ~/.config/openshell/gateways/local/mtls/ca.crt
 # client_cert: ~/.config/openshell/gateways/local/mtls/tls.crt

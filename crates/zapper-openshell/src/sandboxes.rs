@@ -74,8 +74,6 @@ use zapper_policy::{
 use crate::client::{block, DraftDecision, DraftRule, OfficeClient};
 use crate::rules;
 
-/// The gateway workspace the office's sandboxes and templates live in.
-const WORKSPACE: &str = "default";
 /// The most stdout or stderr one frame carries (under `MAX_FRAME`).
 const CHUNK: usize = 60 * 1024;
 /// The buffer between a command's gRPC stream and the office's end of it.
@@ -136,6 +134,9 @@ pub struct Settings {
     /// The programs the office's rules let through (zapper's rules name
     /// none); by default any (`/**`).
     pub rule_binaries: Vec<String>,
+    /// The gateway workspace the sandboxes and templates are in; by default
+    /// `default`.
+    pub workspace: String,
 }
 
 /// The office edge's settings (`edge:` in `openshell.yaml`). The defaults
@@ -201,10 +202,139 @@ impl Settings {
             .unwrap_or_else(|| format!("localhost/zapper-openshell-{name}"))
     }
 
+    /// The gateway workspace: `workspace`, or `default`.
+    pub fn workspace(&self) -> &str {
+        match self.workspace.trim() {
+            "" => "default",
+            w => w,
+        }
+    }
+
     fn ready_timeout(&self) -> Duration {
         self.ready_timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(READY_TIMEOUT)
+    }
+}
+
+/// Labels, by key.
+pub type Labels = BTreeMap<String, String>;
+
+/// A sandbox template to make ([`OpenShell::put_template`]).
+#[derive(Debug, Clone)]
+pub struct Template {
+    pub name: String,
+    /// The OCI image its sandboxes boot.
+    pub image: String,
+    pub vcpus: u8,
+    pub memory_mib: u32,
+    /// The template's own (the gateway doesn't copy them to its sandboxes;
+    /// [`OpenShell::sandbox_by_id`] reads them through).
+    pub labels: Labels,
+    /// The environment its sandboxes' processes get.
+    pub env: BTreeMap<String, String>,
+}
+
+/// A sandbox of the gateway's workspace, of any maker.
+#[derive(Debug, Clone)]
+pub struct GatewaySandbox {
+    /// The gateway's id (a UUID).
+    pub id: String,
+    pub name: String,
+    /// Its own labels (not its template's).
+    pub labels: Labels,
+    /// The template it was made from, if it was.
+    pub template: Option<String>,
+    pub ready: bool,
+}
+
+/// What setting a sandbox up as a profile takes, as zapper's guest agent did
+/// at boot: its environment, the files it writes, the host directories it
+/// copies in and the commands it then runs.
+#[derive(Debug, Clone, Default)]
+pub struct Setup {
+    /// The profile's environment (but secrets), the extra, then the
+    /// harness's.
+    pub env: BTreeMap<String, String>,
+    /// The harness's files (instructions, settings, MCP servers, turn-end
+    /// hook), the profile's `files` and `config_files`.
+    pub files: Vec<GuestFile>,
+    /// The profile's mounts, then the harness's (skills, config
+    /// directories); a host path may name `{workdir}`.
+    pub mounts: Vec<Mount>,
+    /// The profile's `setup` commands.
+    pub commands: Vec<String>,
+    /// Where the commands run: the profile's work directory.
+    pub workdir: String,
+    /// What was left out as it names secrets (the gateway's providers hold
+    /// credentials).
+    pub left_out: Vec<String>,
+}
+
+impl Setup {
+    /// Profile `profile`'s setup, with `extra` in its environment.
+    pub fn of(profile: &ResolvedProfile, extra: BTreeMap<String, String>) -> Result<Setup> {
+        let agent = &profile.agent;
+        let home = format!("/home/{}", agent.user);
+        let harness = zapper_driver::harness::get(&agent.kind).ok_or_else(|| {
+            anyhow!(
+                "profile {}: agent.kind {:?} is not a harness zapper knows",
+                profile.name,
+                agent.kind
+            )
+        })?;
+        let mut left_out = Vec::new();
+        let mut env = BTreeMap::new();
+        for (k, v) in &agent.env {
+            if secret_refs(v).is_empty() {
+                env.insert(k.clone(), v.clone());
+            } else {
+                left_out.push(format!("agent.env.{k}"));
+            }
+        }
+        env.extend(extra);
+        let mut files = Vec::new();
+        harness.guest(profile, &home, &mut env, &mut files);
+
+        // `files` by guest path and `config_files` in the harness's config
+        // directory.
+        let config_dir = harness.config_dir(&home);
+        let named = agent.files.iter().map(|(p, c)| (p.clone(), c)).chain(
+            agent
+                .config_files
+                .iter()
+                .map(|(p, c)| (format!("{config_dir}/{}", p.trim_start_matches('/')), c)),
+        );
+        for (path, content) in named {
+            let path = match path.strip_prefix("~/") {
+                Some(rest) => format!("{home}/{rest}"),
+                None => path,
+            };
+            if !secret_refs(content).is_empty() {
+                left_out.push(path);
+                continue;
+            }
+            files.push(GuestFile {
+                user_owned: path.starts_with(&home),
+                path,
+                content: content.clone(),
+                mode: 0o644,
+            });
+        }
+        let mounts = profile
+            .mounts
+            .iter()
+            .cloned()
+            .chain(harness.mounts(agent, &home))
+            .collect();
+        Ok(Setup {
+            env,
+            files,
+            mounts,
+            commands: profile.setup.clone(),
+            workdir: agent.workdir.clone(),
+            left_out,
+        })
     }
 }
 
@@ -322,7 +452,7 @@ impl OpenShell {
             let req = proto::GetDraftPolicyRequest {
                 sandbox: name.clone(),
                 status_filter: "pending".into(),
-                workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+                workspace_scope: Some(proto::workspace_selector(self.workspace())),
             };
             let got = match self.sdk.raw_grpc_fresh().await {
                 Ok(mut g) => g.get_draft_policy(req).await.map_err(anyhow::Error::from),
@@ -442,7 +572,7 @@ impl OpenShell {
         let n = ops.len();
         let req = proto::UpdateConfigRequest {
             sandbox: name.to_string(),
-            workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            workspace_scope: Some(proto::workspace_selector(self.workspace())),
             merge_operations: ops
                 .into_iter()
                 .map(|o| proto::PolicyMergeOperation { operation: Some(o) })
@@ -468,7 +598,7 @@ impl OpenShell {
     async fn advisor_on(&self, name: &str) -> Result<()> {
         let req = proto::UpdateConfigRequest {
             sandbox: name.to_string(),
-            workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+            workspace_scope: Some(proto::workspace_selector(self.workspace())),
             setting_key: PROPOSALS.into(),
             setting_value: Some(proto::SettingValue {
                 value: Some(proto::setting_value::Value::BoolValue(true)),
@@ -486,7 +616,7 @@ impl OpenShell {
 
     /// Decides draft `chunk` of sandbox `name` at the gateway.
     async fn decide(&self, name: &str, chunk: &str, d: DraftDecision) -> Result<Option<String>> {
-        let ws = || Some(proto::workspace_selector(WORKSPACE));
+        let ws = || Some(proto::workspace_selector(self.workspace()));
         let mut grpc = self.sdk.raw_grpc_fresh().await?;
         let known = self.drafts.lock().unwrap().get(name).and_then(|all| {
             all.iter()
@@ -570,7 +700,7 @@ impl OpenShell {
             let req = proto::UndoDraftChunkRequest {
                 sandbox: name.clone(),
                 chunk_id: chunk.clone(),
-                workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+                workspace_scope: Some(proto::workspace_selector(me.workspace())),
                 ..Default::default()
             };
             let done = match me.sdk.raw_grpc_fresh().await {
@@ -602,7 +732,11 @@ impl OpenShell {
     }
 
     async fn running(&self) -> usize {
-        match self.sdk.list_all_sandboxes(ListOptions::default()).await {
+        match self
+            .scoped()
+            .list_all_sandboxes(ListOptions::default())
+            .await
+        {
             Ok(all) => all.len(),
             Err(e) => {
                 tracing::debug!("listing sandboxes: {e}");
@@ -680,53 +814,53 @@ impl OpenShell {
         if made.get(&name) == Some(&from) {
             return Ok(name);
         }
-        let labels = BTreeMap::from([("zapper-office".to_string(), "1".to_string())]);
-        self.put_template(
-            &name,
-            &image,
-            profile.engine.vcpus,
-            profile.engine.memory_mib,
-            &labels,
-        )
-        .await?;
+        let t = Template {
+            name: name.clone(),
+            image,
+            vcpus: profile.engine.vcpus,
+            memory_mib: profile.engine.memory_mib,
+            labels: Labels::from([
+                ("zapper-office".to_string(), "1".to_string()),
+                ("zapper-profile".to_string(), label_value(&profile.name)),
+            ]),
+            env: BTreeMap::new(),
+        };
+        self.put_template(&t).await?;
         made.insert(name.clone(), from);
         Ok(name)
     }
 
-    /// Makes template `name` on the gateway (again, if there is one): the
-    /// OCI `image`, `vcpus` and `memory_mib`, with `labels`.
-    pub async fn put_template(
-        &self,
-        name: &str,
-        image: &str,
-        vcpus: u8,
-        memory_mib: u32,
-        labels: &BTreeMap<String, String>,
-    ) -> Result<()> {
+    /// Makes template `t` on the gateway (again, if there is one).
+    pub async fn put_template(&self, t: &Template) -> Result<()> {
+        let name = t.name.as_str();
         let template = proto::SandboxWorkloadTemplate {
             metadata: Some(proto::ObjectMeta {
                 name: name.to_string(),
-                labels: labels.clone().into_iter().collect(),
+                labels: t.labels.clone().into_iter().collect(),
                 ..Default::default()
             }),
             spec: Some(proto::SandboxWorkloadTemplateSpec {
                 workload: Some(proto::SandboxWorkloadConfig {
-                    image: image.to_string(),
+                    image: t.image.clone(),
+                    environment: t.env.clone().into_iter().collect(),
                     resources: Some(proto::SandboxResources {
-                        cpu: vcpus.to_string(),
-                        memory: format!("{memory_mib}Mi"),
+                        cpu: t.vcpus.to_string(),
+                        memory: format!("{}Mi", t.memory_mib),
                         ..Default::default()
                     }),
-                    ..Default::default()
                 }),
                 ..Default::default()
             }),
         };
-        match self.sdk.create_sandbox_template(template.clone()).await {
+        match self
+            .scoped()
+            .create_sandbox_template(template.clone())
+            .await
+        {
             Ok(_) => Ok(()),
             // Made before, perhaps from another image: made again.
             Err(SdkError::AlreadyExists { .. }) => {
-                self.sdk
+                self.scoped()
                     .delete_sandbox_template(
                         name,
                         DeleteOptions {
@@ -735,7 +869,7 @@ impl OpenShell {
                     )
                     .await
                     .with_context(|| format!("replacing template {name}"))?;
-                self.sdk
+                self.scoped()
                     .create_sandbox_template(template)
                     .await
                     .with_context(|| format!("replacing template {name}"))?;
@@ -745,17 +879,82 @@ impl OpenShell {
         }
     }
 
-    /// The gateway's sandbox whose id is `uuid` (what its supervisor's SPIFFE
-    /// ID names), of any maker: its name and labels.
-    pub async fn sandbox_by_id(
-        &self,
-        uuid: &str,
-    ) -> Result<Option<(String, BTreeMap<String, String>)>> {
-        let all = self.sdk.list_all_sandboxes(ListOptions::default()).await?;
+    /// Template `name`'s labels; `None` if there is no such template.
+    pub async fn template_labels(&self, name: &str) -> Result<Option<Labels>> {
+        match self.scoped().get_sandbox_template(name).await {
+            Ok(t) => Ok(Some(
+                t.metadata
+                    .map(|m| m.labels.into_iter().collect())
+                    .unwrap_or_default(),
+            )),
+            Err(SdkError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(anyhow::Error::from(e).context(format!("reading template {name}"))),
+        }
+    }
+
+    /// The workspace's sandboxes, of any maker.
+    pub async fn gateway_sandboxes(&self) -> Result<Vec<GatewaySandbox>> {
+        let all = self
+            .scoped()
+            .list_all_sandboxes(ListOptions::default())
+            .await?;
         Ok(all
             .into_iter()
+            .map(|s| GatewaySandbox {
+                ready: s.phase == SandboxPhase::Ready,
+                template: s.created_from_workload_template.map(|t| t.name),
+                id: s.id,
+                name: s.name,
+                labels: s.labels.into_iter().collect(),
+            })
+            .collect())
+    }
+
+    /// The workspace's sandbox whose id is `uuid` (what its supervisor's
+    /// SPIFFE ID names), of any maker: its name, and its labels over those
+    /// of the template it was made from (which the gateway doesn't copy to
+    /// it).
+    pub async fn sandbox_by_id(&self, uuid: &str) -> Result<Option<(String, Labels)>> {
+        let Some(s) = self
+            .gateway_sandboxes()
+            .await?
+            .into_iter()
             .find(|s| s.id == uuid)
-            .map(|s| (s.name, s.labels.into_iter().collect())))
+        else {
+            return Ok(None);
+        };
+        let mut labels = match &s.template {
+            Some(t) => self.template_labels(t).await?.unwrap_or_default(),
+            None => Labels::new(),
+        };
+        labels.extend(s.labels);
+        Ok(Some((s.name, labels)))
+    }
+
+    /// Makes a sandbox `name` from template `template`, with `labels` and the
+    /// providers every sandbox gets, and waits for it to be ready.
+    pub async fn create_from_template(
+        &self,
+        template: &str,
+        name: &str,
+        labels: &Labels,
+    ) -> Result<()> {
+        let spec = SandboxTemplateCreateSpec {
+            name: Some(name.to_string()),
+            template_name: template.to_string(),
+            labels: labels.clone().into_iter().collect(),
+            providers: self.settings.providers.clone(),
+            ..Default::default()
+        };
+        self.scoped()
+            .create_sandbox_from_template(spec)
+            .await
+            .with_context(|| format!("creating sandbox {name} from template {template}"))?;
+        self.scoped()
+            .wait_ready(name, self.settings.ready_timeout())
+            .await
+            .with_context(|| format!("waiting for sandbox {name}"))?;
+        Ok(())
     }
 
     /// Waits for sandbox `name` and sets it up as zapper's guest agent would
@@ -767,98 +966,65 @@ impl OpenShell {
         profile: &ResolvedProfile,
         new: &NewSession,
     ) -> Result<(HashMap<String, String>, String)> {
-        self.sdk
+        self.scoped()
             .wait_ready(name, self.settings.ready_timeout())
             .await
             .with_context(|| format!("waiting for sandbox {name}"))?;
-        let agent = &profile.agent;
-        let home = format!("/home/{}", agent.user);
-        let harness = zapper_driver::harness::get(&agent.kind)
-            .ok_or_else(|| anyhow!("agent.kind {:?} is not a harness zapper knows", agent.kind))?;
-
-        // The environment: the profile's, then the harness's.
-        let mut left_out = Vec::new();
-        let mut env = BTreeMap::new();
-        for (k, v) in &agent.env {
-            if secret_refs(v).is_empty() {
-                env.insert(k.clone(), v.clone());
-            } else {
-                left_out.push(format!("agent.env.{k}"));
-            }
-        }
-        env.insert("ZAPPER_SESSION".into(), name.to_string());
         // `office` (the CLI, the stop hook, the stdio bridge for harnesses
-        // without HTTP MCP) reaches the edge here.
-        env.insert("ZAPPER_OFFICE_URL".into(), self.mcp_url());
-        let mut files = Vec::new();
-        harness.guest(profile, &home, &mut env, &mut files);
+        // without HTTP MCP) reaches the edge at ZAPPER_OFFICE_URL.
+        let extra = BTreeMap::from([
+            ("ZAPPER_SESSION".to_string(), name.to_string()),
+            ("ZAPPER_OFFICE_URL".to_string(), self.mcp_url()),
+        ]);
+        let mut setup = Setup::of(profile, extra)?;
+        setup.files.extend(new.files.iter().cloned());
+        setup.mounts.extend(new.mounts.iter().cloned());
+        let workdir = new.workdir.to_string_lossy().into_owned();
+        self.provision(name, &setup, Some(&workdir)).await?;
+        Ok((
+            setup.env.into_iter().collect(),
+            profile.agent.workdir.clone(),
+        ))
+    }
 
-        // `files` by guest path and `config_files` in the harness's config
-        // directory, then the session's own.
-        let config_dir = harness.config_dir(&home);
-        let named = agent.files.iter().map(|(p, c)| (p.clone(), c)).chain(
-            agent
-                .config_files
-                .iter()
-                .map(|(p, c)| (format!("{config_dir}/{}", p.trim_start_matches('/')), c)),
-        );
-        for (path, content) in named {
-            let path = match path.strip_prefix("~/") {
-                Some(rest) => format!("{home}/{rest}"),
-                None => path,
-            };
-            if !secret_refs(content).is_empty() {
-                left_out.push(path);
-                continue;
-            }
-            files.push(GuestFile {
-                user_owned: path.starts_with(&home),
-                path,
-                content: content.clone(),
-                mode: 0o644,
-            });
-        }
-        files.extend(new.files.iter().cloned());
-        if !left_out.is_empty() {
+    /// Sets sandbox `name` up as `setup` says: its files written, its
+    /// directories copied (`{workdir}` in a mount's host path is `workdir`;
+    /// with none, those mounts are left out), then its commands run in
+    /// order, in its work directory with its environment. The first that
+    /// fails stops it.
+    pub async fn provision(&self, name: &str, setup: &Setup, workdir: Option<&str>) -> Result<()> {
+        if !setup.left_out.is_empty() {
             tracing::warn!(
                 sandbox = name,
                 "left out, as they name secrets (the gateway's providers hold credentials): {}",
-                left_out.join(", ")
+                setup.left_out.join(", ")
             );
         }
-        for f in &files {
+        for f in &setup.files {
             self.write_file(name, f)
                 .await
                 .with_context(|| format!("writing {}", f.path))?;
         }
-
-        // The directories zapper mounted, copied as zapper copied them (a
-        // session's changes stay in it): the profile's and the session's
-        // mounts, and the harness's (skills, config directories).
-        let workdir = new.workdir.to_string_lossy().into_owned();
-        let mounts: Vec<Mount> = profile
-            .mounts
-            .iter()
-            .chain(new.mounts.iter())
-            .cloned()
-            .chain(harness.mounts(agent, &home))
-            .collect();
-        for m in &mounts {
-            let host = expand_home(&m.host.replace("{workdir}", &workdir));
+        for m in &setup.mounts {
+            let host = match workdir {
+                Some(w) => m.host.replace("{workdir}", w),
+                None if m.host.contains("{workdir}") => continue,
+                None => m.host.clone(),
+            };
+            let host = expand_home(&host);
             self.copy_dir(name, Path::new(&host), &m.guest)
                 .await
                 .with_context(|| format!("copying {host} to {}", m.guest))?;
         }
-
-        let env: HashMap<String, String> = env.into_iter().collect();
-        for cmd in &profile.setup {
+        let env: HashMap<String, String> = setup.env.clone().into_iter().collect();
+        for cmd in &setup.commands {
             let argv = vec!["bash".to_string(), "-c".to_string(), cmd.clone()];
             let (code, _, err) = self
                 .exec(
                     name,
                     argv,
                     env.clone(),
-                    String::new(),
+                    setup.workdir.clone(),
                     Vec::new(),
                     SETUP_OUTPUT,
                 )
@@ -867,7 +1033,7 @@ impl OpenShell {
                 bail!("setup {cmd:?} exited {code}: {}", err.trim());
             }
         }
-        Ok((env, agent.workdir.clone()))
+        Ok(())
     }
 
     async fn write_file(&self, name: &str, f: &GuestFile) -> Result<()> {
@@ -939,7 +1105,8 @@ impl OpenShell {
 
     /// Starts `start` with `ExecSandboxInteractive`; the frame stream the
     /// office drives it over.
-    async fn open(&self, start: proto::ExecSandboxRequest) -> Result<Box<dyn DriveStream>> {
+    async fn open(&self, mut start: proto::ExecSandboxRequest) -> Result<Box<dyn DriveStream>> {
+        start.workspace_scope = Some(proto::workspace_selector(self.workspace()));
         let sandbox = start.sandbox.clone();
         let (tx, rx) = mpsc::channel(16);
         let first = proto::ExecSandboxInput {
@@ -965,6 +1132,16 @@ impl OpenShell {
     fn registered(&self, what: &str) -> u64 {
         tracing::debug!("{what}: served through the office edge");
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The gateway workspace its sandboxes and templates are in.
+    pub fn workspace(&self) -> &str {
+        self.settings.workspace()
+    }
+
+    /// The SDK, in that workspace.
+    fn scoped(&self) -> openshell_sdk::WorkspaceScopedClient {
+        self.sdk.workspace(self.workspace())
     }
 
     /// The edge's settings.
@@ -1082,12 +1259,12 @@ impl OfficeClient for OpenShell {
             let spec = SandboxTemplateCreateSpec {
                 name: Some(name.clone()),
                 template_name: template.clone(),
-                labels: gateway_labels(&new.labels),
+                labels: gateway_labels(&new.labels, &profile.name),
                 providers: self.settings.providers.clone(),
                 ..Default::default()
             };
             let created = self
-                .sdk
+                .scoped()
                 .create_sandbox_from_template(spec)
                 .await
                 .with_context(|| format!("creating a sandbox from template {template}"))?;
@@ -1102,7 +1279,7 @@ impl OfficeClient for OpenShell {
                     let gone = DeleteOptions {
                         allow_missing: true,
                     };
-                    if let Err(d) = self.sdk.delete_sandbox(&name, gone).await {
+                    if let Err(d) = self.scoped().delete_sandbox(&name, gone).await {
                         tracing::warn!(sandbox = %name, "deleting it after a failed boot: {d}");
                     }
                     return Err(e.context(format!("sandbox {name}")));
@@ -1165,7 +1342,7 @@ impl OfficeClient for OpenShell {
                 bail!("no session {id}");
             }
             tracing::info!(sandbox = id, reason, "deleting the sandbox");
-            self.sdk
+            self.scoped()
                 .delete_sandbox(
                     id,
                     DeleteOptions {
@@ -1186,7 +1363,7 @@ impl OfficeClient for OpenShell {
             .get(id)
             .map(|s| s.info.clone())
             .ok_or_else(|| anyhow!("no session {id}"))?;
-        match block(self.sdk.get_sandbox(id)) {
+        match block(self.scoped().get_sandbox(id)) {
             Ok(s) => info.status = status_of(s.phase),
             Err(SdkError::NotFound { .. }) => {
                 info.status = Status::Stopped("gone from the gateway".into())
@@ -1238,7 +1415,7 @@ impl OfficeClient for OpenShell {
             let (tx, rx) = mpsc::channel(16);
             let init = proto::TcpForwardInit {
                 sandbox: id.to_string(),
-                workspace: WORKSPACE.into(),
+                workspace: self.workspace().into(),
                 target: Some(proto::tcp_forward_init::Target::Tcp(
                     proto::TcpRelayTarget {
                         host: "127.0.0.1".into(),
@@ -1480,8 +1657,17 @@ fn template_name(profile: &str) -> String {
 
 /// The labels the gateway gets: which firm, run and worker (the office keeps
 /// all of a session's labels itself), as label values.
-fn gateway_labels(labels: &BTreeMap<String, String>) -> HashMap<String, String> {
-    let mut out = HashMap::from([("zapper-office".to_string(), "1".to_string())]);
+/// The labels a sandbox the office makes has, so the gateway's operator sees
+/// what it is: the office's, its firm, run, member and role, and the profile
+/// it was made from.
+fn gateway_labels(labels: &BTreeMap<String, String>, profile: &str) -> HashMap<String, String> {
+    let mut out = HashMap::from([
+        ("zapper-office".to_string(), "1".to_string()),
+        ("zapper-profile".to_string(), label_value(profile)),
+    ]);
+    if let Some((_, role)) = labels.get("firm-role").and_then(|r| r.split_once('/')) {
+        out.insert("zapper-role".to_string(), label_value(role));
+    }
     for k in ["firm", "run", "member"] {
         if let Some(v) = labels.get(k).map(|v| label_value(v)) {
             if !v.is_empty() {
@@ -1519,7 +1705,8 @@ fn exec_request(
 ) -> proto::ExecSandboxRequest {
     proto::ExecSandboxRequest {
         sandbox: sandbox.to_string(),
-        workspace_scope: Some(proto::workspace_selector(WORKSPACE)),
+        // The workspace: `open`.
+        workspace_scope: None,
         command: argv,
         workdir,
         environment: env,
@@ -1761,11 +1948,16 @@ mod tests {
         assert!(template_name(&"p".repeat(100)).len() <= 63);
         assert_eq!(label_value("acme/eng"), "acme-eng");
         assert_eq!(label_value("-x-"), "x");
-        let l = gateway_labels(&BTreeMap::from([
-            ("firm".to_string(), "acme".to_string()),
-            ("firm-role".to_string(), "acme/eng".to_string()),
-        ]));
+        let l = gateway_labels(
+            &BTreeMap::from([
+                ("firm".to_string(), "acme".to_string()),
+                ("firm-role".to_string(), "acme/eng".to_string()),
+            ]),
+            "eng-dev",
+        );
         assert_eq!(l["zapper-firm"], "acme");
+        assert_eq!(l["zapper-role"], "eng");
+        assert_eq!(l["zapper-profile"], "eng-dev");
         assert!(!l.contains_key("zapper-firm-role"));
     }
 

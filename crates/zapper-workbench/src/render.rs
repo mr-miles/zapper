@@ -15,9 +15,7 @@
 //! `instructions`, the definition's `AGENT.md` without its front matter;
 //! every profile gets a skills directory of its own, `skills/` with its
 //! agent's own laid over it; a path relative to the repository (in mounts,
-//! config mounts and image arguments) becomes the checkout's. Secrets are
-//! the gateway's providers, never the repository's: a `secrets.yaml` is
-//! refused.
+//! config mounts and image arguments) becomes the checkout's.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -137,10 +135,6 @@ pub fn render(repo: &Path, out: &Path) -> Result<Rendered> {
     let policy = repo.join("policy.yaml");
     if policy.exists() {
         config.insert("policy".into(), load(&policy)?);
-    }
-
-    if repo.join("secrets.yaml").exists() {
-        bail!("secrets.yaml: secrets are the gateway's providers (openshell provider create), never the repository's");
     }
 
     let mut images = Map::new();
@@ -340,11 +334,6 @@ mod tests {
     #[test]
     fn what_doesnt_belong_is_refused_with_why() {
         let cases = [
-            (
-                "secrets.yaml",
-                "x: { hosts: [h] }\n",
-                "secrets are the gateway's providers",
-            ),
             (
                 "profiles/bad.yaml",
                 "agent: { skills: elsewhere }\n",

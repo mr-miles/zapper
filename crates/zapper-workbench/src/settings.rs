@@ -3,6 +3,8 @@
 //!
 //! ```yaml
 //! openshell: ~/.config/zapper/openshell.yaml   # the gateway (default: beside the zapper config)
+//! workspace: default                           # the gateway workspace (default: openshell.yaml's, else `default`)
+//! providers: [anthropic, workbench-edge]       # attached to the sandboxes `new` makes (the default)
 //! agent: ~/.local/bin/zapper-agent             # the guest `office` command the images carry
 //! edge:                                        # where sandboxes reach the drive and repository
 //!   listen: 127.0.0.1:8971
@@ -21,6 +23,12 @@ use zapper_openshell::EdgeSettings;
 pub struct Settings {
     /// The OpenShell settings (the gateway, its TLS, images, providers).
     pub openshell: Option<PathBuf>,
+    /// The gateway workspace its templates and sandboxes are in, over
+    /// `openshell.yaml`'s.
+    pub workspace: Option<String>,
+    /// The gateway providers `zapper-workbench new` attaches; by default
+    /// `anthropic` and `workbench-edge`.
+    pub providers: Option<Vec<String>>,
     /// The static guest binary the base images install as `office`.
     pub agent: Option<PathBuf>,
     /// The workbench's edge: as the office's, on a port of its own.
@@ -31,6 +39,8 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             openshell: None,
+            workspace: None,
+            providers: None,
             agent: None,
             edge: edge_defaults(),
         }

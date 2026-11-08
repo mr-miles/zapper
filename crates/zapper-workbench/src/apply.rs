@@ -1,26 +1,28 @@
 //! Applying the repository to the gateway: a commit of `main` checked out
 //! and rendered as zapper's profiles and image recipes (`render`); each
 //! image whose recipe or files changed built again (`zapper-openshell`'s
-//! image builder); and each profile made a sandbox template, `wb-<profile>`,
-//! whose image is its base with the profile in it: the harness's files and
-//! environment (instructions, settings, MCP servers, the turn-end hook), the
-//! skills and directories it mounted, and its setup commands, as the user's
-//! account. A sandbox made from the template, in OpenShell's CLI or UI, is
-//! the profile's from its first command.
+//! image builder); and each profile made a sandbox template, `wb-<profile>`:
+//! its image, CPU and memory, its environment (the profile's and its
+//! harness's, and `ZAPPER_WORKBENCH_PROFILE`), and labels naming the
+//! profile and the commit it came from (`zapper-profile`,
+//! `zapper-config`). The rest of the profile (its harness's files, the
+//! skills and directories it mounted, its setup commands) is put in each
+//! sandbox once it is made (`provision`).
 //!
 //! Only what is asked for is applied (`zapper-workbench apply`, `main` by
 //! default); `check` renders a branch without building or applying. The
 //! live commit is kept beside the repository (`state.json`), with each
-//! image's hash as last built and each profile's as last made.
+//! image's hash as last built.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use zapper_openshell::OpenShell;
-use zapper_policy::{secret_refs, Config, ResolvedProfile};
+use zapper_openshell::{Labels, OpenShell, Setup, Template};
+use zapper_policy::{Config, ResolvedProfile};
 
 use crate::render;
 use crate::repo::git;
@@ -34,25 +36,42 @@ pub struct Applied {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct State {
     live: Option<Applied>,
     /// Each image's hash when it was last built.
     images: BTreeMap<String, String>,
-    /// Each profile's, as its template was last made.
-    profiles: BTreeMap<String, String>,
 }
 
 /// How long a commit's id is in the labels.
 const SHORT: usize = 12;
+/// The prefix of the templates the workbench makes.
+pub const TEMPLATE_PREFIX: &str = "wb-";
 
 /// The template a profile becomes.
 pub fn template_name(profile: &str) -> String {
-    format!("wb-{profile}")
+    format!("{TEMPLATE_PREFIX}{profile}")
 }
 
-/// The image a profile's template runs.
-pub fn profile_image(profile: &str) -> String {
-    format!("localhost/zapper-workbench-{profile}")
+/// The labels of profile `profile`'s template, made from `commit`, and of
+/// the sandboxes the workbench makes from it: so the gateway's operator sees
+/// which definition a sandbox came from.
+pub fn labels(profile: &str, commit: &str) -> Labels {
+    Labels::from([
+        ("zapper-workbench".to_string(), "1".to_string()),
+        ("zapper-profile".to_string(), profile.to_string()),
+        (
+            "zapper-config".to_string(),
+            commit[..SHORT.min(commit.len())].to_string(),
+        ),
+    ])
+}
+
+/// Profile `p`'s setup, as its sandboxes get it: `ZAPPER_WORKBENCH_PROFILE`
+/// in its environment, so what runs in one knows which it is.
+pub fn setup(p: &ResolvedProfile) -> Result<Setup> {
+    let extra = BTreeMap::from([("ZAPPER_WORKBENCH_PROFILE".to_string(), p.name.clone())]);
+    Setup::of(p, extra)
 }
 
 pub struct Applier {
@@ -60,15 +79,21 @@ pub struct Applier {
     data: PathBuf,
     /// The static guest binary the base images install as `office`.
     agent: PathBuf,
+    /// The live commit's config, once rendered.
+    live: Mutex<Option<(String, Config)>>,
 }
 
 impl Applier {
     /// Applies the bare repository `repo`, with checkouts and state under
     /// `data`.
     pub fn new(repo: PathBuf, data: PathBuf, agent: PathBuf) -> Applier {
-        Applier { repo, data, agent }
+        Applier {
+            repo,
+            data,
+            agent,
+            live: Mutex::default(),
+        }
     }
-
     fn state_path(&self) -> PathBuf {
         self.data.join("state.json")
     }
@@ -164,7 +189,7 @@ impl Applier {
     }
 
     /// Applies `r` (`main` unless said): images built where they changed,
-    /// every profile's template made from its image with the profile in it.
+    /// every profile's template made again.
     pub async fn apply(&self, os: &OpenShell, r: &str, log: &dyn Fn(&str)) -> Result<Value> {
         let (commit, subject) = self.resolve(r)?;
         let dir = self.data.join("live").join(&commit);
@@ -193,31 +218,19 @@ impl Applier {
             state.images.insert(name.clone(), hash.clone());
             built.push(name.clone());
         }
-        let short = commit[..SHORT.min(commit.len())].to_string();
         let mut made = Vec::new();
         for name in config.profiles.keys() {
             let p = config.resolve(name)?;
-            let tag = profile_image(name);
-            let base = os.image_of(&p);
-            let layer = profile_layer(&p, &base, &dir.join("profiles").join(name))?;
-            let fingerprint = format!("{base} {}", sha(&layer));
-            if state.profiles.get(name) != Some(&fingerprint) || built.contains(&p.engine.image) {
-                build_layer(&dir.join("profiles").join(name), &tag, log)?;
-            }
-            let labels = BTreeMap::from([
-                ("workbench".to_string(), "1".to_string()),
-                ("workbench-config".to_string(), short.clone()),
-            ]);
-            os.put_template(
-                &template_name(name),
-                &tag,
-                p.engine.vcpus,
-                p.engine.memory_mib,
-                &labels,
-            )
-            .await?;
-            state.profiles.insert(name.clone(), fingerprint);
-            made.push(template_name(name));
+            let t = Template {
+                name: template_name(name),
+                image: os.image_of(&p),
+                vcpus: p.engine.vcpus,
+                memory_mib: p.engine.memory_mib,
+                labels: labels(name, &commit),
+                env: setup(&p)?.env,
+            };
+            os.put_template(&t).await?;
+            made.push(t.name);
         }
         state.live = Some(Applied {
             commit: commit.clone(),
@@ -225,9 +238,30 @@ impl Applier {
             applied_at: zapper_util::now() as u64,
         });
         self.save(&state)?;
+        *self.live.lock().unwrap() = Some((commit.clone(), config));
         // The checkout before the live one is kept, older ones go.
         prune(&self.data.join("live"), &commit);
         Ok(json!({ "commit": commit, "subject": subject, "built": built, "templates": made }))
+    }
+
+    /// The live commit's profile `name`, resolved; an error if nothing was
+    /// applied or it has no such profile.
+    pub fn live_profile(&self, name: &str) -> Result<(String, ResolvedProfile)> {
+        let commit = self
+            .state()?
+            .live
+            .ok_or_else(|| anyhow!("nothing applied yet (zapper-workbench apply)"))?
+            .commit;
+        let mut live = self.live.lock().unwrap();
+        if live.as_ref().map(|(c, _)| c) != Some(&commit) {
+            let (config, _) = self.render(&commit, &self.data.join("live").join(&commit))?;
+            *live = Some((commit.clone(), config));
+        }
+        let (_, config) = live.as_ref().expect("rendered above");
+        let p = config
+            .resolve(name)
+            .with_context(|| format!("profile {name} at {commit}"))?;
+        Ok((commit, p))
     }
 
     /// The live commit, if any was applied.
@@ -236,7 +270,6 @@ impl Applier {
         Ok(json!({ "live": s.live, "images": s.images }))
     }
 }
-
 /// A ref the user may name: a branch or a commit, nothing git would read
 /// as an option or a range.
 fn checked_ref(r: &str) -> Result<&str> {
@@ -249,169 +282,6 @@ fn checked_ref(r: &str) -> Result<&str> {
         bail!("{r:?} isn't a branch or a commit");
     }
     Ok(r)
-}
-
-/// Writes the build context of profile `p`'s image into `ctx`: `root/`, the
-/// files and directories it puts in the image by their paths, and the
-/// Containerfile, `FROM base`. Its Containerfile, to tell whether it changed.
-fn profile_layer(p: &ResolvedProfile, base: &str, ctx: &Path) -> Result<String> {
-    let agent = &p.agent;
-    let user = &agent.user;
-    let home = format!("/home/{user}");
-    let harness = zapper_driver::harness::get(&agent.kind).ok_or_else(|| {
-        anyhow!(
-            "profile {}: agent.kind {:?} isn't a harness",
-            p.name,
-            agent.kind
-        )
-    })?;
-    let _ = std::fs::remove_dir_all(ctx);
-    let root = ctx.join("root");
-    std::fs::create_dir_all(&root)?;
-
-    // The environment: the profile's (but secrets: the gateway's providers
-    // hold credentials), then the harness's.
-    let mut env = BTreeMap::new();
-    for (k, v) in &agent.env {
-        if secret_refs(v).is_empty() {
-            env.insert(k.clone(), v.clone());
-        }
-    }
-    let mut files = Vec::new();
-    harness.guest(p, &home, &mut env, &mut files);
-    let config_dir = harness.config_dir(&home);
-    let named = agent.files.iter().map(|(k, c)| (k.clone(), c)).chain(
-        agent
-            .config_files
-            .iter()
-            .map(|(k, c)| (format!("{config_dir}/{}", k.trim_start_matches('/')), c)),
-    );
-    for (path, content) in named {
-        let path = match path.strip_prefix("~/") {
-            Some(rest) => format!("{home}/{rest}"),
-            None => path,
-        };
-        if secret_refs(content).is_empty() {
-            files.push(zapper_policy::proto::GuestFile {
-                user_owned: path.starts_with(&home),
-                path,
-                content: content.clone(),
-                mode: 0o644,
-            });
-        }
-    }
-    for f in &files {
-        let dest = under(&root, &f.path)?;
-        std::fs::create_dir_all(dest.parent().unwrap_or(&root))?;
-        std::fs::write(&dest, &f.content)?;
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(f.mode))?;
-    }
-    // The directories it mounted (skills, config directories, the
-    // profile's own), copied in; a session's own work directory is the
-    // sandbox's.
-    for m in p.mounts.iter().cloned().chain(harness.mounts(agent, &home)) {
-        if m.host.contains("{workdir}") {
-            continue;
-        }
-        let host = PathBuf::from(zapper_policy::expand_home(&m.host));
-        copy_tree(&host, &under(&root, &m.guest)?)
-            .with_context(|| format!("profile {}: copying {}", p.name, host.display()))?;
-    }
-
-    let mut file = format!("FROM {base}\nCOPY root/ /\n");
-    file.push_str(&format!(
-        "RUN mkdir -p {home} && chown -R {user}:{user} {home}\n"
-    ));
-    for (k, v) in &env {
-        if valid_env_name(k) {
-            file.push_str(&format!("ENV {k}=\"{}\"\n", env_quote(v)));
-        }
-    }
-    if !p.setup.is_empty() {
-        file.push_str(&format!("USER {user}\nWORKDIR {}\n", agent.workdir));
-        for cmd in &p.setup {
-            file.push_str(&format!(
-                "RUN [\"bash\", \"-c\", {}]\n",
-                serde_json::to_string(cmd)?
-            ));
-        }
-    }
-    file.push_str(&format!("WORKDIR {}\n", agent.workdir));
-    std::fs::write(ctx.join("Containerfile"), &file)?;
-    Ok(file)
-}
-
-/// Builds the profile image in `ctx` as `tag`.
-fn build_layer(ctx: &Path, tag: &str, log: &dyn Fn(&str)) -> Result<()> {
-    log(&format!("building {tag}"));
-    let oci = zapper_openshell::image::engine();
-    let out = std::process::Command::new(&oci)
-        .args(["build", "-t", tag, "-f"])
-        .arg(ctx.join("Containerfile"))
-        .arg(ctx)
-        .output()
-        .with_context(|| format!("running {oci} build"))?;
-    for line in String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .chain(String::from_utf8_lossy(&out.stderr).lines())
-    {
-        log(line);
-    }
-    if !out.status.success() {
-        bail!("{oci} build of {tag} failed");
-    }
-    Ok(())
-}
-
-/// `path`, an absolute path in the image, under `root`; none that leads out.
-fn under(root: &Path, path: &str) -> Result<PathBuf> {
-    let rel = path.trim_start_matches('/');
-    if !path.starts_with('/') || rel.split('/').any(|c| c == ".." || c.is_empty()) {
-        bail!("{path:?} isn't an absolute path in the image");
-    }
-    Ok(root.join(rel))
-}
-
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
-        std::fs::create_dir_all(to)?;
-        for e in std::fs::read_dir(from)? {
-            let e = e?;
-            if e.file_type()?.is_symlink() {
-                continue;
-            }
-            copy_tree(&e.path(), &to.join(e.file_name()))?;
-        }
-    } else if from.is_file() {
-        if let Some(d) = to.parent() {
-            std::fs::create_dir_all(d)?;
-        }
-        std::fs::copy(from, to)?;
-    }
-    Ok(())
-}
-
-fn valid_env_name(k: &str) -> bool {
-    !k.is_empty()
-        && !k.starts_with(|c: char| c.is_ascii_digit())
-        && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-/// A value in a Containerfile's `ENV k="v"`.
-fn env_quote(v: &str) -> String {
-    v.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('\n', "\\n")
-}
-
-fn sha(s: &str) -> String {
-    ring::digest::digest(&ring::digest::SHA256, s.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// Removes the checkouts under `live` but `keep` and the newest other.
@@ -446,53 +316,27 @@ mod tests {
     }
 
     #[test]
-    fn a_profiles_image_has_its_harness_files_env_and_setup() {
+    fn a_profiles_template_names_it_and_its_sandboxes_get_the_rest() {
         let c = Config::from_yaml(
-            "profiles:\n  dev:\n    agent:\n      kind: claude-code\n      instructions: be careful\n      env: { MODE: \"a \\\"b\\\" $c\", TOKEN: \"{{secret:x}}\" }\n    setup: [\"echo hi\"]\n",
+            "profiles:\n  dev:\n    agent:\n      kind: claude-code\n      instructions: be careful\n      env: { MODE: a, TOKEN: \"{{secret:x}}\" }\n    setup: [\"echo hi\"]\n",
         )
         .unwrap();
         let p = c.resolve("dev").unwrap();
-        let ctx = std::env::temp_dir().join(format!("zapper-wb-layer-{}", std::process::id()));
-        let file = profile_layer(&p, "localhost/zapper-openshell-office", &ctx).unwrap();
+        let l = labels("dev", "0123456789abcdef0123");
+        assert_eq!(l["zapper-workbench"], "1");
+        assert_eq!(l["zapper-profile"], "dev");
+        assert_eq!(l["zapper-config"], "0123456789ab");
+        let s = setup(&p).unwrap();
+        assert_eq!(s.env["MODE"], "a");
+        assert_eq!(s.env["ZAPPER_WORKBENCH_PROFILE"], "dev");
+        assert!(!s.env.contains_key("TOKEN"), "secrets are the gateway's");
+        assert_eq!(s.left_out, ["agent.env.TOKEN"]);
+        assert_eq!(s.commands, ["echo hi"]);
+        let home = format!("/home/{}/", p.agent.user);
         assert!(
-            file.starts_with("FROM localhost/zapper-openshell-office\n"),
-            "{file}"
+            s.files.iter().any(|f| f.path.starts_with(&home)),
+            "the harness's files under the home"
         );
-        assert!(file.contains("ENV MODE=\"a \\\"b\\\" \\$c\""), "{file}");
-        assert!(!file.contains("TOKEN"), "secrets are the gateway's: {file}");
-        assert!(
-            file.contains("RUN [\"bash\", \"-c\", \"echo hi\"]"),
-            "{file}"
-        );
-        let home = format!("home/{}", p.agent.user);
-        let written: Vec<String> = walk(&ctx.join("root"));
-        assert!(
-            written.iter().any(|f| f.starts_with(&home)),
-            "the harness's files under the home: {written:?}"
-        );
-        let _ = std::fs::remove_dir_all(ctx);
-    }
-
-    fn walk(dir: &Path) -> Vec<String> {
-        let mut out = vec![];
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                } else {
-                    out.push(e.path().strip_prefix(dir).unwrap().display().to_string());
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn paths_stay_in_the_image() {
-        let r = Path::new("/ctx");
-        assert_eq!(under(r, "/home/a/x").unwrap(), Path::new("/ctx/home/a/x"));
-        assert!(under(r, "home/a").is_err());
-        assert!(under(r, "/home/../etc").is_err());
+        assert_eq!(template_name("dev"), "wb-dev");
     }
 }
