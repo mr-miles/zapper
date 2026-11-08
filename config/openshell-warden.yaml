@@ -1,0 +1,42 @@
+# The `warden` provider profile (docs/warden.md): how the zapperclaw office
+# sandbox reaches the warden's routes, as the office sandbox.
+#
+#   openshell profile import -f config/openshell-warden.yaml
+#   openshell provider create --name warden --type warden --runtime-credentials
+#
+# The warden attaches it to the office sandbox only (office.providers in
+# warden.yaml). Needs the Firecracker driver's supervisor identity on
+# (OPENSHELL_VM_SUPERVISOR_IDENTITY=true): the supervisor posts its
+# sandbox's JWT-SVID to the warden's token endpoint and adds the token it
+# gets to the office's requests to the warden, outside the VM. The warden
+# serves only the sandbox it made as the office; the guest never holds the
+# token.
+#
+# The addresses match warden.yaml's `listen:` and `url:` defaults.
+id: warden
+display_name: zapperclaw warden
+description: The warden's routes (workers, their agents, the driver's keys), for the zapperclaw office sandbox
+category: other
+credentials:
+  - name: access_token
+    required: false
+    auth_style: bearer
+    header_name: Authorization
+    token_grant:
+      # Plain HTTP only on loopback, which the supervisor dials directly.
+      token_endpoint: http://127.0.0.1:8972/oauth/token
+      # The SVID's audience: the warden checks it is its token endpoint.
+      jwt_svid_audience: http://127.0.0.1:8972/oauth/token
+      scopes: [warden]
+endpoints:
+  - host: host.openshell.internal
+    port: 8972
+    protocol: rest
+    access: full
+    enforcement: enforce
+# The programs that call the warden: zapperclaw (step 2), and curl for the
+# end-to-end test's probe. Drop curl once zapperclaw replaces the probe:
+# whatever runs curl in the office sandbox gets the office's token.
+binaries:
+  - /usr/local/bin/zapperclaw
+  - /usr/bin/curl

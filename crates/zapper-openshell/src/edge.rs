@@ -564,7 +564,7 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
 
 /// GETs a plain `http://host:port/path` URL (the driver's JWKS, on
 /// loopback): its body, if the answer is 2xx.
-async fn http_get(url: &str) -> Result<Vec<u8>> {
+pub async fn http_get(url: &str) -> Result<Vec<u8>> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
         anyhow!("{url}: only http:// URLs (the driver serves its JWKS on loopback)")
     })?;
