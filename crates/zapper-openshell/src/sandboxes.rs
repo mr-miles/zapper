@@ -591,7 +591,7 @@ impl OpenShell {
 
     /// Turns the policy advisor on for sandbox `name`: its workers propose
     /// rules through `policy.local`.
-    async fn advisor_on(&self, name: &str) -> Result<()> {
+    pub async fn advisor_on(&self, name: &str) -> Result<()> {
         let req = proto::UpdateConfigRequest {
             sandbox: name.to_string(),
             workspace_scope: Some(proto::workspace_selector(self.workspace())),
@@ -959,11 +959,28 @@ impl OpenShell {
         name: &str,
         labels: &Labels,
     ) -> Result<()> {
+        let providers = self.settings.providers.clone();
+        self.create_from_template_with(template, name, labels, &providers)
+            .await
+            .map(|_| ())
+    }
+
+    /// Makes a sandbox `name` from template `template`, with `labels` and
+    /// the gateway providers `providers` (in place of those every sandbox
+    /// gets), waits for it to be ready, and answers the gateway's id for it
+    /// (what its supervisor's SPIFFE ID names).
+    pub async fn create_from_template_with(
+        &self,
+        template: &str,
+        name: &str,
+        labels: &Labels,
+        providers: &[String],
+    ) -> Result<String> {
         let spec = SandboxTemplateCreateSpec {
             name: Some(name.to_string()),
             template_name: template.to_string(),
             labels: labels.clone().into_iter().collect(),
-            providers: self.settings.providers.clone(),
+            providers: providers.to_vec(),
             ..Default::default()
         };
         self.scoped()
@@ -971,6 +988,26 @@ impl OpenShell {
             .await
             .with_context(|| format!("creating sandbox {name} from template {template}"))?;
         self.wait_ready(name).await?;
+        self.gateway_sandboxes()
+            .await?
+            .into_iter()
+            .find(|s| s.name == name)
+            .map(|s| s.id)
+            .ok_or_else(|| anyhow!("sandbox {name} was made but the gateway doesn't list it"))
+    }
+
+    /// Deletes sandbox `name` of the workspace, of any maker; none there is
+    /// no error.
+    pub async fn delete_named(&self, name: &str) -> Result<()> {
+        self.scoped()
+            .delete_sandbox(
+                name,
+                DeleteOptions {
+                    allow_missing: true,
+                },
+            )
+            .await
+            .with_context(|| format!("deleting sandbox {name}"))?;
         Ok(())
     }
 
@@ -1103,6 +1140,51 @@ impl OpenShell {
         let (code, err) =
             zapper_driver::process::pump_command(stream, input, &mut out, limit).await?;
         Ok((code, out, err))
+    }
+
+    /// Runs `argv` in sandbox `name` of the workspace, of any maker, with
+    /// `env` in `workdir`: the frame stream to drive it over, as `attach`'s.
+    pub async fn exec_stream(
+        &self,
+        name: &str,
+        argv: Vec<String>,
+        env: BTreeMap<String, String>,
+        workdir: String,
+    ) -> Result<Box<dyn DriveStream>> {
+        self.open(exec_request(name, argv, env.into_iter().collect(), workdir, None))
+            .await
+    }
+
+    /// A raw byte stream to TCP port `port` on sandbox `name`'s loopback
+    /// (`ForwardTcp`), of any maker.
+    pub async fn forward(&self, name: &str, port: u32) -> Result<Box<dyn DriveStream>> {
+        use proto::tcp_forward_frame::Payload;
+        let (tx, rx) = mpsc::channel(16);
+        let init = proto::TcpForwardInit {
+            sandbox: name.to_string(),
+            workspace: self.workspace().into(),
+            target: Some(proto::tcp_forward_init::Target::Tcp(
+                proto::TcpRelayTarget {
+                    host: "127.0.0.1".into(),
+                    port,
+                },
+            )),
+            ..Default::default()
+        };
+        tx.send(proto::TcpForwardFrame {
+            payload: Some(Payload::Init(init)),
+        })
+        .await
+        .map_err(|_| anyhow!("the forward's input closed"))?;
+        let mut grpc = self.sdk.raw_grpc_fresh().await?;
+        let frames = grpc
+            .forward_tcp(receiver_stream(rx))
+            .await
+            .with_context(|| format!("forwarding port {port} of sandbox {name}"))?
+            .into_inner();
+        let (ours, theirs) = tokio::io::duplex(PIPE);
+        tokio::spawn(pump_tcp(theirs, tx, frames));
+        Ok(Box::new(ours) as Box<dyn DriveStream>)
     }
 
     /// Starts `start` with `ExecSandboxInteractive`; the frame stream the
@@ -1409,36 +1491,10 @@ impl OfficeClient for OpenShell {
         port: u32,
     ) -> BoxFuture<'a, Result<Box<dyn DriveStream>>> {
         Box::pin(async move {
-            use proto::tcp_forward_frame::Payload;
             if !self.sandboxes.lock().unwrap().contains_key(id) {
                 bail!("no session {id}");
             }
-            let (tx, rx) = mpsc::channel(16);
-            let init = proto::TcpForwardInit {
-                sandbox: id.to_string(),
-                workspace: self.workspace().into(),
-                target: Some(proto::tcp_forward_init::Target::Tcp(
-                    proto::TcpRelayTarget {
-                        host: "127.0.0.1".into(),
-                        port,
-                    },
-                )),
-                ..Default::default()
-            };
-            tx.send(proto::TcpForwardFrame {
-                payload: Some(Payload::Init(init)),
-            })
-            .await
-            .map_err(|_| anyhow!("the forward's input closed"))?;
-            let mut grpc = self.sdk.raw_grpc_fresh().await?;
-            let frames = grpc
-                .forward_tcp(receiver_stream(rx))
-                .await
-                .with_context(|| format!("forwarding port {port} of sandbox {id}"))?
-                .into_inner();
-            let (ours, theirs) = tokio::io::duplex(PIPE);
-            tokio::spawn(pump_tcp(theirs, tx, frames));
-            Ok(Box::new(ours) as Box<dyn DriveStream>)
+            self.forward(id, port).await
         })
     }
 
@@ -1564,9 +1620,10 @@ fn status_of(phase: SandboxPhase) -> Status {
     }
 }
 
-/// A template's name for profile `profile`: a DNS label.
-/// [`OpenShell::office_over_http`], with the tools at `mcp_url`.
-fn office_over_http(profile: &mut ResolvedProfile, mcp_url: &str) {
+/// Points a Claude Code profile's `office` MCP server at the office's tools
+/// over HTTP at `mcp_url` (its requests get the worker's token outside the
+/// VM); other harnesses keep `office mcp`, their stdio bridge to it.
+pub fn office_over_http(profile: &mut ResolvedProfile, mcp_url: &str) {
     if profile.agent.kind != "claude-code" {
         return;
     }

@@ -1,0 +1,37 @@
+# The warden's config in a checkout (docs/warden.md): zapper-warden --config
+# config/warden.yaml. Elsewhere it is ~/.config/zapperclaw/warden.yaml.
+# Relative paths resolve against this file's directory.
+
+# The gateway (its URL and TLS), the workers' edge (edge.listen is where the
+# warden forwards the workers' supervisors from) and the driver's identity.
+openshell: openshell.yaml
+# The profiles and image recipes named below.
+zapper: zapper.yaml
+
+# The office's routes, which only the office sandbox's supervisor reaches
+# (with the `warden` provider: config/openshell-warden.yaml).
+listen: 127.0.0.1:8972
+url: http://host.openshell.internal:8972
+# The board's forward into the office sandbox (not 8099, zapper-office's dashboard).
+board: 127.0.0.1:8974
+# The warden's own record of what it did for the office (warden.jsonl).
+state: ~/.local/state/zapperclaw
+max_workers: 8
+
+office:
+  profile: zapperclaw-office
+  providers: [warden]
+  ports: { edge: 8970, board: 8099, agent: 8973 }
+
+# The worker profiles the office may ask for, and nothing else.
+profiles:
+  # The end-to-end test's (tests/e2e-warden.sh): a fake Claude Code, which
+  # needs no Claude token.
+  zapperclaw-fake:
+    providers: [office-edge]
+    max: 2
+  # Claude Code on the office image, with the gateway's anthropic provider.
+  claude:
+    providers: [anthropic, office-edge]
+    max: 4
+    proposals: true

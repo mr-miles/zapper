@@ -112,6 +112,32 @@ profiles:
         - { action: allow, host: "*.quay.io", ports: [443] }
       defaults: { net: ask }
 
+  # zapperclaw (docs/warden.md): the office sandbox the warden makes, and a
+  # fake worker for the warden's end-to-end test (tests/e2e-warden.sh). The
+  # office sandbox is, for now, a probe with curl and socat: zapperclaw
+  # itself comes with step 2 of docs/proposals/09-zapperclaw.md. Images:
+  # make image IMAGE=zapperclaw-office, make image IMAGE=office-fake.
+  zapperclaw-office:
+    extends: base
+    description: The zapperclaw office sandbox (for now a probe with curl, socat and jq)
+    engine: { image: zapperclaw-office, vcpus: 1, memory_mib: 1024, disk: 2GiB }
+    agent:
+      kind: generic
+      command: [bash, -l]
+      user: agent
+      workdir: /home/agent
+
+  zapperclaw-fake:
+    extends: base
+    description: A fake Claude Code playing no script, for the warden's end-to-end test
+    engine: { image: office-fake }
+    agent:
+      kind: claude-code
+      command: [claude]
+      user: agent
+      workdir: /home/agent
+      env: { ZAPPER_FAKE_SCRIPT: /fake/none.yaml }
+
   # MCP servers behind the gateway (http://mcp.zapper.internal/mcp in each
   # session), once the fork has feat/mcp-gateway. A profile lists the servers
   # its sessions may use, and knows no others:
@@ -182,6 +208,17 @@ images:
       - { from: scripts, to: /fake }
     after:
       - "claude --version && pi --version && ls /fake"
+
+  # The zapperclaw office sandbox, for now a probe for the warden's
+  # end-to-end test: curl to call the warden's routes through its
+  # supervisor, socat to listen for the forwards and agent streams.
+  zapperclaw-office:
+    description: The zapperclaw office sandbox (for now a probe with curl, socat and jq)
+    from: docker.io/library/ubuntu:26.04
+    run:
+      - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl socat jq procps xxd && rm -rf /var/lib/apt/lists/*"
+    after:
+      - "curl --version && socat -V | head -1"
 
   # The cluster facility: k3s at a pinned release, with its air-gap images so
   # it starts without the internet, and the board's dashboard (Headlamp),
