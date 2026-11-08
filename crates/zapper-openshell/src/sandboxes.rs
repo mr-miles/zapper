@@ -931,6 +931,53 @@ impl OpenShell {
         Ok(Some((s.name, labels)))
     }
 
+    /// Waits for sandbox `name` to be ready, on the gateway's stream of its
+    /// status (`WatchSandbox`) rather than by asking again and again. An
+    /// error if it stops, fails or is suspended first, or takes longer than
+    /// `ready_timeout_secs`.
+    pub async fn wait_ready(&self, name: &str) -> Result<()> {
+        use proto::SandboxPhase as Phase;
+        let req = proto::WatchSandboxRequest {
+            sandbox: name.to_string(),
+            workspace_scope: Some(proto::workspace_selector(self.workspace())),
+            follow_status: true,
+            stop_on_terminal: true,
+            ..Default::default()
+        };
+        let wait = async {
+            let mut events = self
+                .sdk
+                .raw_grpc_fresh()
+                .await?
+                .watch_sandbox(req)
+                .await
+                .with_context(|| format!("watching sandbox {name}"))?
+                .into_inner();
+            while let Some(e) = events
+                .message()
+                .await
+                .with_context(|| format!("watching sandbox {name}"))?
+            {
+                let Some(proto::sandbox_stream_event::Payload::Sandbox(s)) = e.payload else {
+                    continue;
+                };
+                match Phase::try_from(s.phase()).unwrap_or(Phase::Unspecified) {
+                    Phase::Ready | Phase::Completed => return Ok(()),
+                    Phase::Error => bail!("sandbox {name} failed before it was ready"),
+                    Phase::Stopped => bail!("sandbox {name} stopped before it was ready"),
+                    Phase::Suspending | Phase::Suspended => {
+                        bail!("sandbox {name} is suspended")
+                    }
+                    _ => {}
+                }
+            }
+            bail!("the gateway ended its watch of sandbox {name} before it was ready")
+        };
+        tokio::time::timeout(self.settings.ready_timeout(), wait)
+            .await
+            .map_err(|_| anyhow!("timed out waiting for sandbox {name}"))?
+    }
+
     /// Makes a sandbox `name` from template `template`, with `labels` and the
     /// providers every sandbox gets, and waits for it to be ready.
     pub async fn create_from_template(
@@ -950,10 +997,7 @@ impl OpenShell {
             .create_sandbox_from_template(spec)
             .await
             .with_context(|| format!("creating sandbox {name} from template {template}"))?;
-        self.scoped()
-            .wait_ready(name, self.settings.ready_timeout())
-            .await
-            .with_context(|| format!("waiting for sandbox {name}"))?;
+        self.wait_ready(name).await?;
         Ok(())
     }
 
@@ -966,10 +1010,7 @@ impl OpenShell {
         profile: &ResolvedProfile,
         new: &NewSession,
     ) -> Result<(HashMap<String, String>, String)> {
-        self.scoped()
-            .wait_ready(name, self.settings.ready_timeout())
-            .await
-            .with_context(|| format!("waiting for sandbox {name}"))?;
+        self.wait_ready(name).await?;
         // `office` (the CLI, the stop hook, the stdio bridge for harnesses
         // without HTTP MCP) reaches the edge at ZAPPER_OFFICE_URL.
         let extra = BTreeMap::from([

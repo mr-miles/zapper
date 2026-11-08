@@ -216,7 +216,7 @@ Gate: cluster e2e (grant, no grant, revocation, ingress, product port, cleanup) 
 
 - [ ] Port `make test-e2e-office`; one real-Claude two-worker run; one red-team scenario run.
 - [x] Remove the daemon: zapper-core, zapper-api, the `zapper` CLI and the guest agent's PID 1 are gone; the office runs on OpenShell alone, its tests on an in-memory backend (`fake.rs`), and `zapper-office image` builds the images. The README, AGENTS.md and the quickstart describe the office on OpenShell; `docs/office.md` carries a note where it still describes the daemon's mechanics.
-- [x] The workbench on OpenShell: only what OpenShell doesn't do (a drive, a repository, templates from it, labelled with their profile, and each sandbox made from one set up as it once ready), on an edge of its own (`zapper-openshell::edge`, shared with the office); sandboxes, terminals, SSH, rules and secrets are OpenShell's.
+- [x] The workbench on OpenShell: only what OpenShell doesn't do (a drive, a repository, templates from it, labelled with their profile, and sandboxes made from them by `zapper-workbench new`, set up once the gateway says they are ready), on an edge of its own (`zapper-openshell::edge`, shared with the office); sandboxes, terminals, SSH, rules and secrets are OpenShell's.
 - [x] The gateway workspace is `workspace:` in `openshell.yaml` (by default `default`), for the office and the workbench; the office labels its sandboxes with their profile and role (`zapper-profile`, `zapper-role`) beside firm, run and member.
 
 Gate: the full office e2e suite is green on OpenShell.

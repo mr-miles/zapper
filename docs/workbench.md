@@ -6,12 +6,13 @@
 
 - **A drive**: files in `~/.local/share/zapper-workbench/drive`. You put files in `inbox/` on the host; each sandbox reads them at `/drive/inbox/` and writes its own `/drive/outbox/<sandbox>/`, which you read on the host. The drive decides that itself: a sandbox can't write the inbox or read another's outbox, and every path stays in the directory (no `..`, hidden names or symbolic links on the way).
 - **A repository**: `~/.local/share/zapper-workbench/config.git`, bare. You clone it on the host and push to it, `main` included. Sandboxes reach it at `/git/config.git` and may push branches only, never `main`, `main/…` or tags, each push as the sandbox: an agent proposes a change on a branch, and you merge it.
-- **Templates from the repository**: `zapper-workbench apply` turns a commit of `main` into the gateway's sandbox templates, one per profile, `wb-<profile>`. Each image's recipe is built (`zapper-openshell`'s image builder) where it changed. A profile's template is its image, CPU and memory, its environment (the profile's, its harness's, and `ZAPPER_WORKBENCH_PROFILE`), and labels saying which definition it is: `zapper-workbench: 1`, `zapper-profile: <profile>` and `zapper-config: <commit>`. The rest of the profile (the harness's files: instructions, settings, MCP servers, the turn-end hook; the skills and directories it mounts; its setup commands) goes into each sandbox once it is made and ready, by `serve` or by `new`.
+- **Templates from the repository**: `zapper-workbench apply` turns a commit of `main` into the gateway's sandbox templates, one per profile, `wb-<profile>`. Each image's recipe is built (`zapper-openshell`'s image builder) where it changed. A profile's template is its image, CPU and memory, its environment (the profile's, its harness's, and `ZAPPER_WORKBENCH_PROFILE`), and labels saying which definition it is: `zapper-workbench: 1`, `zapper-profile: <profile>` and `zapper-config: <commit>`. The rest of the profile (the harness's files: instructions, settings, MCP servers, the turn-end hook; the skills and directories it mounts; its setup commands) goes into each sandbox `new` makes, once it is ready.
 
 
 ## Sandboxes from the templates
 
-`zapper-workbench new PROFILE` makes a sandbox from the profile's template, with the template's labels on it and the workbench's providers attached, waits for it to be ready and sets it up. A sandbox you make yourself (`openshell sandbox create --template wb-dev`, or OpenShell's UI) is set up by `serve` once it is ready, as the live commit's profile; it shows which template it came from (OpenShell records that for every sandbox), but not the template's labels, which OpenShell doesn't copy and lets nobody change on a running sandbox. Give them yourself (`--label zapper-profile=dev`) if you want them on it. Each sandbox is set up once, so setup commands needn't be safe to run twice; `status` lists the sandboxes set up, and why one wasn't. Changing a profile changes the sandboxes made after it is applied, not those already running.
+`zapper-workbench new PROFILE` makes a sandbox from the profile's template, with the template's labels on it and the workbench's providers attached, follows the gateway's stream of its status (`WatchSandbox`) until it is ready, and sets it up. It is the way to make a workbench sandbox: one made directly from a `wb-` template (`openshell sandbox create --template wb-dev`, or OpenShell's UI) gets the template's image, resources and environment, but not the rest of the profile, nor the template's labels (OpenShell copies neither). `status` lists the sandboxes `new` made, and why one wasn't set up. Changing a profile changes the sandboxes made after it is applied, not those already running.
+
 ## The repository's layout
 
 ```text
@@ -44,11 +45,11 @@ git clone http://host.openshell.internal:8971/git/config.git
 ## Commands
 
 ```
-zapper-workbench serve           # the edge (the drive and the repository for the sandboxes), and setting up sandboxes made from its templates
+zapper-workbench serve           # the edge: the drive and the repository for the sandboxes
 zapper-workbench apply           # main applied: images built where they changed, each profile a template
 zapper-workbench check REF       # what applying a branch or commit would build and make
-zapper-workbench new PROFILE     # a sandbox from the profile's template, labelled and set up (--name to name it)
-zapper-workbench status          # the commit applied last, the sandboxes set up, and where the drive and repository are
+zapper-workbench new PROFILE     # a sandbox from the profile's template, labelled and set up once ready (--name to name it)
+zapper-workbench status          # the commit applied last, the sandboxes `new` made, and where the drive and repository are
 ```
 
 Its config is `~/.config/zapper-workbench/workbench.yaml` (all optional):

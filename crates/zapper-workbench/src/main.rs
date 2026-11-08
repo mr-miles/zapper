@@ -1,6 +1,6 @@
 //! `zapper-workbench`: serve the drive and repository to OpenShell
-//! sandboxes, apply the repository to the gateway as templates, and set up
-//! the sandboxes made from them.
+//! sandboxes, apply the repository to the gateway as templates, and make
+//! sandboxes from them, set up as their profiles.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,8 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Serve the drive and the repository to the gateway's sandboxes, on the
-    /// workbench's edge, and set up each sandbox made from a workbench
-    /// template.
+    /// workbench's edge.
     Serve,
     /// Apply a commit of the repository (`main` by default) to the gateway:
     /// its images built where they changed, each profile a template.
@@ -116,11 +115,6 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("binding the workbench's edge on {listen}"))?;
             let backend = Arc::new(Workbench::new(os.clone(), c.drive, c.repo.clone()));
             let edge = Arc::new(Edge::new(c.settings.edge.clone(), backend));
-            let provisioner = Arc::new(Provisioner::new(
-                os.clone(),
-                c.applier.clone(),
-                c.provisioned.clone(),
-            ));
             eprintln!(
                 "zapper-workbench: the edge on http://{listen} (sandboxes: {}/drive/ and {}/git/{}), workspace {}",
                 c.settings.edge.url,
@@ -134,7 +128,6 @@ async fn main() -> Result<()> {
             );
             tokio::select! {
                 _ = edge.serve(listener) => {}
-                _ = provisioner.run() => {}
                 _ = tokio::signal::ctrl_c() => {}
             }
             Ok(())
