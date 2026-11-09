@@ -9,3 +9,4 @@
 - [OpenShell migration](openshell-migration.md): how the office moved from zapper's daemon onto OpenShell: the edge and identity, rules and drafted rules, the phases still to come.
 - [Workbench](workbench.md): `zapper-workbench`, a drive and a repository for one person's OpenShell sandboxes, and the repository applied as their templates.
 - [Warden](warden.md): `zapper-warden`, zapperclaw's host side: worker sandboxes from fixed templates for an office in a sandbox of its own ([proposal 09](proposals/09-zapperclaw.md)).
+- [zapperclaw](zapperclaw.md): the office cut down to a post office, a foreman per worker and a drive, running in the office sandbox behind the warden ([proposal 09](proposals/09-zapperclaw.md)).

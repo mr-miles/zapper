@@ -63,6 +63,13 @@ pub struct Office {
     pub profile: String,
     pub providers: Vec<String>,
     pub ports: Ports,
+    /// What the warden keeps running in the office's sandbox: zapperclaw.
+    /// Empty, nothing (the end-to-end test's probe).
+    pub command: Vec<String>,
+    /// zapperclaw's config directory (`zapperclaw.yaml` and the
+    /// instructions it names), copied read-only into the office's template
+    /// at `~/.config/zapperclaw`.
+    pub config: Option<String>,
 }
 
 /// Where the office listens in its sandbox, for the warden's forwards.
@@ -111,6 +118,8 @@ impl Default for Office {
             profile: String::new(),
             providers: vec!["warden".into()],
             ports: Ports::default(),
+            command: vec!["/usr/local/bin/zapperclaw".into(), "serve".into()],
+            config: Some("zapperclaw".into()),
         }
     }
 }
@@ -166,6 +175,19 @@ impl Config {
     fn check(&self) -> Result<()> {
         if self.office.profile.trim().is_empty() {
             bail!("office.profile: name the zapper profile the office sandbox is made from");
+        }
+        if self
+            .office
+            .command
+            .first()
+            .is_some_and(|c| !c.starts_with('/'))
+        {
+            bail!("office.command: the program is an absolute path in the office's image");
+        }
+        if !self.office.command.is_empty() && self.office.config.is_none() {
+            bail!(
+                "office.config: the directory with zapperclaw.yaml, for office.command to run with"
+            );
         }
         if self.office.providers.is_empty() {
             bail!("office.providers: the office reaches the warden through its provider (warden)");
@@ -247,6 +269,7 @@ mod tests {
         assert_eq!(c.listen.port(), 8972);
         assert_eq!(c.office.providers, ["warden"]);
         assert_eq!(c.office.ports.agent, 8973);
+        assert_eq!(c.office.command, ["/usr/local/bin/zapperclaw", "serve"]);
         assert_eq!(c.max_workers, 8);
         assert_eq!(c.token_url(), "http://127.0.0.1:8972/oauth/token");
     }
@@ -274,6 +297,10 @@ mod tests {
             (
                 "office: { profile: o }\nprofiles: { Claude: {} }\n",
                 "a profile name",
+            ),
+            (
+                "office: { profile: o, command: [zapperclaw, serve] }\n",
+                "a command that isn't a path",
             ),
             (
                 "office: { profile: o }\nprofiles: { c: { max: 0 } }\n",

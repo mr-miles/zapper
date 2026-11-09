@@ -563,10 +563,27 @@ fn parse_jwks(body: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
 }
 
 /// GETs a plain `http://host:port/path` URL (the driver's JWKS, on
-/// loopback): its body, if the answer is 2xx.
+/// loopback, or the warden's, from the office's sandbox): its body, if the
+/// answer is 2xx.
 pub async fn http_get(url: &str) -> Result<Vec<u8>> {
+    let (status, body) = http_request(Method::GET, url, None).await?;
+    if !(200..300).contains(&status) {
+        bail!("{url}: {status}");
+    }
+    Ok(body)
+}
+
+/// Sends `method` to a plain `http://host:port/path` URL, with `body` as
+/// JSON if given: the answer's status and body (up to 1 MiB). It connects
+/// directly: in a sandbox, the supervisor intercepts the connection, holds
+/// it to the sandbox's policy and adds the provider's token.
+pub async fn http_request(
+    method: Method,
+    url: &str,
+    body: Option<Vec<u8>>,
+) -> Result<(u16, Vec<u8>)> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
-        anyhow!("{url}: only http:// URLs (the driver serves its JWKS on loopback)")
+        anyhow!("{url}: only http:// URLs (loopback, or a sandbox's intercepted egress)")
     })?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -580,20 +597,23 @@ pub async fn http_get(url: &str) -> Result<Vec<u8>> {
     .map_err(|_| anyhow!("connecting to {authority}: timed out"))??;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(conn);
-    let req = Request::get(path)
-        .header(hyper::header::HOST, authority)
-        .body(Full::<Bytes>::default())?;
-    let resp = tokio::time::timeout(Duration::from_secs(10), sender.send_request(req))
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(hyper::header::HOST, authority);
+    if body.is_some() {
+        req = req.header(hyper::header::CONTENT_TYPE, "application/json");
+    }
+    let req = req.body(Full::<Bytes>::from(body.unwrap_or_default()))?;
+    let resp = tokio::time::timeout(Duration::from_secs(120), sender.send_request(req))
         .await
         .map_err(|_| anyhow!("{url}: timed out"))??;
-    if !resp.status().is_success() {
-        bail!("{url}: {}", resp.status());
-    }
+    let status = resp.status().as_u16();
     let body = http_body_util::Limited::new(resp.into_body(), 1 << 20)
         .collect()
         .await
         .map_err(|e| anyhow!("{url}: {e}"))?;
-    Ok(body.to_bytes().to_vec())
+    Ok((status, body.to_bytes().to_vec()))
 }
 
 /// A new token: 32 random bytes, hex (token68, as the supervisor wants).

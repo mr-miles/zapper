@@ -498,6 +498,19 @@ mod tests {
             ("m-7", "t-3", "cto", "assignment", "Landing page v1")
         );
         assert!(matches(&json!({ "from": "cto", "kind": "assignment" }), &w));
+        // zapperclaw's wake (crates/zapperclaw/src/prompts.rs): the same
+        // headers, no kind.
+        let zc = parse_wake("You are echo, a worker in this office.\n\n1 new message for you, echo:\n\n---\nMessage: m-1\nThread: \"Ping\" (t-1)\nFrom: board\nTo: echo\n\nAre you there?\n");
+        assert_eq!(
+            (
+                zc.message.as_str(),
+                zc.thread.as_str(),
+                zc.from.as_str(),
+                zc.subject.as_str()
+            ),
+            ("m-1", "t-1", "board", "Ping")
+        );
+        assert!(matches(&json!({ "from": "board" }), &zc));
         assert!(!matches(&json!({ "from": "board" }), &w));
         let r = parse_wake("Access request r-12 — decision needed.");
         assert_eq!(r.request, "r-12");

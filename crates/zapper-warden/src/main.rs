@@ -39,8 +39,12 @@ enum Cmd {
     /// Make the templates: the office's and each worker profile's.
     Apply,
     /// Make the office sandbox if it isn't there, then serve its routes and
-    /// the forwards into it.
-    Serve,
+    /// the forwards into it, and keep the office's command running in it.
+    Serve {
+        /// Run nothing in the office sandbox (the end-to-end test's probe).
+        #[arg(long)]
+        idle_office: bool,
+    },
     /// The office sandbox and the workers the warden made.
     Status,
 }
@@ -161,12 +165,19 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Serve => serve(c).await,
+        Cmd::Serve { idle_office } => {
+            let mut c = c;
+            if idle_office {
+                c.config.office.command.clear();
+            }
+            serve(c).await
+        }
     }
 }
 
 async fn serve(c: Ctx) -> Result<()> {
-    let audit = Audit::open(&c.config.path(&c.config.state))?;
+    let state = c.config.path(&c.config.state);
+    let audit = Arc::new(Audit::open(&state)?);
     let os = connect(&c).await?;
     let control = control_edge(&c.config, os.edge_settings());
     let workers_edge = os.edge_settings().listen;
@@ -176,13 +187,14 @@ async fn serve(c: Ctx) -> Result<()> {
     let board_l = bind(c.config.board, "the board's forward").await?;
     let gw: Arc<dyn Gateway> = Arc::new(os);
     let office = Warden::ensure_office(gw.as_ref(), &c.profiles, &audit).await?;
+    let token = zapper_warden::office::board_token(&state)?;
     let ports = c.config.office.ports;
     let warden = Arc::new(Warden::new(
         gw.clone(),
         c.config.clone(),
         c.profiles.clone(),
         office.clone(),
-        audit,
+        audit.clone(),
     ));
     let edge = Arc::new(Edge::new(control.clone(), warden));
     eprintln!(
@@ -195,10 +207,26 @@ async fn serve(c: Ctx) -> Result<()> {
         "zapper-warden: workers' edge {workers_edge} -> office :{}, board http://{} -> office :{}",
         ports.edge, c.config.board, ports.board
     );
+    if !c.config.office.command.is_empty() {
+        eprintln!(
+            "zapper-warden: running {:?} in the office sandbox; the board is http://{}/?token=$(cat {})",
+            c.config.office.command,
+            c.config.board,
+            state.join(zapper_warden::office::BOARD_TOKEN).display()
+        );
+    }
+    let running = zapper_warden::office::keep_running(
+        gw.clone(),
+        c.profiles.office.clone(),
+        c.config.office.command.clone(),
+        token,
+        audit,
+    );
     tokio::select! {
         _ = edge.serve(control_l) => {}
         _ = forward::serve(edge_l, gw.clone(), ports.edge, "workers' edge") => {}
         _ = forward::serve(board_l, gw.clone(), ports.board, "board") => {}
+        _ = running => {}
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())

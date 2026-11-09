@@ -10,7 +10,7 @@ Only the office sandbox reaches the warden's routes. Its supervisor posts the sa
 
 | Route | Does | The warden holds |
 |---|---|---|
-| `GET /workers` | The workers it made: name, profile, sandbox, id, ready | Only sandboxes named, labelled and templated as it makes them |
+| `GET /workers` | The workers it made: name, profile, sandbox, id, ready, and `kind` (the profile's harness, which the office drives) | Only sandboxes named, labelled and templated as it makes them |
 | `PUT /workers/{name}` `{"profile": P}` | Makes worker `name` (sandbox `zcw-<name>`) from `zcp-<P>` with P's providers, lets it propose rules if P says so, runs P's setup. 201 made, 200 there already | P one of `profiles:`; the name's syntax; `max_workers` and P's `max` (429); a worker of another profile, or a sandbox of that name it didn't make (409) |
 | `DELETE /workers/{name}` | Deletes it | Only its own (404 otherwise) |
 | `POST /workers/{name}/agent` `{"ticket": T, "resume": R?}` | Runs P's harness headless in the worker (`claude -p --input-format stream-json …`, `--resume R` if given), and pipes its frame stream into the office sandbox's agent port, opened with the line `ZCAGENT T` | The command line is the harness's; `T` is 32 to 128 hex digits, `R` one plain id (no flags) |
@@ -25,30 +25,32 @@ And two forwards into the office sandbox, bytes only, by `ForwardTcp`:
 
 The agent's stream goes the same way, as a forward the warden opens to `office.ports.agent` (8973): the office needs nothing of its supervisor but plain requests, and the warden reads none of what the agent and the office say.
 
-Every call is recorded in `<state>/warden.jsonl` (private to its user): workers made, failed, deleted, agents started, refusals. It is the host's account of the office, apart from the office's own journal.
+It also keeps the office's process running: `office.command` (`/usr/local/bin/zapperclaw serve`), run in the office sandbox with the template's environment and `ZAPPERCLAW_BOARD_TOKEN`, and started again whenever it stops; its output goes to the warden's log. The board's token is made once and kept on the host, in `<state>/board-token` (0600): open `http://127.0.0.1:8974/?token=$(cat ~/.local/state/zapperclaw/board-token)`. `serve --idle-office` runs nothing there, for the step 1 test's probe.
+
+Every call is recorded in `<state>/warden.jsonl` (private to its user): workers made, failed, deleted, agents started, refusals, and the office's process started and stopped. It is the host's account of the office, apart from the office's own journal.
 
 ## Templates
 
-`zapper-warden apply` makes the office's template (`zc-office`, from `office.profile`) and one per worker profile (`zcp-<profile>`), from the zapper config, with their files staged under the driver's files root (`zapperclaw/<template>`) as the workbench stages its own. A worker profile's template has what the office gave each worker it made, once: the office's tools as its MCP server (Claude Code over HTTP to the edge, other harnesses through `office mcp`), the Stop hook (`office stop-hook`), `ZAPPER_OFFICE_URL`, and the profile's own instructions, skills and model if `warden.yaml` gives them. The office's template gets `ZAPPERCLAW_WARDEN_URL` and its three ports. Only a harness the office can drive headless (Claude Code, pi) can be a worker profile.
+`zapper-warden apply` makes the office's template (`zc-office`, from `office.profile`) and one per worker profile (`zcp-<profile>`), from the zapper config, with their files staged under the driver's files root (`zapperclaw/<template>`) as the workbench stages its own. A worker profile's template has what the office gave each worker it made, once: the office's tools as its MCP server (Claude Code over HTTP to the edge, other harnesses through `office mcp`), the Stop hook (`office stop-hook`), Claude Code's SessionStart hook (`office instructions`: the worker's brief, from the office), `ZAPPER_OFFICE_URL`, and the profile's own instructions, skills and model if `warden.yaml` gives them. The office's template gets `ZAPPERCLAW_WARDEN_URL`, its three ports, and `office.config` ([config/zapperclaw](../config/zapperclaw): `zapperclaw.yaml` and the instructions it names) copied in read-only at `~/.config/zapperclaw`. A sandbox keeps what it was made with: to change the roster, delete `zc-office` and let the warden make it again (its state goes with it until step 4). Only a harness the office can drive headless (Claude Code, pi) can be a worker profile.
 
 ## Setting it up
 
 ```
 make build
 make image IMAGE=office-fake          # the fake worker's image, for the test
-make image IMAGE=zapperclaw-office    # the office sandbox's (for now a probe: curl, socat)
+make image IMAGE=zapperclaw-office    # the office sandbox's: zapperclaw, and the probe's curl and socat
 openshell profile import -f config/openshell-warden.yaml
 openshell provider create --name warden --type warden --runtime-credentials
 zapper-warden --config config/warden.yaml check    # the templates it would make
 zapper-warden --config config/warden.yaml apply
-zapper-warden --config config/warden.yaml serve    # makes zc-office if it isn't there
+zapper-warden --config config/warden.yaml serve    # makes zc-office if it isn't there, runs zapperclaw in it
 zapper-warden --config config/warden.yaml status
 ```
 
 The `office-edge` provider ([config/openshell-office-edge.yaml](../config/openshell-office-edge.yaml)) is the workers' as before; the `anthropic` provider is the Claude workers'. [config/warden.yaml](../config/warden.yaml) has every setting, with its default.
 
-[tests/e2e-warden.sh](../tests/e2e-warden.sh) is the step's gate on a real gateway: from inside the office sandbox, with curl, it makes a fake worker, is refused what it may not do, drives the worker's agent through the warden (its ticket, a prompt in as a frame, the turn's `result` out), checks the workers' edge forward, deletes the worker, and reads the warden's record.
+[tests/e2e-warden.sh](../tests/e2e-warden.sh) is step 1's gate on a real gateway (with `serve --idle-office`): from inside the office sandbox, with curl, it makes a fake worker, is refused what it may not do, drives the worker's agent through the warden (its ticket, a prompt in as a frame, the turn's `result` out), checks the workers' edge forward, deletes the worker, and reads the warden's record.
 
 ## Status
 
-Step 1 of [proposal 09](proposals/09-zapperclaw.md). The office sandbox is a probe until step 2 carves zapperclaw from zapper-office: until then nothing in it listens on the edge, board or agent port but what the test starts.
+Steps 1 and 2 of [proposal 09](proposals/09-zapperclaw.md): the warden, and zapperclaw running in the office sandbox ([zapperclaw](zapperclaw.md)).

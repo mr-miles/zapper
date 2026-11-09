@@ -361,6 +361,22 @@ fn a_worker_profile_is_wired_to_the_office_and_the_office_to_the_warden() {
         format!("{EDGE}/mcp"),
         "Claude Code reaches the office's tools over HTTP"
     );
+    let settings = w
+        .setup
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("/.claude/settings.json"))
+        .expect("Claude Code's settings");
+    let settings: serde_json::Value = serde_json::from_str(&settings.content).unwrap();
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "/usr/local/bin/zapper-agent office instructions",
+        "its session starts with its brief, from the edge"
+    );
+    assert_eq!(
+        settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "/usr/local/bin/zapper-agent office stop-hook"
+    );
     assert_eq!(p.office.template, names::OFFICE);
     assert_eq!(p.office.providers, ["warden"]);
     assert_eq!(
@@ -378,4 +394,83 @@ fn a_worker_profile_must_be_drivable() {
     let zapper = zapper_policy::Config::from_yaml(ZAPPER).unwrap();
     let e = Profiles::prepare(&config, &zapper, EDGE).unwrap_err();
     assert!(format!("{e:#}").contains("headless"), "{e:#}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_office_runs_its_command_with_the_boards_token_and_again_when_it_stops() {
+    let fake = Arc::new(Fake::default());
+    let gw: Arc<dyn Gateway> = fake.clone();
+    let config = config();
+    let profiles = profiles(&config);
+    let command = config.office.command.clone();
+    assert_eq!(command, ["/usr/local/bin/zapperclaw", "serve"]);
+    let run = tokio::spawn(crate::office::keep_running(
+        gw,
+        profiles.office.clone(),
+        command.clone(),
+        "tok".into(),
+        Arc::new(Audit::none()),
+    ));
+    let execs = |fake: &Fake| fake.execs.lock().unwrap().len();
+    while execs(&fake) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    {
+        let e = &fake.execs.lock().unwrap()[0];
+        assert_eq!(e.sandbox, names::OFFICE);
+        assert_eq!(e.argv, command);
+        assert_eq!(e.env["ZAPPERCLAW_BOARD_TOKEN"], "tok");
+        assert_eq!(e.env["ZAPPERCLAW_AGENT_PORT"], "8973");
+        assert_eq!(e.env["HOME"], "/home/agent");
+    }
+    // It exits: the warden starts it again, after a pause.
+    let mut end = fake.exec_ends.lock().unwrap().remove(0);
+    end.write_all(&zapper_policy::proto::Frame::Exit(1).encode())
+        .await
+        .unwrap();
+    while execs(&fake) < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    run.abort();
+}
+
+#[tokio::test]
+async fn an_empty_office_command_runs_nothing() {
+    let fake = Arc::new(Fake::default());
+    let gw: Arc<dyn Gateway> = fake.clone();
+    let config = config();
+    let run = tokio::spawn(crate::office::keep_running(
+        gw,
+        profiles(&config).office,
+        vec![],
+        "tok".into(),
+        Arc::new(Audit::none()),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(fake.execs.lock().unwrap().is_empty());
+    run.abort();
+}
+
+#[test]
+fn the_checkouts_config_runs_zapperclaw_with_its_config_and_offers_its_roster() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    let config = Config::load(&dir.join("warden.yaml")).unwrap();
+    assert_eq!(
+        config.office.command,
+        ["/usr/local/bin/zapperclaw", "serve"]
+    );
+    let p = profiles(&config);
+    let mount = p.office.profile.mounts.last().expect("zapperclaw's config");
+    assert!(mount.host.ends_with("config/zapperclaw"), "{}", mount.host);
+    assert_eq!(mount.guest, "/home/agent/.config/zapperclaw");
+    assert_eq!(mount.mode, zapper_policy::MountMode::Ro);
+    let roster = std::fs::read_to_string(dir.join("zapperclaw/zapperclaw.yaml")).unwrap();
+    let roster: serde_yaml::Value = serde_yaml::from_str(&roster).unwrap();
+    for (_, m) in roster["workers"].as_mapping().unwrap() {
+        let profile = m["profile"].as_str().unwrap();
+        assert!(
+            p.workers.contains_key(profile),
+            "the warden offers {profile}"
+        );
+    }
 }

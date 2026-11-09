@@ -112,14 +112,13 @@ profiles:
         - { action: allow, host: "*.quay.io", ports: [443] }
       defaults: { net: ask }
 
-  # zapperclaw (docs/warden.md): the office sandbox the warden makes, and a
-  # fake worker for the warden's end-to-end test (tests/e2e-warden.sh). The
-  # office sandbox is, for now, a probe with curl and socat: zapperclaw
-  # itself comes with step 2 of docs/proposals/09-zapperclaw.md. Images:
-  # make image IMAGE=zapperclaw-office, make image IMAGE=office-fake.
+  # zapperclaw (docs/zapperclaw.md, docs/warden.md): the office sandbox the
+  # warden makes and runs zapperclaw in, and fake workers for the end-to-end
+  # tests (tests/e2e-warden.sh, tests/e2e-zapperclaw.sh). Images: make image
+  # IMAGE=zapperclaw-office, make image IMAGE=office-fake.
   zapperclaw-office:
     extends: base
-    description: The zapperclaw office sandbox (for now a probe with curl, socat and jq)
+    description: The zapperclaw office sandbox (zapperclaw, and curl, socat and jq for the warden's probe)
     engine: { image: zapperclaw-office, vcpus: 1, memory_mib: 1024, disk: 2GiB }
     agent:
       kind: generic
@@ -137,6 +136,12 @@ profiles:
       user: agent
       workdir: /home/agent
       env: { ZAPPER_FAKE_SCRIPT: /fake/none.yaml }
+
+  zapperclaw-echo:
+    extends: zapperclaw-fake
+    description: A fake Claude Code that answers the board's mail, for zapperclaw's end-to-end test
+    agent:
+      env: { ZAPPER_FAKE_SCRIPT: /fake/zc-echo.yaml }
 
   # MCP servers behind the gateway (http://mcp.zapper.internal/mcp in each
   # session), once the fork has feat/mcp-gateway. A profile lists the servers
@@ -209,16 +214,23 @@ images:
     after:
       - "claude --version && pi --version && ls /fake"
 
-  # The zapperclaw office sandbox, for now a probe for the warden's
-  # end-to-end test: curl to call the warden's routes through its
-  # supervisor, socat to listen for the forwards and agent streams.
+  # The zapperclaw office sandbox: zapperclaw (the host's build: make
+  # build), and for the warden's end-to-end test a probe: curl to call the
+  # warden's routes through its supervisor, socat to listen for the
+  # forwards and agent streams.
   zapperclaw-office:
-    description: The zapperclaw office sandbox (for now a probe with curl, socat and jq)
+    description: The zapperclaw office sandbox (zapperclaw, and a probe with curl, socat and jq)
     from: docker.io/library/ubuntu:26.04
+    args:
+      zapperclaw:
+        description: zapperclaw, built by `make build` (cargo build --release -p zapperclaw)
+        default: ../target/release/zapperclaw
     run:
       - "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl socat jq procps xxd && rm -rf /var/lib/apt/lists/*"
+    copy:
+      - { from: zapperclaw, to: /usr/local/bin/zapperclaw }
     after:
-      - "curl --version && socat -V | head -1"
+      - "curl --version && socat -V | head -1 && zapperclaw --help"
 
   # The cluster facility: k3s at a pinned release, with its air-gap images so
   # it starts without the internet, and the board's dashboard (Headlamp),

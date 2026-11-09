@@ -59,7 +59,8 @@ crates/zapper-github/    the firm's GitHub remote and its App (`zapper-office gi
 crates/zapper-fake/      a fake Claude Code and pi that play a script: the office-fake image's `claude` and `pi`
 crates/zapper-openshell/ the OpenShell client both use: sandboxes from profiles, exec, policy and drafted rules (`rules.rs`), the edge sandboxes reach a layer through (`edge.rs`: SVID → token, then the backend's routes), image builds (`image.rs`), what the Firecracker driver copies into a sandbox (`files.rs`), what the office asks of a session and reports of one (`session.rs`)
 crates/zapper-workbench/ one person's drive and repository for OpenShell sandboxes, on an edge of its own, and the repository applied as sandbox templates
-crates/zapper-warden/    zapperclaw's host side (docs/warden.md): templates, worker sandboxes and their agents for an office in a sandbox of its own, five routes for that sandbox only, two forwards into it
+crates/zapper-warden/    zapperclaw's host side (docs/warden.md): templates, worker sandboxes and their agents for an office in a sandbox of its own, five routes for that sandbox only, two forwards into it, and zapperclaw kept running in it
+crates/zapperclaw/       the office in a sandbox of its own (docs/zapperclaw.md): post office, foremen and drive for a fixed roster, reaching its workers only through the warden
 config/                  zapper.yaml (profiles, image recipes), office.yaml (firms), openshell.yaml (the gateway), openshell-office-edge.yaml and openshell-workbench-edge.yaml (the edges' provider profiles)
   agents/, skills/         office roles' agent definitions and skills
 tests/fake               the scripts the fake workers play; tests/e2e-office.sh is the daemon-era suite, to be ported

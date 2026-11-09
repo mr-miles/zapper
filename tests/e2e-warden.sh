@@ -58,7 +58,7 @@ trap cleanup EXIT
 ok "templates zc-office, zcp-zapperclaw-fake, zcp-claude"
 
 # 2. The warden serves, having made the office sandbox.
-"${WARDEN[@]}" serve >"$LOG" 2>&1 &
+"${WARDEN[@]}" serve --idle-office >"$LOG" 2>&1 &
 SERVE=$!
 for _ in $(seq 1 360); do
   grep -q 'its routes on' "$LOG" && break

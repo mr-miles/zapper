@@ -22,12 +22,23 @@ office:
   profile: zapperclaw-office
   providers: [warden]
   ports: { edge: 8970, board: 8099, agent: 8973 }
+  # What the warden keeps running in the office sandbox, and its config
+  # directory (zapperclaw.yaml and the instructions it names), copied in at
+  # ~/.config/zapperclaw. `serve --idle-office` runs nothing (the probe of
+  # tests/e2e-warden.sh).
+  command: [/usr/local/bin/zapperclaw, serve]
+  config: zapperclaw
 
 # The worker profiles the office may ask for, and nothing else.
 profiles:
   # The end-to-end test's (tests/e2e-warden.sh): a fake Claude Code, which
   # needs no Claude token.
   zapperclaw-fake:
+    providers: [office-edge]
+    max: 2
+  # zapperclaw's end-to-end test's (tests/e2e-zapperclaw.sh): a fake that
+  # answers the board.
+  zapperclaw-echo:
     providers: [office-edge]
     max: 2
   # Claude Code on the office image, with the gateway's anthropic provider.

@@ -1,0 +1,15 @@
+# zapperclaw's config (docs/zapperclaw.md): the roster, how many turns run
+# at once and for how long. The warden copies this directory into the office
+# sandbox at ~/.config/zapperclaw (office.config in config/warden.yaml), so a
+# change reaches the office when its sandbox is made again.
+#
+# Each worker's profile is one the warden offers (profiles: in warden.yaml).
+# The checkout's roster is the end-to-end test's (tests/e2e-zapperclaw.sh):
+# one fake worker that answers the board's mail.
+workers:
+  echo:
+    profile: zapperclaw-echo
+    instructions: echo.md
+    about: answers the board's mail
+max_concurrent: 2
+turn_timeout: 10m
