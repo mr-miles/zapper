@@ -4,6 +4,7 @@
 # so the user who runs zapper can add to the record and never change it.
 #
 #   make build && sudo scripts/install-keeper.sh [USER]
+#   sudo scripts/install-keeper.sh [USER]    # from a release's tarball
 #
 # USER is who runs zapper (default: the user who ran sudo). Needs root once:
 # it creates the system user zapper-keeper, installs the binary root-owned in
@@ -20,8 +21,10 @@ UID_W=$(id -u "$WRITER")
 GID_W=$(id -g "$WRITER")
 GROUP_W=$(id -gn "$WRITER")
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# A checkout's build, or a release's libexec/.
 BIN="$HERE/target/release/zapper-keeper"
-[ -x "$BIN" ] || { echo "no $BIN: run make build first" >&2; exit 1; }
+[ -x "$BIN" ] || BIN="$HERE/libexec/zapper-keeper"
+[ -x "$BIN" ] || { echo "no $HERE/target/release/zapper-keeper: run make build first" >&2; exit 1; }
 
 # The keeper's own user, in the writer's group so it can give the record
 # that group: the writer reads it, nobody else does.
