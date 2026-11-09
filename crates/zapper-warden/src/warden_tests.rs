@@ -474,3 +474,70 @@ fn the_checkouts_config_runs_zapperclaw_with_its_config_and_offers_its_roster() 
         );
     }
 }
+
+#[tokio::test]
+async fn an_agent_whose_office_went_is_told_its_input_ended_and_holds_its_slot_until_it_exits() {
+    let (fake, w) = warden().await;
+    w.put_worker("ada", FAKE).await.unwrap();
+    let ticket = "ef".repeat(16);
+    w.start_agent("ada", &ticket, None).await.unwrap();
+    let mut agent = fake.exec_ends.lock().unwrap().remove(0);
+    let office = fake.forward_ends.lock().unwrap().remove(0);
+    // The office restarts: its end closes; the agent is still running.
+    drop(office);
+    let eof = zapper_policy::proto::Frame::Eof.encode();
+    let mut got = vec![0u8; eof.len()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.read_exact(&mut got),
+    )
+    .await
+    .expect("the agent hears its input ended")
+    .unwrap();
+    assert_eq!(got, eof);
+    // Its output still drains; no second agent while it runs.
+    agent.write_all(b"late output").await.unwrap();
+    let e = w.start_agent("ada", &ticket, None).await.unwrap_err();
+    assert!(matches!(refusal(&e), Refusal::Conflict(_)), "{e:#}");
+    // It exits: the slot is free.
+    drop(agent);
+    let mut again = false;
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+        if w.start_agent("ada", &ticket, None).await.is_ok() {
+            again = true;
+            break;
+        }
+    }
+    assert!(again, "a new agent once the old one exited");
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_host_restart_the_warden_waits_for_its_office_to_be_ready() {
+    let fake = Arc::new(Fake::default());
+    let gw: Arc<dyn Gateway> = fake.clone();
+    let config = config();
+    let ps = profiles(&config);
+    let first = Warden::ensure_office(gw.as_ref(), &ps, &Audit::none())
+        .await
+        .unwrap();
+    // The host restarts: the office's sandbox is there, not yet ready.
+    fake.sandboxes.lock().unwrap()[0].ready = false;
+    let waiting = {
+        let gw = gw.clone();
+        let ps = ps.clone();
+        tokio::spawn(async move { Warden::ensure_office(gw.as_ref(), &ps, &Audit::none()).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    assert!(!waiting.is_finished(), "it waits");
+    fake.sandboxes.lock().unwrap()[0].ready = true;
+    let again = waiting.await.unwrap().unwrap();
+    assert_eq!(again, first, "the same office, not a new one");
+    assert_eq!(
+        fake.calls()
+            .iter()
+            .filter(|c| c.starts_with("create"))
+            .count(),
+        1
+    );
+}

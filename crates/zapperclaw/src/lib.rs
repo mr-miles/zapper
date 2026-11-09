@@ -14,10 +14,12 @@
 pub mod board;
 pub mod config;
 pub mod edge;
+pub mod events;
 pub mod foreman;
 pub mod journal;
 pub mod mail;
 pub mod prompts;
+pub mod store;
 pub mod tools;
 pub mod workers;
 
@@ -80,6 +82,8 @@ pub struct Worker {
     pub conversation: Mutex<Option<String>>,
     /// Whether its instructions were given in this conversation.
     pub briefed: AtomicBool,
+    /// The turn under way, as the post office numbered it.
+    pub turn: Mutex<Option<u64>>,
     /// Mail handed over during the current turn (the Stop hook, a steer):
     /// the turn's too, if it has to be shown again.
     pub handed: Mutex<Vec<String>>,
@@ -98,6 +102,7 @@ impl Worker {
             sandbox: Mutex::new(None),
             conversation: Mutex::new(None),
             briefed: AtomicBool::new(false),
+            turn: Mutex::new(None),
             handed: Mutex::new(vec![]),
         }
     }
@@ -138,13 +143,40 @@ impl Office {
         let journal = Journal::create(&dir.join("journal.jsonl"))?;
         let drive = Drive::new(dir.join("drive")).context("the drive")?;
         let files = Files::new(&dir.join("drive"));
-        let mut post = PostOffice::new(config.workers.keys().cloned(), config.relays.clone());
-        post.number_from(next_number(&dir.join("journal.jsonl")));
-        let workers = config
-            .workers
-            .iter()
-            .map(|(n, m)| (n.clone(), Arc::new(Worker::new(n, &m.profile))))
-            .collect();
+        let journaled = config.store != config::StoreMode::Database;
+        let store: Box<dyn store::Store> = match config.store {
+            config::StoreMode::Journal => Box::new(store::Memory::new()),
+            _ => Box::new(store::Sqlite::open(&dir.join("office.db"))?),
+        };
+        let mut store = store;
+        if journaled {
+            let n = mail::catch_up(store.as_mut(), &dir.join("journal.jsonl"))?;
+            if n > 0 {
+                tracing::info!("the post office caught up {n} batches of events from the journal");
+            }
+        }
+        let mut post = PostOffice::new(
+            config.workers.keys().cloned(),
+            config.relays.clone(),
+            store,
+            journaled,
+        );
+        // What a restart left: each worker's conversation, its unread mail,
+        // and the mail of a turn the office stopped in, to show again.
+        let mut workers = BTreeMap::new();
+        for (n, m) in &config.workers {
+            let w = Worker::new(n, &m.profile);
+            let again = post.recover(&journal, n)?;
+            if let Some(c) = post.conversation(n) {
+                *w.conversation.lock().unwrap() = Some(c);
+                w.briefed.store(true, Ordering::Relaxed);
+            }
+            *w.queue.lock().unwrap() = post.unread(n);
+            if !again.is_empty() {
+                w.notes.lock().unwrap().push(prompts::interrupted_note());
+            }
+            workers.insert(n.clone(), Arc::new(w));
+        }
         Ok(Arc::new(Office {
             turns: Arc::new(Semaphore::new(config.max_concurrent)),
             config,
@@ -186,14 +218,7 @@ impl Office {
                 w.wake.notify_one();
             }
         }
-        let to_board = self
-            .post
-            .lock()
-            .unwrap()
-            .messages
-            .get(&sent.id)
-            .is_some_and(|m| m.to.iter().any(|t| t == mail::BOARD));
-        if to_board {
+        if sent.to_board {
             self.board_mail.notify_waiters();
         }
     }
@@ -322,30 +347,6 @@ impl Office {
             .collect();
         json!(list)
     }
-}
-
-/// One past the highest message or thread number journal `path` has.
-fn next_number(path: &std::path::Path) -> u64 {
-    use std::io::BufRead as _;
-    // A line at a time: a long journal isn't taken into memory.
-    let Ok(f) = std::fs::File::open(zapper_record::view(path)) else {
-        return 1;
-    };
-    let mut max = 0;
-    let lines = std::io::BufReader::new(f).lines().map_while(Result::ok);
-    for line in lines.filter(|l| l.contains("\"type\":\"mail\"")) {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        for k in ["id", "thread"] {
-            let n = v[k]
-                .as_str()
-                .and_then(|s| s.split_once('-'))
-                .and_then(|(_, n)| n.parse::<u64>().ok());
-            max = max.max(n.unwrap_or(0));
-        }
-    }
-    max + 1
 }
 
 /// `dir`, made private to its user if it isn't there.

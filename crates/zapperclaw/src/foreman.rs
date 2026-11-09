@@ -50,9 +50,15 @@ impl Observer for Watch {
             *c = Some(id.to_string());
             drop(c);
             // Kept, for a restarted office to resume it.
-            self.office
-                .journal
-                .append("conversation", json!({ "worker": self.w.name, "id": id }));
+            let o = &self.office;
+            let kept = o
+                .post
+                .lock()
+                .unwrap()
+                .set_conversation(&o.journal, &self.w.name, id);
+            if let Err(e) = kept {
+                tracing::warn!("{}'s conversation: {e:#}", self.w.name);
+            }
         }
     }
 
@@ -188,18 +194,27 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
         let ids: Vec<String> = std::mem::take(&mut *w.queue.lock().unwrap());
         let notes: Vec<String> = std::mem::take(&mut *w.notes.lock().unwrap());
         let brief = brief_for(&office, &w);
-        let prompt = {
+        // The turn, and what it shows, recorded before it runs: a restart
+        // shows again what a turn it stopped had shown.
+        let started_turn = {
             let mut po = office.post.lock().unwrap();
-            po.mark_read(&w.name, &ids);
-            prompts::wake(
-                &po,
-                &office.journal,
-                &w.name,
-                &ids,
-                &notes,
-                brief.as_deref(),
-            )
+            po.start_turn(&office.journal, &w.name, &ids).map(|turn| {
+                let prompt = prompts::wake(&po, &w.name, &ids, &notes, brief.as_deref());
+                (turn, prompt)
+            })
         };
+        let (turn, prompt) = match started_turn {
+            Ok(t) => t,
+            Err(e) => {
+                requeue(&w, ids);
+                w.notes.lock().unwrap().extend(notes);
+                office.set_state(&w, State::Error, Some(format!("recording the turn: {e:#}")));
+                drop(permit);
+                backoff_until = now() + 30.0;
+                continue;
+            }
+        };
+        *w.turn.lock().unwrap() = Some(turn);
         w.extended.store(0, Ordering::Relaxed);
         w.handed.lock().unwrap().clear();
         office.set_state(&w, State::Working, None);
@@ -223,9 +238,12 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
         // again with the rest if the turn has to be.
         let mut ids = ids;
         ids.extend(std::mem::take(&mut *w.handed.lock().unwrap()));
+        // The turn's mail to show again, if it didn't take it.
+        let mut again: Vec<String> = Vec::new();
         match outcome {
             Out::End(end) => match end.outcome {
                 Outcome::RateLimited => {
+                    again.clone_from(&ids);
                     requeue(&w, ids);
                     backoff_until = now() + 60.0;
                     office.journal.append(
@@ -234,6 +252,7 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
                     );
                 }
                 Outcome::Failed(why) => {
+                    again.clone_from(&ids);
                     requeue(&w, ids);
                     backoff_until = now() + 60.0;
                     office.journal.append(
@@ -260,7 +279,7 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
                 let subjects: Vec<String> = {
                     let po = office.post.lock().unwrap();
                     ids.iter()
-                        .filter_map(|id| po.messages.get(id))
+                        .filter_map(|id| po.meta(id))
                         .map(|m| format!("{} from {}", m.subject, m.from))
                         .collect()
                 };
@@ -293,6 +312,7 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
             }
             Out::Exit(code) => {
                 proc = None;
+                again.clone_from(&ids);
                 requeue(&w, ids);
                 let at = now();
                 w.notes.lock().unwrap().push(prompts::restart_note());
@@ -318,6 +338,15 @@ pub async fn run(office: Arc<Office>, w: Arc<Worker>) {
                 }
             }
         }
+        *w.turn.lock().unwrap() = None;
+        let ended = office
+            .post
+            .lock()
+            .unwrap()
+            .end_turn(&office.journal, &w.name, turn, &again);
+        if let Err(e) = ended {
+            tracing::warn!("ending {}'s turn {turn}: {e:#}", w.name);
+        }
         drop(permit);
     }
 }
@@ -338,14 +367,22 @@ pub fn stop_check(office: &Office, w: &Worker) -> Value {
 
 /// Mail that came during a turn, taken from the queue and marked read.
 fn hand_over(office: &Office, w: &Worker, how: &str) -> Option<String> {
+    let turn = (*w.turn.lock().unwrap())?;
     let ids: Vec<String> = std::mem::take(&mut *w.queue.lock().unwrap());
     if ids.is_empty() {
         return None;
     }
     let text = {
         let mut po = office.post.lock().unwrap();
-        po.mark_read(&w.name, &ids);
-        prompts::wake(&po, &office.journal, &w.name, &ids, &[], None)
+        match po.show(&office.journal, &w.name, turn, &ids) {
+            Ok(()) => prompts::wake(&po, &w.name, &ids, &[], None),
+            Err(e) => {
+                drop(po);
+                tracing::warn!("handing {} mail: {e:#}", w.name);
+                requeue(w, ids);
+                return None;
+            }
+        }
     };
     w.handed.lock().unwrap().extend(ids.iter().cloned());
     office.journal.append(

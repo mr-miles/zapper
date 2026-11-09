@@ -51,6 +51,16 @@ impl Default for EdgeConfig {
     }
 }
 
+/// Where the post office keeps its state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreMode {
+    #[default]
+    Both,
+    Database,
+    Journal,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -65,6 +75,11 @@ pub struct Config {
     /// for their relay.
     pub relays: Vec<String>,
     pub edge: EdgeConfig,
+    /// Where the post office keeps its state: `both` (its events journaled
+    /// and a database, `office.db`, made from them; the default),
+    /// `database` (no events in the journal), or `journal` (memory, made
+    /// again from the journal at every start).
+    pub store: StoreMode,
     /// The config's directory, for relative paths.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -78,6 +93,7 @@ impl Default for Config {
             turn_timeout: "30m".into(),
             state: PathBuf::from("~/.local/state/zapperclaw"),
             relays: vec![],
+            store: StoreMode::default(),
             edge: EdgeConfig::default(),
             dir: PathBuf::from("."),
         }

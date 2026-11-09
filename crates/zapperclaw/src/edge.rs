@@ -30,7 +30,16 @@ pub fn for_office(office: Arc<Office>, listen: std::net::SocketAddr, jwks: Strin
         issuer: e.issuer.clone(),
         trust_domain: e.trust_domain.clone(),
     };
-    Edge::new(settings, Arc::new(OfficeBackend(office)))
+    // Signed with a key kept with the office's state: the workers' tokens
+    // outlive a restart of the office.
+    let key = match zapper_openshell::edge::key_file(&office.dir.join("edge-key")) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("the edge's token key: {e:#}; tokens won't outlive this run");
+            rand::random()
+        }
+    };
+    Edge::with_key(settings, Arc::new(OfficeBackend(office)), &key)
 }
 
 pub struct OfficeBackend(pub Arc<Office>);

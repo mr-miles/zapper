@@ -23,9 +23,11 @@ And two forwards into the office sandbox, bytes only, by `ForwardTcp`:
 | `openshell.yaml`'s `edge.listen` (127.0.0.1:8970) | `office.ports.edge` (8970) | The workers' supervisors: the office's tools, drive, Stop hook and token grant |
 | `board` (127.0.0.1:8974) | `office.ports.board` (8099) | You: the dashboard and CLI, behind the office's own token |
 
-The agent's stream goes the same way, as a forward the warden opens to `office.ports.agent` (8973): the office needs nothing of its supervisor but plain requests, and the warden reads none of what the agent and the office say.
+The agent's stream goes the same way, as a forward the warden opens to `office.ports.agent` (8973): the office needs nothing of its supervisor but plain requests, and the warden reads none of what the agent and the office say. When the office's end closes, the warden sends the agent end-of-input and keeps reading its output (and dropping it) until it exits, up to 15 minutes; until then the worker has no other agent.
 
 It also keeps the office's process running: `office.command` (`/usr/local/bin/zapperclaw serve`), run in the office sandbox with the template's environment and `ZAPPERCLAW_BOARD_TOKEN`, and started again whenever it stops; its output goes to the warden's log. The board's token is made once and kept on the host, in `<state>/board-token` (0600): open `http://127.0.0.1:8974/?token=$(cat ~/.local/state/zapperclaw/board-token)`. `serve --idle-office` runs nothing there, for the step 1 test's probe.
+
+The office's token is signed with a key kept in `<state>/edge-key` (0600), so it outlives a restart of the warden; after a host restart, the warden waits for the office's sandbox to be ready before it serves.
 
 Every call is recorded in `<state>/warden.jsonl` (private to its user): workers made, failed, deleted, agents started, refusals, and the office's process started and stopped. It is the host's account of the office, apart from the office's own journal.
 

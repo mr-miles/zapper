@@ -117,13 +117,24 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// The edge: its settings, the driver's keys, and the tokens it issued.
+/// The edge: its settings, the driver's keys, and the key its tokens are
+/// signed with.
+///
+/// A token is `zt1.<sandbox id>.<iat>.<exp>.<tag>` (the id base64url, the
+/// times Unix seconds, the tag an HMAC-SHA256 of the rest): it names its
+/// sandbox and when it was issued and expires, so the edge keeps no table
+/// of them, and they outlive a restart of an edge with the same key. One
+/// stops working when it expires, when its sandbox is no longer the
+/// backend's caller, or when everything issued before a time is revoked
+/// (`revoke_before`).
 pub struct Edge {
     settings: EdgeSettings,
     backend: Arc<dyn Backend>,
     keys: Mutex<Keys>,
-    /// Token → the sandbox it names and when it expires.
-    tokens: Mutex<HashMap<String, Grant>>,
+    /// What the tokens are signed with.
+    token_key: ring::hmac::Key,
+    /// Tokens issued before this (Unix seconds) are refused.
+    not_before: std::sync::atomic::AtomicU64,
     /// SVIDs already used (`jti` → `exp`), so one can't be replayed.
     used: Mutex<HashMap<String, u64>>,
 }
@@ -135,20 +146,57 @@ struct Keys {
     fetched: Option<Instant>,
 }
 
-struct Grant {
-    uuid: String,
-    expires: Instant,
-}
-
 impl Edge {
+    /// An edge whose tokens are signed with a new key: they last as long as
+    /// it does.
     pub fn new(settings: EdgeSettings, backend: Arc<dyn Backend>) -> Edge {
+        Edge::with_key(settings, backend, &rand::random::<[u8; 32]>())
+    }
+
+    /// An edge whose tokens are signed with `key` (`key_file`): they outlive
+    /// it, for an edge started again with the same key.
+    pub fn with_key(settings: EdgeSettings, backend: Arc<dyn Backend>, key: &[u8; 32]) -> Edge {
         Edge {
             settings,
             backend,
             keys: Mutex::default(),
-            tokens: Mutex::default(),
+            token_key: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key),
+            not_before: std::sync::atomic::AtomicU64::new(0),
             used: Mutex::default(),
         }
+    }
+
+    /// Refuses every token issued before `t` (Unix seconds).
+    pub fn revoke_before(&self, t: u64) {
+        self.not_before
+            .fetch_max(t, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A token for sandbox `uuid`, issued at `iat`, expiring at `exp`.
+    pub(crate) fn sign_token(&self, uuid: &str, iat: u64, exp: u64) -> String {
+        let body = format!("zt1.{}.{iat}.{exp}", URL_SAFE_NO_PAD.encode(uuid));
+        let tag = ring::hmac::sign(&self.token_key, body.as_bytes());
+        format!("{body}.{}", URL_SAFE_NO_PAD.encode(tag.as_ref()))
+    }
+
+    /// The sandbox token `token` names, if the edge signed it, it is current,
+    /// and it wasn't revoked.
+    pub(crate) fn token_sandbox(&self, token: &str) -> Option<String> {
+        let (body, tag) = token.rsplit_once('.')?;
+        let tag = URL_SAFE_NO_PAD.decode(tag).ok()?;
+        ring::hmac::verify(&self.token_key, body.as_bytes(), &tag).ok()?;
+        let mut parts = body.split('.');
+        let (v, id, iat, exp) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if v != "zt1" || parts.next().is_some() {
+            return None;
+        }
+        let (iat, exp): (u64, u64) = (iat.parse().ok()?, exp.parse().ok()?);
+        let now = unix_now();
+        let nb = self.not_before.load(std::sync::atomic::Ordering::Relaxed);
+        if exp <= now || iat > now + SKEW || iat < nb {
+            return None;
+        }
+        String::from_utf8(URL_SAFE_NO_PAD.decode(id).ok()?).ok()
     }
 
     /// Serves the edge on `listener` until the task is dropped.
@@ -249,15 +297,7 @@ impl Edge {
             .strip_prefix("Bearer ")
             .or_else(|| value.strip_prefix("bearer "))?
             .trim();
-        let uuid = {
-            let mut tokens = self.tokens.lock().unwrap();
-            let grant = tokens.get(token)?;
-            if grant.expires <= Instant::now() {
-                tokens.remove(token);
-                return None;
-            }
-            grant.uuid.clone()
-        };
+        let uuid = self.token_sandbox(token)?;
         self.backend.caller(&uuid)
     }
 
@@ -282,19 +322,8 @@ impl Edge {
             tracing::info!(sandbox = %uuid, "edge: refused a token grant: a sandbox it doesn't know");
             return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client");
         }
-        let token = random_token();
-        {
-            let now = Instant::now();
-            let mut tokens = self.tokens.lock().unwrap();
-            tokens.retain(|_, g| g.expires > now);
-            tokens.insert(
-                token.clone(),
-                Grant {
-                    uuid,
-                    expires: now + TOKEN_TTL,
-                },
-            );
-        }
+        let now = unix_now();
+        let token = self.sign_token(&uuid, now, now + TOKEN_TTL.as_secs());
         json_response(
             StatusCode::OK,
             &json!({ "access_token": token, "token_type": "Bearer", "expires_in": TOKEN_TTL.as_secs() }),
@@ -616,12 +645,26 @@ pub async fn http_request(
     Ok((status, body.to_bytes().to_vec()))
 }
 
-/// A new token: 32 random bytes, hex (token68, as the supervisor wants).
-fn random_token() -> String {
-    rand::random::<[u8; 32]>()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// The token key at `path`: the one there, or a new one kept there (0600)
+/// for an edge started again to take up.
+pub fn key_file(path: &std::path::Path) -> Result<[u8; 32]> {
+    if let Ok(b) = std::fs::read(path) {
+        if let Ok(k) = <[u8; 32]>::try_from(b.as_slice()) {
+            return Ok(k);
+        }
+        bail!("{}: not a token key (32 bytes)", path.display());
+    }
+    let key = rand::random::<[u8; 32]>();
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| f.write_all(&key))
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(key)
 }
 
 fn unix_now() -> u64 {

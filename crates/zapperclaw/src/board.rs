@@ -141,29 +141,18 @@ impl Board {
                 ok(json!({ "unread": po.unread(BOARD).len(), "messages": po.inbox(BOARD, unread, 200) }))
             }
             (Method::GET, ["api", "threads"]) => {
-                let po = o.post.lock().unwrap();
-                let mut list: Vec<Value> = po
-                    .threads
-                    .values()
-                    .map(|t| {
-                        let last = t.messages.last().and_then(|m| po.messages.get(m));
-                        json!({ "id": t.id, "subject": t.subject, "participants": t.participants,
-                                "messages": t.messages.len(), "last": last.map(|m| m.ts) })
-                    })
-                    .collect();
-                list.sort_by(|a, b| b["last"].as_f64().unwrap_or(0.0).total_cmp(&a["last"].as_f64().unwrap_or(0.0)));
-                ok(json!(list))
+                ok(json!(o.post.lock().unwrap().threads()))
             }
             (Method::GET, ["api", "thread", id]) => {
                 let mut po = o.post.lock().unwrap();
-                let t = po.thread(&o.journal, id, BOARD)?;
+                let t = po.thread(id, BOARD)?;
                 let ids: Vec<String> = t["messages"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(|m| m["id"].as_str().map(str::to_string))
                     .collect();
-                po.mark_read(BOARD, &ids);
+                po.mark_read(&o.journal, BOARD, &ids)?;
                 ok(t)
             }
             (Method::GET, ["api", "desk"]) => {
