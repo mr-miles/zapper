@@ -386,3 +386,70 @@ fn forms_decode_as_browsers_and_supervisors_send_them() {
     assert_eq!(f["d"], "%zz");
     assert_eq!(f["e"], "%4");
 }
+
+#[test]
+fn a_token_names_its_sandbox_only_as_signed_and_current() {
+    let key = [7u8; 32];
+    let e = Edge::with_key(EdgeSettings::default(), Arc::new(Fake), &key);
+    let now = unix_now();
+    let t = e.sign_token(UUID, now, now + 300);
+    assert!(t.starts_with("zt1."), "{t}");
+    assert!(
+        t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c)),
+        "token68, as the supervisor wants: {t}"
+    );
+    assert_eq!(e.token_sandbox(&t).as_deref(), Some(UUID));
+
+    // The same key, a new edge (a restart): still good. Another key: not.
+    let again = Edge::with_key(EdgeSettings::default(), Arc::new(Fake), &key);
+    assert_eq!(again.token_sandbox(&t).as_deref(), Some(UUID));
+    let other = Edge::with_key(EdgeSettings::default(), Arc::new(Fake), &[8u8; 32]);
+    assert_eq!(other.token_sandbox(&t), None);
+
+    // Changed in any part, it is refused.
+    let (body, tag) = t.rsplit_once('.').unwrap();
+    let forged = format!(
+        "{}.{tag}",
+        body.replace(
+            &URL_SAFE_NO_PAD.encode(UUID),
+            &URL_SAFE_NO_PAD.encode("6f1c2d3e-0000-4000-8000-0000000000ff")
+        )
+    );
+    assert_eq!(e.token_sandbox(&forged), None);
+    let longer = format!(
+        "{}.{tag}",
+        body.replace(&format!(".{}", now + 300), &format!(".{}", now + 99_999))
+    );
+    assert_eq!(e.token_sandbox(&longer), None);
+    for bad in ["", "zt1", "made-up", "zt1.a.b.c.d", &format!("{t}x")] {
+        assert_eq!(e.token_sandbox(bad), None, "{bad}");
+    }
+
+    // Expired, or from the future: refused.
+    assert_eq!(
+        e.token_sandbox(&e.sign_token(UUID, now - 600, now - 1)),
+        None
+    );
+    assert_eq!(
+        e.token_sandbox(&e.sign_token(UUID, now + 3600, now + 3900)),
+        None
+    );
+}
+
+#[test]
+fn a_token_key_is_made_once_and_kept_private() {
+    let dir = std::env::temp_dir().join(format!("zo-key-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("edge-key");
+    let a = key_file(&p).unwrap();
+    assert_eq!(key_file(&p).unwrap(), a, "kept");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o077,
+        0
+    );
+    std::fs::write(&p, b"short").unwrap();
+    assert!(key_file(&p).is_err(), "not silently replaced");
+    let _ = std::fs::remove_dir_all(dir);
+}

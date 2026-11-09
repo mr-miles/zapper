@@ -1,7 +1,6 @@
 //! What a worker is told: the wake that hands it its mail, and the notes
 //! put before it.
 
-use crate::journal::Journal;
 use crate::mail::{PostOffice, BOARD};
 
 /// How much of a message's body a wake shows; the rest is a `mail_read`
@@ -12,7 +11,6 @@ const WAKE_BODY: usize = 16 * 1024;
 /// first turn), the notes, then each of `ids` in full.
 pub fn wake(
     po: &PostOffice,
-    journal: &Journal,
     me: &str,
     ids: &[String],
     notes: &[String],
@@ -37,10 +35,10 @@ pub fn wake(
         if ids.len() == 1 { "" } else { "s" }
     ));
     for id in ids {
-        let Some(m) = po.messages.get(id) else {
+        let Some(m) = po.meta(id) else {
             continue;
         };
-        let body = po.body(journal, id);
+        let body = po.body(id);
         let shown = if body.len() > WAKE_BODY {
             let mut end = WAKE_BODY;
             while !body.is_char_boundary(end) {
@@ -105,6 +103,11 @@ pub fn timeout_note(limit: &str, subjects: &[String]) -> String {
     format!("[Automatic note] Your last turn ran past the {limit} limit and was stopped.{on} Pick up where you left off, in smaller steps.")
 }
 
+/// After the office was restarted in the middle of a turn.
+pub fn interrupted_note() -> String {
+    "[Automatic note] The office was restarted during your last turn. Its mail is shown again below: some of it you may have handled already, so check your desk and the threads before answering twice.".to_string()
+}
+
 /// After the agent stopped and was started again.
 pub fn restart_note() -> String {
     "[Automatic note] Your agent stopped during the last turn and was started again; its mail is shown again below.".to_string()
@@ -123,6 +126,7 @@ pub fn until(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::Journal;
     use crate::mail::Draft;
 
     #[test]
@@ -130,7 +134,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zc-prompt-{}", zapper_util::random_id(8)));
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::create(&dir.join("j.jsonl")).unwrap();
-        let mut po = PostOffice::new(["ada".into(), "bob".into()], []);
+        let mut po = PostOffice::new(
+            ["ada".into(), "bob".into()],
+            [],
+            Box::new(crate::store::Memory::new()),
+            true,
+        );
         let d = Draft {
             from: "board".into(),
             to: vec!["ada".into()],
@@ -142,7 +151,6 @@ mod tests {
         let b = brief("ada", Some("Count things."), &["ada".into(), "bob".into()]);
         let text = wake(
             &po,
-            &j,
             "ada",
             std::slice::from_ref(&s.id),
             &["A note.".into()],
@@ -160,7 +168,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("How many?"), "{text}");
-        let nothing = wake(&po, &j, "ada", &[], &[], None);
+        let nothing = wake(&po, "ada", &[], &[], None);
         assert!(nothing.starts_with("No new mail"), "{nothing}");
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -31,6 +31,8 @@ pub struct Journal {
 pub struct At {
     pub offset: u64,
     pub len: u32,
+    /// Its `seq` in the journal.
+    pub seq: u64,
 }
 
 impl At {
@@ -93,7 +95,11 @@ impl Journal {
             let offset = std::fs::metadata(&self.path)
                 .map(|m| m.len())
                 .unwrap_or_else(|_| self.offset.load(Ordering::Relaxed));
-            return At { offset, len: 0 };
+            return At {
+                offset,
+                len: 0,
+                seq: 0,
+            };
         }
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         if let Some(o) = entry.as_object_mut() {
@@ -115,13 +121,18 @@ impl Journal {
             .unwrap_or_else(|_| self.offset.load(Ordering::Relaxed));
         if let Err(e) = file.line(line.as_bytes()) {
             tracing::warn!("journal {}: {e:#}", self.path.display());
-            return At { offset, len: 0 };
+            return At {
+                offset,
+                len: 0,
+                seq,
+            };
         }
         let len = line.len() as u64 + 1;
         self.offset.store(offset + len, Ordering::Relaxed);
         At {
             offset,
             len: len as u32,
+            seq,
         }
     }
 

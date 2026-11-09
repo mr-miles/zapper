@@ -51,6 +51,16 @@ impl Default for EdgeConfig {
     }
 }
 
+/// Where the post office keeps its state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreMode {
+    Both,
+    #[default]
+    Database,
+    Journal,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -65,6 +75,11 @@ pub struct Config {
     /// for their relay.
     pub relays: Vec<String>,
     pub edge: EdgeConfig,
+    /// Where the post office keeps its state: `database` (`office.db`; the
+    /// default), `both` (its events journaled too, so the database catches
+    /// up from the journal and can be made again from it), or `journal`
+    /// (memory, made again from the journal at every start).
+    pub store: StoreMode,
     /// The config's directory, for relative paths.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -78,6 +93,7 @@ impl Default for Config {
             turn_timeout: "30m".into(),
             state: PathBuf::from("~/.local/state/zapperclaw"),
             relays: vec![],
+            store: StoreMode::default(),
             edge: EdgeConfig::default(),
             dir: PathBuf::from("."),
         }
@@ -272,6 +288,11 @@ relays: [wa]
         assert_eq!(c.about()["research"], "finds things out");
         assert_eq!(c.edge, EdgeConfig::default());
         assert_eq!(c.edge.token_url, "http://127.0.0.1:8970/oauth/token");
+        assert_eq!(
+            c.store,
+            StoreMode::Database,
+            "the database alone, unless asked"
+        );
     }
 
     #[test]

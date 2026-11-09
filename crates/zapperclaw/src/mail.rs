@@ -1,18 +1,27 @@
 //! The post office: mail between the roster's workers, the board (you) and,
 //! once relays come, outside addresses (`wa:…`, `tg:…`, `cron:…`).
 //!
-//! What it keeps from the office's: threads, the journal as the record (a
-//! message's body is read back from it), a reply-by time with follow-ups,
-//! the loop and fan-out guards, and size limits. What it drops: kinds,
-//! authority, teams and the chart. Anyone on the roster may mail anyone.
+//! What it keeps from the office's: threads, a reply-by time with
+//! follow-ups, the loop and fan-out guards, and size limits. What it drops:
+//! kinds, authority, teams and the chart. Anyone on the roster may mail
+//! anyone.
+//!
+//! It decides; it doesn't keep. Every change is an event (`events`),
+//! committed as a batch: journaled (one line, unless the office keeps no
+//! event journal), then applied to the store (`store`), which is all the
+//! state there is but the fan-out guard's recent sends.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::path::Path;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::journal::{At, Journal};
+use crate::events::{Event, VERSION};
+use crate::journal::Journal;
+use crate::store::{number, Store};
+pub use crate::store::{Meta, Thread};
 
 /// You, as the roster's workers address you.
 pub const BOARD: &str = "board";
@@ -52,43 +61,6 @@ pub struct Draft {
     pub due: Option<f64>,
 }
 
-/// A message the post office holds; its body stays in the journal.
-#[derive(Debug, Clone, Serialize)]
-pub struct Meta {
-    pub id: String,
-    pub thread: String,
-    pub from: String,
-    pub to: Vec<String>,
-    pub subject: String,
-    pub ts: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub in_reply_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due: Option<f64>,
-    /// Reminders sent about it.
-    #[serde(skip)]
-    pub follow_ups: u32,
-    /// How long its sender gave for an answer: the time between reminders.
-    #[serde(skip)]
-    wait: f64,
-    /// Its answer is no longer awaited (answered, or given up on).
-    #[serde(skip)]
-    pub settled: bool,
-    #[serde(skip)]
-    at: At,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Thread {
-    pub id: String,
-    pub subject: String,
-    pub participants: BTreeSet<String>,
-    pub messages: Vec<String>,
-    /// Messages since the board or an outside address last wrote in it.
-    #[serde(skip)]
-    unattended: usize,
-}
-
 /// What `send` did: the message's id and thread, and the roster workers to
 /// wake (the board and outside addresses aren't woken).
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +68,8 @@ pub struct Sent {
     pub id: String,
     pub thread: String,
     pub wake: Vec<String>,
+    /// Whether it went to the board.
+    pub to_board: bool,
 }
 
 /// One worker's (or the board's) desk: what they wait for, and what is
@@ -120,18 +94,14 @@ pub enum Address {
     },
 }
 
-/// The post office's state, rebuilt from nothing but the journal.
 pub struct PostOffice {
     roster: BTreeSet<String>,
     relays: BTreeSet<String>,
-    pub messages: HashMap<String, Meta>,
-    pub threads: BTreeMap<String, Thread>,
-    /// Who → their unread message ids, oldest first.
-    unread: HashMap<String, Vec<String>>,
+    store: Box<dyn Store>,
+    /// Whether events are journaled (the office's `store`: `both`).
+    journaled: bool,
     /// Who → when they last sent, for the fan-out guard.
     sent_at: HashMap<String, VecDeque<f64>>,
-    /// Mail to outside addresses, for their relays (later).
-    pub outbound: VecDeque<String>,
     next: u64,
 }
 
@@ -155,29 +125,76 @@ pub fn subject_from(body: &str) -> String {
     }
 }
 
+/// Applies the journal's event batches after the store's last to it: the
+/// ones a crash kept from it, or all of them to a new store. Returns how
+/// many batches it applied.
+pub fn catch_up(store: &mut dyn Store, journal: &Path) -> Result<usize> {
+    use std::io::BufRead as _;
+    let Ok(f) = std::fs::File::open(zapper_record::view(journal)) else {
+        return Ok(0);
+    };
+    let after = store.last_seq();
+    let mut n = 0;
+    // A line at a time: a long journal isn't taken into memory.
+    let lines = std::io::BufReader::new(f).lines().map_while(Result::ok);
+    for line in lines.filter(|l| l.contains("\"type\":\"events\"")) {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let seq = v["seq"].as_u64().unwrap_or(0);
+        if v["type"] != "events" || seq <= after {
+            continue;
+        }
+        if v["v"].as_u64().unwrap_or(0) > VERSION as u64 {
+            bail!(
+                "the journal's events at seq {seq} are of a newer version ({})",
+                v["v"]
+            );
+        }
+        let events: Vec<Event> = serde_json::from_value(v["events"].clone())
+            .with_context(|| format!("the journal's events at seq {seq}"))?;
+        store.apply(seq, &events)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 impl PostOffice {
     /// A post office for `roster`, taking outside addresses of `relays`'
-    /// namespaces.
+    /// namespaces, its state in `store`, its events journaled if
+    /// `journaled`.
     pub fn new(
         roster: impl IntoIterator<Item = String>,
         relays: impl IntoIterator<Item = String>,
+        store: Box<dyn Store>,
+        journaled: bool,
     ) -> PostOffice {
+        let next = store.next_number();
         PostOffice {
             roster: roster.into_iter().collect(),
             relays: relays.into_iter().collect(),
-            messages: HashMap::new(),
-            threads: BTreeMap::new(),
-            unread: HashMap::new(),
+            store,
+            journaled,
             sent_at: HashMap::new(),
-            outbound: VecDeque::new(),
-            next: 1,
+            next,
         }
     }
 
-    /// Numbers new messages and threads from `next` on: past every one an
-    /// earlier run of the office journaled, so none is used twice.
-    pub fn number_from(&mut self, next: u64) {
-        self.next = self.next.max(next);
+    /// Commits `events` as one batch: journaled, then applied.
+    pub fn commit(&mut self, journal: &Journal, events: Vec<Event>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let seq = if self.journaled {
+            let at = journal.append("events", json!({ "v": VERSION, "events": events }));
+            if !at.written() {
+                bail!("the journal can't be written; nothing was changed");
+            }
+            at.seq
+        } else {
+            self.store.last_seq() + 1
+        };
+        self.store.apply(seq, &events)
     }
 
     /// What `s` addresses, if anyone.
@@ -217,8 +234,19 @@ impl PostOffice {
         self.address(who).map(|_| ())
     }
 
-    /// Sends `d` at `now`: checked, journaled, then delivered.
+    /// Sends `d` at `now`: checked, then committed.
     pub fn send(&mut self, journal: &Journal, d: Draft, now: f64) -> Result<Sent> {
+        let (sent, event) = self.decide_send(d, now)?;
+        self.commit(journal, vec![event])?;
+        self.next += 1;
+        if self.roster.contains(&sent.from()) {
+            self.sent_at.entry(sent.from()).or_default().push_back(now);
+        }
+        Ok(sent.sent)
+    }
+
+    /// The event that sends `d`, if the rules allow it.
+    fn decide_send(&mut self, d: Draft, now: f64) -> Result<(Sending, Event)> {
         self.may_send(&d.from)?;
         if d.body.len() > MAX_BODY {
             bail!("the body is {} bytes; at most {MAX_BODY}", d.body.len());
@@ -231,8 +259,7 @@ impl PostOffice {
         }
         let mut to = Vec::new();
         for t in &d.to {
-            let a = self.address(t)?;
-            let name = match a {
+            let name = match self.address(t)? {
                 Address::Worker(n) => n,
                 Address::Board => BOARD.to_string(),
                 Address::Outside { ns, id } => format!("{ns}:{id}"),
@@ -248,20 +275,18 @@ impl PostOffice {
             bail!("{} recipients; at most {MAX_RECIPIENTS}", to.len());
         }
         let worker_sender = self.roster.contains(&d.from);
-        let thread = match &d.in_reply_to {
+        let replied = match &d.in_reply_to {
             Some(r) => {
                 let m = self
-                    .messages
-                    .get(r)
+                    .store
+                    .message(r)
+                    .filter(|m| self.can_read(&d.from, &m.thread))
                     .ok_or_else(|| anyhow!("no message {r}"))?;
-                if !self.can_read(&d.from, &m.thread) {
-                    bail!("no message {r}");
-                }
-                Some(m.thread.clone())
+                self.store.thread(&m.thread)
             }
             None => None,
         };
-        if let Some(t) = thread.as_ref().and_then(|t| self.threads.get(t)) {
+        if let Some(t) = &replied {
             if t.messages.len() >= MAX_THREAD {
                 bail!("thread {} has {MAX_THREAD} messages; start a new one", t.id);
             }
@@ -296,86 +321,57 @@ impl PostOffice {
             d.subject.trim().to_string()
         };
         let id = format!("m-{}", self.next);
-        let thread = thread.unwrap_or_else(|| format!("t-{}", self.next));
-        let at = journal.append(
-            "mail",
-            json!({ "id": id, "thread": thread, "from": d.from, "to": to, "subject": subject,
-                    "body": d.body, "in_reply_to": d.in_reply_to, "due": due }),
-        );
-        if !at.written() {
-            bail!("the journal can't be written; the message wasn't sent");
-        }
-        self.next += 1;
-        if worker_sender {
-            self.sent_at
-                .entry(d.from.clone())
-                .or_default()
-                .push_back(now);
-        }
-        // An answer settles what its sender owed in the thread.
-        let owed: Vec<String> = self
-            .threads
-            .get(&thread)
-            .map(|t| t.messages.clone())
-            .unwrap_or_default();
-        for mid in owed {
-            if let Some(m) = self.messages.get_mut(&mid) {
-                // Answered: by one it was to, to the one who asked.
-                if !m.settled && m.due.is_some() && m.to.contains(&d.from) && to.contains(&m.from) {
-                    m.settled = true;
-                }
-            }
-        }
-        let t = self
-            .threads
-            .entry(thread.clone())
-            .or_insert_with(|| Thread {
-                id: thread.clone(),
-                subject: subject.clone(),
-                participants: BTreeSet::new(),
-                messages: vec![],
-                unattended: 0,
-            });
-        t.participants.insert(d.from.clone());
-        t.participants.extend(to.iter().cloned());
-        t.messages.push(id.clone());
+        let (thread, new_thread) = match &replied {
+            Some(t) => (t.id.clone(), None),
+            None => (format!("t-{}", self.next), Some(subject.clone())),
+        };
+        // Answered: by one it was to, to the one who asked.
+        let settles: Vec<String> = self
+            .store
+            .open()
+            .into_iter()
+            .filter(|m| m.thread == thread && m.to.contains(&d.from) && to.contains(&m.from))
+            .map(|m| m.id)
+            .collect();
+        let before = replied.as_ref().map_or(0, |t| t.unattended);
         // The post office's notices neither count nor reset it.
-        t.unattended = if worker_sender {
-            t.unattended + 1
+        let unattended = if worker_sender {
+            before + 1
         } else if d.from == OFFICE {
-            t.unattended
+            before
         } else {
             0
         };
-        let mut wake = Vec::new();
-        for r in &to {
-            if r.contains(':') {
-                self.outbound.push_back(id.clone());
-            } else {
-                self.unread.entry(r.clone()).or_default().push(id.clone());
-                if self.roster.contains(r) {
-                    wake.push(r.clone());
-                }
-            }
-        }
-        self.messages.insert(
-            id.clone(),
-            Meta {
+        let wake: Vec<String> = to
+            .iter()
+            .filter(|r| self.roster.contains(*r))
+            .cloned()
+            .collect();
+        let to_board = to.iter().any(|r| r == BOARD);
+        let sending = Sending {
+            from: d.from.clone(),
+            sent: Sent {
                 id: id.clone(),
                 thread: thread.clone(),
-                from: d.from,
-                to,
-                subject,
-                ts: now,
-                in_reply_to: d.in_reply_to,
-                due,
-                follow_ups: 0,
-                wait: due.map_or(0.0, |d| d - now),
-                settled: false,
-                at,
+                wake,
+                to_board,
             },
-        );
-        Ok(Sent { id, thread, wake })
+        };
+        let event = Event::MessageSent {
+            id,
+            thread,
+            from: d.from,
+            to,
+            subject,
+            body: d.body,
+            ts: now,
+            in_reply_to: d.in_reply_to,
+            due,
+            new_thread,
+            unattended,
+            settles,
+        };
+        Ok((sending, event))
     }
 
     /// Whether `viewer` may read thread `thread`: the board reads all, and
@@ -384,71 +380,83 @@ impl PostOffice {
         viewer == BOARD
             || viewer == OFFICE
             || self
-                .threads
-                .get(thread)
+                .store
+                .thread(thread)
                 .is_some_and(|t| t.participants.contains(viewer))
     }
 
-    /// A message's body, from the journal.
-    pub fn body(&self, journal: &Journal, id: &str) -> String {
-        self.messages
-            .get(id)
-            .and_then(|m| journal.read(m.at).ok())
-            .and_then(|v| v["body"].as_str().map(str::to_string))
-            .unwrap_or_default()
+    pub fn meta(&self, id: &str) -> Option<Meta> {
+        self.store.message(id)
+    }
+
+    pub fn body(&self, id: &str) -> String {
+        self.store.body(id).unwrap_or_default()
     }
 
     /// Message `id` as `viewer` reads it, body and all.
-    pub fn message(&self, journal: &Journal, id: &str, viewer: &str) -> Result<Value> {
+    pub fn message(&self, id: &str, viewer: &str) -> Result<Value> {
         let m = self
-            .messages
-            .get(id)
+            .store
+            .message(id)
             .filter(|m| self.can_read(viewer, &m.thread))
             .ok_or_else(|| anyhow!("no message {id}"))?;
-        let mut v = serde_json::to_value(m)?;
-        v["body"] = json!(self.body(journal, id));
+        let mut v = serde_json::to_value(&m)?;
+        v["body"] = json!(self.body(id));
         Ok(v)
     }
 
     /// Thread `id` as `viewer` reads it: every message, bodies and all.
-    pub fn thread(&self, journal: &Journal, id: &str, viewer: &str) -> Result<Value> {
+    pub fn thread(&self, id: &str, viewer: &str) -> Result<Value> {
         let t = self
-            .threads
-            .get(id)
+            .store
+            .thread(id)
             .filter(|_| self.can_read(viewer, id))
             .ok_or_else(|| anyhow!("no thread {id}"))?;
         let messages: Vec<Value> = t
             .messages
             .iter()
-            .filter_map(|m| self.message(journal, m, viewer).ok())
+            .filter_map(|m| self.message(m, viewer).ok())
             .collect();
         Ok(
             json!({ "id": t.id, "subject": t.subject, "participants": t.participants, "messages": messages }),
         )
     }
 
-    pub fn mark_read(&mut self, who: &str, ids: &[String]) {
-        if let Some(u) = self.unread.get_mut(who) {
-            u.retain(|id| !ids.contains(id));
+    /// Every thread, most recent first, as a line each.
+    pub fn threads(&self) -> Vec<Value> {
+        self.store
+            .threads()
+            .into_iter()
+            .map(|t| json!({ "id": t.id, "subject": t.subject, "participants": t.participants, "messages": t.messages.len(), "last": t.last }))
+            .collect()
+    }
+
+    /// `who` has read `ids`.
+    pub fn mark_read(&mut self, journal: &Journal, who: &str, ids: &[String]) -> Result<()> {
+        let unread = self.unread(who);
+        let ids: Vec<String> = ids.iter().filter(|i| unread.contains(i)).cloned().collect();
+        if ids.is_empty() {
+            return Ok(());
         }
+        self.commit(
+            journal,
+            vec![Event::Read {
+                who: who.into(),
+                ids,
+            }],
+        )
     }
 
     pub fn unread(&self, who: &str) -> Vec<String> {
-        self.unread.get(who).cloned().unwrap_or_default()
+        self.store.unread(who)
     }
 
     /// `who`'s mail, newest first: a line each, at most `limit`.
     pub fn inbox(&self, who: &str, unread_only: bool, limit: usize) -> Vec<Value> {
         let unread = self.unread(who);
-        let mut mine: Vec<&Meta> = self
-            .messages
-            .values()
-            .filter(|m| m.to.iter().any(|t| t == who))
-            .filter(|m| !unread_only || unread.contains(&m.id))
-            .collect();
-        mine.sort_by(|a, b| b.ts.total_cmp(&a.ts).then(seq(&b.id).cmp(&seq(&a.id))));
-        mine.into_iter()
-            .take(limit)
+        self.store
+            .inbox(who, unread_only, limit)
+            .into_iter()
             .map(|m| json!({ "id": m.id, "thread": m.thread, "from": m.from, "subject": m.subject, "ts": m.ts, "unread": unread.contains(&m.id), "due": m.due }))
             .collect()
     }
@@ -456,13 +464,7 @@ impl PostOffice {
     /// `who`'s desk.
     pub fn desk(&self, who: &str) -> Desk {
         let mut d = Desk::default();
-        let mut open: Vec<&Meta> = self
-            .messages
-            .values()
-            .filter(|m| m.due.is_some() && !m.settled)
-            .collect();
-        open.sort_by_key(|m| seq(&m.id));
-        for m in open {
+        for m in self.store.open() {
             let line = json!({ "id": m.id, "thread": m.thread, "subject": m.subject, "from": m.from, "to": m.to, "due": m.due });
             if m.from == who {
                 d.waiting.push(line.clone());
@@ -478,49 +480,67 @@ impl PostOffice {
     /// `MAX_FOLLOW_UPS`, then word to the sender that nobody did. Returns
     /// what was sent.
     pub fn tick(&mut self, journal: &Journal, now: f64) -> Vec<Sent> {
-        let mut late: Vec<(String, f64)> = self
-            .messages
-            .values()
-            .filter(|m| !m.settled && m.due.is_some_and(|d| d <= now))
-            .map(|m| (m.id.clone(), m.due.unwrap()))
+        let late: Vec<Meta> = self
+            .store
+            .open()
+            .into_iter()
+            .filter(|m| m.due.is_some_and(|d| d <= now))
             .collect();
-        late.sort_by_key(|l| seq(&l.0));
         let mut sent = Vec::new();
-        for (id, _) in late {
-            let m = self.messages[&id].clone();
-            let notice = if m.follow_ups < MAX_FOLLOW_UPS {
+        for m in late {
+            let (event, notice) = if m.follow_ups < MAX_FOLLOW_UPS {
                 let interval = m.wait.max(MIN_DUE_SECS);
                 let to: Vec<String> = m.to.iter().filter(|t| !t.contains(':')).cloned().collect();
-                if let Some(mm) = self.messages.get_mut(&id) {
-                    mm.follow_ups += 1;
-                    mm.due = Some(now + interval);
-                }
-                (!to.is_empty()).then(|| Draft {
+                let notice = (!to.is_empty()).then(|| Draft {
                     from: OFFICE.into(),
                     to,
                     subject: format!("Reminder: {}", m.subject),
                     body: format!("[Automatic reminder] {} is waiting for your answer to {} (\"{}\"). Reply to it with mail_reply.", m.from, m.id, m.subject),
-                    in_reply_to: Some(id.clone()),
+                    in_reply_to: Some(m.id.clone()),
                     due: None,
-                })
+                });
+                let e = Event::FollowedUp {
+                    id: m.id.clone(),
+                    follow_ups: m.follow_ups + 1,
+                    due: now + interval,
+                };
+                (e, notice)
             } else {
-                if let Some(mm) = self.messages.get_mut(&id) {
-                    mm.settled = true;
-                }
-                (m.from != OFFICE && !m.from.contains(':')).then(|| Draft {
+                let notice = (m.from != OFFICE && !m.from.contains(':')).then(|| Draft {
                     from: OFFICE.into(),
                     to: vec![m.from.clone()],
                     subject: format!("No answer: {}", m.subject),
                     body: format!("[Automatic notice] Nobody answered {} (\"{}\") after {MAX_FOLLOW_UPS} reminders. Decide what to do without it, or ask someone else.", m.id, m.subject),
-                    in_reply_to: Some(id.clone()),
+                    in_reply_to: Some(m.id.clone()),
                     due: None,
-                })
+                });
+                (
+                    Event::Settled {
+                        ids: vec![m.id.clone()],
+                    },
+                    notice,
+                )
             };
+            // The follow-up and its notice, as one batch.
+            let mut events = vec![event];
+            let mut out = None;
             if let Some(d) = notice {
-                match self.send(journal, d, now) {
-                    Ok(s) => sent.push(s),
-                    Err(e) => tracing::warn!("follow-up of {id}: {e:#}"),
+                match self.decide_send(d, now) {
+                    Ok((s, e)) => {
+                        events.push(e);
+                        out = Some(s.sent);
+                    }
+                    Err(e) => tracing::warn!("the follow-up of {}: {e:#}", m.id),
                 }
+            }
+            match self.commit(journal, events) {
+                Ok(()) => {
+                    if let Some(s) = out {
+                        self.next += 1;
+                        sent.push(s);
+                    }
+                }
+                Err(e) => tracing::warn!("the follow-up of {}: {e:#}", m.id),
             }
         }
         sent
@@ -535,23 +555,139 @@ impl PostOffice {
             .collect();
         json!({ "workers": workers, "board": BOARD, "relays": self.relays })
     }
+
+    /// Mail to outside addresses, for their relays.
+    pub fn outbound(&self) -> Vec<String> {
+        self.store.outbound()
+    }
+
+    // --- turns: what each worker was shown, for a restart -------------------
+
+    /// Starts `worker`'s next turn, showing it `ids`: the turn's number.
+    pub fn start_turn(&mut self, journal: &Journal, worker: &str, ids: &[String]) -> Result<u64> {
+        let turn = self.store.next_turn(worker);
+        let mut events = vec![Event::TurnStarted {
+            worker: worker.into(),
+            turn,
+        }];
+        if !ids.is_empty() {
+            events.push(Event::Shown {
+                worker: worker.into(),
+                turn,
+                ids: ids.to_vec(),
+            });
+        }
+        self.commit(journal, events)?;
+        Ok(turn)
+    }
+
+    /// `ids` were shown to `worker` during turn `turn`.
+    pub fn show(
+        &mut self,
+        journal: &Journal,
+        worker: &str,
+        turn: u64,
+        ids: &[String],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.commit(
+            journal,
+            vec![Event::Shown {
+                worker: worker.into(),
+                turn,
+                ids: ids.to_vec(),
+            }],
+        )
+    }
+
+    /// Ends `worker`'s turn `turn`; `again` are its mail to show again.
+    pub fn end_turn(
+        &mut self,
+        journal: &Journal,
+        worker: &str,
+        turn: u64,
+        again: &[String],
+    ) -> Result<()> {
+        let mut events = Vec::new();
+        if !again.is_empty() {
+            events.push(Event::Unread {
+                who: worker.into(),
+                ids: again.to_vec(),
+            });
+        }
+        events.push(Event::TurnEnded {
+            worker: worker.into(),
+            turn,
+        });
+        self.commit(journal, events)
+    }
+
+    /// Records `worker`'s agent's conversation.
+    pub fn set_conversation(&mut self, journal: &Journal, worker: &str, id: &str) -> Result<()> {
+        if self.store.conversation(worker).as_deref() == Some(id) {
+            return Ok(());
+        }
+        self.commit(
+            journal,
+            vec![Event::Conversation {
+                worker: worker.into(),
+                id: id.into(),
+            }],
+        )
+    }
+
+    pub fn conversation(&self, worker: &str) -> Option<String> {
+        self.store.conversation(worker)
+    }
+
+    /// After a restart: the turns of `worker`'s that never ended are ended,
+    /// their mail unread again. Returns that mail.
+    pub fn recover(&mut self, journal: &Journal, worker: &str) -> Result<Vec<String>> {
+        let mut again = Vec::new();
+        for (turn, ids) in self.store.open_turns(worker) {
+            self.end_turn(journal, worker, turn, &ids)?;
+            again.extend(ids);
+        }
+        again.sort_by_key(|i| number(i));
+        again.dedup();
+        Ok(again)
+    }
 }
 
-/// A message id's number, for ordering.
-fn seq(id: &str) -> u64 {
-    id.trim_start_matches("m-").parse().unwrap_or(0)
+/// A message about to be sent.
+struct Sending {
+    from: String,
+    sent: Sent,
+}
+
+impl Sending {
+    fn from(&self) -> String {
+        self.from.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Memory, Sqlite};
 
-    fn po() -> (PostOffice, Journal, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("zc-mail-{}", zapper_util::random_id(8)));
-        std::fs::create_dir_all(&dir).unwrap();
-        let j = Journal::create(&dir.join("journal.jsonl")).unwrap();
-        let po = PostOffice::new(["ada".into(), "bob".into()], ["wa".into()]);
-        (po, j, dir)
+    /// Runs `f` on a post office with each store, its journal in a new
+    /// directory.
+    fn each(f: impl Fn(&mut PostOffice, &Journal)) {
+        for (name, store) in [
+            ("memory", Box::new(Memory::new()) as Box<dyn Store>),
+            ("sqlite", Box::new(Sqlite::in_memory())),
+        ] {
+            let dir = std::env::temp_dir().join(format!("zc-mail-{}", zapper_util::random_id(8)));
+            std::fs::create_dir_all(&dir).unwrap();
+            let j = Journal::create(&dir.join("journal.jsonl")).unwrap();
+            let mut po = PostOffice::new(["ada".into(), "bob".into()], ["wa".into()], store, true);
+            eprintln!("store: {name}");
+            f(&mut po, &j);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     fn draft(from: &str, to: &[&str], body: &str) -> Draft {
@@ -563,233 +699,301 @@ mod tests {
         }
     }
 
+    fn reply(to_id: &str, from: &str, to: &[&str], body: &str) -> Draft {
+        Draft {
+            in_reply_to: Some(to_id.into()),
+            ..draft(from, to, body)
+        }
+    }
+
     #[test]
     fn mail_is_journaled_threaded_and_wakes_its_workers() {
-        let (mut po, j, dir) = po();
-        let s = po
-            .send(&j, draft("board", &["ada", "bob"], "Plan\nmore"), 100.0)
-            .unwrap();
-        assert_eq!(s.wake, vec!["ada", "bob"]);
-        assert_eq!(po.messages[&s.id].subject, "Plan");
-        assert_eq!(po.body(&j, &s.id), "Plan\nmore");
-        let r = po
-            .send(
-                &j,
-                Draft {
-                    in_reply_to: Some(s.id.clone()),
-                    ..draft("ada", &["board"], "ok")
-                },
-                101.0,
-            )
-            .unwrap();
-        assert_eq!(r.thread, s.thread);
-        assert!(r.wake.is_empty(), "the board isn't woken");
-        assert_eq!(po.unread("board"), vec![r.id.clone()]);
-        let t = po.thread(&j, &s.thread, "bob").unwrap();
-        assert_eq!(t["messages"].as_array().unwrap().len(), 2);
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            let s = po
+                .send(j, draft("board", &["ada", "bob"], "Plan\nmore"), 100.0)
+                .unwrap();
+            assert_eq!(s.wake, vec!["ada", "bob"]);
+            assert_eq!(po.meta(&s.id).unwrap().subject, "Plan");
+            assert_eq!(po.body(&s.id), "Plan\nmore");
+            let r = po
+                .send(j, reply(&s.id, "ada", &["board"], "ok"), 101.0)
+                .unwrap();
+            assert_eq!(r.thread, s.thread);
+            assert!(r.wake.is_empty() && r.to_board, "the board isn't woken");
+            assert_eq!(po.unread("board"), vec![r.id.clone()]);
+            let t = po.thread(&s.thread, "bob").unwrap();
+            assert_eq!(t["messages"].as_array().unwrap().len(), 2);
+            assert_eq!(po.threads()[0]["messages"], 2);
+        });
     }
 
     #[test]
     fn only_known_addresses_and_bounded_messages() {
-        let (mut po, j, dir) = po();
-        assert!(po.send(&j, draft("ada", &["eve"], "x"), 1.0).is_err());
-        assert!(po.send(&j, draft("eve", &["ada"], "x"), 1.0).is_err());
-        assert!(po.send(&j, draft("ada", &["ada"], "x"), 1.0).is_err());
-        assert!(po.send(&j, draft("ada", &["tg:1"], "x"), 1.0).is_err());
-        assert!(po.send(&j, draft("ada", &["wa:+44 7"], "x"), 1.0).is_err());
-        let big = "x".repeat(MAX_BODY + 1);
-        assert!(po.send(&j, draft("ada", &["bob"], &big), 1.0).is_err());
-        let s = po
-            .send(&j, draft("ada", &["wa:+447700900123"], "hi"), 1.0)
-            .unwrap();
-        assert!(s.wake.is_empty());
-        assert_eq!(po.outbound.front(), Some(&s.id));
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            assert!(po.send(j, draft("ada", &["eve"], "x"), 1.0).is_err());
+            assert!(po.send(j, draft("eve", &["ada"], "x"), 1.0).is_err());
+            assert!(po.send(j, draft("ada", &["ada"], "x"), 1.0).is_err());
+            assert!(po.send(j, draft("ada", &["tg:1"], "x"), 1.0).is_err());
+            assert!(po.send(j, draft("ada", &["wa:+44 7"], "x"), 1.0).is_err());
+            let big = "x".repeat(MAX_BODY + 1);
+            assert!(po.send(j, draft("ada", &["bob"], &big), 1.0).is_err());
+            let s = po
+                .send(j, draft("ada", &["wa:+447700900123"], "hi"), 1.0)
+                .unwrap();
+            assert!(s.wake.is_empty());
+            assert_eq!(po.outbound(), vec![s.id]);
+        });
     }
 
     #[test]
     fn a_thread_is_read_only_by_its_participants_and_the_board() {
-        let (mut po, j, dir) = po();
-        let s = po
-            .send(&j, draft("ada", &["board"], "secret"), 1.0)
-            .unwrap();
-        assert!(po.message(&j, &s.id, "bob").is_err());
-        assert!(po.message(&j, &s.id, "board").is_ok());
-        let reply = Draft {
-            in_reply_to: Some(s.id.clone()),
-            ..draft("bob", &["ada"], "let me in")
-        };
-        assert!(
-            po.send(&j, reply, 2.0).is_err(),
-            "no replying into a thread you can't read"
-        );
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            let s = po.send(j, draft("ada", &["board"], "secret"), 1.0).unwrap();
+            assert!(po.message(&s.id, "bob").is_err());
+            assert!(po.message(&s.id, "board").is_ok());
+            assert!(
+                po.send(j, reply(&s.id, "bob", &["ada"], "let me in"), 2.0)
+                    .is_err(),
+                "no replying into a thread you can't read"
+            );
+        });
     }
 
     #[test]
     fn workers_alone_in_a_thread_are_stopped_until_the_board_writes() {
-        let (mut po, j, dir) = po();
-        let first = po
-            .send(&j, draft("board", &["ada", "bob"], "go"), 0.0)
-            .unwrap();
-        let mut last = first.id;
-        let mut now = 1.0;
-        for i in 0..MAX_UNATTENDED {
-            let from = if i % 2 == 0 { "ada" } else { "bob" };
-            let to = if i % 2 == 0 { "bob" } else { "ada" };
-            // Spread out, so the fan-out guard stays out of it.
-            now += RATE_WINDOW / 20.0;
-            last = po
-                .send(
-                    &j,
-                    Draft {
-                        in_reply_to: Some(last),
-                        ..draft(from, &[to], "again")
-                    },
-                    now,
-                )
-                .unwrap()
-                .id;
-        }
-        let more = Draft {
-            in_reply_to: Some(last.clone()),
-            ..draft("ada", &["bob"], "again")
-        };
-        let e = po.send(&j, more, now + 1.0).unwrap_err().to_string();
-        assert!(e.contains("ask board"), "{e}");
-        let board = Draft {
-            in_reply_to: Some(last),
-            ..draft("board", &["ada"], "carry on")
-        };
-        let b = po.send(&j, board, now + 2.0).unwrap();
-        let ok = Draft {
-            in_reply_to: Some(b.id),
-            ..draft("ada", &["bob"], "again")
-        };
-        assert!(po.send(&j, ok, now + 3.0).is_ok());
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            let first = po
+                .send(j, draft("board", &["ada", "bob"], "go"), 0.0)
+                .unwrap();
+            let mut last = first.id;
+            let mut now = 1.0;
+            for i in 0..MAX_UNATTENDED {
+                let (from, to) = if i % 2 == 0 {
+                    ("ada", "bob")
+                } else {
+                    ("bob", "ada")
+                };
+                // Spread out, so the fan-out guard stays out of it.
+                now += RATE_WINDOW / 20.0;
+                last = po
+                    .send(j, reply(&last, from, &[to], "again"), now)
+                    .unwrap()
+                    .id;
+            }
+            let e = po
+                .send(j, reply(&last, "ada", &["bob"], "again"), now + 1.0)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("ask board"), "{e}");
+            let b = po
+                .send(j, reply(&last, "board", &["ada"], "carry on"), now + 2.0)
+                .unwrap();
+            assert!(po
+                .send(j, reply(&b.id, "ada", &["bob"], "again"), now + 3.0)
+                .is_ok());
+        });
     }
 
     #[test]
     fn a_sender_is_held_to_a_rate() {
-        let (mut po, j, dir) = po();
-        for i in 0..MAX_PER_WINDOW {
-            po.send(&j, draft("ada", &["bob"], &format!("n{i}")), 10.0)
-                .unwrap();
-        }
-        assert!(po.send(&j, draft("ada", &["bob"], "more"), 10.0).is_err());
-        assert!(po
-            .send(
-                &j,
-                draft("ada", &["bob"], "later"),
-                10.0 + RATE_WINDOW + 1.0
-            )
-            .is_ok());
-        assert!(po
-            .send(
-                &j,
-                draft("board", &["bob"], "the board isn't limited"),
-                10.0
-            )
-            .is_ok());
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            for i in 0..MAX_PER_WINDOW {
+                po.send(j, draft("ada", &["bob"], &format!("n{i}")), 10.0)
+                    .unwrap();
+            }
+            assert!(po.send(j, draft("ada", &["bob"], "more"), 10.0).is_err());
+            assert!(po
+                .send(j, draft("ada", &["bob"], "later"), 10.0 + RATE_WINDOW + 1.0)
+                .is_ok());
+            assert!(po
+                .send(j, draft("board", &["bob"], "not limited"), 10.0)
+                .is_ok());
+        });
     }
 
     #[test]
     fn a_due_answer_is_on_both_desks_until_given_and_is_followed_up() {
-        let (mut po, j, dir) = po();
-        let ask = Draft {
-            due: Some(200.0),
-            ..draft("ada", &["bob"], "numbers?")
-        };
-        assert!(
-            po.send(
-                &j,
-                Draft {
-                    due: Some(30.0),
-                    ..ask.clone()
-                },
-                0.0
-            )
-            .is_err(),
-            "too soon"
-        );
-        let s = po.send(&j, ask, 0.0).unwrap();
-        assert_eq!(po.desk("ada").waiting.len(), 1);
-        assert_eq!(po.desk("bob").owed.len(), 1);
-        assert!(po.tick(&j, 100.0).is_empty(), "not due yet");
-        let f = po.tick(&j, 200.0);
-        assert_eq!(f.len(), 1);
-        assert_eq!(f[0].wake, vec!["bob"]);
-        assert_eq!(f[0].thread, s.thread);
-        assert_eq!(
-            po.tick(&j, 300.0).len(),
-            0,
-            "the next reminder is a due interval on"
-        );
-        assert_eq!(po.tick(&j, 400.0).len(), 1);
-        let gave_up = po.tick(&j, 600.0);
-        assert_eq!(
-            gave_up[0].wake,
-            vec!["ada"],
-            "the sender hears nobody answered"
-        );
-        assert!(po.desk("bob").owed.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            let ask = Draft {
+                due: Some(200.0),
+                ..draft("ada", &["bob"], "numbers?")
+            };
+            let soon = Draft {
+                due: Some(30.0),
+                ..ask.clone()
+            };
+            assert!(po.send(j, soon, 0.0).is_err(), "too soon");
+            let s = po.send(j, ask, 0.0).unwrap();
+            assert_eq!(po.desk("ada").waiting.len(), 1);
+            assert_eq!(po.desk("bob").owed.len(), 1);
+            assert!(po.tick(j, 100.0).is_empty(), "not due yet");
+            let f = po.tick(j, 200.0);
+            assert_eq!(f.len(), 1);
+            assert_eq!(f[0].wake, vec!["bob"]);
+            assert_eq!(f[0].thread, s.thread);
+            assert_eq!(po.tick(j, 300.0).len(), 0, "the next is a due interval on");
+            assert_eq!(po.tick(j, 400.0).len(), 1);
+            let gave_up = po.tick(j, 600.0);
+            assert_eq!(
+                gave_up[0].wake,
+                vec!["ada"],
+                "the sender hears nobody answered"
+            );
+            assert!(po.desk("bob").owed.is_empty());
+        });
     }
 
     #[test]
-    fn an_answer_settles_what_was_owed() {
-        let (mut po, j, dir) = po();
-        let s = po
-            .send(
-                &j,
-                Draft {
-                    due: Some(500.0),
-                    ..draft("ada", &["bob"], "numbers?")
-                },
-                0.0,
-            )
-            .unwrap();
-        po.send(
-            &j,
-            Draft {
-                in_reply_to: Some(s.id),
-                ..draft("bob", &["ada"], "42")
-            },
-            1.0,
-        )
-        .unwrap();
-        assert!(po.desk("ada").waiting.is_empty());
-        assert!(po.tick(&j, 1000.0).is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+    fn an_answer_settles_what_was_owed_to_who_asked() {
+        each(|po, j| {
+            let s = po
+                .send(
+                    j,
+                    Draft {
+                        due: Some(500.0),
+                        ..draft("ada", &["bob"], "numbers?")
+                    },
+                    0.0,
+                )
+                .unwrap();
+            po.send(j, reply(&s.id, "bob", &["board"], "not to ada"), 1.0)
+                .unwrap();
+            assert_eq!(po.desk("ada").waiting.len(), 1, "an answer to someone else");
+            po.send(j, reply(&s.id, "bob", &["ada"], "42"), 2.0)
+                .unwrap();
+            assert!(po.desk("ada").waiting.is_empty());
+            assert!(po.tick(j, 1000.0).is_empty());
+        });
     }
 
     #[test]
     fn the_inbox_is_newest_first_and_marks_unread() {
-        let (mut po, j, dir) = po();
-        let a = po.send(&j, draft("board", &["ada"], "one"), 1.0).unwrap();
-        let b = po.send(&j, draft("bob", &["ada"], "two"), 2.0).unwrap();
-        let inbox = po.inbox("ada", false, 10);
-        assert_eq!(inbox[0]["id"], json!(b.id));
-        po.mark_read("ada", std::slice::from_ref(&b.id));
-        let unread = po.inbox("ada", true, 10);
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0]["id"], json!(a.id));
-        let _ = std::fs::remove_dir_all(dir);
+        each(|po, j| {
+            let a = po.send(j, draft("board", &["ada"], "one"), 1.0).unwrap();
+            let b = po.send(j, draft("bob", &["ada"], "two"), 2.0).unwrap();
+            assert_eq!(po.inbox("ada", false, 10)[0]["id"], json!(b.id));
+            po.mark_read(j, "ada", std::slice::from_ref(&b.id)).unwrap();
+            let unread = po.inbox("ada", true, 10);
+            assert_eq!(unread.len(), 1);
+            assert_eq!(unread[0]["id"], json!(a.id));
+        });
     }
 
     #[test]
     fn mail_the_journal_cant_keep_isnt_sent() {
-        let (mut po, j, dir) = po();
-        j.fail_writes();
-        let e = po
-            .send(&j, draft("ada", &["bob"], "lost?"), 1.0)
-            .unwrap_err();
-        assert!(e.to_string().contains("journal"), "{e}");
-        assert!(po.unread("bob").is_empty());
-        assert!(po.messages.is_empty());
+        each(|po, j| {
+            j.fail_writes();
+            let e = po
+                .send(j, draft("ada", &["bob"], "lost?"), 1.0)
+                .unwrap_err();
+            assert!(e.to_string().contains("journal"), "{e}");
+            assert!(po.unread("bob").is_empty());
+            assert!(po.meta("m-1").is_none());
+        });
+    }
+
+    #[test]
+    fn a_turn_never_ended_gives_its_mail_back_on_recovery() {
+        each(|po, j| {
+            let a = po.send(j, draft("board", &["ada"], "one"), 1.0).unwrap();
+            let b = po.send(j, draft("board", &["ada"], "two"), 2.0).unwrap();
+            let t1 = po
+                .start_turn(j, "ada", std::slice::from_ref(&a.id))
+                .unwrap();
+            po.end_turn(j, "ada", t1, &[]).unwrap();
+            let t2 = po
+                .start_turn(j, "ada", std::slice::from_ref(&b.id))
+                .unwrap();
+            assert_eq!(t2, t1 + 1);
+            assert!(po.unread("ada").is_empty(), "shown is read");
+            // The office stops here; started again:
+            assert_eq!(po.recover(j, "ada").unwrap(), vec![b.id.clone()]);
+            assert_eq!(po.unread("ada"), vec![b.id.clone()]);
+            assert!(po.recover(j, "ada").unwrap().is_empty(), "once");
+            // A turn that ends asking for mail again leaves it unread.
+            let t3 = po
+                .start_turn(j, "ada", std::slice::from_ref(&b.id))
+                .unwrap();
+            po.end_turn(j, "ada", t3, std::slice::from_ref(&b.id))
+                .unwrap();
+            assert_eq!(po.unread("ada"), vec![b.id.clone()]);
+            po.set_conversation(j, "ada", "c-1").unwrap();
+            assert_eq!(po.conversation("ada").as_deref(), Some("c-1"));
+        });
+    }
+
+    /// The point of the events: a store made from the journal alone is the
+    /// store the post office kept.
+    #[test]
+    fn a_store_made_again_from_the_journal_answers_the_same() {
+        let dir = std::env::temp_dir().join(format!("zc-replay-{}", zapper_util::random_id(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let j = Journal::create(&path).unwrap();
+        let mut po = PostOffice::new(
+            ["ada".into(), "bob".into()],
+            ["wa".into()],
+            Box::new(Sqlite::open(&dir.join("office.db")).unwrap()),
+            true,
+        );
+        let s = po
+            .send(
+                &j,
+                Draft {
+                    due: Some(100.0),
+                    ..draft("ada", &["bob", "wa:+44"], "numbers?")
+                },
+                0.0,
+            )
+            .unwrap();
+        po.send(&j, reply(&s.id, "board", &["ada"], "go on"), 1.0)
+            .unwrap();
+        po.tick(&j, 100.0);
+        let t = po
+            .start_turn(&j, "bob", std::slice::from_ref(&s.id))
+            .unwrap();
+        po.set_conversation(&j, "bob", "c-9").unwrap();
+        let _ = t;
+        for mut fresh in [
+            Box::new(Memory::new()) as Box<dyn Store>,
+            Box::new(Sqlite::in_memory()),
+        ] {
+            catch_up(fresh.as_mut(), &path).unwrap();
+            let again = PostOffice::new(["ada".into(), "bob".into()], ["wa".into()], fresh, true);
+            for who in ["ada", "bob", "board"] {
+                assert_eq!(
+                    again.inbox(who, false, 50),
+                    po.inbox(who, false, 50),
+                    "{who}'s inbox"
+                );
+                assert_eq!(again.unread(who), po.unread(who), "{who}'s unread");
+                assert_eq!(
+                    serde_json::to_value(again.desk(who)).unwrap(),
+                    serde_json::to_value(po.desk(who)).unwrap(),
+                    "{who}'s desk"
+                );
+            }
+            assert_eq!(again.threads(), po.threads());
+            assert_eq!(
+                again.thread(&s.thread, "board").unwrap(),
+                po.thread(&s.thread, "board").unwrap()
+            );
+            assert_eq!(again.outbound(), po.outbound());
+            assert_eq!(again.conversation("bob").as_deref(), Some("c-9"));
+            assert_eq!(again.store.open_turns("bob"), po.store.open_turns("bob"));
+            assert_eq!(again.next, po.next, "numbering carries on");
+        }
+        // A database behind the journal (a crash between the two) catches up.
+        let mut behind = Sqlite::in_memory();
+        catch_up(&mut behind, &path).unwrap();
+        let caught = behind.last_seq();
+        po.send(&j, draft("bob", &["ada"], "after"), 2.0).unwrap();
+        assert_eq!(
+            catch_up(&mut behind, &path).unwrap(),
+            1,
+            "only what it missed"
+        );
+        assert!(behind.last_seq() > caught);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

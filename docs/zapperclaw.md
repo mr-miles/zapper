@@ -48,7 +48,20 @@ relays: []          # address namespaces for relays (wa, tg, cron), later
 
 Each profile must be one the warden offers (`profiles:` in `warden.yaml`), which sets its providers and caps. A worker's brief (who they are, their instructions, who else works here) comes from the edge: Claude Code's `SessionStart` hook, which the warden's worker templates set, runs `office instructions` (the `instructions` tool) when a session starts, but not when it resumes. A harness without the hook (pi) gets it in its conversation's first wake instead. What the warden sets is in the environment, and the office can't change it: `ZAPPERCLAW_WARDEN_URL`, the three ports, and `ZAPPERCLAW_BOARD_TOKEN`.
 
-State is in the office sandbox, under `~/.local/state/zapperclaw`: the journal (`journal.jsonl`: mail, turns, workers' states, conversations), each worker's transcript, and the drive. The sandbox's disk outlives restarts.
+State is in the office sandbox, under `~/.local/state/zapperclaw`, on a disk that outlives restarts: the journal (`journal.jsonl`), the post office's database (`office.db`), each worker's transcript, the drive, and the edge's token key (`edge-key`).
+
+## Restarts
+
+The post office's state changes only by events ([crates/zapperclaw/src/events.rs](../crates/zapperclaw/src/events.rs)): a message sent, read or shown in a turn, a reminder, an answer settled, a turn started or ended, a conversation. It decides them (the rules, the clock, the numbering) and a store applies them and nothing else, so the same events make the same state. `store:` in `zapperclaw.yaml` picks where the state is kept: `database` (the default: `office.db` alone), `both` (each batch of events also one journal line, `"type": "events"`; the database records the last batch it applied, catches up from the journal after a crash between the two, and can be made again from it if lost), or `journal` (memory, made again from the journal at every start). With `database`, the journal still records turns and workers' states, but a lost `office.db` can't be rebuilt.
+
+Started again, the office takes up where it was:
+
+- The mail is as it was: threads, who has read what, what is awaited and how many reminders went.
+- A turn it stopped in is ended, and its mail (and what the Stop hook handed over in it) is unread again, shown in the next wake with a note that some of it may be handled already.
+- Each worker's agent resumes its conversation (`--resume`), so it isn't briefed again.
+- Workers' tokens are signed with the edge's key, not kept in a table, so they still work. The warden's token for the office is signed with its own key, in its state on the host, and survives the warden's restart the same way.
+- When the office's end of an agent's stream closes, the warden tells the agent its input ended and waits for it to exit (up to 15 minutes) before the worker may have another: the resumed agent never runs beside the old one.
+- After a host restart the warden waits (up to 10 minutes) for the office's sandbox to be ready.
 
 ## Running it
 
@@ -66,10 +79,10 @@ Then open `http://127.0.0.1:8974/?token=$(cat ~/.local/state/zapperclaw/board-to
 
 ## Not yet
 
-- **Restarting without losing the run** (step 4): a restarted office numbers on from its journal and resumes no conversation; it doesn't yet rebuild its mail from the journal.
 - To check on a gateway: that the supervisor adds the office's token to zapperclaw's own requests to the warden (as it does curl's: `/usr/local/bin/zapperclaw` is in the `warden` provider's binaries) when the warden's exec starts it; and that the host's build of zapperclaw runs on the image's glibc (Ubuntu 26.04).
 - Known edges, from review:
   - Anyone in a thread may add recipients when replying, and they can then read the whole thread, the board's messages included.
   - The board's cookie, like any cookie, goes to every port on 127.0.0.1. Writes still need `X-Zapper-UI`, which another origin can't send without the board's leave.
-  - A turn that runs too long drops the office's end of the agent's stream. The warden frees the worker for a new agent only once the old one's stream ends.
+  - A turn that runs too long drops the office's end of the agent's stream: the agent is told its input ended, but finishes what it was doing before it exits, and only then may the worker have another (the office tries again every 30 seconds).
+  - The fan-out guard's recent sends aren't kept: a restart resets it.
   - If the warden loses the office's exec stream while the process lives on, the restart's copy can't bind the ports and exits; the first runs on unwatched.

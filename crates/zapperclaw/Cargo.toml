@@ -26,6 +26,9 @@ zapper-policy = { path = "../zapper-policy" }
 zapper-record = { path = "../zapper-record" }
 zapper-util = { path = "../zapper-util" }
 zapper-workbench = { path = "../zapper-workbench" }
+# The post office's store (office.db). 0.39: on the libsqlite3-sys the
+# OpenShell SDK's sqlx already builds, bundled, so one SQLite is linked.
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

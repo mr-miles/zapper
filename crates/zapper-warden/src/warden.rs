@@ -154,10 +154,8 @@ impl Warden {
                 );
             }
             if !s.ready {
-                anyhow::bail!(
-                    "the office sandbox {} isn't ready yet; start the warden again once it is",
-                    names::OFFICE
-                );
+                // After a host restart, the gateway brings it back: wait.
+                return wait_ready(gw, &s.id).await;
             }
             return Ok(s.id);
         }
@@ -374,7 +372,7 @@ impl Warden {
             streams: self.streams.clone(),
             name: name.to_string(),
         };
-        let mut agent = self.gw.exec(&w.sandbox, argv, env, workdir).await?;
+        let agent = self.gw.exec(&w.sandbox, argv, env, workdir).await?;
         let mut office = self
             .gw
             .forward(names::OFFICE, self.config.office.ports.agent)
@@ -389,16 +387,9 @@ impl Warden {
         );
         let worker = name.to_string();
         tokio::spawn(async move {
+            // The worker's slot is free once its agent has exited.
             let _open = open;
-            match tokio::io::copy_bidirectional(&mut agent, &mut office).await {
-                Ok((to_office, to_agent)) => tracing::debug!(
-                    worker = %worker,
-                    to_office,
-                    to_agent,
-                    "agent stream ended"
-                ),
-                Err(e) => tracing::debug!(worker = %worker, "agent stream: {e}"),
-            }
+            pipe_agent(&worker, agent, office).await;
         });
         Ok(())
     }
@@ -415,6 +406,97 @@ impl Warden {
             "refused",
             json!({ "route": route, "error": format!("{e:#}") }),
         );
+    }
+}
+
+/// How long the warden waits for the office's sandbox to be ready.
+const OFFICE_READY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Waits for sandbox `id` (the office's) to be ready: its id.
+async fn wait_ready(gw: &dyn Gateway, id: &str) -> Result<String> {
+    tracing::info!(
+        "waiting for the office sandbox {} to be ready",
+        names::OFFICE
+    );
+    let wait = async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let s = gw.sandboxes().await?.into_iter().find(|s| s.id == id);
+            match s {
+                Some(s) if s.ready => return Ok(s.id),
+                Some(_) => {}
+                None => anyhow::bail!(
+                    "the office sandbox {} went while the warden waited for it",
+                    names::OFFICE
+                ),
+            }
+        }
+    };
+    tokio::time::timeout(OFFICE_READY, wait)
+        .await
+        .unwrap_or_else(|_| {
+            anyhow::bail!(
+                "the office sandbox {} wasn't ready in {} minutes",
+                names::OFFICE,
+                OFFICE_READY.as_secs() / 60
+            )
+        })
+}
+
+/// How long an agent whose office went away has to finish and exit
+/// before its worker may have another.
+const AGENT_DRAIN: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Pipes an agent's frames to the office and the office's to it until the
+/// agent exits. When the office's end closes (a restart, a turn stopped),
+/// the agent is told its input ended, and its output is read, and dropped,
+/// until it exits, so no second agent of the worker's runs beside it.
+async fn pipe_agent(
+    worker: &str,
+    agent: Box<dyn zapper_driver::process::DriveStream>,
+    office: Box<dyn zapper_driver::process::DriveStream>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut agent_r, mut agent_w) = tokio::io::split(agent);
+    let (mut office_r, mut office_w) = tokio::io::split(office);
+    let to_agent = async {
+        let _ = tokio::io::copy(&mut office_r, &mut agent_w).await;
+        // The office is gone: the agent's input ends.
+        let _ = agent_w
+            .write_all(&zapper_policy::proto::Frame::Eof.encode())
+            .await;
+        let _ = agent_w.flush().await;
+    };
+    let from_agent = async {
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut office_open = true;
+        loop {
+            match agent_r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) if office_open => {
+                    office_open = office_w.write_all(&buf[..n]).await.is_ok();
+                }
+                Ok(_) => {}
+            }
+        }
+        let _ = office_w.shutdown().await;
+    };
+    // Done when the agent has exited, whether or not the office went first.
+    let until_exit = async {
+        tokio::pin!(to_agent);
+        tokio::pin!(from_agent);
+        let mut input_ended = false;
+        loop {
+            tokio::select! {
+                _ = &mut to_agent, if !input_ended => input_ended = true,
+                _ = &mut from_agent => break,
+            }
+        }
+    };
+    if tokio::time::timeout(AGENT_DRAIN, until_exit).await.is_err() {
+        tracing::warn!(worker = %worker, "the agent didn't exit {} minutes after its office went; its worker may start another", AGENT_DRAIN.as_secs() / 60);
+    } else {
+        tracing::debug!(worker = %worker, "agent exited");
     }
 }
 

@@ -181,10 +181,11 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
             .as_deref(),
         Some("c-1")
     );
-    assert!(t
-        .journal()
-        .iter()
-        .any(|e| e["type"] == "conversation" && e["id"] == "c-1"));
+    // Kept for a restart, in the store.
+    assert_eq!(
+        t.office.post.lock().unwrap().conversation("ada").as_deref(),
+        Some("c-1")
+    );
     // The next mail goes to the same agent.
     t.board_mails("ada", "More");
     let text = wake(&mut agent).await;
@@ -515,7 +516,13 @@ async fn an_answer_to_a_reminder_goes_to_who_asked_and_settles_it() {
         )
         .await
         .unwrap();
-    let due = t.office.post.lock().unwrap().messages[asked["sent"].as_str().unwrap()]
+    let due = t
+        .office
+        .post
+        .lock()
+        .unwrap()
+        .meta(asked["sent"].as_str().unwrap())
+        .unwrap()
         .due
         .unwrap();
     let reminders = t
@@ -533,7 +540,13 @@ async fn an_answer_to_a_reminder_goes_to_who_asked_and_settles_it() {
         )
         .await
         .unwrap();
-    let m = t.office.post.lock().unwrap().messages[answer["sent"].as_str().unwrap()].clone();
+    let m = t
+        .office
+        .post
+        .lock()
+        .unwrap()
+        .meta(answer["sent"].as_str().unwrap())
+        .unwrap();
     assert_eq!(m.to, vec!["ada"], "to who asked, not the board");
     assert_eq!(m.in_reply_to.as_deref(), asked["sent"].as_str());
     assert!(
@@ -599,5 +612,91 @@ async fn a_file_is_published_by_any_name_of_its_outbox_path() {
             .await
             .unwrap();
         assert_eq!(p["published"], "ada/x.txt", "{path}");
+    }
+}
+
+/// The same office started again on `t`'s state: a new warden, the old
+/// office stopped.
+fn restarted(t: &T) -> (Arc<Office>, UnboundedReceiver<Agent>) {
+    t.office.stop();
+    let (warden, agents) = FakeWarden::new();
+    let again = Office::new(t.office.config.clone(), Arc::new(warden)).unwrap();
+    (again, agents)
+}
+
+#[tokio::test]
+async fn an_office_restarted_mid_turn_resumes_and_shows_the_turns_mail_again() {
+    let mut t = office_with("");
+    t.start();
+    t.board_mails("ada", "First");
+    let mut agent = t.next().await;
+    wake(&mut agent).await;
+    end_turn(&mut agent).await;
+    t.turn_event("ada", "end").await;
+    let second = t.board_mails("ada", "Second");
+    wake(&mut agent).await;
+    // The office stops in the middle of ada's second turn.
+    let (again, mut agents) = restarted(&t);
+    let ada = again.worker("ada").unwrap();
+    assert_eq!(*ada.queue.lock().unwrap(), vec![second.clone()]);
+    assert_eq!(ada.conversation.lock().unwrap().as_deref(), Some("c-1"));
+    again.start();
+    let mut resumed = tokio::time::timeout(Duration::from_secs(10), agents.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resumed.resume.as_deref(),
+        Some("c-1"),
+        "it resumes the conversation"
+    );
+    let text = wake(&mut resumed).await;
+    assert!(text.contains("restarted during your last turn"), "{text}");
+    assert!(text.contains("Second"), "{text}");
+    again.stop();
+}
+
+#[tokio::test]
+async fn a_lost_database_is_made_again_from_the_journal() {
+    let t = office_with("store: both\n");
+    let first = t.board_mails("ada", "One");
+    t.tool(
+        "ada",
+        "mail_reply",
+        json!({ "message": first, "body": "done" }),
+    )
+    .await
+    .unwrap();
+    t.office.stop();
+    for f in ["office.db", "office.db-wal", "office.db-shm"] {
+        let _ = std::fs::remove_file(t.office.dir.join(f));
+    }
+    let (again, _agents) = restarted(&t);
+    let po = again.post.lock().unwrap();
+    let inbox = po.inbox(BOARD, false, 10);
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0]["subject"], "Re: One");
+    assert_eq!(
+        po.unread("ada"),
+        vec![first.clone()],
+        "ada's mail, as it was"
+    );
+}
+
+#[tokio::test]
+async fn each_store_keeps_the_mail_and_only_both_and_journal_journal_it() {
+    for (mode, events) in [("both", true), ("database", false), ("journal", true)] {
+        let t = office_with(&format!("store: {mode}\n"));
+        let id = t.board_mails("ada", "Kept");
+        let journaled = t.journal().iter().any(|e| e["type"] == "events");
+        assert_eq!(journaled, events, "{mode}: events in the journal");
+        assert_eq!(
+            t.office.dir.join("office.db").exists(),
+            mode != "journal",
+            "{mode}: office.db"
+        );
+        let (again, _agents) = restarted(&t);
+        let unread = again.post.lock().unwrap().unread("ada");
+        assert_eq!(unread, vec![id], "{mode}: the mail survives a restart");
     }
 }

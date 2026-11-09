@@ -118,12 +118,11 @@ pub async fn answer(office: &Office, w: &Worker, op: &str, args: Value) -> Resul
             let (id, from, subject) = {
                 let po = office.post.lock().unwrap();
                 let mut m = po
-                    .messages
-                    .get(&id)
+                    .meta(&id)
                     .filter(|m| po.can_read(me, &m.thread))
                     .ok_or_else(|| anyhow!("no message {id}"))?;
                 if m.from == crate::mail::OFFICE {
-                    if let Some(about) = m.in_reply_to.as_ref().and_then(|a| po.messages.get(a)) {
+                    if let Some(about) = m.in_reply_to.as_ref().and_then(|a| po.meta(a)) {
                         m = about;
                     }
                 }
@@ -163,15 +162,15 @@ pub async fn answer(office: &Office, w: &Worker, op: &str, args: Value) -> Resul
         "mail_read" => {
             let id = req(&args, "message")?;
             let mut po = office.post.lock().unwrap();
-            let m = po.message(&office.journal, &id, me)?;
-            po.mark_read(me, std::slice::from_ref(&id));
+            let m = po.message(&id, me)?;
+            po.mark_read(&office.journal, me, std::slice::from_ref(&id))?;
             w.queue.lock().unwrap().retain(|q| q != &id);
             Ok(m)
         }
         "mail_thread" => {
             let id = req(&args, "thread")?;
             let po = office.post.lock().unwrap();
-            po.thread(&office.journal, &id, me)
+            po.thread(&id, me)
         }
         "desk" => {
             let po = office.post.lock().unwrap();

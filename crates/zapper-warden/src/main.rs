@@ -196,7 +196,9 @@ async fn serve(c: Ctx) -> Result<()> {
         office.clone(),
         audit.clone(),
     ));
-    let edge = Arc::new(Edge::new(control.clone(), warden));
+    // The office's token outlives a restart of the warden.
+    let key = zapper_openshell::edge::key_file(&state.join("edge-key"))?;
+    let edge = Arc::new(Edge::with_key(control.clone(), warden, &key));
     eprintln!(
         "zapper-warden: the office sandbox {} ({office}); its routes on http://{} ({} to it)",
         names::OFFICE,
