@@ -361,6 +361,22 @@ fn a_worker_profile_is_wired_to_the_office_and_the_office_to_the_warden() {
         format!("{EDGE}/mcp"),
         "Claude Code reaches the office's tools over HTTP"
     );
+    let settings = w
+        .setup
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("/.claude/settings.json"))
+        .expect("Claude Code's settings");
+    let settings: serde_json::Value = serde_json::from_str(&settings.content).unwrap();
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "/usr/local/bin/zapper-agent office instructions",
+        "its session starts with its brief, from the edge"
+    );
+    assert_eq!(
+        settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "/usr/local/bin/zapper-agent office stop-hook"
+    );
     assert_eq!(p.office.template, names::OFFICE);
     assert_eq!(p.office.providers, ["warden"]);
     assert_eq!(

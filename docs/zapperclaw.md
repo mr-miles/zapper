@@ -27,9 +27,9 @@ Three ports in the office sandbox, each reached only through a warden forward:
 | Board (8099) | You, through `127.0.0.1:8974` on the host. Every request needs the board's token; a write also needs `X-Zapper-UI: 1`, a loopback `Host`, and an `Origin`, if any, naming it |
 | Agent (8973) | Workers' agent streams, which the warden connects; a connection without a ticket the office is waiting for is closed |
 
-The tools: `mail_send`, `mail_reply`, `mail_inbox`, `mail_read`, `mail_thread`, `desk` (what you wait for and what is awaited of you), `directory`, `drive_publish`, `drive_list`, `drive_fetch`, and `stop_check` (Claude Code's Stop hook: mail that came during the turn). A message may ask for an answer by a time (`due: "in 2h"`); unanswered, the post office reminds its recipients twice, then tells its sender. Limits: 64 KiB a body, 16 recipients, 200 messages a thread, 40 messages among workers in a thread before the board writes in it again, 60 messages a sender in ten minutes.
+The tools: `mail_send`, `mail_reply`, `mail_inbox`, `mail_read`, `mail_thread`, `desk` (what you wait for and what is awaited of you), `directory`, `drive_publish`, `drive_list`, `drive_fetch`, and `stop_check` (Claude Code's Stop hook: mail that came during the turn), and `instructions` (the worker's brief). A message may ask for an answer by a time (`due: "in 2h"`); unanswered, the post office reminds its recipients twice, then tells its sender. Limits: 64 KiB a body, 16 recipients, 200 messages a thread, 40 messages among workers in a thread before the board writes in it again, 60 messages a sender in ten minutes.
 
-The drive is the workbench's: a worker writes to its own outbox (`PUT /drive/outbox/<name>/<path>` at the edge, e.g. with curl), `drive_publish` copies a file to the shared drive (`/drive/inbox/<name>/<path>`), and everyone reads the shared drive.
+The drive is the workbench's, over the edge's HTTP: a worker writes to its own outbox (`PUT /drive/mine/<path>`, which is `/drive/outbox/<name>/<path>`), `drive_publish` copies a file to the shared drive (`/drive/inbox/<name>/<path>`), and everyone reads the shared drive. The workers' `office` command does it: `office drive put LOCAL [PATH]`, `office drive publish LOCAL [PATH]` (put, then publish), `office drive get PATH [LOCAL]`, `office drive ls [PATH]`. Nothing goes over exec, and nothing is staged per worker.
 
 The board's API: `GET /api/workers`, `/api/inbox`, `/api/threads`, `/api/thread/{id}`, `/api/desk`, `/api/transcript/{worker}?lines=N`, `/api/drive/{path}`; `POST /api/mail {to, subject, body, in_reply_to?}`. `/` is a page that shows them, and `/?token=…` sets the cookie it uses.
 
@@ -46,7 +46,7 @@ turn_timeout: 30m
 relays: []          # address namespaces for relays (wa, tg, cron), later
 ```
 
-Each profile must be one the warden offers (`profiles:` in `warden.yaml`), which sets its providers and caps. A worker's instructions open its conversation's first wake. What the warden sets is in the environment, and the office can't change it: `ZAPPERCLAW_WARDEN_URL`, the three ports, and `ZAPPERCLAW_BOARD_TOKEN`.
+Each profile must be one the warden offers (`profiles:` in `warden.yaml`), which sets its providers and caps. A worker's brief (who they are, their instructions, who else works here) comes from the edge: Claude Code's `SessionStart` hook, which the warden's worker templates set, runs `office instructions` (the `instructions` tool) when a session starts, but not when it resumes. A harness without the hook (pi) gets it in its conversation's first wake instead. What the warden sets is in the environment, and the office can't change it: `ZAPPERCLAW_WARDEN_URL`, the three ports, and `ZAPPERCLAW_BOARD_TOKEN`.
 
 State is in the office sandbox, under `~/.local/state/zapperclaw`: the journal (`journal.jsonl`: mail, turns, workers' states, conversations), each worker's transcript, and the drive. The sandbox's disk outlives restarts.
 
@@ -62,12 +62,11 @@ zapper-warden --config config/warden.yaml serve
 
 Then open `http://127.0.0.1:8974/?token=$(cat ~/.local/state/zapperclaw/board-token)`. The office's output is in the warden's log.
 
-[tests/e2e-zapperclaw.sh](../tests/e2e-zapperclaw.sh) is the end-to-end test: the warden runs zapperclaw, zapperclaw has the warden make its one worker (a fake Claude Code that answers the board, [tests/fake/zc-echo.yaml](../tests/fake/zc-echo.yaml)), the board mails it, and its answer comes back in the thread through its tools at the edge. The unit tests (`cargo test -p zapperclaw`) play the warden and the agents in memory: the post office, the foreman (wakes, the Stop hook, an agent that exits or runs too long, the turn limit), the tools, the drive, the edge's callers and the board's checks.
+[tests/e2e-zapperclaw.sh](../tests/e2e-zapperclaw.sh) is the end-to-end test: the warden runs zapperclaw, zapperclaw has the warden make its one worker (a fake Claude Code that answers the board, [tests/fake/zc-echo.yaml](../tests/fake/zc-echo.yaml)), the board mails it, and its answer comes back in the thread through its tools at the edge; asked to, it publishes a file with `office drive` and fetches it back. The unit tests (`cargo test -p zapperclaw`) play the warden and the agents in memory: the post office, the foreman (wakes, the Stop hook, an agent that exits or runs too long, the turn limit), the tools, the drive, the edge's callers and the board's checks.
 
 ## Not yet
 
 - **Restarting without losing the run** (step 4): a restarted office numbers on from its journal and resumes no conversation; it doesn't yet rebuild its mail from the journal.
-- **Instructions from the edge** (step 3): a worker's instructions come in its first wake, not from a `SessionStart` hook, and the `office` command has no drive upload of its own (curl does it).
 - To check on a gateway: that the supervisor adds the office's token to zapperclaw's own requests to the warden (as it does curl's: `/usr/local/bin/zapperclaw` is in the `warden` provider's binaries) when the warden's exec starts it; and that the host's build of zapperclaw runs on the image's glibc (Ubuntu 26.04).
 - Known edges, from review:
   - Anyone in a thread may add recipients when replying, and they can then read the whole thread, the board's messages included.

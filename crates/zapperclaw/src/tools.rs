@@ -43,6 +43,7 @@ pub fn list() -> Value {
         tool("drive_publish", "Publish a file you uploaded to your outbox (PUT /drive/outbox/<you>/<path> at the edge) to the shared drive, where everyone can fetch it.", json!({ "path": s("Its path in your outbox"), "as": s("Its path on the shared drive (default: the same)") }), &["path"]),
         tool("drive_list", "The shared drive's files.", json!({ "path": s("A directory (default: all)") }), &[]),
         tool("drive_fetch", "Where to fetch a file of the shared drive from.", json!({ "path": s("Its path, as drive_list shows it") }), &["path"]),
+        tool("instructions", "Your instructions, and who else works here.", json!({}), &[]),
         tool("stop_check", "The Stop hook's check: mail that came during the turn.", json!({}), &[]),
     ])
 }
@@ -196,6 +197,7 @@ pub async fn answer(office: &Office, w: &Worker, op: &str, args: Value) -> Resul
             }
         }
         "stop_check" => Ok(foreman::stop_check(office, w)),
+        "instructions" => Ok(json!({ "text": office.brief(me) })),
         _ => bail!("no tool {op}"),
     };
     if let Err(e) = &r {
@@ -227,6 +229,8 @@ fn publish(office: &Office, me: &str, path: &str, to: Option<String>) -> Result<
     let p = path.trim().trim_start_matches('/');
     let p = p
         .strip_prefix(&format!("drive/outbox/{me}/"))
+        .or_else(|| p.strip_prefix("drive/mine/"))
+        .or_else(|| p.strip_prefix("mine/"))
         .or_else(|| p.strip_prefix(&format!("outbox/{me}/")))
         .unwrap_or(p);
     let src_rel = components(p)?;

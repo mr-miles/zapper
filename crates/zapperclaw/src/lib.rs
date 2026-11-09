@@ -287,6 +287,20 @@ impl Office {
         });
     }
 
+    /// Worker `name`'s brief: who they are, their instructions, who else
+    /// works here.
+    pub fn brief(&self, name: &str) -> String {
+        let instructions = match self.config.instructions(name) {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!("{e:#}");
+                None
+            }
+        };
+        let names: Vec<String> = self.workers.keys().cloned().collect();
+        prompts::brief(name, instructions.as_deref(), &names)
+    }
+
     /// The workers as the board shows them.
     pub fn roster(&self) -> Value {
         let post = self.post.lock().unwrap();

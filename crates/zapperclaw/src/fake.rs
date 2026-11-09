@@ -55,6 +55,8 @@ pub struct FakeWarden {
     pub made: Mutex<Vec<String>>,
     /// `ensure` fails this many more times.
     pub fail_ensure: AtomicU32,
+    /// The harness its sandboxes run.
+    pub kind: Mutex<String>,
 }
 
 impl FakeWarden {
@@ -64,6 +66,7 @@ impl FakeWarden {
             agents: tx,
             made: Mutex::new(vec![]),
             fail_ensure: AtomicU32::new(0),
+            kind: Mutex::new("claude-code".into()),
         };
         (w, rx)
     }
@@ -92,7 +95,9 @@ impl Workers for FakeWarden {
             if !made.iter().any(|m| m == name) {
                 made.push(name.to_string());
             }
-            Ok(sandbox_of(name, profile))
+            let mut s = sandbox_of(name, profile);
+            s.kind = self.kind.lock().unwrap().clone();
+            Ok(s)
         })
     }
 

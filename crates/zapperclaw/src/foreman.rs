@@ -104,20 +104,22 @@ async fn nap(office: &Office, w: &Worker, secs: u64) {
     }
 }
 
-/// The brief, the first time a conversation is woken.
-fn brief_for(office: &Office, w: &Worker) -> Option<String> {
+/// Harnesses whose sessions start by asking the edge for the brief (Claude
+/// Code's SessionStart hook runs `office instructions`, which the warden's
+/// worker templates set): theirs isn't put in the first wake.
+const BRIEFED_BY_HOOK: &[&str] = &["claude-code"];
+
+/// The brief, the first time a conversation is woken, unless the harness
+/// fetched it itself.
+pub(crate) fn brief_for(office: &Office, w: &Worker) -> Option<String> {
     if w.briefed.swap(true, Ordering::Relaxed) {
         return None;
     }
-    let instructions = match office.config.instructions(&w.name) {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!("{e:#}");
-            None
-        }
-    };
-    let names: Vec<String> = office.workers.keys().cloned().collect();
-    Some(prompts::brief(&w.name, instructions.as_deref(), &names))
+    let kind = w.sandbox.lock().unwrap().as_ref().map(|s| s.kind.clone());
+    if kind.is_some_and(|k| BRIEFED_BY_HOOK.contains(&k.as_str())) {
+        return None;
+    }
+    Some(office.brief(&w.name))
 }
 
 pub async fn run(office: Arc<Office>, w: Arc<Worker>) {

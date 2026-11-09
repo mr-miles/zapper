@@ -83,12 +83,40 @@ impl Backend for OfficeBackend {
             return None;
         }
         let who = caller.labels.get(WORKER)?.clone();
+        // `/drive/mine/…` is the caller's own outbox: a worker needn't know
+        // its name to upload.
+        let path = drive_path(&who, rest);
         Some(Box::pin(async move {
             let method = req.method().clone();
             self.0
                 .drive
-                .serve(&who, &method, rest, req.into_body())
+                .serve(&who, &method, &path, req.into_body())
                 .await
         }))
+    }
+}
+
+/// A drive path at the edge (without `/drive`) as the drive takes it:
+/// `/mine/…` is caller `who`'s outbox.
+pub fn drive_path(who: &str, rest: &str) -> String {
+    match rest.strip_prefix("/mine") {
+        Some(r) if r.is_empty() || r.starts_with('/') => format!("/outbox/{who}{r}"),
+        _ => rest.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mine_is_the_callers_outbox() {
+        assert_eq!(super::drive_path("ada", "/mine/x.txt"), "/outbox/ada/x.txt");
+        assert_eq!(super::drive_path("ada", "/mine"), "/outbox/ada");
+        assert_eq!(super::drive_path("ada", "/mineral/x"), "/mineral/x");
+        assert_eq!(super::drive_path("ada", "/inbox/bob/x"), "/inbox/bob/x");
+        assert_eq!(
+            super::drive_path("ada", "/outbox/bob/x"),
+            "/outbox/bob/x",
+            "the drive refuses it"
+        );
     }
 }

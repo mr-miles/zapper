@@ -87,7 +87,20 @@ board GET /api/inbox | grep -q 'Re: Ping' || fail "no answer from echo: $(board 
 board GET /api/thread/$thread | grep -q 'echo: Ping' || fail "the answer isn't echo's: $(board GET /api/thread/$thread)"
 ok "the board mailed echo; echo answered in the thread, through the edge"
 
-# 5. The office's record, in its sandbox; the warden's, on the host.
+# 5. The drive over the edge: echo publishes a file with `office drive`,
+#    fetches it back from the shared drive, and says what it read.
+sent=$(board POST /api/mail '{"to":["echo"],"subject":"Publish","body":"Put a note on the drive."}')
+pub=$(echo "$sent" | sed -n 's/.*"thread":"\(t-[0-9]*\)".*/\1/p')
+[ -n "$pub" ] || fail "sending: $sent"
+for _ in $(seq 1 180); do
+  board GET /api/inbox | grep -q 'Re: Publish' && break
+  sleep 1
+done
+board GET /api/thread/$pub | grep -q 'published and fetched: from echo' || fail "echo didn't publish and fetch: $(board GET /api/thread/$pub)"
+board GET /api/drive/echo/notes | grep -q "\"$pub.txt\"" || fail "no echo/notes/$pub.txt on the shared drive: $(board GET /api/drive/echo/notes)"
+ok "echo published to the shared drive and fetched it back, over the edge"
+
+# 6. The office's record, in its sandbox; the warden's, on the host.
 in_office grep -q '"event":"end"' /home/agent/.local/state/zapperclaw/journal.jsonl || fail "no turn's end in the office's journal"
 for op in office_started worker_made agent_started; do
   grep -q "\"op\":\"$op\"" "$STATE/warden.jsonl" || fail "no $op in the warden's record"

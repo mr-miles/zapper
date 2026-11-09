@@ -158,11 +158,12 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
     assert_eq!(agent.name, "ada");
     assert_eq!(agent.resume, None);
     let text = wake(&mut agent).await;
-    assert!(
-        text.starts_with("You are ada"),
-        "the first wake briefs: {text}"
-    );
-    assert!(text.contains("Count things."), "{text}");
+    // Claude Code fetches its brief itself (its SessionStart hook).
+    assert!(!text.contains("You are ada"), "{text}");
+    let brief = t.tool("ada", "instructions", json!({})).await.unwrap();
+    let brief = brief["text"].as_str().unwrap();
+    assert!(brief.starts_with("You are ada"), "{brief}");
+    assert!(brief.contains("Count things."), "{brief}");
     assert!(text.contains("The plan"), "{text}");
     assert_eq!(t.office.post.lock().unwrap().unread("ada").len(), 0);
     t.state("ada", State::Working).await;
@@ -184,7 +185,7 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
         .journal()
         .iter()
         .any(|e| e["type"] == "conversation" && e["id"] == "c-1"));
-    // The next mail goes to the same agent, without the brief.
+    // The next mail goes to the same agent.
     t.board_mails("ada", "More");
     let text = wake(&mut agent).await;
     assert!(!text.contains("You are ada"), "{text}");
@@ -556,4 +557,47 @@ async fn an_answer_to_a_reminder_goes_to_who_asked_and_settles_it() {
     .await
     .unwrap();
     assert_eq!(t.office.post.lock().unwrap().desk("ada").waiting.len(), 1);
+}
+
+#[test]
+fn a_harness_without_the_hook_is_briefed_in_its_first_wake() {
+    let t = office_with("");
+    let w = t.office.worker("ada").unwrap();
+    let mut s = crate::fake::sandbox_of("ada", "pi");
+    s.kind = "pi".into();
+    t.office.set_sandbox(w, s);
+    let b = crate::foreman::brief_for(&t.office, w).expect("pi is briefed in its wake");
+    assert!(b.contains("Count things."), "{b}");
+    assert!(
+        crate::foreman::brief_for(&t.office, w).is_none(),
+        "once a conversation"
+    );
+    let bob = t.office.worker("bob").unwrap();
+    t.office
+        .set_sandbox(bob, crate::fake::sandbox_of("bob", "claude"));
+    assert!(
+        crate::foreman::brief_for(&t.office, bob).is_none(),
+        "Claude Code fetches its own"
+    );
+}
+
+#[tokio::test]
+async fn a_file_is_published_by_any_name_of_its_outbox_path() {
+    let t = office_with("");
+    let parts: Vec<String> = ["outbox", "ada", "x.txt"].map(String::from).to_vec();
+    let mut w = t.office.files.begin_write(&parts).unwrap();
+    w.file().write_all(b"x").unwrap();
+    w.finish().unwrap();
+    for path in [
+        "x.txt",
+        "mine/x.txt",
+        "drive/mine/x.txt",
+        "outbox/ada/x.txt",
+    ] {
+        let p = t
+            .tool("ada", "drive_publish", json!({ "path": path }))
+            .await
+            .unwrap();
+        assert_eq!(p["published"], "ada/x.txt", "{path}");
+    }
 }

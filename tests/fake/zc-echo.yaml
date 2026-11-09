@@ -1,6 +1,12 @@
 # zapperclaw's end-to-end test (tests/e2e-zapperclaw.sh): a worker that
-# answers the board's mail in its thread.
+# answers the board's mail in its thread. Asked to publish, it puts a file
+# on the shared drive through the edge, fetches it back, and answers with
+# what it read.
 rules:
+  - when: { from: board, subject: Publish }
+    do:
+      - shell: "printf 'from echo\\n' > /tmp/zc-note.txt && /usr/local/bin/zapper-agent office drive publish /tmp/zc-note.txt notes/$thread.txt >/dev/null && /usr/local/bin/zapper-agent office drive get echo/notes/$thread.txt /tmp/zc-back.txt >/dev/null && cat /tmp/zc-back.txt"
+      - mail_reply: { message: $message, body: "published and fetched: $last" }
   - when: { from: board }
     do:
       - mail_reply: { message: $message, body: "echo: $subject" }

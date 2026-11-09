@@ -126,11 +126,15 @@ fn prepare_worker(
         .skills
         .as_ref()
         .map(|p| config.path(p).to_string_lossy().into_owned());
-    let overlay = overlay(
+    let mut overlay = overlay(
         instructions.as_deref(),
         skills.as_deref(),
         w.model.as_deref(),
     );
+    if profile.agent.kind == "claude-code" {
+        // Its session starts with the worker's brief, from the edge.
+        overlay["settings"] = session_start_hook();
+    }
     let mut agent = serde_json::to_value(&profile.agent)?;
     zapper_policy::merge(&mut agent, &overlay);
     profile.agent = serde_json::from_value(agent).context("the office's wiring")?;
@@ -178,6 +182,12 @@ fn overlay(instructions: Option<&str>, skills: Option<&str>, model: Option<&str>
         o["model"] = json!(m);
     }
     o
+}
+
+/// Claude Code's SessionStart hook: `office instructions`, whose output
+/// (the worker's brief, from the office) the session starts with.
+pub fn session_start_hook() -> Value {
+    json!({ "hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{AGENT_PATH} office instructions"), "timeout": 30 }] }] } })
 }
 
 /// What a worker's agent runs as: its harness's headless command, resuming
