@@ -124,17 +124,15 @@ pub trait Backend: Send + Sync {
 /// times Unix seconds, the tag an HMAC-SHA256 of the rest): it names its
 /// sandbox and when it was issued and expires, so the edge keeps no table
 /// of them, and they outlive a restart of an edge with the same key. One
-/// stops working when it expires, when its sandbox is no longer the
-/// backend's caller, or when everything issued before a time is revoked
-/// (`revoke_before`).
+/// stops working when it expires, or when its sandbox is no longer the
+/// backend's caller. To refuse every token at once, delete the key file
+/// (`key_file`) and start the edge again.
 pub struct Edge {
     settings: EdgeSettings,
     backend: Arc<dyn Backend>,
     keys: Mutex<Keys>,
     /// What the tokens are signed with.
     token_key: ring::hmac::Key,
-    /// Tokens issued before this (Unix seconds) are refused.
-    not_before: std::sync::atomic::AtomicU64,
     /// SVIDs already used (`jti` → `exp`), so one can't be replayed.
     used: Mutex<HashMap<String, u64>>,
 }
@@ -161,15 +159,8 @@ impl Edge {
             backend,
             keys: Mutex::default(),
             token_key: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key),
-            not_before: std::sync::atomic::AtomicU64::new(0),
             used: Mutex::default(),
         }
-    }
-
-    /// Refuses every token issued before `t` (Unix seconds).
-    pub fn revoke_before(&self, t: u64) {
-        self.not_before
-            .fetch_max(t, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// A token for sandbox `uuid`, issued at `iat`, expiring at `exp`.
@@ -179,8 +170,8 @@ impl Edge {
         format!("{body}.{}", URL_SAFE_NO_PAD.encode(tag.as_ref()))
     }
 
-    /// The sandbox token `token` names, if the edge signed it, it is current,
-    /// and it wasn't revoked.
+    /// The sandbox token `token` names, if the edge signed it and it is
+    /// current.
     pub(crate) fn token_sandbox(&self, token: &str) -> Option<String> {
         let (body, tag) = token.rsplit_once('.')?;
         let tag = URL_SAFE_NO_PAD.decode(tag).ok()?;
@@ -192,8 +183,7 @@ impl Edge {
         }
         let (iat, exp): (u64, u64) = (iat.parse().ok()?, exp.parse().ok()?);
         let now = unix_now();
-        let nb = self.not_before.load(std::sync::atomic::Ordering::Relaxed);
-        if exp <= now || iat > now + SKEW || iat < nb {
+        if exp <= now || iat > now + SKEW {
             return None;
         }
         String::from_utf8(URL_SAFE_NO_PAD.decode(id).ok()?).ok()

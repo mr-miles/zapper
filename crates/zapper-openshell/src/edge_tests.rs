@@ -388,7 +388,7 @@ fn forms_decode_as_browsers_and_supervisors_send_them() {
 }
 
 #[test]
-fn a_token_names_its_sandbox_only_as_signed_current_and_unrevoked() {
+fn a_token_names_its_sandbox_only_as_signed_and_current() {
     let key = [7u8; 32];
     let e = Edge::with_key(EdgeSettings::default(), Arc::new(Fake), &key);
     let now = unix_now();
@@ -426,7 +426,7 @@ fn a_token_names_its_sandbox_only_as_signed_current_and_unrevoked() {
         assert_eq!(e.token_sandbox(bad), None, "{bad}");
     }
 
-    // Expired, or from the future, or issued before a revocation: refused.
+    // Expired, or from the future: refused.
     assert_eq!(
         e.token_sandbox(&e.sign_token(UUID, now - 600, now - 1)),
         None
@@ -435,11 +435,6 @@ fn a_token_names_its_sandbox_only_as_signed_current_and_unrevoked() {
         e.token_sandbox(&e.sign_token(UUID, now + 3600, now + 3900)),
         None
     );
-    e.revoke_before(now + 1);
-    assert_eq!(e.token_sandbox(&t), None, "revoked");
-    assert!(e
-        .token_sandbox(&e.sign_token(UUID, now + 1, now + 300))
-        .is_some());
 }
 
 #[test]
