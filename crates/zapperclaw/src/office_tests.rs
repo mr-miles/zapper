@@ -181,9 +181,7 @@ async fn mail_wakes_the_worker_whose_turn_reads_it_and_is_journaled() {
             .as_deref(),
         Some("c-1")
     );
-    // Kept for a restart: an event in the journal, and in the store.
-    assert!(t.journal().iter().any(|e| e["type"] == "events"
-        && e["events"][0] == json!({ "event": "conversation", "worker": "ada", "id": "c-1" })));
+    // Kept for a restart, in the store.
     assert_eq!(
         t.office.post.lock().unwrap().conversation("ada").as_deref(),
         Some("c-1")
@@ -660,7 +658,7 @@ async fn an_office_restarted_mid_turn_resumes_and_shows_the_turns_mail_again() {
 
 #[tokio::test]
 async fn a_lost_database_is_made_again_from_the_journal() {
-    let t = office_with("");
+    let t = office_with("store: both\n");
     let first = t.board_mails("ada", "One");
     t.tool(
         "ada",

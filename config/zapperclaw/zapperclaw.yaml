@@ -13,3 +13,7 @@ workers:
     about: answers the board's mail
 max_concurrent: 2
 turn_timeout: 10m
+# Where the post office keeps its state: database (office.db, the default),
+# both (its events journaled too, so office.db can be made again from the
+# journal), or journal (memory, from the journal at every start).
+# store: database
